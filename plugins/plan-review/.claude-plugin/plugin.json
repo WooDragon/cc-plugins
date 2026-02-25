@@ -1,0 +1,7 @@
+{
+  "name": "plan-review",
+  "description": "Adversarial plan review via cross-model consultation (Gemini/Claude)",
+  "version": "1.0.0",
+  "author": { "name": "woodragon" },
+  "hooks": "./hooks/hooks.json"
+}

@@ -1,0 +1,20 @@
+{
+  "name": "claude-plugins",
+  "description": "WooDragon's Claude Code plugin marketplace",
+  "owner": {
+    "name": "WooDragon"
+  },
+  "plugins": [
+    {
+      "name": "plan-review",
+      "description": "Adversarial plan review via cross-model consultation (Gemini/Claude)",
+      "version": "1.0.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/plan-review",
+      "category": "development",
+      "homepage": "https://github.com/WooDragon/claude-plugins"
+    }
+  ]
+}
