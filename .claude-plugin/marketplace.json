@@ -1,6 +1,6 @@
 {
-  "name": "claude-plugins",
-  "description": "WooDragon's Claude Code plugin marketplace",
+  "name": "cc-plugins",
+  "description": "WooDragon's CC plugin marketplace",
   "owner": {
     "name": "WooDragon"
   },
@@ -14,7 +14,7 @@
       },
       "source": "./plugins/plan-review",
       "category": "development",
-      "homepage": "https://github.com/WooDragon/claude-plugins"
+      "homepage": "https://github.com/WooDragon/cc-plugins"
     }
   ]
 }

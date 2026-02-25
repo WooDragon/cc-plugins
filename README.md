@@ -1,14 +1,14 @@
-# claude-plugins
+# cc-plugins
 
-WooDragon's Claude Code plugin marketplace.
+WooDragon's CC plugin marketplace.
 
 ## Installation
 
 ```bash
-claude plugin add WooDragon/claude-plugins
+claude plugin add WooDragon/cc-plugins
 ```
 
-Then enable individual plugins via `claude plugin add <plugin-name>@WooDragon-claude-plugins`.
+Then enable individual plugins via `claude plugin add <plugin-name>@WooDragon-cc-plugins`.
 
 ## Plugins
 

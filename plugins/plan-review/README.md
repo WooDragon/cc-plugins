@@ -8,7 +8,7 @@ When Claude calls `ExitPlanMode`, this plugin intercepts the call and sends the 
 
 ```bash
 # From marketplace
-claude plugin add plan-review@WooDragon-claude-plugins
+claude plugin add plan-review@WooDragon-cc-plugins
 
 # Development mode
 claude --plugin-dir ~/.claude/dev-plugins/plan-review
