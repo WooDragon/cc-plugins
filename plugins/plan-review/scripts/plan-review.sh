@@ -24,7 +24,7 @@ INPUT=$(cat)
 command -v jq >/dev/null 2>&1 || { echo "plan-review: missing jq, allowing." >&2; exit 0; }
 
 # --- Logging (write failure → discard, never let side-channel kill core logic) ---
-LOG_DIR="$HOME/.claude/logs"
+LOG_DIR="${REVIEW_LOG_DIR:-$HOME/.claude/logs}"
 mkdir -p "$LOG_DIR" 2>/dev/null && LOG_FILE="${LOG_DIR}/plan-review.log" || LOG_FILE="/dev/null"
 
 # --- Namespace unification (legacy GEMINI_* fallback — never break userspace) ---
@@ -48,7 +48,7 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
 [ -n "$SESSION_ID" ] || exit 0
 
 # --- Attempt counter (tmpfs-backed, system handles cleanup) ---
-COUNTER_DIR="/tmp/claude-reviews"
+COUNTER_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
 mkdir -p "$COUNTER_DIR"
 COUNTER_FILE="$COUNTER_DIR/.review-count-${SESSION_ID}"
 
@@ -65,7 +65,7 @@ PLAN=$(echo "$INPUT" | jq -r '.tool_input.plan // ""')
 
 if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   # Fallback: read most recent plan file
-  PLAN_DIR="$HOME/.claude/plans"
+  PLAN_DIR="${REVIEW_PLAN_DIR:-$HOME/.claude/plans}"
   if [ -d "$PLAN_DIR" ]; then
     PLAN_FILE=$(find "$PLAN_DIR" -maxdepth 1 -name '*.md' -not -name '.*' \
       -print0 2>>"$LOG_FILE" | xargs -0 ls -t 2>>"$LOG_FILE" | head -1)
@@ -215,17 +215,21 @@ fi
 
 # --- 6. Extract structured verdict (XML-tag isolation, anti-hijack) ---
 # Defensive extraction: LLM output is untrusted external input.
-#   1. printf — safe for text starting with -n/-E (echo is not)
+#   1. printf — safe for text starting with -n/-E (echo is not), trailing \n for POSIX
 #   2. tr upper — case-normalize before matching (BSD sed has no /I flag)
-#   3. grep -oE (first pass) — extract first <VERDICT>...</VERDICT> tag, non-greedy via head
+#   3. grep -oE (first pass) — extract <VERDICT>...</VERDICT> tag
 #   4. grep -oE (second pass) — extract verdict keyword from the tag
+#   5. head -n 1 — LLM may emit multiple tags; guarantee single value
+#   || true — grep returns exit 1 on no match; suppress for set -e + pipefail
 VERDICT=$(printf "%s\n" "$REVIEW" \
   | tr '[:lower:]' '[:upper:]' \
   | grep -oE '<VERDICT>[[:space:]]*(APPROVE|CONCERNS|REJECT)[[:space:]]*</VERDICT>' \
-  | head -n 1 \
   | grep -oE 'APPROVE|CONCERNS|REJECT' \
-  | head -n 1)
-VERDICT="${VERDICT:-CONCERNS}"  # Malformed output → fail-closed as CONCERNS
+  | head -n 1) || true
+if [ -z "$VERDICT" ]; then
+  VERDICT="CONCERNS"
+  echo "plan-review: verdict tag missing or malformed, falling back to CONCERNS." >&2
+fi
 
 # --- 7. Branch on verdict ---
 if [ "$VERDICT" = "APPROVE" ]; then

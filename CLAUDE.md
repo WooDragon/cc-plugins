@@ -2,6 +2,12 @@
 
 WooDragon 的 Claude Code 插件 marketplace。
 
+## 当前版本
+
+| 插件 | 版本 |
+|------|------|
+| plan-review | 1.0.3 |
+
 ## 项目结构
 
 ```
@@ -11,6 +17,10 @@ plugins/
     .claude-plugin/plugin.json    # 插件元数据
     hooks/hooks.json              # PreToolUse hook 声明
     scripts/plan-review.sh        # 核心脚本
+    tests/                        # BDD 测试套件（bats-core）
+      plan-review.bats            # 25 个测试用例
+      test_helper/
+        common-setup.bash         # 测试基础设施（mock、断言）
 ```
 
 ## 开发踩坑记录
@@ -37,3 +47,13 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_MAX_ROUNDS` | `3` | 最大磋商轮次 |
 
 旧变量 `GEMINI_REVIEW_OFF`、`GEMINI_DRY_RUN`、`GEMINI_MAX_REVIEWS` 通过脚本内 fallback 继续生效。
+
+### 测试隔离变量（仅测试使用）
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `REVIEW_LOG_DIR` | `$HOME/.claude/logs` | 日志目录 |
+| `REVIEW_COUNTER_DIR` | `/tmp/claude-reviews` | counter 文件目录 |
+| `REVIEW_PLAN_DIR` | `$HOME/.claude/plans` | plan 文件 fallback 目录 |
+
+生产环境不设置这些变量，脚本 fallback 到默认路径。测试通过注入临时目录实现完全隔离。
