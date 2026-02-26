@@ -37,6 +37,20 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 
 插件版本号存在于两处：`marketplace.json` 的 plugins 条目和插件自身的 `plugin.json`。bump 版本时必须两处同步修改，否则 `claude plugin update` 检测不到新版本。
 
+### Prompt 构造的 KV Cache 友好原则
+
+调用 LLM API 时，prompt 内容的排列顺序直接影响 KV cache 命中率（prefix matching 机制）。plan-review 插件遵循以下分层策略：
+
+**分层模型（从前缀到尾部）**：
+1. **Static layer** — 角色定义、评审标准、输出格式等跨调用完全不变的指令。Claude 引擎走 `--system-prompt`（独立 cache 通道），Gemini 引擎作为 prompt 文件前缀
+2. **Session-stable layer** — GLOBAL_MD、PROJECT_MD、USER_REQ 等同一会话内跨轮次不变的上下文
+3. **Volatile layer** — PLAN、ROUND_CONTEXT 等每轮可能变化的内容，严格排在最末
+
+**核心约束**：
+- 静态内容禁止被动态内容切断——任何 static 块出现在 dynamic 块之后都是 cache 失效点
+- 支持 system prompt 分离的引擎（Claude）将全部静态指令放入 system prompt
+- 多轮磋商场景中，易变内容（轮次号、修改后的 plan）在 prompt 最末尾，保护前面 ~11KB session-stable 前缀的 cache 命中
+
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |

@@ -115,46 +115,15 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
 fi
 
 # --- 4. Compose prompt ---
-PROMPT_FILE=$(mktemp)
-trap 'rm -f "$PROMPT_FILE"' EXIT
-
-cat > "$PROMPT_FILE" << 'PROMPT_HEADER'
-# Red Team Plan Review
+# Static instructions: single canonical source for both engines.
+# Claude → --system-prompt (independent KV cache); Gemini → prompt file prefix.
+SYSTEM_INSTRUCTIONS='# Red Team Plan Review
 
 You are a senior software architect performing an ADVERSARIAL review of the
 following implementation plan. Your job is to find flaws before implementation
 begins. Be direct and specific — no generic advice.
 
 Keep your response under 2000 characters.
-PROMPT_HEADER
-
-cat >> "$PROMPT_FILE" << PROMPT_CONTEXT
-
-## Coding Standards (Author's Reference)
-${GLOBAL_MD:-<not available>}
-
-## Project Architecture
-${PROJECT_MD:-<not available>}
-
-## User's Original Request
-${USER_REQ:-<not available>}
-
-## Plan to Review
-${PLAN}
-PROMPT_CONTEXT
-
-# Include round context so reviewer knows this may be a rebuttal round
-if [ "$ATTEMPT" -gt 0 ]; then
-  cat >> "$PROMPT_FILE" << ROUND_CONTEXT
-
-## Consultation Context
-This is round $((ATTEMPT + 1)) of adversarial review. The plan author may have
-revised or added rebuttals since the previous round. Evaluate the CURRENT plan
-on its merits — if prior concerns have been addressed, APPROVE.
-ROUND_CONTEXT
-fi
-
-cat >> "$PROMPT_FILE" << 'PROMPT_CRITERIA'
 
 ## Review Criteria
 1. **Correctness** — Does the plan actually solve the stated problem?
@@ -174,8 +143,45 @@ IMPORTANT: The verdict MUST be wrapped in <verdict></verdict> XML tags on the
 very first line. This is machine-parsed. Do NOT place verdict keywords anywhere
 else in your response without the tags.
 
-Use Chinese for the review output.
-PROMPT_CRITERIA
+Use Chinese for the review output.'
+
+PROMPT_FILE=$(mktemp)
+trap 'rm -f "$PROMPT_FILE"' EXIT
+
+# Engine-specific prefix: Claude → system-prompt channel; Gemini → file prefix
+if [ "$REVIEW_ENGINE" = "claude" ]; then
+  SYSTEM_PROMPT="$SYSTEM_INSTRUCTIONS"
+  : > "$PROMPT_FILE"
+else
+  SYSTEM_PROMPT=""
+  printf '%s\n\n' "$SYSTEM_INSTRUCTIONS" > "$PROMPT_FILE"
+fi
+
+# Shared dynamic content: stable → volatile ordering
+cat >> "$PROMPT_FILE" << DYNEOF
+## Coding Standards (Author's Reference)
+${GLOBAL_MD:-<not available>}
+
+## Project Architecture
+${PROJECT_MD:-<not available>}
+
+## User's Original Request
+${USER_REQ:-<not available>}
+
+## Plan to Review
+${PLAN}
+DYNEOF
+
+# Volatile tail: round context (always last, changes every round)
+if [ "$ATTEMPT" -gt 0 ]; then
+  cat >> "$PROMPT_FILE" << RNDEOF
+
+## Consultation Context
+This is round $((ATTEMPT + 1)) of adversarial review. The plan author may have
+revised or added rebuttals since the previous round. Evaluate the CURRENT plan
+on its merits — if prior concerns have been addressed, APPROVE.
+RNDEOF
+fi
 
 # --- 5. Call review engine ---
 if [ "$REVIEW_DRY_RUN" = "1" ]; then
@@ -207,7 +213,7 @@ else
       --no-session-persistence \
       --tools "" \
       --disable-slash-commands \
-      --system-prompt "You are a senior software architect performing an adversarial red-team review. Output verdict as <verdict>APPROVE</verdict>, <verdict>CONCERNS</verdict>, or <verdict>REJECT</verdict>. Then list issues by severity. Use Chinese." \
+      --system-prompt "$SYSTEM_PROMPT" \
       < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
       log_decision "decision=allow reason=engine-error engine=claude"
       echo "plan-review: claude -p failed (exit $?), see $LOG_FILE. Allowing." >&2
