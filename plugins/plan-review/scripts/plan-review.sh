@@ -214,8 +214,17 @@ fi
 [ -n "$REVIEW" ] || exit 0
 
 # --- 6. Extract structured verdict (XML-tag isolation, anti-hijack) ---
-# Uses sed for macOS compatibility (no grep -P)
-VERDICT=$(echo "$REVIEW" | sed -n 's/.*<verdict>\(APPROVE\|CONCERNS\|REJECT\)<\/verdict>.*/\1/p' | head -1)
+# Defensive extraction: LLM output is untrusted external input.
+#   1. printf — safe for text starting with -n/-E (echo is not)
+#   2. tr upper — case-normalize before matching (BSD sed has no /I flag)
+#   3. grep -oE (first pass) — extract first <VERDICT>...</VERDICT> tag, non-greedy via head
+#   4. grep -oE (second pass) — extract verdict keyword from the tag
+VERDICT=$(printf "%s\n" "$REVIEW" \
+  | tr '[:lower:]' '[:upper:]' \
+  | grep -oE '<VERDICT>[[:space:]]*(APPROVE|CONCERNS|REJECT)[[:space:]]*</VERDICT>' \
+  | head -n 1 \
+  | grep -oE 'APPROVE|CONCERNS|REJECT' \
+  | head -n 1)
 VERDICT="${VERDICT:-CONCERNS}"  # Malformed output → fail-closed as CONCERNS
 
 # --- 7. Branch on verdict ---
