@@ -27,6 +27,14 @@ command -v jq >/dev/null 2>&1 || { echo "plan-review: missing jq, allowing." >&2
 LOG_DIR="${REVIEW_LOG_DIR:-$HOME/.claude/logs}"
 mkdir -p "$LOG_DIR" 2>/dev/null && LOG_FILE="${LOG_DIR}/plan-review.log" || LOG_FILE="/dev/null"
 
+# --- Structured decision log (one line per exit, machine-parseable) ---
+log_decision() {
+  printf '[%s] session=%s attempt=%s/%s %s\n' \
+    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    "${SESSION_ID:-unknown}" "${ATTEMPT:-?}" "${REVIEW_MAX_ROUNDS:-?}" \
+    "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
 # --- Namespace unification (legacy GEMINI_* fallback — never break userspace) ---
 REVIEW_DISABLED="${REVIEW_DISABLED:-${GEMINI_REVIEW_OFF:-0}}"
 REVIEW_DRY_RUN="${REVIEW_DRY_RUN:-${GEMINI_DRY_RUN:-0}}"
@@ -55,6 +63,7 @@ COUNTER_FILE="$COUNTER_DIR/.review-count-${SESSION_ID}"
 # --- Safety valve: max rounds reached → escalate to user ---
 ATTEMPT=$(cat "$COUNTER_FILE" 2>/dev/null || echo "0")
 if [ "$ATTEMPT" -ge "$REVIEW_MAX_ROUNDS" ]; then
+  log_decision "decision=allow reason=safety-valve"
   rm -f "$COUNTER_FILE"
   echo "Max reviews ($REVIEW_MAX_ROUNDS) reached — escalating to user." >&2
   exit 0
@@ -77,6 +86,7 @@ fi
 
 # Nothing to review → allow
 if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
+  log_decision "decision=allow reason=no-plan-content"
   exit 0
 fi
 
@@ -176,6 +186,7 @@ else
   ENGINE_CMD="gemini"
   [ "$REVIEW_ENGINE" != "claude" ] || ENGINE_CMD="claude"
   if ! command -v "$ENGINE_CMD" >/dev/null 2>&1; then
+    log_decision "decision=allow reason=engine-not-found engine=$REVIEW_ENGINE"
     echo "plan-review: REVIEW_ENGINE=$REVIEW_ENGINE but '$ENGINE_CMD' not found. Skipping." >&2
     exit 0
   fi
@@ -198,12 +209,14 @@ else
       --disable-slash-commands \
       --system-prompt "You are a senior software architect performing an adversarial red-team review. Output verdict as <verdict>APPROVE</verdict>, <verdict>CONCERNS</verdict>, or <verdict>REJECT</verdict>. Then list issues by severity. Use Chinese." \
       < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
+      log_decision "decision=allow reason=engine-error engine=claude"
       echo "plan-review: claude -p failed (exit $?), see $LOG_FILE. Allowing." >&2
       exit 0
     }
   else
     GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-pro-preview}"
     REVIEW=$(gemini -m "$GEMINI_MODEL" < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
+      log_decision "decision=allow reason=engine-error engine=gemini"
       echo "plan-review: gemini failed (exit $?), see $LOG_FILE. Allowing." >&2
       exit 0
     }
@@ -211,7 +224,10 @@ else
 fi
 
 # Empty review → allow
-[ -n "$REVIEW" ] || exit 0
+if [ -z "$REVIEW" ]; then
+  log_decision "decision=allow reason=empty-review engine=$REVIEW_ENGINE"
+  exit 0
+fi
 
 # --- 6. Extract structured verdict (XML-tag isolation, anti-hijack) ---
 # Defensive extraction: LLM output is untrusted external input.
@@ -233,6 +249,7 @@ fi
 
 # --- 7. Branch on verdict ---
 if [ "$VERDICT" = "APPROVE" ]; then
+  log_decision "verdict=APPROVE decision=allow"
   rm -f "$COUNTER_FILE"
   exit 0  # Consensus reached — allow through
 fi
@@ -240,6 +257,7 @@ fi
 # CONCERNS or REJECT → increment counter, deny with feedback
 ATTEMPT=$((ATTEMPT + 1))
 echo "$ATTEMPT" > "$COUNTER_FILE"
+log_decision "verdict=$VERDICT decision=deny round=$ATTEMPT/$REVIEW_MAX_ROUNDS"
 REMAINING=$((REVIEW_MAX_ROUNDS - ATTEMPT))
 
 # --- 8. Compose deny feedback (peer consultation framing) ---

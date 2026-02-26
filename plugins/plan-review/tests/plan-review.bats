@@ -358,3 +358,79 @@ Still not good enough."
   # Counter file should be cleaned up
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
 }
+
+# =============================================================================
+# Penetration Defense (审阅穿透防御)
+# =============================================================================
+
+# 26. Safety valve releases, then new plan enters fresh review cycle
+@test "flow: new cycle starts fresh after safety valve releases" {
+  export REVIEW_MAX_ROUNDS=3
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+Not good enough."
+  INPUT=$(build_input)
+
+  # Exhaust all 3 rounds: deny, deny, deny
+  run_hook; assert_deny_json; [ "$(get_counter_value)" -eq 1 ]
+  run_hook; assert_deny_json; [ "$(get_counter_value)" -eq 2 ]
+  run_hook; assert_deny_json; [ "$(get_counter_value)" -eq 3 ]
+
+  # Round 4: safety valve fires, counter deleted
+  run_hook
+  assert_allowed
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+
+  # New plan submitted — engine now approves (simulates fresh review)
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+LGTM after revision."
+  INPUT=$(build_input plan="Revised plan v2")
+  run_hook
+
+  # Must go through engine (APPROVE), not short-circuit
+  assert_allowed
+  # Counter should be cleaned up by APPROVE branch
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+# 27. Engine failure does not touch counter (fail-open, counter unchanged)
+@test "flow: engine failure does not modify counter" {
+  INPUT=$(build_input)
+
+  # No counter file exists initially
+  [ "$(get_counter_value)" -eq 0 ]
+
+  # Engine fails → fail-open, counter must remain untouched
+  create_failing_engine "gemini" 1
+  run_hook
+  assert_allowed
+
+  # Counter file must NOT exist (engine failure should not create one)
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+  [ "$(get_counter_value)" -eq 0 ]
+}
+
+# 28. Engine failure mid-cycle preserves existing counter value
+@test "flow: engine failure mid-cycle preserves counter" {
+  export REVIEW_MAX_ROUNDS=3
+  INPUT=$(build_input)
+
+  # Round 1: normal CONCERNS → counter=1
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+Issues found."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+
+  # Round 2: engine crashes → fail-open, counter must stay at 1
+  create_failing_engine "gemini" 1
+  run_hook
+  assert_allowed
+  [ "$(get_counter_value)" -eq 1 ]
+
+  # Round 3: engine recovers → CONCERNS, counter=2 (continues from 1)
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+Still has issues."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 2 ]
+}

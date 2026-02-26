@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.3 |
+| plan-review | 1.0.4 |
 
 ## 项目结构
 
@@ -18,7 +18,7 @@ plugins/
     hooks/hooks.json              # PreToolUse hook 声明
     scripts/plan-review.sh        # 核心脚本
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 25 个测试用例
+      plan-review.bats            # 28 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
 ```
