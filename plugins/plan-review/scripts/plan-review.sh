@@ -2,26 +2,35 @@
 # PreToolUse hook: Adversarial plan review via cross-model consultation.
 #
 # Triggered when Plan agent calls ExitPlanMode (via PreToolUse matcher).
-# Flow (adversarial consultation model):
+# Flow (severity-aware adversarial consultation):
 #   ExitPlanMode called → hook intercepts → review engine (Gemini/Claude) reviews:
-#     APPROVE  → allow through immediately
-#     CONCERNS/REJECT → deny with feedback, Claude revises or rebuts
-#     → re-calls ExitPlanMode → engine reviews again → repeat
-#   After REVIEW_MAX_ROUNDS without consensus → allow through (user decides)
+#     APPROVE  → allow through immediately, clear counter
+#     CONCERNS → deny with feedback, increment ATTEMPT + TOTAL, Claude revises or rebuts
+#     REJECT   → deny with feedback, increment TOTAL only (ATTEMPT frozen), Critical must resolve
+#   Termination (dual safety valves):
+#     Non-Critical valve: ATTEMPT >= MAX_ROUNDS → allow (escalate to user)
+#     Global valve:       TOTAL >= MAX_TOTAL_ROUNDS → deny (hard stop, tombstone counter)
+#
+# All non-guard exits emit structured JSON (allow or deny). No silent exit 0.
 #
 # Environment variables:
-#   REVIEW_DISABLED=1        — bypass entirely (fallback: GEMINI_REVIEW_OFF)
-#   REVIEW_DRY_RUN=1         — skip engine call, synthetic APPROVE (fallback: GEMINI_DRY_RUN)
-#   REVIEW_MAX_ROUNDS=N      — max consultation rounds, default 3 (fallback: GEMINI_MAX_REVIEWS)
-#   REVIEW_ENGINE=gemini     — review engine: "gemini" (default) or "claude"
-#   CLAUDE_MODEL=opus        — Claude engine model (default: opus)
-#   GEMINI_MODEL=<id>        — Gemini engine model (default: gemini-3-pro-preview)
+#   REVIEW_DISABLED=1            — bypass entirely (fallback: GEMINI_REVIEW_OFF)
+#   REVIEW_DRY_RUN=1             — skip engine call, synthetic APPROVE (fallback: GEMINI_DRY_RUN)
+#   REVIEW_MAX_ROUNDS=N          — max non-Critical consultation rounds, default 3 (fallback: GEMINI_MAX_REVIEWS)
+#   REVIEW_MAX_TOTAL_ROUNDS=N    — absolute max total rounds (incl. REJECT), default 20
+#   REVIEW_ENGINE=gemini         — review engine: "gemini" (default) or "claude"
+#   CLAUDE_MODEL=opus            — Claude engine model (default: opus)
+#   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3-pro-preview)
 set -euo pipefail
 
 INPUT=$(cat)
 
 # --- Pre-requisites ---
-command -v jq >/dev/null 2>&1 || { echo "plan-review: missing jq, allowing." >&2; exit 0; }
+command -v jq >/dev/null 2>&1 || {
+  echo "plan-review: missing jq, allowing." >&2
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] jq missing, plan-review skipped"}}'
+  exit 0
+}
 
 # --- Logging (write failure → discard, never let side-channel kill core logic) ---
 LOG_DIR="${REVIEW_LOG_DIR:-$HOME/.claude/logs}"
@@ -29,16 +38,29 @@ mkdir -p "$LOG_DIR" 2>/dev/null && LOG_FILE="${LOG_DIR}/plan-review.log" || LOG_
 
 # --- Structured decision log (one line per exit, machine-parseable) ---
 log_decision() {
-  printf '[%s] session=%s attempt=%s/%s %s\n' \
+  printf '[%s] session=%s attempt=%s/%s total=%s/%s %s\n' \
     "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     "${SESSION_ID:-unknown}" "${ATTEMPT:-?}" "${REVIEW_MAX_ROUNDS:-?}" \
+    "${TOTAL_ROUNDS:-?}" "${REVIEW_MAX_TOTAL_ROUNDS:-?}" \
     "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+# --- Visible allow helper (eliminates silent exit 0 for non-guard paths) ---
+allow_with_reason() {
+  local reason="$1"
+  local reason_json
+  reason_json=$(printf '%s' "$reason" | jq -Rs . 2>/dev/null) || reason_json="\"$reason\""
+  cat << EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${reason_json}}}
+EOF
+  exit 0
 }
 
 # --- Namespace unification (legacy GEMINI_* fallback — never break userspace) ---
 REVIEW_DISABLED="${REVIEW_DISABLED:-${GEMINI_REVIEW_OFF:-0}}"
 REVIEW_DRY_RUN="${REVIEW_DRY_RUN:-${GEMINI_DRY_RUN:-0}}"
 REVIEW_MAX_ROUNDS="${REVIEW_MAX_ROUNDS:-${GEMINI_MAX_REVIEWS:-3}}"
+REVIEW_MAX_TOTAL_ROUNDS="${REVIEW_MAX_TOTAL_ROUNDS:-20}"
 REVIEW_ENGINE="${REVIEW_ENGINE:-gemini}"
 
 # --- Recursive guard: claude -p subprocess inherits this, bail immediately ---
@@ -60,12 +82,40 @@ COUNTER_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
 mkdir -p "$COUNTER_DIR"
 COUNTER_FILE="$COUNTER_DIR/.review-count-${SESSION_ID}"
 
-# --- Safety valve: max rounds reached → escalate to user ---
-ATTEMPT=$(cat "$COUNTER_FILE" 2>/dev/null || echo "0")
+# --- Read counter (new format ATTEMPT:TOTAL, backward-compat with old single-number) ---
+IFS=: read -r ATTEMPT TOTAL_ROUNDS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0")"
+# Three-layer defense: empty fallback → old format compat → dirty data sanitization
+ATTEMPT=${ATTEMPT:-0}
+TOTAL_ROUNDS=${TOTAL_ROUNDS:-$ATTEMPT}  # old format "3" → ATTEMPT=3, TOTAL_ROUNDS="" → 3
+[[ "$ATTEMPT" =~ ^[0-9]+$ ]] || ATTEMPT=0
+[[ "$TOTAL_ROUNDS" =~ ^[0-9]+$ ]] || TOTAL_ROUNDS=0
+
+# --- Global safety valve: total rounds exhausted → hard deny (tombstone counter) ---
+# Never delete counter — tombstone blocks subsequent calls until human intervenes
+if [ "$TOTAL_ROUNDS" -ge "$REVIEW_MAX_TOTAL_ROUNDS" ]; then
+  log_decision "decision=deny reason=global-safety-valve total=$TOTAL_ROUNDS"
+  BLOCK_MSG="## Red Team Review — HARD STOP
+
+审阅已达全局上限（${TOTAL_ROUNDS}/${REVIEW_MAX_TOTAL_ROUNDS}），仍存在未解决的审阅意见。
+Plan 被强制拦截。请停止当前操作，将问题升级给用户做人工决策。"
+  BLOCK_JSON=$(printf '%s' "$BLOCK_MSG" | jq -Rs .)
+  cat << EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${BLOCK_JSON}}}
+EOF
+  exit 0
+fi
+
+# --- Non-Critical safety valve: CONCERNS rounds exhausted → allow (escalate to user) ---
 if [ "$ATTEMPT" -ge "$REVIEW_MAX_ROUNDS" ]; then
-  log_decision "decision=allow reason=safety-valve"
+  log_decision "decision=allow reason=non-critical-safety-valve round=$ATTEMPT total=$TOTAL_ROUNDS"
   rm -f "$COUNTER_FILE"
-  echo "Max reviews ($REVIEW_MAX_ROUNDS) reached — escalating to user." >&2
+  VALVE_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
+
+非 Critical 磋商已达上限（${ATTEMPT}/${REVIEW_MAX_ROUNDS}），未能达成一致。Plan 直接呈现给用户做最终裁决。"
+  VALVE_JSON=$(printf '%s' "$VALVE_MSG" | jq -Rs .)
+  cat << EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${VALVE_JSON}}}
+EOF
   exit 0
 fi
 
@@ -84,10 +134,10 @@ if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   fi
 fi
 
-# Nothing to review → allow
+# Nothing to review → allow with visible reason
 if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   log_decision "decision=allow reason=no-plan-content"
-  exit 0
+  allow_with_reason "[SKIP] 无 plan 内容可审阅"
 fi
 
 # --- 2. Collect project context ---
@@ -133,10 +183,24 @@ Keep your response under 2000 characters.
 5. **Testability** — Can changes be verified? Missing test scenarios?
 6. **Architecture fit** — Consistent with project patterns?
 
+## Severity Definitions
+- **[Critical]** — Blocker: security vulnerabilities, data loss, logic errors producing wrong results, breaking changes to existing behavior, fundamental approach flaws
+- **[Major]** — Significant gap: missing error handling on critical paths, poor architecture decisions, performance issues under normal load, incomplete implementation
+- **[Minor]** — Polish: naming, style, documentation gaps, minor optimization opportunities
+
+## Verdict Rules
+- **APPROVE**: No issues, or only Minor items remaining
+- **CONCERNS**: Major items present but no Critical
+- **REJECT**: Critical items present
+
+Verdict is the structured severity signal — the automation routes on verdict tags only,
+no body scanning. Strictly follow verdict-severity correspondence.
+
 ## Output Format
 - FIRST line must be a verdict tag: <verdict>APPROVE</verdict> or <verdict>CONCERNS</verdict> or <verdict>REJECT</verdict>
-- Then list specific issues by severity (Critical / Major / Minor)
-- Each issue: description -> impact -> suggested fix
+- List issues, each prefixed with severity tag: `[Critical]`, `[Major]`, or `[Minor]`
+- Each issue format: `[Severity] description → impact → suggested fix`
+- If a severity level has no issues, omit it entirely
 - End with brief strengths of the plan (if any)
 
 IMPORTANT: The verdict MUST be wrapped in <verdict></verdict> XML tags on the
@@ -173,13 +237,13 @@ ${PLAN}
 DYNEOF
 
 # Volatile tail: round context (always last, changes every round)
-if [ "$ATTEMPT" -gt 0 ]; then
+if [ "$TOTAL_ROUNDS" -gt 0 ]; then
   cat >> "$PROMPT_FILE" << RNDEOF
 
 ## Consultation Context
-This is round $((ATTEMPT + 1)) of adversarial review. The plan author may have
-revised or added rebuttals since the previous round. Evaluate the CURRENT plan
-on its merits — if prior concerns have been addressed, APPROVE.
+This is round $((TOTAL_ROUNDS + 1)) of adversarial review.
+The plan author may have revised or added rebuttals since the previous round.
+Evaluate the CURRENT plan on its merits — if prior concerns have been addressed, APPROVE.
 RNDEOF
 fi
 
@@ -193,8 +257,7 @@ else
   [ "$REVIEW_ENGINE" != "claude" ] || ENGINE_CMD="claude"
   if ! command -v "$ENGINE_CMD" >/dev/null 2>&1; then
     log_decision "decision=allow reason=engine-not-found engine=$REVIEW_ENGINE"
-    echo "[WARNING] plan-review: REVIEW_ENGINE=$REVIEW_ENGINE but '$ENGINE_CMD' not found. Skipping." >&2
-    exit 0
+    allow_with_reason "[WARNING] REVIEW_ENGINE=$REVIEW_ENGINE but '$ENGINE_CMD' not found"
   fi
 
   # Engine model variables (outside retry loop, avoid repeat assignment)
@@ -254,11 +317,10 @@ else
     break
   done
 
-  # All attempts exhausted → fail-open with explicit WARNING
+  # All attempts exhausted → fail-open with visible WARNING
   if [ -z "$REVIEW" ]; then
     log_decision "decision=allow reason=engine-exhausted engine=$REVIEW_ENGINE"
-    echo "[WARNING] plan-review: 引擎调用失败（已重试），审阅跳过。详见 $LOG_FILE" >&2
-    exit 0
+    allow_with_reason "[WARNING] 引擎调用失败（已重试），审阅跳过。详见 $LOG_FILE"
   fi
 fi
 
@@ -285,8 +347,8 @@ if [ "$VERDICT" = "APPROVE" ]; then
   log_decision "verdict=APPROVE decision=allow"
   rm -f "$COUNTER_FILE"
   # Emit structured allow so user sees the APPROVE verdict (not silent pass-through)
-  if [ "$ATTEMPT" -gt 0 ]; then
-    APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED (Round $((ATTEMPT + 1))/${REVIEW_MAX_ROUNDS})"
+  if [ "$TOTAL_ROUNDS" -gt 0 ]; then
+    APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED (Round $((TOTAL_ROUNDS + 1)))"
   else
     APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED"
   fi
@@ -298,21 +360,36 @@ EOF
   exit 0
 fi
 
-# CONCERNS or REJECT → increment counter, deny with feedback
-ATTEMPT=$((ATTEMPT + 1))
-echo "$ATTEMPT" > "$COUNTER_FILE"
-log_decision "verdict=$VERDICT decision=deny round=$ATTEMPT/$REVIEW_MAX_ROUNDS"
-REMAINING=$((REVIEW_MAX_ROUNDS - ATTEMPT))
+# CONCERNS or REJECT → update counter, deny with feedback
+TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
 
-# --- 8. Compose deny feedback (peer consultation framing) ---
+if [ "$VERDICT" != "REJECT" ]; then
+  # CONCERNS: non-Critical, increment ATTEMPT
+  ATTEMPT=$((ATTEMPT + 1))
+fi
+# REJECT: ATTEMPT frozen (Critical must resolve before negotiation counter starts)
+
+echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
+log_decision "verdict=$VERDICT decision=deny round=$ATTEMPT/$REVIEW_MAX_ROUNDS total=$TOTAL_ROUNDS/$REVIEW_MAX_TOTAL_ROUNDS"
+
+# --- 8. Compose deny feedback (severity-differentiated) ---
+if [ "$VERDICT" = "REJECT" ]; then
+  FEEDBACK_HEADER="Red Team Review — ${REVIEW_ENGINE} — REJECT (Round ${TOTAL_ROUNDS}/${REVIEW_MAX_TOTAL_ROUNDS})"
+  PHASE_MSG="审阅引擎发现 Critical 级别问题。Critical 项必须全部解决后磋商计数才启动。"
+else
+  REMAINING=$((REVIEW_MAX_ROUNDS - ATTEMPT))
+  FEEDBACK_HEADER="Red Team Review — ${REVIEW_ENGINE} — CONCERNS (Round ${ATTEMPT}/${REVIEW_MAX_ROUNDS})"
+  PHASE_MSG="磋商剩余轮次：${REMAINING}。若双方无法达成一致，plan 将直接呈现给用户做最终裁决。"
+fi
+
 FEEDBACK=$(cat << REVIEW_EOF
-## Red Team Review — ${REVIEW_ENGINE} (Round ${ATTEMPT}/${REVIEW_MAX_ROUNDS})
+## ${FEEDBACK_HEADER}
 
-审阅引擎对本 plan 提出了以下意见。你有两个选择：
+${PHASE_MSG}
+
+你有两个选择：
 1. 如意见合理，修正 plan 后再次调用 ExitPlanMode
 2. 如你认为意见不成立，在 plan 中补充辩护理由后再次调用 ExitPlanMode
-
-磋商剩余轮次：${REMAINING}。若双方无法达成一致，plan 将直接呈现给用户做最终裁决。
 
 ---
 

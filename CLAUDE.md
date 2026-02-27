@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.7 |
+| plan-review | 1.0.8 |
 
 ## 项目结构
 
@@ -18,7 +18,7 @@ plugins/
     hooks/hooks.json              # PreToolUse hook 声明
     scripts/plan-review.sh        # 核心脚本
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 31 个测试用例
+      plan-review.bats            # 48 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
 ```
@@ -58,9 +58,22 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_ENGINE` | `gemini` | 审阅引擎：`gemini` 或 `claude` |
 | `REVIEW_DISABLED` | `0` | `1` 全局关闭 |
 | `REVIEW_DRY_RUN` | `0` | `1` 跳过引擎调用 |
-| `REVIEW_MAX_ROUNDS` | `3` | 最大磋商轮次 |
+| `REVIEW_MAX_ROUNDS` | `3` | 非 Critical 最大磋商轮次（CONCERNS 累计） |
+| `REVIEW_MAX_TOTAL_ROUNDS` | `20` | 全局绝对上限（含 REJECT 轮次），到达后硬拦截 |
 
 旧变量 `GEMINI_REVIEW_OFF`、`GEMINI_DRY_RUN`、`GEMINI_MAX_REVIEWS` 通过脚本内 fallback 继续生效。
+
+### 严重性分级与磋商终止机制
+
+Prompt 定义三级严重性（Critical/Major/Minor），与 Verdict 强绑定：REJECT=Critical、CONCERNS=Major、APPROVE=Minor-only-or-clean。脚本通过 Verdict tag 路由，不扫正文（消除假阳性）。
+
+**计数器格式**：`ATTEMPT:TOTAL`（冒号分隔），向后兼容旧格式单数字。REJECT 轮次仅递增 TOTAL（ATTEMPT 冻结），CONCERNS 轮次两者均递增。
+
+**双安全阀**：
+- 非 Critical 安全阀（ATTEMPT >= MAX_ROUNDS）→ allow + "ESCALATED" 理由 + 清理计数器
+- 全局安全阀（TOTAL >= MAX_TOTAL_ROUNDS）→ deny + "HARD STOP" 硬拦截 + 保留计数器作为 tombstone
+
+**状态清理铁律**：只有 allow 路径（APPROVE、非 Critical 安全阀放行）才可删除计数器。deny 路径绝不清理。
 
 ### 测试隔离变量（仅测试使用）
 

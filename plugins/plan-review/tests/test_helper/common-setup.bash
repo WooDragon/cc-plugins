@@ -24,11 +24,12 @@ common_setup() {
   # Prepend MOCK_BIN to PATH so mock engines are found first
   export PATH="${MOCK_BIN}:${PATH}"
 
-  # Sane defaults: gemini engine, not disabled, not dry-run, 3 rounds
+  # Sane defaults: gemini engine, not disabled, not dry-run, 3 rounds, 20 total
   export REVIEW_ENGINE="gemini"
   export REVIEW_DISABLED="0"
   export REVIEW_DRY_RUN="0"
   export REVIEW_MAX_ROUNDS="3"
+  export REVIEW_MAX_TOTAL_ROUNDS="20"
 
   # Zero retry delay in tests (production: 2s)
   export REVIEW_RETRY_DELAY=0
@@ -182,19 +183,33 @@ create_plan_file() {
 
 # --- Counter Helpers ---
 
-# get_counter_value
-#   Reads the counter file for session "test-session". Returns 0 if missing.
+# get_counter_value [session_id]
+#   Reads the ATTEMPT field from counter file (new format ATTEMPT:TOTAL).
+#   Returns 0 if missing or unparseable.
 get_counter_value() {
   local session="${1:-test-session}"
-  cat "${REVIEW_COUNTER_DIR}/.review-count-${session}" 2>/dev/null || echo "0"
+  local attempt total
+  IFS=: read -r attempt total <<< "$(cat "${REVIEW_COUNTER_DIR}/.review-count-${session}" 2>/dev/null || echo "0:0")"
+  echo "${attempt:-0}"
 }
 
-# set_counter_value <value> [session_id]
-#   Sets the counter file for the given session.
+# get_total_rounds [session_id]
+#   Reads the TOTAL_ROUNDS field from counter file (new format ATTEMPT:TOTAL).
+#   Falls back to ATTEMPT for old single-number format.
+get_total_rounds() {
+  local session="${1:-test-session}"
+  local attempt total
+  IFS=: read -r attempt total <<< "$(cat "${REVIEW_COUNTER_DIR}/.review-count-${session}" 2>/dev/null || echo "0:0")"
+  echo "${total:-$attempt}"
+}
+
+# set_counter_value <attempt> [session_id] [total_rounds]
+#   Sets the counter file for the given session in ATTEMPT:TOTAL format.
 set_counter_value() {
   local value="$1"
   local session="${2:-test-session}"
-  echo "$value" > "${REVIEW_COUNTER_DIR}/.review-count-${session}"
+  local total="${3:-$value}"
+  echo "${value}:${total}" > "${REVIEW_COUNTER_DIR}/.review-count-${session}"
 }
 
 # --- Run Hook ---

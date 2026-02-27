@@ -1,9 +1,10 @@
 #!/usr/bin/env bats
 # BDD test suite for plan-review hook.
 #
-# Covers all logic branches: guard layer, counter safety valve, plan extraction,
-# dry-run, engine call error handling, verdict extraction (including the core
-# set -e bug fix), branch behavior, and counter management.
+# Covers all logic branches: guard layer, dual safety valves, severity-aware
+# counter logic, plan extraction, dry-run, engine call error handling, verdict
+# extraction (including the core set -e bug fix), branch behavior, counter
+# management, and full multi-round flows.
 #
 # Dependencies: bats-core, jq
 
@@ -20,8 +21,8 @@ teardown() {
 # Guard Layer (early exits, no engine call)
 # =============================================================================
 
-# 1. jq missing → fail-open
-@test "guard: jq missing → exit 0 (fail-open)" {
+# 1. jq missing → fail-open with visible JSON
+@test "guard: jq missing → allow JSON with WARNING" {
   # Build input BEFORE restricting PATH (build_input needs jq)
   INPUT=$(build_input)
 
@@ -43,8 +44,10 @@ teardown() {
   run_hook
   export PATH="$orig_path"
 
-  assert_allowed
-  [[ "$HOOK_STDERR" == *"missing jq"* ]]
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"jq missing"* ]]
 }
 
 # 2. Recursive guard
@@ -78,25 +81,27 @@ teardown() {
 }
 
 # =============================================================================
-# Counter Safety Valve
+# Non-Critical Safety Valve
 # =============================================================================
 
-# 6. Max rounds reached → allow through
-@test "counter: max rounds reached → exit 0, counter deleted" {
-  set_counter_value 3
+# 6. Non-Critical safety valve → allow JSON with ESCALATED
+@test "counter: non-critical safety valve → allow JSON with ESCALATED" {
+  set_counter_value 3 test-session 5
   export REVIEW_MAX_ROUNDS=3
   INPUT=$(build_input)
   run_hook
 
-  assert_allowed
-  [[ "$HOOK_STDERR" == *"Max reviews"* ]]
-  # Counter file should be deleted
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"ESCALATED"* ]]
+  # Counter file should be deleted (allow path)
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
 }
 
 # 7. Below max rounds → proceeds to review
 @test "counter: below max rounds → calls engine" {
-  set_counter_value 2
+  set_counter_value 2 test-session 3
   export REVIEW_MAX_ROUNDS=3
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nAll good."
   INPUT=$(build_input)
@@ -128,12 +133,15 @@ teardown() {
   assert_approve_json
 }
 
-# 10. No plan anywhere → allow
-@test "plan: no plan content → exit 0" {
+# 10. No plan anywhere → allow JSON with SKIP
+@test "plan: no plan content → allow JSON with SKIP" {
   INPUT=$(build_input_no_plan)
   run_hook
 
-  assert_allowed
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[SKIP]"* ]]
 }
 
 # =============================================================================
@@ -154,11 +162,9 @@ teardown() {
 # Engine Call Error Handling
 # =============================================================================
 
-# 12. Engine CLI not in PATH → fail-open
-@test "engine: CLI not found → exit 0 (fail-open)" {
+# 12. Engine CLI not in PATH → allow JSON with WARNING
+@test "engine: CLI not found → allow JSON with WARNING" {
   # Don't create any mock — gemini won't exist in MOCK_BIN
-  # But we need to ensure it's not found anywhere else either
-  # Remove gemini from PATH by unsetting and reconstructing
   INPUT=$(build_input)
 
   # Temporarily override command lookup: hide real gemini if installed
@@ -176,30 +182,36 @@ teardown() {
   run_hook
   export PATH="$orig_path"
 
-  assert_allowed
-  [[ "$HOOK_STDERR" == *"[WARNING]"* ]]
-  [[ "$HOOK_STDERR" == *"not found"* ]]
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
+  [[ "$reason" == *"not found"* ]]
 }
 
-# 13. Engine call fails (non-zero exit) — retried then fail-open
-@test "engine: call fails → retry then exit 0 (fail-open)" {
+# 13. Engine call fails (non-zero exit) — retried then allow JSON with WARNING
+@test "engine: call fails → retry then allow JSON with WARNING" {
   create_failing_engine "gemini" 1
   INPUT=$(build_input)
   run_hook
 
-  assert_allowed
+  assert_approve_json
   [[ "$HOOK_STDERR" == *"retrying"* ]]
-  [[ "$HOOK_STDERR" == *"[WARNING]"* ]]
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
 }
 
-# 14. Engine returns empty response — retried then fail-open
-@test "engine: empty response → retry then exit 0" {
+# 14. Engine returns empty response — retried then allow JSON with WARNING
+@test "engine: empty response → retry then allow JSON with WARNING" {
   create_mock_engine "gemini" ""
   INPUT=$(build_input)
   run_hook
 
-  assert_allowed
-  [[ "$HOOK_STDERR" == *"[WARNING]"* ]]
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
 }
 
 # =============================================================================
@@ -288,7 +300,7 @@ Almost right."
 
 # 22. APPROVE → clear counter
 @test "branch: APPROVE → counter file deleted" {
-  set_counter_value 2
+  set_counter_value 2 test-session 3
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>
 All good."
   INPUT=$(build_input)
@@ -298,7 +310,7 @@ All good."
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
 }
 
-# 23. CONCERNS → increment counter
+# 23. CONCERNS → increment counter (both ATTEMPT and TOTAL)
 @test "branch: CONCERNS → counter incremented" {
   create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
 Issues found."
@@ -306,9 +318,8 @@ Issues found."
   run_hook
 
   assert_deny_json
-  local count
-  count=$(get_counter_value)
-  [ "$count" -eq 1 ]
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 1 ]
 }
 
 # 24a. Allow JSON structure validation
@@ -334,7 +345,7 @@ Plan looks solid."
 
 # 24b. Allow JSON with round info (multi-round APPROVE)
 @test "branch: APPROVE after prior rounds includes round info" {
-  set_counter_value 2
+  set_counter_value 2 test-session 4
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>
 All resolved."
   INPUT=$(build_input)
@@ -343,8 +354,8 @@ All resolved."
   assert_approve_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  # Should show round 3 (ATTEMPT=2 → round 2+1=3)
-  [[ "$reason" == *"Round 3/3"* ]]
+  # TOTAL_ROUNDS=4 → round displayed is 4+1=5
+  [[ "$reason" == *"Round 5"* ]]
 }
 
 # 24c. Deny JSON structure validation
@@ -368,32 +379,37 @@ Critical issues."
   [[ "$reason" == *"Round"* ]]
 }
 
-# 25. Full 3-round consultation flow
+# 25. Full 3-round CONCERNS consultation flow
 @test "flow: 3 rounds CONCERNS then safety valve releases" {
   export REVIEW_MAX_ROUNDS=3
   create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
 Still not good enough."
 
-  # Round 1: CONCERNS → deny, counter=1
+  # Round 1: CONCERNS → deny, attempt=1, total=1
   INPUT=$(build_input)
   run_hook
   assert_deny_json
   [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 1 ]
 
-  # Round 2: CONCERNS → deny, counter=2
+  # Round 2: CONCERNS → deny, attempt=2, total=2
   run_hook
   assert_deny_json
   [ "$(get_counter_value)" -eq 2 ]
+  [ "$(get_total_rounds)" -eq 2 ]
 
-  # Round 3: CONCERNS → deny, counter=3
+  # Round 3: CONCERNS → deny, attempt=3, total=3
   run_hook
   assert_deny_json
   [ "$(get_counter_value)" -eq 3 ]
+  [ "$(get_total_rounds)" -eq 3 ]
 
-  # Round 4: counter=3 >= MAX_ROUNDS=3 → safety valve, exit 0
+  # Round 4: attempt=3 >= MAX_ROUNDS=3 → non-critical safety valve, allow
   run_hook
-  assert_allowed
-  [[ "$HOOK_STDERR" == *"Max reviews"* ]]
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"ESCALATED"* ]]
   # Counter file should be cleaned up
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
 }
@@ -437,9 +453,10 @@ Issues found on retry." "empty"
   INPUT=$(build_input)
   run_hook
 
-  assert_allowed
-  [[ "$HOOK_STDERR" == *"[WARNING]"* ]]
-  [[ "$HOOK_STDERR" == *"引擎调用失败"* ]]
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
 }
 
 # =============================================================================
@@ -460,7 +477,7 @@ Not good enough."
 
   # Round 4: safety valve fires, counter deleted
   run_hook
-  assert_allowed
+  assert_approve_json
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
 
   # New plan submitted — engine now approves (simulates fresh review)
@@ -485,7 +502,7 @@ LGTM after revision."
   # Engine fails → fail-open, counter must remain untouched
   create_failing_engine "gemini" 1
   run_hook
-  assert_allowed
+  assert_approve_json
 
   # Counter file must NOT exist (engine failure should not create one)
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
@@ -497,23 +514,364 @@ LGTM after revision."
   export REVIEW_MAX_ROUNDS=3
   INPUT=$(build_input)
 
-  # Round 1: normal CONCERNS → counter=1
+  # Round 1: normal CONCERNS → attempt=1, total=1
   create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
 Issues found."
   run_hook
   assert_deny_json
   [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 1 ]
 
-  # Round 2: engine crashes → fail-open, counter must stay at 1
+  # Round 2: engine crashes → fail-open, counter must stay at 1:1
   create_failing_engine "gemini" 1
   run_hook
-  assert_allowed
+  assert_approve_json
   [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 1 ]
 
-  # Round 3: engine recovers → CONCERNS, counter=2 (continues from 1)
+  # Round 3: engine recovers → CONCERNS, attempt=2, total=2
   create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
 Still has issues."
   run_hook
   assert_deny_json
   [ "$(get_counter_value)" -eq 2 ]
+  [ "$(get_total_rounds)" -eq 2 ]
+}
+
+# =============================================================================
+# Global Safety Valve
+# =============================================================================
+
+# 32. Global safety valve fires → hard deny
+@test "counter: global safety valve fires at REVIEW_MAX_TOTAL_ROUNDS → hard deny" {
+  set_counter_value 0 test-session 20
+  export REVIEW_MAX_TOTAL_ROUNDS=20
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"HARD STOP"* ]]
+  # Counter file NOT deleted (tombstone)
+  [ -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+# 33. Global safety valve takes precedence over active review → deny, no engine call
+@test "counter: global safety valve precedence → deny, no engine call" {
+  set_counter_value 0 test-session 20
+  export REVIEW_MAX_TOTAL_ROUNDS=20
+  # No mock engine — if script calls engine, it'll fail
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"HARD STOP"* ]]
+}
+
+# =============================================================================
+# Severity-Aware Counter (VERDICT-driven)
+# =============================================================================
+
+# 34. REJECT → ATTEMPT frozen, TOTAL increments
+@test "severity: REJECT → ATTEMPT frozen, TOTAL increments" {
+  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+[Critical] Security vulnerability found."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+}
+
+# 35. Multiple REJECT → ATTEMPT stays 0
+@test "severity: multiple REJECT → ATTEMPT stays 0" {
+  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+[Critical] Still broken."
+  INPUT=$(build_input)
+
+  # Round 1: REJECT
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+
+  # Round 2: REJECT
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 2 ]
+
+  # Round 3: REJECT
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 3 ]
+}
+
+# 36. REJECT then CONCERNS → ATTEMPT starts incrementing
+@test "severity: REJECT then CONCERNS → ATTEMPT starts incrementing" {
+  INPUT=$(build_input)
+
+  # Round 1: REJECT → attempt=0, total=1
+  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+[Critical] Flaw found."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+
+  # Round 2: CONCERNS → attempt=1, total=2
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+[Major] Needs improvement."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 2 ]
+}
+
+# 37. CONCERNS then REJECT → ATTEMPT frozen at current value (no reset)
+@test "severity: CONCERNS then REJECT → ATTEMPT frozen at current value" {
+  INPUT=$(build_input)
+
+  # Round 1: CONCERNS → attempt=1, total=1
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+[Major] Needs work."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+
+  # Round 2: REJECT → attempt stays 1, total=2
+  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+[Critical] New critical issue introduced."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 2 ]
+}
+
+# 38. Non-critical safety valve only counts CONCERNS
+@test "severity: non-crit safety valve only counts CONCERNS" {
+  export REVIEW_MAX_ROUNDS=2
+  INPUT=$(build_input)
+
+  # 2 rounds REJECT → attempt stays 0
+  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+[Critical] Broken."
+  run_hook; assert_deny_json  # total=1, attempt=0
+  run_hook; assert_deny_json  # total=2, attempt=0
+
+  # 2 rounds CONCERNS → attempt goes 1, 2
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+[Major] Issues."
+  run_hook; assert_deny_json  # total=3, attempt=1
+  run_hook; assert_deny_json  # total=4, attempt=2
+
+  # Next call: attempt=2 >= MAX_ROUNDS=2 → non-critical safety valve fires
+  run_hook
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"ESCALATED"* ]]
+}
+
+# 39. REJECT feedback shows Critical message
+@test "severity: REJECT feedback shows Critical message" {
+  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+[Critical] Data loss risk."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"REJECT"* ]]
+  [[ "$reason" == *"Critical 项必须全部解决"* ]]
+}
+
+# 40. CONCERNS feedback shows round countdown
+@test "severity: CONCERNS feedback shows round countdown" {
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+[Major] Needs work."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"磋商剩余轮次"* ]]
+}
+
+# =============================================================================
+# Full Flow
+# =============================================================================
+
+# 41. REJECT → REJECT → CONCERNS → CONCERNS → CONCERNS → safety valve
+@test "flow: REJECT → REJECT → CONCERNS×3 → safety valve" {
+  export REVIEW_MAX_ROUNDS=3
+  INPUT=$(build_input)
+
+  # Round 1: REJECT → attempt=0, total=1
+  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+[Critical] Broken."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+
+  # Round 2: REJECT → attempt=0, total=2
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 2 ]
+
+  # Round 3: CONCERNS → attempt=1, total=3
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+[Major] Better but not good enough."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 3 ]
+
+  # Round 4: CONCERNS → attempt=2, total=4
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 2 ]
+  [ "$(get_total_rounds)" -eq 4 ]
+
+  # Round 5: CONCERNS → attempt=3, total=5
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 3 ]
+  [ "$(get_total_rounds)" -eq 5 ]
+
+  # Round 6: attempt=3 >= MAX_ROUNDS=3 → non-critical safety valve
+  run_hook
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"ESCALATED"* ]]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+# =============================================================================
+# Counter Robustness (defensive tests)
+# =============================================================================
+
+# 42. Empty counter file → treated as 0:0
+@test "counter: empty counter file → treated as 0:0, no crash" {
+  touch "${REVIEW_COUNTER_DIR}/.review-count-test-session"
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+Issues."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+}
+
+# 43. Garbage in counter file → reset to 0:0
+@test "counter: garbage in counter file → reset to 0:0, no crash" {
+  echo "abc:xyz" > "${REVIEW_COUNTER_DIR}/.review-count-test-session"
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+Issues."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+}
+
+# 44. Old single-number format → backward compat
+@test "counter: partial format (old single number) → backward compat" {
+  echo "2" > "${REVIEW_COUNTER_DIR}/.review-count-test-session"
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+LGTM."
+  INPUT=$(build_input)
+  run_hook
+
+  # Old format "2" → ATTEMPT=2, TOTAL_ROUNDS=2 (fallback)
+  # APPROVE header should show "Round 3" (TOTAL=2 → 2+1=3)
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"Round 3"* ]]
+}
+
+# =============================================================================
+# Visible Skip Reasons
+# =============================================================================
+
+# 45. No plan content → allow JSON with SKIP reason
+@test "skip: no plan content → allow JSON with SKIP reason" {
+  INPUT=$(build_input_no_plan)
+  run_hook
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[SKIP]"* ]]
+}
+
+# 46. Engine CLI not found → allow JSON with WARNING reason
+@test "skip: engine CLI not found → allow JSON with WARNING reason" {
+  INPUT=$(build_input)
+
+  local clean_path="${MOCK_BIN}"
+  local orig_path="$PATH"
+  while IFS=: read -r -d: dir || [ -n "$dir" ]; do
+    if [ -d "$dir" ] && [ ! -x "${dir}/gemini" ]; then
+      clean_path="${clean_path}:${dir}"
+    fi
+  done <<< "${orig_path}:"
+
+  export PATH="$clean_path"
+  run_hook
+  export PATH="$orig_path"
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
+}
+
+# 47. Engine exhausted → allow JSON with WARNING reason
+@test "skip: engine exhausted → allow JSON with WARNING reason" {
+  create_failing_engine "gemini" 1
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
+}
+
+# 48. jq missing → allow JSON with WARNING (hardcoded)
+@test "skip: jq missing → allow JSON with WARNING (hardcoded)" {
+  INPUT=$(build_input)
+
+  local restricted_bin="${TEST_TEMP_DIR}/restricted_bin2"
+  mkdir -p "$restricted_bin"
+  for cmd in bash cat grep head tr printf mkdir rm find xargs ls echo mktemp chmod sed; do
+    local cmd_path
+    cmd_path=$(command -v "$cmd" 2>/dev/null) || continue
+    ln -sf "$cmd_path" "${restricted_bin}/${cmd}"
+  done
+
+  local orig_path="$PATH"
+  export PATH="$restricted_bin"
+  run_hook
+  export PATH="$orig_path"
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"jq missing"* ]]
 }
