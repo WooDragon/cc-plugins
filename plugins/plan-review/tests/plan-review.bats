@@ -102,7 +102,7 @@ teardown() {
   INPUT=$(build_input)
   run_hook
 
-  assert_allowed
+  assert_approve_json
 }
 
 # =============================================================================
@@ -115,7 +115,7 @@ teardown() {
   INPUT=$(build_input plan="My specific plan content")
   run_hook
 
-  assert_allowed
+  assert_approve_json
 }
 
 # 9. Plan from fallback file
@@ -125,7 +125,7 @@ teardown() {
   INPUT=$(build_input_no_plan)
   run_hook
 
-  assert_allowed
+  assert_approve_json
 }
 
 # 10. No plan anywhere → allow
@@ -147,7 +147,7 @@ teardown() {
   INPUT=$(build_input)
   run_hook
 
-  assert_allowed
+  assert_approve_json
 }
 
 # =============================================================================
@@ -207,13 +207,13 @@ teardown() {
 # =============================================================================
 
 # 15. Standard APPROVE tag
-@test "verdict: standard APPROVE → exit 0" {
+@test "verdict: standard APPROVE → allow JSON" {
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>
 Plan looks solid."
   INPUT=$(build_input)
   run_hook
 
-  assert_allowed
+  assert_approve_json
 }
 
 # 16. Standard CONCERNS tag
@@ -243,7 +243,7 @@ Looks fine."
   INPUT=$(build_input)
   run_hook
 
-  assert_allowed
+  assert_approve_json
 }
 
 # 19. BUG FIX: No verdict tag → fail-closed as CONCERNS (no crash)
@@ -294,7 +294,7 @@ All good."
   INPUT=$(build_input)
   run_hook
 
-  assert_allowed
+  assert_approve_json
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
 }
 
@@ -311,7 +311,43 @@ Issues found."
   [ "$count" -eq 1 ]
 }
 
-# 24. Deny JSON structure validation
+# 24a. Allow JSON structure validation
+@test "branch: APPROVE JSON has correct structure" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+Plan looks solid."
+  INPUT=$(build_input)
+  run_hook
+
+  # Validate full JSON structure
+  local event_name decision reason
+  event_name=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.hookEventName')
+  decision=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecision')
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+
+  [ "$event_name" = "PreToolUse" ]
+  [ "$decision" = "allow" ]
+  # Reason should contain the review content
+  [[ "$reason" == *"Plan looks solid"* ]]
+  # Reason should contain APPROVED header
+  [[ "$reason" == *"APPROVED"* ]]
+}
+
+# 24b. Allow JSON with round info (multi-round APPROVE)
+@test "branch: APPROVE after prior rounds includes round info" {
+  set_counter_value 2
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+All resolved."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  # Should show round 3 (ATTEMPT=2 → round 2+1=3)
+  [[ "$reason" == *"Round 3/3"* ]]
+}
+
+# 24c. Deny JSON structure validation
 @test "branch: deny JSON has correct structure" {
   create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
 Critical issues."
@@ -373,7 +409,7 @@ Looks good after retry."
   INPUT=$(build_input)
   run_hook
 
-  assert_allowed
+  assert_approve_json
   # First attempt failed, should see retrying message
   [[ "$HOOK_STDERR" == *"retrying"* ]]
   # Retry succeeded — no WARNING
@@ -434,7 +470,7 @@ LGTM after revision."
   run_hook
 
   # Must go through engine (APPROVE), not short-circuit
-  assert_allowed
+  assert_approve_json
   # Counter should be cleaned up by APPROVE branch
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
 }

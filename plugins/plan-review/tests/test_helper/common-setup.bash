@@ -222,18 +222,41 @@ run_hook() {
 # --- Assertion Helpers ---
 
 # assert_allowed
-#   Verifies: exit 0, no deny JSON in stdout.
+#   Verifies: exit 0, stdout does not contain a deny decision.
+#   Permits empty stdout (guard exits) or allow JSON (APPROVE verdict).
 assert_allowed() {
   [ "$HOOK_EXIT" -eq 0 ] || {
     echo "Expected exit 0, got $HOOK_EXIT"
     echo "stderr: $HOOK_STDERR"
     return 1
   }
-  # stdout should NOT contain permissionDecision:deny
-  if echo "$HOOK_STDOUT" | grep -q '"permissionDecision"'; then
-    echo "Expected no deny JSON, got: $HOOK_STDOUT"
+  # stdout must NOT contain permissionDecision=deny
+  if [ -n "$HOOK_STDOUT" ] && echo "$HOOK_STDOUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1; then
+    echo "Expected allow, got deny: $HOOK_STDOUT"
     return 1
   fi
+}
+
+# assert_approve_json
+#   Verifies: exit 0, stdout is valid JSON with permissionDecision=allow.
+assert_approve_json() {
+  [ "$HOOK_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $HOOK_EXIT"
+    echo "stderr: $HOOK_STDERR"
+    return 1
+  }
+  # Must be valid JSON
+  echo "$HOOK_STDOUT" | jq . >/dev/null 2>&1 || {
+    echo "stdout is not valid JSON: $HOOK_STDOUT"
+    return 1
+  }
+  # Must contain permissionDecision=allow
+  local decision
+  decision=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecision')
+  [ "$decision" = "allow" ] || {
+    echo "Expected permissionDecision=allow, got: $decision"
+    return 1
+  }
 }
 
 # assert_deny_json

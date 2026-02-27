@@ -284,7 +284,18 @@ fi
 if [ "$VERDICT" = "APPROVE" ]; then
   log_decision "verdict=APPROVE decision=allow"
   rm -f "$COUNTER_FILE"
-  exit 0  # Consensus reached — allow through
+  # Emit structured allow so user sees the APPROVE verdict (not silent pass-through)
+  if [ "$ATTEMPT" -gt 0 ]; then
+    APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED (Round $((ATTEMPT + 1))/${REVIEW_MAX_ROUNDS})"
+  else
+    APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED"
+  fi
+  APPROVE_REASON=$(printf '## %s\n\n%s' "$APPROVE_HEADER" "$REVIEW")
+  APPROVE_JSON=$(printf '%s' "$APPROVE_REASON" | jq -Rs .)
+  cat << EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${APPROVE_JSON}}}
+EOF
+  exit 0
 fi
 
 # CONCERNS or REJECT → increment counter, deny with feedback
