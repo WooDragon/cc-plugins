@@ -18,7 +18,7 @@ plugins/
     hooks/hooks.json              # PreToolUse hook 声明
     scripts/plan-review.sh        # 核心脚本
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 28 个测试用例
+      plan-review.bats            # 31 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
 ```
@@ -69,5 +69,6 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_LOG_DIR` | `$HOME/.claude/logs` | 日志目录 |
 | `REVIEW_COUNTER_DIR` | `/tmp/claude-reviews` | counter 文件目录 |
 | `REVIEW_PLAN_DIR` | `$HOME/.claude/plans` | plan 文件 fallback 目录 |
+| `REVIEW_RETRY_DELAY` | `2` | 引擎重试间隔秒数 |
 
 生产环境不设置这些变量，脚本 fallback 到默认路径。测试通过注入临时目录实现完全隔离。

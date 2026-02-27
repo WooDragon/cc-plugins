@@ -30,6 +30,9 @@ common_setup() {
   export REVIEW_DRY_RUN="0"
   export REVIEW_MAX_ROUNDS="3"
 
+  # Zero retry delay in tests (production: 2s)
+  export REVIEW_RETRY_DELAY=0
+
   # Prevent recursive guard from firing
   unset PLAN_REVIEW_RUNNING
 
@@ -67,6 +70,32 @@ create_failing_engine() {
   cat > "${MOCK_BIN}/${name}" << MOCK_EOF
 #!/bin/bash
 exit ${exit_code}
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/${name}"
+}
+
+# create_flaky_engine <name> <success_output> [first_behavior]
+#   First call fails or returns empty, subsequent calls return success_output.
+#   first_behavior: "exit" (default) → exit 1 on first call
+#                   "empty" → return empty string on first call
+#   State file lives in TEST_TEMP_DIR (per-test isolation, teardown auto-cleans).
+create_flaky_engine() {
+  local name="$1"
+  local output="$2"
+  local first_behavior="${3:-exit}"
+  local state_file="${TEST_TEMP_DIR}/.flaky-${name}-state"
+  local first_action="exit 1"
+  [ "$first_behavior" != "empty" ] || first_action="exit 0"
+
+  cat > "${MOCK_BIN}/${name}" << MOCK_EOF
+#!/bin/bash
+if [ ! -f "${state_file}" ]; then
+  touch "${state_file}"
+  ${first_action}
+fi
+cat << 'ENGINE_OUTPUT'
+${output}
+ENGINE_OUTPUT
 MOCK_EOF
   chmod +x "${MOCK_BIN}/${name}"
 }

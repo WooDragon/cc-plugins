@@ -177,26 +177,29 @@ teardown() {
   export PATH="$orig_path"
 
   assert_allowed
+  [[ "$HOOK_STDERR" == *"[WARNING]"* ]]
   [[ "$HOOK_STDERR" == *"not found"* ]]
 }
 
-# 13. Engine call fails (non-zero exit)
-@test "engine: call fails → exit 0 (fail-open)" {
+# 13. Engine call fails (non-zero exit) — retried then fail-open
+@test "engine: call fails → retry then exit 0 (fail-open)" {
   create_failing_engine "gemini" 1
   INPUT=$(build_input)
   run_hook
 
   assert_allowed
-  [[ "$HOOK_STDERR" == *"failed"* ]]
+  [[ "$HOOK_STDERR" == *"retrying"* ]]
+  [[ "$HOOK_STDERR" == *"[WARNING]"* ]]
 }
 
-# 14. Engine returns empty response
-@test "engine: empty response → exit 0" {
+# 14. Engine returns empty response — retried then fail-open
+@test "engine: empty response → retry then exit 0" {
   create_mock_engine "gemini" ""
   INPUT=$(build_input)
   run_hook
 
   assert_allowed
+  [[ "$HOOK_STDERR" == *"[WARNING]"* ]]
 }
 
 # =============================================================================
@@ -357,6 +360,50 @@ Still not good enough."
   [[ "$HOOK_STDERR" == *"Max reviews"* ]]
   # Counter file should be cleaned up
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+# =============================================================================
+# Engine Retry Behavior
+# =============================================================================
+
+# 29. First call fails, retry succeeds → uses retry result
+@test "retry: first call fails, retry succeeds → uses retry result" {
+  create_flaky_engine "gemini" "<verdict>APPROVE</verdict>
+Looks good after retry."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_allowed
+  # First attempt failed, should see retrying message
+  [[ "$HOOK_STDERR" == *"retrying"* ]]
+  # Retry succeeded — no WARNING
+  [[ "$HOOK_STDERR" != *"[WARNING]"* ]]
+}
+
+# 30. First call empty, retry returns content → uses retry content
+@test "retry: first call empty, retry returns content → uses retry content" {
+  create_flaky_engine "gemini" "<verdict>CONCERNS</verdict>
+Issues found on retry." "empty"
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  # First attempt was empty, should see retrying message
+  [[ "$HOOK_STDERR" == *"retrying"* ]]
+  # Retry succeeded — no WARNING
+  [[ "$HOOK_STDERR" != *"[WARNING]"* ]]
+}
+
+# 31. Both attempts fail → fail-open with explicit WARNING
+@test "retry: both attempts fail → fail-open with WARNING" {
+  export REVIEW_ENGINE="claude"
+  create_failing_engine "claude" 1
+  INPUT=$(build_input)
+  run_hook
+
+  assert_allowed
+  [[ "$HOOK_STDERR" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDERR" == *"引擎调用失败"* ]]
 }
 
 # =============================================================================

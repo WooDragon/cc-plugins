@@ -188,51 +188,78 @@ if [ "$REVIEW_DRY_RUN" = "1" ]; then
   REVIEW="<verdict>APPROVE</verdict>
 [DRY-RUN] 审阅调用已跳过。"
 else
-  # --- Pre-flight: CLI existence check (fail-open) ---
+  # --- Pre-flight: CLI existence check (permanent failure, no retry) ---
   ENGINE_CMD="gemini"
   [ "$REVIEW_ENGINE" != "claude" ] || ENGINE_CMD="claude"
   if ! command -v "$ENGINE_CMD" >/dev/null 2>&1; then
     log_decision "decision=allow reason=engine-not-found engine=$REVIEW_ENGINE"
-    echo "plan-review: REVIEW_ENGINE=$REVIEW_ENGINE but '$ENGINE_CMD' not found. Skipping." >&2
+    echo "[WARNING] plan-review: REVIEW_ENGINE=$REVIEW_ENGINE but '$ENGINE_CMD' not found. Skipping." >&2
     exit 0
   fi
 
-  # --- Engine invocation (failure → allow + warning) ---
+  # Engine model variables (outside retry loop, avoid repeat assignment)
   if [ "$REVIEW_ENGINE" = "claude" ]; then
     CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
-    # Strip Claude Code internal env vars to prevent recursive hook/plugin loading.
-    # Fragile (depends on internal implementation), but necessary: user authenticates
-    # via OAuth (claude login), no ANTHROPIC_API_KEY available, so claude -p is the
-    # only viable path. Triple isolation: --setting-sources local + PLAN_REVIEW_RUNNING
-    # + --tools "" (no tool calls = no PreToolUse events).
-    unset CLAUDECODE
-    unset CLAUDE_CODE_ENTRYPOINT
-    REVIEW=$(PLAN_REVIEW_RUNNING=1 claude -p \
-      --model "$CLAUDE_MODEL" \
-      --setting-sources local \
-      --no-session-persistence \
-      --tools "" \
-      --disable-slash-commands \
-      --system-prompt "$SYSTEM_PROMPT" \
-      < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
-      log_decision "decision=allow reason=engine-error engine=claude"
-      echo "plan-review: claude -p failed (exit $?), see $LOG_FILE. Allowing." >&2
-      exit 0
-    }
   else
     GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-pro-preview}"
-    REVIEW=$(gemini -m "$GEMINI_MODEL" < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
-      log_decision "decision=allow reason=engine-error engine=gemini"
-      echo "plan-review: gemini failed (exit $?), see $LOG_FILE. Allowing." >&2
-      exit 0
-    }
   fi
-fi
 
-# Empty review → allow
-if [ -z "$REVIEW" ]; then
-  log_decision "decision=allow reason=empty-review engine=$REVIEW_ENGINE"
-  exit 0
+  # --- Engine invocation with retry (2 attempts: 1 initial + 1 retry) ---
+  REVIEW=""
+  for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
+    if [ "$REVIEW_ENGINE" = "claude" ]; then
+      # Strip Claude Code internal env vars to prevent recursive hook/plugin loading.
+      # Fragile (depends on internal implementation), but necessary: user authenticates
+      # via OAuth (claude login), no ANTHROPIC_API_KEY available, so claude -p is the
+      # only viable path. Triple isolation: --setting-sources local + PLAN_REVIEW_RUNNING
+      # + --tools "" (no tool calls = no PreToolUse events).
+      unset CLAUDECODE
+      unset CLAUDE_CODE_ENTRYPOINT
+      REVIEW=$(PLAN_REVIEW_RUNNING=1 claude -p \
+        --model "$CLAUDE_MODEL" \
+        --setting-sources local \
+        --no-session-persistence \
+        --tools "" \
+        --disable-slash-commands \
+        --system-prompt "$SYSTEM_PROMPT" \
+        < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
+        REVIEW=""
+        if [ "$engine_attempt" -lt 2 ]; then
+          echo "plan-review: claude -p failed (attempt $engine_attempt/2), retrying..." >&2
+          sleep "${REVIEW_RETRY_DELAY:-2}"
+        fi
+        continue
+      }
+    else
+      REVIEW=$(gemini -m "$GEMINI_MODEL" < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
+        REVIEW=""
+        if [ "$engine_attempt" -lt 2 ]; then
+          echo "plan-review: gemini failed (attempt $engine_attempt/2), retrying..." >&2
+          sleep "${REVIEW_RETRY_DELAY:-2}"
+        fi
+        continue
+      }
+    fi
+
+    # Engine succeeded (exit 0) but returned empty → retry
+    if [ -z "$REVIEW" ]; then
+      if [ "$engine_attempt" -lt 2 ]; then
+        echo "plan-review: engine returned empty response (attempt $engine_attempt/2), retrying..." >&2
+        sleep "${REVIEW_RETRY_DELAY:-2}"
+      fi
+      continue
+    fi
+
+    # Non-empty response obtained — exit retry loop
+    break
+  done
+
+  # All attempts exhausted → fail-open with explicit WARNING
+  if [ -z "$REVIEW" ]; then
+    log_decision "decision=allow reason=engine-exhausted engine=$REVIEW_ENGINE"
+    echo "[WARNING] plan-review: 引擎调用失败（已重试），审阅跳过。详见 $LOG_FILE" >&2
+    exit 0
+  fi
 fi
 
 # --- 6. Extract structured verdict (XML-tag isolation, anti-hijack) ---
