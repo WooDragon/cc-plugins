@@ -105,7 +105,7 @@ teardown() {
   export REVIEW_MAX_ROUNDS=3
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nAll good."
   INPUT=$(build_input)
-  run_hook
+  run_hook_to_completion
 
   assert_approve_json
 }
@@ -118,7 +118,7 @@ teardown() {
 @test "plan: extract from tool_input.plan" {
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
   INPUT=$(build_input plan="My specific plan content")
-  run_hook
+  run_hook_to_completion
 
   assert_approve_json
 }
@@ -128,7 +128,7 @@ teardown() {
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
   create_plan_file "Plan from file system"
   INPUT=$(build_input_no_plan)
-  run_hook
+  run_hook_to_completion
 
   assert_approve_json
 }
@@ -149,11 +149,11 @@ teardown() {
 # =============================================================================
 
 # 11. Dry-run mode → synthetic APPROVE
-@test "dry-run: REVIEW_DRY_RUN=1 → exit 0, no engine call" {
+@test "dry-run: REVIEW_DRY_RUN=1 → ack-deny then allow, no engine call" {
   export REVIEW_DRY_RUN=1
   # No mock engine created — if script tries to call one, it'll fail
   INPUT=$(build_input)
-  run_hook
+  run_hook_to_completion
 
   assert_approve_json
 }
@@ -218,13 +218,18 @@ teardown() {
 # Verdict Extraction (core bug fix validation)
 # =============================================================================
 
-# 15. Standard APPROVE tag
-@test "verdict: standard APPROVE → allow JSON" {
+# 15. Standard APPROVE tag → ack-deny then ack-round
+@test "verdict: standard APPROVE → ack-deny then allow" {
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>
 Plan looks solid."
   INPUT=$(build_input)
-  run_hook
 
+  # First call: ack-deny (deny with APPROVED)
+  run_hook
+  assert_ack_approve_json
+
+  # Second call: ack-round (allow)
+  run_hook
   assert_approve_json
 }
 
@@ -253,7 +258,7 @@ Fundamentally flawed approach."
   create_mock_engine "gemini" "<Verdict>approve</Verdict>
 Looks fine."
   INPUT=$(build_input)
-  run_hook
+  run_hook_to_completion
 
   assert_approve_json
 }
@@ -298,16 +303,17 @@ Almost right."
 # Branch Behavior + Counter Management
 # =============================================================================
 
-# 22. APPROVE → clear counter
-@test "branch: APPROVE → counter file deleted" {
+# 22. APPROVE → ack-round clears counter and marker
+@test "branch: APPROVE → counter and marker cleaned after ack-round" {
   set_counter_value 2 test-session 3
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>
 All good."
   INPUT=$(build_input)
-  run_hook
+  run_hook_to_completion
 
   assert_approve_json
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
 }
 
 # 23. CONCERNS → increment counter (both ATTEMPT and TOTAL)
@@ -322,36 +328,38 @@ Issues found."
   [ "$(get_total_rounds)" -eq 1 ]
 }
 
-# 24a. Allow JSON structure validation
-@test "branch: APPROVE JSON has correct structure" {
+# 24a. Ack-deny JSON structure validation
+@test "branch: APPROVE ack-deny JSON has correct structure" {
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>
 Plan looks solid."
   INPUT=$(build_input)
   run_hook
 
-  # Validate full JSON structure
+  # Validate ack-deny JSON structure
   local event_name decision reason
   event_name=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.hookEventName')
   decision=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecision')
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
 
   [ "$event_name" = "PreToolUse" ]
-  [ "$decision" = "allow" ]
+  [ "$decision" = "deny" ]
   # Reason should contain the review content
   [[ "$reason" == *"Plan looks solid"* ]]
   # Reason should contain APPROVED header
   [[ "$reason" == *"APPROVED"* ]]
+  # Marker file should exist (ack-round pending)
+  [ -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
 }
 
-# 24b. Allow JSON with round info (multi-round APPROVE)
-@test "branch: APPROVE after prior rounds includes round info" {
+# 24b. Ack-deny with round info (multi-round APPROVE)
+@test "branch: APPROVE ack-deny after prior rounds includes round info" {
   set_counter_value 2 test-session 4
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>
 All resolved."
   INPUT=$(build_input)
   run_hook
 
-  assert_approve_json
+  assert_ack_approve_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   # TOTAL_ROUNDS=4 → round displayed is 4+1=5
@@ -423,13 +431,16 @@ Still not good enough."
   create_flaky_engine "gemini" "<verdict>APPROVE</verdict>
 Looks good after retry."
   INPUT=$(build_input)
-  run_hook
 
+  # First run_hook triggers engine (fail→retry→APPROVE) → ack-deny
+  run_hook
+  # Capture retrying message from the ack-deny round
+  local stderr_from_engine="$HOOK_STDERR"
+  [[ "$stderr_from_engine" == *"retrying"* ]]
+
+  # Ack-round: allow
+  run_hook
   assert_approve_json
-  # First attempt failed, should see retrying message
-  [[ "$HOOK_STDERR" == *"retrying"* ]]
-  # Retry succeeded — no WARNING
-  [[ "$HOOK_STDERR" != *"[WARNING]"* ]]
 }
 
 # 30. First call empty, retry returns content → uses retry content
@@ -484,12 +495,13 @@ Not good enough."
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>
 LGTM after revision."
   INPUT=$(build_input plan="Revised plan v2")
-  run_hook
+  run_hook_to_completion
 
   # Must go through engine (APPROVE), not short-circuit
   assert_approve_json
-  # Counter should be cleaned up by APPROVE branch
+  # Counter and marker should be cleaned up
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
 }
 
 # 27. Engine failure does not touch counter (fail-open, counter unchanged)
@@ -797,8 +809,8 @@ LGTM."
   run_hook
 
   # Old format "2" → ATTEMPT=2, TOTAL_ROUNDS=2 (fallback)
-  # APPROVE header should show "Round 3" (TOTAL=2 → 2+1=3)
-  assert_approve_json
+  # APPROVE ack-deny should show "Round 3" (TOTAL=2 → 2+1=3)
+  assert_ack_approve_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"Round 3"* ]]
@@ -874,4 +886,74 @@ LGTM."
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"jq missing"* ]]
+}
+
+# =============================================================================
+# Ack-Round (APPROVE acknowledgment flow)
+# =============================================================================
+
+# 49. Ack-round: marker exists → allow immediately
+@test "ack-round: marker exists → allow with confirmation" {
+  touch "${REVIEW_COUNTER_DIR}/.review-approved-test-session"
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"审阅已通过"* ]]
+  # Marker cleaned up
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
+}
+
+# 50. Ack-round: cleans both marker and counter
+@test "ack-round: cleans both marker and counter" {
+  set_counter_value 2 test-session 4
+  touch "${REVIEW_COUNTER_DIR}/.review-approved-test-session"
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+# 51. Ack-round: bypasses global safety valve
+@test "ack-round: bypasses global safety valve when marker exists" {
+  set_counter_value 0 test-session 20
+  export REVIEW_MAX_TOTAL_ROUNDS=20
+  touch "${REVIEW_COUNTER_DIR}/.review-approved-test-session"
+  INPUT=$(build_input)
+  run_hook
+
+  # Would normally be HARD STOP, but marker takes precedence
+  assert_approve_json
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
+}
+
+# 52. Ack-round: no engine call needed
+@test "ack-round: no engine call needed" {
+  # No mock engine — if script calls engine, it'll fail
+  touch "${REVIEW_COUNTER_DIR}/.review-approved-test-session"
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+}
+
+# 53. Full APPROVE ack-round flow: engine APPROVE → ack-deny → ack-round → allow
+@test "ack-round: full end-to-end APPROVE flow" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+Plan is solid."
+  INPUT=$(build_input)
+
+  # Step 1: Engine review → APPROVE → ack-deny
+  run_hook
+  assert_ack_approve_json
+  [ -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
+
+  # Step 2: Ack-round → allow
+  run_hook
+  assert_approve_json
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
 }

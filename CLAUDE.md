@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.8 |
+| plan-review | 1.0.9 |
 
 ## 项目结构
 
@@ -18,7 +18,7 @@ plugins/
     hooks/hooks.json              # PreToolUse hook 声明
     scripts/plan-review.sh        # 核心脚本
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 48 个测试用例
+      plan-review.bats            # 55 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
 ```
@@ -73,7 +73,21 @@ Prompt 定义三级严重性（Critical/Major/Minor），与 Verdict 强绑定�
 - 非 Critical 安全阀（ATTEMPT >= MAX_ROUNDS）→ allow + "ESCALATED" 理由 + 清理计数器
 - 全局安全阀（TOTAL >= MAX_TOTAL_ROUNDS）→ deny + "HARD STOP" 硬拦截 + 保留计数器作为 tombstone
 
-**状态清理铁律**：只有 allow 路径（APPROVE、非 Critical 安全阀放行）才可删除计数器。deny 路径绝不清理。
+**状态清理铁律**：只有 allow 路径（APPROVE ack-round、非 Critical 安全阀放行）才可删除计数器。deny 路径绝不清理。
+
+### APPROVE Ack-Round 机制
+
+APPROVE 不再静默放行——`allow` 决策的 `permissionDecisionReason` 在 Claude Code 框架中对用户不可见，导致用户无法确认审阅是否执行。
+
+**Ack-deny + Ack-round 两步模式**：
+1. 引擎返回 APPROVE → hook 写入 marker 文件（`.review-approved-{session_id}`），emit `deny` 并将审阅摘要推送给 Claude
+2. Claude 向用户展示审阅结果后再次调用 ExitPlanMode → hook 检测到 marker，emit `allow` 并清理 marker + counter
+
+**设计约束**：
+- Ack-round 检查位于 counter 读取之后、双安全阀之前——已审批的 plan 即使 counter 已达上限也不会被阻断
+- Ack-deny 不递增任何计数器（它是审批确认，不是磋商轮次）
+- Marker 文件与 counter 在 ack-round 的 allow 路径中原子清理
+- 额外开销：一次无引擎调用的 round-trip（~100ms），相对 10-30s 的审阅延迟可忽略
 
 ### 测试隔离变量（仅测试使用）
 

@@ -234,6 +234,22 @@ run_hook() {
   rm -f "$stderr_file"
 }
 
+# --- Ack-Round Helpers ---
+
+# run_hook_to_completion [session_id]
+#   Runs hook. If APPROVE marker was written (ack-deny), runs again for ack-round.
+#   Sets ACK_DENY_STDOUT with the ack-deny output if consumed.
+run_hook_to_completion() {
+  local session="${1:-test-session}"
+  run_hook
+  ACK_DENY_STDOUT=""
+  # If the APPROVE marker was written, this was an ack-deny — run ack-round
+  if [ -f "${REVIEW_COUNTER_DIR}/.review-approved-${session}" ]; then
+    ACK_DENY_STDOUT="$HOOK_STDOUT"
+    run_hook
+  fi
+}
+
 # --- Assertion Helpers ---
 
 # assert_allowed
@@ -270,6 +286,18 @@ assert_approve_json() {
   decision=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecision')
   [ "$decision" = "allow" ] || {
     echo "Expected permissionDecision=allow, got: $decision"
+    return 1
+  }
+}
+
+# assert_ack_approve_json
+#   Verifies: exit 0, deny JSON with "APPROVED" in reason (ack-deny for APPROVE verdict).
+assert_ack_approve_json() {
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"APPROVED"* ]] || {
+    echo "Expected APPROVED in deny reason (ack-deny), got: $reason"
     return 1
   }
 }

@@ -4,7 +4,7 @@
 # Triggered when Plan agent calls ExitPlanMode (via PreToolUse matcher).
 # Flow (severity-aware adversarial consultation):
 #   ExitPlanMode called → hook intercepts → review engine (Gemini/Claude) reviews:
-#     APPROVE  → allow through immediately, clear counter
+#     APPROVE  → deny with review feedback (ack-deny); next ExitPlanMode allows (ack-round)
 #     CONCERNS → deny with feedback, increment ATTEMPT + TOTAL, Claude revises or rebuts
 #     REJECT   → deny with feedback, increment TOTAL only (ATTEMPT frozen), Critical must resolve
 #   Termination (dual safety valves):
@@ -81,6 +81,7 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
 COUNTER_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
 mkdir -p "$COUNTER_DIR"
 COUNTER_FILE="$COUNTER_DIR/.review-count-${SESSION_ID}"
+APPROVE_MARKER="$COUNTER_DIR/.review-approved-${SESSION_ID}"
 
 # --- Read counter (new format ATTEMPT:TOTAL, backward-compat with old single-number) ---
 IFS=: read -r ATTEMPT TOTAL_ROUNDS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0")"
@@ -89,6 +90,15 @@ ATTEMPT=${ATTEMPT:-0}
 TOTAL_ROUNDS=${TOTAL_ROUNDS:-$ATTEMPT}  # old format "3" → ATTEMPT=3, TOTAL_ROUNDS="" → 3
 [[ "$ATTEMPT" =~ ^[0-9]+$ ]] || ATTEMPT=0
 [[ "$TOTAL_ROUNDS" =~ ^[0-9]+$ ]] || TOTAL_ROUNDS=0
+
+# --- Approval ack-round: previous review approved, this call confirms ---
+# APPROVE emits deny so Claude presents the review to the user; the immediate
+# re-call of ExitPlanMode hits this guard and allows without re-review.
+if [ -f "$APPROVE_MARKER" ]; then
+  log_decision "decision=allow reason=ack-round-approved"
+  rm -f "$APPROVE_MARKER" "$COUNTER_FILE"
+  allow_with_reason "Red Team 审阅已通过，plan 放行。"
+fi
 
 # --- Global safety valve: total rounds exhausted → hard deny (tombstone counter) ---
 # Never delete counter — tombstone blocks subsequent calls until human intervenes
@@ -344,18 +354,34 @@ fi
 
 # --- 7. Branch on verdict ---
 if [ "$VERDICT" = "APPROVE" ]; then
-  log_decision "verdict=APPROVE decision=allow"
-  rm -f "$COUNTER_FILE"
-  # Emit structured allow so user sees the APPROVE verdict (not silent pass-through)
+  log_decision "verdict=APPROVE decision=ack-deny"
+  # Write marker — next ExitPlanMode call hits ack-round guard and allows immediately
+  touch "$APPROVE_MARKER"
+
   if [ "$TOTAL_ROUNDS" -gt 0 ]; then
     APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED (Round $((TOTAL_ROUNDS + 1)))"
   else
     APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED"
   fi
-  APPROVE_REASON=$(printf '## %s\n\n%s' "$APPROVE_HEADER" "$REVIEW")
-  APPROVE_JSON=$(printf '%s' "$APPROVE_REASON" | jq -Rs .)
+
+  # Emit deny so Claude presents the approval to the user (allow reasons are invisible)
+  FEEDBACK=$(cat << APPROVE_EOF
+## ${APPROVE_HEADER}
+
+审阅引擎已**通过**本次 plan。以下是审阅摘要：
+
+---
+
+${REVIEW}
+
+---
+
+> 请向用户简要展示上述审阅结果，然后直接再次调用 ExitPlanMode（不要修改 plan）。
+APPROVE_EOF
+  )
+  FEEDBACK_JSON=$(printf '%s' "$FEEDBACK" | jq -Rs .)
   cat << EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${APPROVE_JSON}}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${FEEDBACK_JSON}}}
 EOF
   exit 0
 fi
