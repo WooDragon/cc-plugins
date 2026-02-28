@@ -645,8 +645,8 @@ Still has issues."
   [ "$(get_total_rounds)" -eq 2 ]
 }
 
-# 37. CONCERNS then REJECT → ATTEMPT frozen at current value (no reset)
-@test "severity: CONCERNS then REJECT → ATTEMPT frozen at current value" {
+# 37. CONCERNS then REJECT → ATTEMPT resets to 0
+@test "severity: CONCERNS then REJECT → ATTEMPT resets to 0" {
   INPUT=$(build_input)
 
   # Round 1: CONCERNS → attempt=1, total=1
@@ -657,12 +657,12 @@ Still has issues."
   [ "$(get_counter_value)" -eq 1 ]
   [ "$(get_total_rounds)" -eq 1 ]
 
-  # Round 2: REJECT → attempt stays 1, total=2
+  # Round 2: REJECT → attempt resets to 0, total=2
   create_mock_engine "gemini" "<verdict>REJECT</verdict>
 [Critical] New critical issue introduced."
   run_hook
   assert_deny_json
-  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_counter_value)" -eq 0 ]
   [ "$(get_total_rounds)" -eq 2 ]
 }
 
@@ -702,7 +702,7 @@ Still has issues."
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"REJECT"* ]]
-  [[ "$reason" == *"Critical 项必须全部解决"* ]]
+  [[ "$reason" == *"非 Critical 磋商计数已重置"* ]]
 }
 
 # 40. CONCERNS feedback shows round countdown
@@ -762,6 +762,62 @@ Still has issues."
   [ "$(get_total_rounds)" -eq 5 ]
 
   # Round 6: attempt=3 >= MAX_ROUNDS=3 → non-critical safety valve
+  run_hook
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"ESCALATED"* ]]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+# 41b. CONCERNS×2 → REJECT → ATTEMPT resets → CONCERNS×3 → safety valve
+@test "flow: CONCERNS×2 → REJECT → ATTEMPT resets → CONCERNS×3 → safety valve" {
+  export REVIEW_MAX_ROUNDS=3
+  INPUT=$(build_input)
+
+  # Round 1: CONCERNS → attempt=1, total=1
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+[Major] Issue A."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+
+  # Round 2: CONCERNS → attempt=2, total=2
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 2 ]
+  [ "$(get_total_rounds)" -eq 2 ]
+
+  # Round 3: REJECT → attempt resets to 0, total=3
+  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+[Critical] New critical flaw introduced."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 3 ]
+
+  # Round 4: CONCERNS → attempt=1, total=4
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+[Major] Residual issue."
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 4 ]
+
+  # Round 5: CONCERNS → attempt=2, total=5
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 2 ]
+  [ "$(get_total_rounds)" -eq 5 ]
+
+  # Round 6: CONCERNS → attempt=3, total=6
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 3 ]
+  [ "$(get_total_rounds)" -eq 6 ]
+
+  # Round 7: attempt=3 >= MAX_ROUNDS=3 → non-critical safety valve fires
   run_hook
   assert_approve_json
   local reason

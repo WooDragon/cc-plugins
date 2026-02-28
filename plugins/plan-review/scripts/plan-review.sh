@@ -389,11 +389,13 @@ fi
 # CONCERNS or REJECT → update counter, deny with feedback
 TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
 
-if [ "$VERDICT" != "REJECT" ]; then
+if [ "$VERDICT" = "REJECT" ]; then
+  # REJECT (Critical): reset ATTEMPT so subsequent non-Critical rounds restart fresh
+  ATTEMPT=0
+else
   # CONCERNS: non-Critical, increment ATTEMPT
   ATTEMPT=$((ATTEMPT + 1))
 fi
-# REJECT: ATTEMPT frozen (Critical must resolve before negotiation counter starts)
 
 echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
 log_decision "verdict=$VERDICT decision=deny round=$ATTEMPT/$REVIEW_MAX_ROUNDS total=$TOTAL_ROUNDS/$REVIEW_MAX_TOTAL_ROUNDS"
@@ -401,7 +403,7 @@ log_decision "verdict=$VERDICT decision=deny round=$ATTEMPT/$REVIEW_MAX_ROUNDS t
 # --- 8. Compose deny feedback (severity-differentiated) ---
 if [ "$VERDICT" = "REJECT" ]; then
   FEEDBACK_HEADER="Red Team Review — ${REVIEW_ENGINE} — REJECT (Round ${TOTAL_ROUNDS}/${REVIEW_MAX_TOTAL_ROUNDS})"
-  PHASE_MSG="审阅引擎发现 Critical 级别问题。Critical 项必须全部解决后磋商计数才启动。"
+  PHASE_MSG="审阅引擎发现 Critical 级别问题。非 Critical 磋商计数已重置，解决 Critical 项后可重新获得 ${REVIEW_MAX_ROUNDS} 轮磋商机会。"
 else
   REMAINING=$((REVIEW_MAX_ROUNDS - ATTEMPT))
   FEEDBACK_HEADER="Red Team Review — ${REVIEW_ENGINE} — CONCERNS (Round ${ATTEMPT}/${REVIEW_MAX_ROUNDS})"

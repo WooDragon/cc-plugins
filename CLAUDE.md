@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.9 |
+| plan-review | 1.0.10 |
 
 ## 项目结构
 
@@ -18,7 +18,7 @@ plugins/
     hooks/hooks.json              # PreToolUse hook 声明
     scripts/plan-review.sh        # 核心脚本
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 55 个测试用例
+      plan-review.bats            # 56 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
 ```
@@ -67,7 +67,7 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 
 Prompt 定义三级严重性（Critical/Major/Minor），与 Verdict 强绑定：REJECT=Critical、CONCERNS=Major、APPROVE=Minor-only-or-clean。脚本通过 Verdict tag 路由，不扫正文（消除假阳性）。
 
-**计数器格式**：`ATTEMPT:TOTAL`（冒号分隔），向后兼容旧格式单数字。REJECT 轮次仅递增 TOTAL（ATTEMPT 冻结），CONCERNS 轮次两者均递增。
+**计数器格式**：`ATTEMPT:TOTAL`（冒号分隔），向后兼容旧格式单数字。REJECT 轮次将 ATTEMPT 重置为 0（让后续非 Critical 磋商重新从零计数）并递增 TOTAL；CONCERNS 轮次两者均递增。
 
 **双安全阀**：
 - 非 Critical 安全阀（ATTEMPT >= MAX_ROUNDS）→ allow + "ESCALATED" 理由 + 清理计数器
