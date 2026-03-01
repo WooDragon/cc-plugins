@@ -56,6 +56,19 @@ EOF
   exit 0
 }
 
+# --- Plan content hasher (portable: sha256sum > shasum > cksum POSIX fallback) ---
+# All branches pipe through awk '{print $1}' to strip filename/extra fields.
+plan_hash() {
+  local content="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$content" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$content" | shasum -a 256 | awk '{print $1}'
+  else
+    printf '%s' "$content" | cksum | awk '{print $1}'
+  fi
+}
+
 # --- Namespace unification (legacy GEMINI_* fallback — never break userspace) ---
 REVIEW_DISABLED="${REVIEW_DISABLED:-${GEMINI_REVIEW_OFF:-0}}"
 REVIEW_DRY_RUN="${REVIEW_DRY_RUN:-${GEMINI_DRY_RUN:-0}}"
@@ -91,13 +104,45 @@ TOTAL_ROUNDS=${TOTAL_ROUNDS:-$ATTEMPT}  # old format "3" → ATTEMPT=3, TOTAL_RO
 [[ "$ATTEMPT" =~ ^[0-9]+$ ]] || ATTEMPT=0
 [[ "$TOTAL_ROUNDS" =~ ^[0-9]+$ ]] || TOTAL_ROUNDS=0
 
-# --- Approval ack-round: previous review approved, this call confirms ---
-# APPROVE emits deny so Claude presents the review to the user; the immediate
-# re-call of ExitPlanMode hits this guard and allows without re-review.
-if [ -f "$APPROVE_MARKER" ]; then
-  log_decision "decision=allow reason=ack-round-approved"
+# --- 1. Extract plan content (must precede ack-round guard for hash comparison) ---
+PLAN=$(echo "$INPUT" | jq -r '.tool_input.plan // ""')
+
+if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
+  # Fallback: read most recent plan file
+  PLAN_DIR="${REVIEW_PLAN_DIR:-$HOME/.claude/plans}"
+  if [ -d "$PLAN_DIR" ]; then
+    PLAN_FILE=$(find "$PLAN_DIR" -maxdepth 1 -name '*.md' -not -name '.*' \
+      -print0 2>>"$LOG_FILE" | xargs -0 ls -t 2>>"$LOG_FILE" | head -1)
+    if [ -n "${PLAN_FILE:-}" ]; then
+      PLAN=$(cat "$PLAN_FILE")
+    fi
+  fi
+fi
+
+# Nothing to review → allow with visible reason (clean up residual state first)
+if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
+  log_decision "decision=allow reason=no-plan-content"
   rm -f "$APPROVE_MARKER" "$COUNTER_FILE"
-  allow_with_reason "Red Team 审阅已通过，plan 放行。"
+  allow_with_reason "[SKIP] 无 plan 内容可审阅"
+fi
+
+# --- Approval ack-round: compare plan hash to detect post-approve modifications ---
+# APPROVE emits deny (ack-deny) so Claude presents the review to the user; the next
+# ExitPlanMode hits this guard — if plan unchanged, allow; if plan changed, re-review.
+if [ -f "$APPROVE_MARKER" ]; then
+  APPROVED_HASH=$(cat "$APPROVE_MARKER" 2>/dev/null)
+  CURRENT_HASH=$(plan_hash "$PLAN")
+  if [ -z "$APPROVED_HASH" ] || [ "$CURRENT_HASH" = "$APPROVED_HASH" ]; then
+    # True ack-round: plan unchanged (empty marker = legacy format, unconditional allow)
+    log_decision "decision=allow reason=ack-round-approved"
+    rm -f "$APPROVE_MARKER" "$COUNTER_FILE"
+    allow_with_reason "Red Team 审阅已通过，plan 放行。"
+  else
+    # Plan was modified after approve: marker invalid, delete and fall through to re-review
+    log_decision "decision=review-again reason=plan-changed-after-approve"
+    rm -f "$APPROVE_MARKER"
+    # Fall through to full review pipeline
+  fi
 fi
 
 # --- Global safety valve: total rounds exhausted → hard deny (tombstone counter) ---
@@ -127,27 +172,6 @@ if [ "$ATTEMPT" -ge "$REVIEW_MAX_ROUNDS" ]; then
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${VALVE_JSON}}}
 EOF
   exit 0
-fi
-
-# --- 1. Extract plan content ---
-PLAN=$(echo "$INPUT" | jq -r '.tool_input.plan // ""')
-
-if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
-  # Fallback: read most recent plan file
-  PLAN_DIR="${REVIEW_PLAN_DIR:-$HOME/.claude/plans}"
-  if [ -d "$PLAN_DIR" ]; then
-    PLAN_FILE=$(find "$PLAN_DIR" -maxdepth 1 -name '*.md' -not -name '.*' \
-      -print0 2>>"$LOG_FILE" | xargs -0 ls -t 2>>"$LOG_FILE" | head -1)
-    if [ -n "${PLAN_FILE:-}" ]; then
-      PLAN=$(cat "$PLAN_FILE")
-    fi
-  fi
-fi
-
-# Nothing to review → allow with visible reason
-if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
-  log_decision "decision=allow reason=no-plan-content"
-  allow_with_reason "[SKIP] 无 plan 内容可审阅"
 fi
 
 # --- 2. Collect project context ---
@@ -355,8 +379,8 @@ fi
 # --- 7. Branch on verdict ---
 if [ "$VERDICT" = "APPROVE" ]; then
   log_decision "verdict=APPROVE decision=ack-deny"
-  # Write marker — next ExitPlanMode call hits ack-round guard and allows immediately
-  touch "$APPROVE_MARKER"
+  # Write plan hash to marker — ack-round guard compares hash to detect post-approve edits
+  printf '%s' "$(plan_hash "$PLAN")" > "$APPROVE_MARKER"
 
   if [ "$TOTAL_ROUNDS" -gt 0 ]; then
     APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED (Round $((TOTAL_ROUNDS + 1)))"

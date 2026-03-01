@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.10 |
+| plan-review | 1.0.11 |
 
 ## 项目结构
 

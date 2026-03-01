@@ -181,6 +181,24 @@ create_plan_file() {
   printf '%s' "$content" > "${REVIEW_PLAN_DIR}/${filename}"
 }
 
+# --- Approve Marker Helpers ---
+
+# create_approve_marker [plan_content] [session_id]
+#   Creates APPROVE_MARKER and writes the plan hash (mirrors plan_hash() in production).
+#   Use ${1-default} (not ${1:-default}) so explicit empty string tests empty-marker compat.
+create_approve_marker() {
+  local plan_content="${1-Test plan content}"
+  local session="${2:-test-session}"
+  local marker="${REVIEW_COUNTER_DIR}/.review-approved-${session}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$plan_content" | sha256sum | awk '{print $1}' > "$marker"
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$plan_content" | shasum -a 256 | awk '{print $1}' > "$marker"
+  else
+    printf '%s' "$plan_content" | cksum | awk '{print $1}' > "$marker"
+  fi
+}
+
 # --- Counter Helpers ---
 
 # get_counter_value [session_id]

@@ -950,7 +950,7 @@ LGTM."
 
 # 49. Ack-round: marker exists → allow immediately
 @test "ack-round: marker exists → allow with confirmation" {
-  touch "${REVIEW_COUNTER_DIR}/.review-approved-test-session"
+  create_approve_marker
   INPUT=$(build_input)
   run_hook
 
@@ -965,7 +965,7 @@ LGTM."
 # 50. Ack-round: cleans both marker and counter
 @test "ack-round: cleans both marker and counter" {
   set_counter_value 2 test-session 4
-  touch "${REVIEW_COUNTER_DIR}/.review-approved-test-session"
+  create_approve_marker
   INPUT=$(build_input)
   run_hook
 
@@ -978,7 +978,7 @@ LGTM."
 @test "ack-round: bypasses global safety valve when marker exists" {
   set_counter_value 0 test-session 20
   export REVIEW_MAX_TOTAL_ROUNDS=20
-  touch "${REVIEW_COUNTER_DIR}/.review-approved-test-session"
+  create_approve_marker
   INPUT=$(build_input)
   run_hook
 
@@ -990,7 +990,7 @@ LGTM."
 # 52. Ack-round: no engine call needed
 @test "ack-round: no engine call needed" {
   # No mock engine — if script calls engine, it'll fail
-  touch "${REVIEW_COUNTER_DIR}/.review-approved-test-session"
+  create_approve_marker
   INPUT=$(build_input)
   run_hook
 
@@ -1010,6 +1010,30 @@ Plan is solid."
 
   # Step 2: Ack-round → allow
   run_hook
+  assert_approve_json
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
+}
+
+# 54. Ack-round: plan changed after approve → re-review triggered
+@test "ack-round: plan changed after approve → re-review triggered" {
+  # Marker contains hash of "Old plan content"; INPUT uses a different plan
+  create_approve_marker "Old plan content" "test-session"
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict> New plan looks good."
+  INPUT=$(build_input 'plan=Completely different plan')
+  run_hook
+  # Hash mismatch → marker deleted, full review triggered → engine returns APPROVE → ack-deny
+  assert_ack_approve_json
+  # New marker written for the re-reviewed plan
+  [ -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
+}
+
+# 55. Ack-round: legacy empty marker → allow (backward compat)
+@test "ack-round: legacy empty marker → allow (backward compat)" {
+  # Empty marker simulates old-format marker written before hash upgrade
+  touch "${REVIEW_COUNTER_DIR}/.review-approved-test-session"
+  INPUT=$(build_input)
+  run_hook
+  # Empty approved_hash branch → unconditional allow
   assert_approve_json
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
 }
