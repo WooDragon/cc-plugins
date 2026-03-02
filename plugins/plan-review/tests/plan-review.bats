@@ -1037,3 +1037,76 @@ Plan is solid."
   assert_approve_json
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
 }
+
+# =============================================================================
+# PreCompact Hook (context compaction resilience)
+# =============================================================================
+
+# 56. PreCompact: no active review → silent exit 0, no output
+@test "precompact: no active review state → silent exit 0" {
+  INPUT=$(build_precompact_input)
+  run_precompact_hook
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+# 57. PreCompact: active CONCERNS counter → systemMessage with review status
+@test "precompact: active CONCERNS counter → systemMessage injected" {
+  set_counter_value 1 test-session 2
+  INPUT=$(build_precompact_input)
+  run_precompact_hook
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -n "$HOOK_STDOUT" ]
+  # Must be valid JSON
+  echo "$HOOK_STDOUT" | jq . >/dev/null 2>&1
+  # continue=true (does not block compaction)
+  local cont
+  cont=$(echo "$HOOK_STDOUT" | jq -r '.continue')
+  [ "$cont" = "true" ]
+  # systemMessage present and mentions plan review
+  local msg
+  msg=$(echo "$HOOK_STDOUT" | jq -r '.systemMessage')
+  [[ "$msg" == *"PLAN REVIEW IN PROGRESS"* ]]
+  [[ "$msg" == *"ExitPlanMode"* ]]
+}
+
+# 58. PreCompact: active REJECT counter (ATTEMPT=0, TOTAL>0) → REJECTED status
+@test "precompact: REJECT counter (attempt=0, total=3) → REJECTED status in message" {
+  set_counter_value 0 test-session 3
+  INPUT=$(build_precompact_input)
+  run_precompact_hook
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  local msg
+  msg=$(echo "$HOOK_STDOUT" | jq -r '.systemMessage')
+  [[ "$msg" == *"REJECTED"* ]]
+  [[ "$msg" == *"Critical"* ]]
+}
+
+# 59. PreCompact: approve marker present → ack-round status in message
+@test "precompact: approve marker present → ack-round pending status in message" {
+  create_approve_marker
+  INPUT=$(build_precompact_input)
+  run_precompact_hook
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  local msg
+  msg=$(echo "$HOOK_STDOUT" | jq -r '.systemMessage')
+  [[ "$msg" == *"APPROVED"* ]]
+  [[ "$msg" == *"ack-round"* ]]
+  # Marker must NOT be deleted (precompact hook is read-only)
+  [ -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
+}
+
+# 60. PreCompact: empty session_id → silent exit 0 (no output)
+@test "precompact: empty session_id → silent exit 0" {
+  # Set up state that would trigger if session_id were valid
+  set_counter_value 1 test-session 1
+  INPUT=$(build_precompact_input session_id=)
+  run_precompact_hook
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}

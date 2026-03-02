@@ -5,8 +5,9 @@
 # assertion helpers. All paths are injected via env vars so production
 # paths are never touched.
 
-# Path to the script under test
+# Paths to scripts under test
 HOOK_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/plan-review.sh"
+PRECOMPACT_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/precompact-review.sh"
 
 # --- Setup / Teardown ---
 
@@ -248,6 +249,41 @@ run_hook() {
 
   # Direct invocation — no eval, no exec indirection, no quote destruction.
   HOOK_STDOUT=$(bash "$HOOK_SCRIPT" <<< "$input" 2>"$stderr_file") || HOOK_EXIT=$?
+  HOOK_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# build_precompact_input [key=value ...]
+#   Constructs a JSON PreCompact hook input.
+#   Defaults: session_id=test-session
+build_precompact_input() {
+  local session_id="test-session"
+
+  for arg in "$@"; do
+    local key="${arg%%=*}"
+    local val="${arg#*=}"
+    case "$key" in
+      session_id) session_id="$val" ;;
+    esac
+  done
+
+  jq -n --arg sid "$session_id" '{"session_id": $sid}'
+}
+
+# run_precompact_hook
+#   Feeds INPUT through the precompact-review.sh script via stdin.
+#   Sets: HOOK_STDOUT, HOOK_STDERR, HOOK_EXIT
+run_precompact_hook() {
+  local input="${INPUT:-$(build_precompact_input)}"
+
+  HOOK_STDOUT=""
+  HOOK_STDERR=""
+  HOOK_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  HOOK_STDOUT=$(bash "$PRECOMPACT_SCRIPT" <<< "$input" 2>"$stderr_file") || HOOK_EXIT=$?
   HOOK_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
 }

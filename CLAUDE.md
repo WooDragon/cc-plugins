@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.11 |
+| plan-review | 1.0.12 |
 
 ## 项目结构
 
@@ -15,10 +15,11 @@ WooDragon 的 Claude Code 插件 marketplace。
 plugins/
   plan-review/                    # 对抗性审阅插件
     .claude-plugin/plugin.json    # 插件元数据
-    hooks/hooks.json              # PreToolUse hook 声明
-    scripts/plan-review.sh        # 核心脚本
+    hooks/hooks.json              # PreToolUse + PreCompact hook 声明
+    scripts/plan-review.sh        # 核心脚本（ExitPlanMode 拦截）
+    scripts/precompact-review.sh  # PreCompact hook（compaction 恢复）
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 56 个测试用例
+      plan-review.bats            # 63 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
 ```
@@ -88,6 +89,22 @@ APPROVE 不再静默放行——`allow` 决策的 `permissionDecisionReason` 在
 - Ack-deny 不递增任何计数器（它是审批确认，不是磋商轮次）
 - Marker 文件与 counter 在 ack-round 的 allow 路径中原子清理
 - 额外开销：一次无引擎调用的 round-trip（~100ms），相对 10-30s 的审阅延迟可忽略
+
+### Conversation Compaction 恢复机制（v1.0.12）
+
+**问题**：当 plan mode 中触发 conversation compaction 时，Claude Code 框架直接退出 plan mode，不调用 ExitPlanMode，导致 PreToolUse:ExitPlanMode hook 被完全绕过，review 不触发。
+
+**根因确认方式**：查看 `plan-review.log`——compaction 后无任何 log 条目（连 session_id guard 的 silent exit 都没有），说明 ExitPlanMode 根本没被调用。
+
+**修复**：添加 `PreCompact` hook（`scripts/precompact-review.sh`），在 compaction 前向 Claude 注入 `systemMessage`：
+
+```json
+{"continue": true, "systemMessage": "⚠️ PLAN REVIEW IN PROGRESS — 必须通过 ExitPlanMode 继续 review..."}
+```
+
+`systemMessage` 随 compaction 内容一起被保留，告知 Claude 恢复后必须调用 ExitPlanMode 而非直接展示 plan。
+
+**session_id 诊断改进**：`plan-review.sh` 的 session_id guard 由静默 `exit 0` 改为写日志后退出，方便排查 compaction 导致 session_id 丢失的场景（应在日志中留下 `session=MISSING` 记录）。
 
 ### 测试隔离变量（仅测试使用）
 

@@ -88,7 +88,12 @@ TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""')
 
 # --- Session ID for counter isolation ---
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
-[ -n "$SESSION_ID" ] || exit 0
+if [ -z "$SESSION_ID" ]; then
+  # Log missing session_id for post-compaction diagnostics (should never happen normally)
+  printf '[%s] session=MISSING tool=%s decision=allow reason=missing-session-id\n' \
+    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${TOOL_NAME:-unknown}" >> "$LOG_FILE" 2>/dev/null || true
+  exit 0
+fi
 
 # --- Attempt counter (tmpfs-backed, system handles cleanup) ---
 COUNTER_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
