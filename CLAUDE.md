@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.13 |
+| plan-review | 1.0.14 |
 
 ## 项目结构
 
@@ -136,3 +136,18 @@ APPROVE 不再静默放行——`allow` 决策的 `permissionDecisionReason` 在
 | `REVIEW_ENGINE_TIMEOUT` | `45` | 引擎调用超时秒数 |
 
 生产环境不设置这些变量，脚本 fallback 到默认路径。测试通过注入临时目录实现完全隔离。
+
+### set -e + read 在 log_entry() 前静默退出（v1.0.14）
+
+**问题**：v1.0.13 将字段提取上移到所有 guard 之前。当 `INPUT` 为空或非法 JSON 时，`jq` 失败 → 进程替换产生 EOF → `read` 返回 1 → `set -euo pipefail` 在 `log_entry()` 调用前静默退出。结果零 ENTRY 行，与"框架未调用 hook"观测完全相同，导致误诊。
+
+**修复**：预初始化变量（防 `set -u`）+ `|| true` 屏蔽 `read` 非零退出（防 `set -e`）：
+
+```bash
+TOOL_NAME="" SESSION_ID=""
+read -r TOOL_NAME SESSION_ID < <(...) || true
+```
+
+行为语义：jq 失败时变量保持空字符串，脚本继续执行 → `log_entry` 正常写 ENTRY → tool-name guard 拦截 → `exit 0`。
+
+**新增测试**：`run_hook_raw_stdin()` 辅助函数（绕过 `${INPUT:-default}` fallback）+ 测试 #71-74 覆盖空/非法 stdin 场景。

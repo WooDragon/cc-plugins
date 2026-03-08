@@ -84,7 +84,11 @@ REVIEW_MAX_TOTAL_ROUNDS="${REVIEW_MAX_TOTAL_ROUNDS:-20}"
 REVIEW_ENGINE="${REVIEW_ENGINE:-gemini}"
 
 # --- Unified field extraction (single jq fork, reused by guards + logging) ---
-read -r TOOL_NAME SESSION_ID < <(echo "$INPUT" | jq -r '[.tool_name // "", .session_id // ""] | @tsv')
+# Pre-initialize so set -u won't fire if read fails (e.g. empty/malformed INPUT).
+# || true absorbs read's exit 1 on EOF, preventing set -e from killing the process
+# before log_entry() can write the ENTRY diagnostic line.
+TOOL_NAME="" SESSION_ID=""
+read -r TOOL_NAME SESSION_ID < <(echo "$INPUT" | jq -r '[.tool_name // "", .session_id // ""] | @tsv') || true
 
 # --- Entry-point diagnostic (unconditional, before all guards) ---
 log_entry "$TOOL_NAME" "$SESSION_ID" "pid=$$"

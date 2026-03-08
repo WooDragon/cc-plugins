@@ -1193,3 +1193,33 @@ All good."
 
   assert_approve_json
 }
+
+# =============================================================================
+# Malformed / Empty Input Resilience (v1.0.14)
+# =============================================================================
+
+# 71. 空 stdin → 不 crash，exit 0，无 JSON 输出
+@test "input: empty stdin exits cleanly without crash" {
+  run_hook_raw_stdin ""
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+# 72. 空 stdin → ENTRY 仍写入日志（回归测试：修复 read + set -e 静默退出）
+@test "input: empty stdin writes ENTRY to log" {
+  run_hook_raw_stdin ""
+  assert_log_contains "ENTRY"
+}
+
+# 73. 非法 JSON stdin → 不 crash，exit 0，无 JSON 输出
+@test "input: malformed JSON stdin exits cleanly" {
+  run_hook_raw_stdin "not-valid-json"
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+# 74. 非法 JSON stdin → ENTRY 仍写入日志
+@test "input: malformed JSON writes ENTRY to log" {
+  run_hook_raw_stdin "not-valid-json"
+  assert_log_contains "ENTRY"
+}

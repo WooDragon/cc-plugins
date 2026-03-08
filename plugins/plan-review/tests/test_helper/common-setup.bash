@@ -291,6 +291,19 @@ run_precompact_hook() {
   rm -f "$stderr_file"
 }
 
+# run_hook_raw_stdin <literal_input>
+#   Like run_hook but passes the literal string as-is to stdin, bypassing
+#   the ${INPUT:-default} fallback. Use for empty or malformed input tests.
+run_hook_raw_stdin() {
+  local raw_input="$1"
+  HOOK_STDOUT="" HOOK_STDERR="" HOOK_EXIT=0
+  local stderr_file
+  stderr_file=$(mktemp)
+  HOOK_STDOUT=$(printf '%s' "$raw_input" | bash "$HOOK_SCRIPT" 2>"$stderr_file") || HOOK_EXIT=$?
+  HOOK_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
 # --- Ack-Round Helpers ---
 
 # run_hook_to_completion [session_id]
