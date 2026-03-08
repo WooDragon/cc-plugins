@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.12 |
+| plan-review | 1.0.13 |
 
 ## 项目结构
 
@@ -19,7 +19,7 @@ plugins/
     scripts/plan-review.sh        # 核心脚本（ExitPlanMode 拦截）
     scripts/precompact-review.sh  # PreCompact hook（compaction 恢复）
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 63 个测试用例
+      plan-review.bats            # 70 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
 ```
@@ -61,6 +61,7 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_DRY_RUN` | `0` | `1` 跳过引擎调用 |
 | `REVIEW_MAX_ROUNDS` | `3` | 非 Critical 最大磋商轮次（CONCERNS 累计） |
 | `REVIEW_MAX_TOTAL_ROUNDS` | `20` | 全局绝对上限（含 REJECT 轮次），到达后硬拦截 |
+| `REVIEW_ENGINE_TIMEOUT` | `45` | 引擎调用超时秒数（需系统有 timeout/gtimeout） |
 
 旧变量 `GEMINI_REVIEW_OFF`、`GEMINI_DRY_RUN`、`GEMINI_MAX_REVIEWS` 通过脚本内 fallback 继续生效。
 
@@ -106,6 +107,24 @@ APPROVE 不再静默放行——`allow` 决策的 `permissionDecisionReason` 在
 
 **session_id 诊断改进**：`plan-review.sh` 的 session_id guard 由静默 `exit 0` 改为写日志后退出，方便排查 compaction 导致 session_id 丢失的场景（应在日志中留下 `session=MISSING` 记录）。
 
+### 入口诊断日志与引擎超时（v1.0.13）
+
+**问题**：hook 间歇性不触发 review，但无法区分两种故障模式——框架未调用 hook vs. 引擎挂死被 120s timeout 杀死。所有日志在 guard 之后才写，guard 层的 silent exit 0 与"框架没调用"产生完全相同的观测空白。
+
+**修复**：
+
+1. **统一变量提取**：`TOOL_NAME` 和 `SESSION_ID` 通过单次 jq 调用提取（`@tsv`），上移到所有 guard 之前。消除冗余 jq fork，全程复用。
+
+2. **入口日志 `log_entry()`**：在所有 guard 之前无条件写入 `ENTRY tool=... session=... pid=...`。每个 guard 退出前额外写 `guard=<reason>` 标记。
+
+3. **引擎超时包裹**：检测 `timeout`（GNU/Homebrew）或 `gtimeout`（coreutils），为引擎调用添加 `timeout -k 5 $ENGINE_TIMEOUT` 前缀。无 timeout 命令时静默降级（行为与 v1.0.12 一致）。超时返回 exit 124，被现有 retry 逻辑自动处理。
+
+**诊断流程**：
+- 有 ENTRY 行 + 有 decision 行 → hook 正常执行
+- 有 ENTRY 行 + 有 guard 行 → hook 被 guard 拦截（看原因）
+- 有 ENTRY 行 + 无后续行 → hook 被 120s timeout 杀死（确认引擎问题）
+- 无 ENTRY 行 → 框架未调用 hook（报 Claude Code bug）
+
 ### 测试隔离变量（仅测试使用）
 
 | 变量 | 默认值 | 说明 |
@@ -114,5 +133,6 @@ APPROVE 不再静默放行——`allow` 决策的 `permissionDecisionReason` 在
 | `REVIEW_COUNTER_DIR` | `/tmp/claude-reviews` | counter 文件目录 |
 | `REVIEW_PLAN_DIR` | `$HOME/.claude/plans` | plan 文件 fallback 目录 |
 | `REVIEW_RETRY_DELAY` | `2` | 引擎重试间隔秒数 |
+| `REVIEW_ENGINE_TIMEOUT` | `45` | 引擎调用超时秒数 |
 
 生产环境不设置这些变量，脚本 fallback 到默认路径。测试通过注入临时目录实现完全隔离。

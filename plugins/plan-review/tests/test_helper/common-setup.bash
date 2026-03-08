@@ -35,6 +35,9 @@ common_setup() {
   # Zero retry delay in tests (production: 2s)
   export REVIEW_RETRY_DELAY=0
 
+  # High timeout for tests (mock engines return instantly)
+  export REVIEW_ENGINE_TIMEOUT=90
+
   # Prevent recursive guard from firing
   unset PLAN_REVIEW_RUNNING
 
@@ -376,4 +379,13 @@ assert_deny_json() {
     echo "Expected permissionDecision=deny, got: $decision"
     return 1
   }
+}
+
+# assert_log_contains <pattern>
+#   Verifies that the plan-review log file contains the given pattern.
+assert_log_contains() {
+  local pattern="$1"
+  local log_file="${REVIEW_LOG_DIR}/plan-review.log"
+  [ -f "$log_file" ] || { echo "Log file missing: $log_file"; return 1; }
+  grep -q -- "$pattern" "$log_file" || { echo "Pattern '$pattern' not found in log:"; cat "$log_file"; return 1; }
 }

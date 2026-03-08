@@ -45,6 +45,13 @@ log_decision() {
     "$*" >> "$LOG_FILE" 2>/dev/null || true
 }
 
+# --- Entry-point diagnostic log (before guards, does not require ATTEMPT/TOTAL) ---
+log_entry() {
+  printf '[%s] ENTRY tool=%s session=%s %s\n' \
+    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    "${1:-unknown}" "${2:-unknown}" "${3:-}" >> "$LOG_FILE" 2>/dev/null || true
+}
+
 # --- Visible allow helper (eliminates silent exit 0 for non-guard paths) ---
 allow_with_reason() {
   local reason="$1"
@@ -76,22 +83,33 @@ REVIEW_MAX_ROUNDS="${REVIEW_MAX_ROUNDS:-${GEMINI_MAX_REVIEWS:-3}}"
 REVIEW_MAX_TOTAL_ROUNDS="${REVIEW_MAX_TOTAL_ROUNDS:-20}"
 REVIEW_ENGINE="${REVIEW_ENGINE:-gemini}"
 
+# --- Unified field extraction (single jq fork, reused by guards + logging) ---
+read -r TOOL_NAME SESSION_ID < <(echo "$INPUT" | jq -r '[.tool_name // "", .session_id // ""] | @tsv')
+
+# --- Entry-point diagnostic (unconditional, before all guards) ---
+log_entry "$TOOL_NAME" "$SESSION_ID" "pid=$$"
+
 # --- Recursive guard: claude -p subprocess inherits this, bail immediately ---
-[ "${PLAN_REVIEW_RUNNING:-}" != "1" ] || exit 0
+[ "${PLAN_REVIEW_RUNNING:-}" != "1" ] || {
+  log_entry "$TOOL_NAME" "$SESSION_ID" "guard=recursive-bail"
+  exit 0
+}
 
 # --- Kill switch ---
-[ "$REVIEW_DISABLED" != "1" ] || exit 0
+[ "$REVIEW_DISABLED" != "1" ] || {
+  log_entry "$TOOL_NAME" "$SESSION_ID" "guard=disabled"
+  exit 0
+}
 
 # --- Guard: only ExitPlanMode (belt-and-suspenders with matcher) ---
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // ""')
-[ "$TOOL_NAME" = "ExitPlanMode" ] || exit 0
+[ "$TOOL_NAME" = "ExitPlanMode" ] || {
+  log_entry "$TOOL_NAME" "$SESSION_ID" "guard=wrong-tool"
+  exit 0
+}
 
 # --- Session ID for counter isolation ---
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // ""')
 if [ -z "$SESSION_ID" ]; then
-  # Log missing session_id for post-compaction diagnostics (should never happen normally)
-  printf '[%s] session=MISSING tool=%s decision=allow reason=missing-session-id\n' \
-    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${TOOL_NAME:-unknown}" >> "$LOG_FILE" 2>/dev/null || true
+  log_entry "$TOOL_NAME" "" "guard=missing-session-id"
   exit 0
 fi
 
@@ -306,6 +324,15 @@ else
     GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-pro-preview}"
   fi
 
+  # Portable timeout: timeout (GNU/Homebrew) > gtimeout (coreutils) > none
+  TIMEOUT_CMD=""
+  if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+  fi
+  ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-45}"
+
   # --- Engine invocation with retry (2 attempts: 1 initial + 1 retry) ---
   REVIEW=""
   for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
@@ -317,7 +344,7 @@ else
       # + --tools "" (no tool calls = no PreToolUse events).
       unset CLAUDECODE
       unset CLAUDE_CODE_ENTRYPOINT
-      REVIEW=$(PLAN_REVIEW_RUNNING=1 claude -p \
+      REVIEW=$(PLAN_REVIEW_RUNNING=1 ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} claude -p \
         --model "$CLAUDE_MODEL" \
         --setting-sources local \
         --no-session-persistence \
@@ -333,7 +360,7 @@ else
         continue
       }
     else
-      REVIEW=$(gemini -m "$GEMINI_MODEL" < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
+      REVIEW=$(${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} gemini -m "$GEMINI_MODEL" < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
         REVIEW=""
         if [ "$engine_attempt" -lt 2 ]; then
           echo "plan-review: gemini failed (attempt $engine_attempt/2), retrying..." >&2

@@ -1110,3 +1110,86 @@ Plan is solid."
   [ "$HOOK_EXIT" -eq 0 ]
   [ -z "$HOOK_STDOUT" ]
 }
+
+# =============================================================================
+# Entry-Point Diagnostic Logging (v1.0.13)
+# =============================================================================
+
+# 64. Normal invocation writes ENTRY log with tool and session
+@test "log: entry-point written on normal invocation" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+LGTM."
+  INPUT=$(build_input)
+  run_hook_to_completion
+
+  assert_approve_json
+  assert_log_contains "ENTRY tool=ExitPlanMode session=test-session"
+}
+
+# 65. Recursive guard still writes ENTRY before bailing
+@test "log: entry-point written before recursive guard" {
+  export PLAN_REVIEW_RUNNING=1
+  INPUT=$(build_input)
+  run_hook
+
+  assert_allowed
+  assert_log_contains "ENTRY tool=ExitPlanMode session=test-session"
+  assert_log_contains "guard=recursive-bail"
+}
+
+# 66. Disabled guard logs reason
+@test "log: disabled guard writes reason" {
+  export REVIEW_DISABLED=1
+  INPUT=$(build_input)
+  run_hook
+
+  assert_allowed
+  assert_log_contains "guard=disabled"
+}
+
+# 67. Wrong tool guard logs reason
+@test "log: wrong tool guard writes reason" {
+  INPUT=$(build_input tool_name=Read)
+  run_hook
+
+  assert_allowed
+  assert_log_contains "guard=wrong-tool"
+}
+
+# 68. Guard exits produce no JSON to stdout (framework invariant)
+@test "log: guard exits produce no JSON to stdout" {
+  export PLAN_REVIEW_RUNNING=1
+  INPUT=$(build_input)
+  run_hook
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+# =============================================================================
+# Engine Timeout (v1.0.13)
+# =============================================================================
+
+# 69. Engine timeout (exit 124) triggers fail-open via existing retry logic
+@test "timeout: engine timeout triggers fail-open" {
+  # exit 124 = timeout's exit code; both attempts timeout → fail-open
+  create_failing_engine "gemini" 124
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
+}
+
+# 70. Custom REVIEW_ENGINE_TIMEOUT does not break normal fast responses
+@test "timeout: REVIEW_ENGINE_TIMEOUT env respected" {
+  export REVIEW_ENGINE_TIMEOUT=10
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+All good."
+  INPUT=$(build_input)
+  run_hook_to_completion
+
+  assert_approve_json
+}
