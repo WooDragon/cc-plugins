@@ -343,17 +343,25 @@ else
     # Isolated Gemini home: disable skills injection (prevents extra 10-30KB system prompt
     # from ~/.agents/skills/ and ~/.gemini/skills/ from inflating token count and worsening
     # MODEL_CAPACITY_EXHAUSTED). Auth files are symlinked from real ~/.gemini/ so credentials
-    # stay current without duplication. Created once, reused across invocations.
+    # stay current without duplication. Settings.json is always regenerated from the real
+    # config + skills:disabled overlay so auth type changes propagate automatically.
     _HOOK_GEMINI="$HOME/.claude/.gemini-hook-home"
-    if [ ! -f "$_HOOK_GEMINI/.gemini/settings.json" ]; then
+    if [ ! -d "$_HOOK_GEMINI/.gemini" ]; then
       mkdir -p "$_HOOK_GEMINI/.gemini"
       for _f in oauth_creds.json google_accounts.json installation_id \
                  state.json trustedFolders.json projects.json; do
         [ -e "$HOME/.gemini/$_f" ] && \
           ln -sf "$HOME/.gemini/$_f" "$_HOOK_GEMINI/.gemini/$_f" || true
       done
-      printf '{"selectedAuthType":"oauth-personal","skills":{"enabled":false}}' \
-        > "$_HOOK_GEMINI/.gemini/settings.json"
+    fi
+    # Merge real settings + skills:disabled. jq merge <1ms; picks up auth changes.
+    # Fallback: copy real settings as-is (skills may inject but auth works).
+    if [ -f "$HOME/.gemini/settings.json" ]; then
+      jq '. + {"skills":{"enabled":false}}' "$HOME/.gemini/settings.json" \
+        > "$_HOOK_GEMINI/.gemini/settings.json" 2>/dev/null || \
+        cp "$HOME/.gemini/settings.json" "$_HOOK_GEMINI/.gemini/settings.json"
+    else
+      printf '{"skills":{"enabled":false}}\n' > "$_HOOK_GEMINI/.gemini/settings.json"
     fi
   fi
 

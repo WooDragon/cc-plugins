@@ -186,7 +186,7 @@ ENGINE_PID=""
 
 **根因二（内部 retry 放大）**：Gemini CLI 遇到 429 会用 backoff 自动 retry 3-4 次。45s 超时窗口内可积累 4-5 次 CLI 内部重试，加上脚本层 2 次重试，总计 6-8 次 API calls 在 ~90s 内打到 capacity-limited 服务端。
 
-**修复一（隔离 Gemini home）**：在 `$HOME/.claude/.gemini-hook-home/` 创建持久化 home，settings.json 写 `{"selectedAuthType":"oauth-personal","skills":{"enabled":false}}`，auth 文件通过 symlink 指向真实 `~/.gemini/`（保持凭证自动同步）。调用前注入 `GEMINI_CLI_HOME="$_HOOK_GEMINI"`，无 skills 目录 → 零注入。
+**修复一（隔离 Gemini home）**：在 `$HOME/.claude/.gemini-hook-home/` 创建持久化 home，auth 文件通过 symlink 指向真实 `~/.gemini/`（保持凭证自动同步）。settings.json 通过 `jq '. + {"skills":{"enabled":false}}'` 从真实配置 merge 生成（保留完整 auth 结构，每次调用自动同步 auth 类型变更）。调用前注入 `GEMINI_CLI_HOME="$_HOOK_GEMINI"`，无 skills 目录 → 零注入。
 
 **修复二（ENGINE_TIMEOUT 25s）**：默认值从 45 降为 25，将 CLI 内部 retry 机会从 3-4 次压缩到 1-2 次。全路径时序验证：attempt1(25s) + REVIEW_CAPACITY_DELAY(25s) + attempt2(25s) = 75s，在 120s hook timeout 内有 45s 安全余量。需要更慢响应的场景可用 `REVIEW_ENGINE_TIMEOUT=45` 覆盖。
 
