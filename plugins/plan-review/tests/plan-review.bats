@@ -1326,3 +1326,44 @@ EOF
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"Missing error handling"* ]]
 }
+
+# =============================================================================
+# Capacity Fast-Break (v1.0.18)
+# =============================================================================
+
+# 81. Capacity exhausted + REST configured → immediate break, REST succeeds
+@test "rest-fallback: capacity exhausted + REST configured → fast break + REST used" {
+  create_capacity_exhausted_engine "gemini"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nLooks good via REST."}}]}'
+  INPUT=$(build_input)
+
+  # Step 1: CLI hits capacity → fast break → REST fires → APPROVE → ack-deny
+  run_hook
+  assert_ack_approve_json
+  local first_stderr="$HOOK_STDERR"
+  [[ "$first_stderr" == *"skipping retry (REST fallback available)"* ]]
+  [[ "$first_stderr" == *"REST API fallback succeeded"* ]]
+
+  # Step 2: ack-round → allow
+  run_hook
+  assert_approve_json
+}
+
+# 82. Capacity exhausted + no REST configured → retries CLI, second attempt succeeds
+@test "rest-fallback: capacity exhausted + no REST configured → retries CLI" {
+  create_capacity_then_success_engine "gemini" "<verdict>APPROVE</verdict>LGTM on retry."
+  # REVIEW_API_URL / REVIEW_API_KEY unset by common_setup — no fast break
+  INPUT=$(build_input)
+
+  # First call: attempt 1 fails with capacity, retry fires, attempt 2 succeeds → ack-deny
+  run_hook
+  assert_ack_approve_json
+  # Fast break must NOT have triggered (no REST configured)
+  [[ "$HOOK_STDERR" != *"skipping retry (REST fallback available)"* ]]
+
+  # ack-round → allow
+  run_hook
+  assert_approve_json
+}

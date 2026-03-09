@@ -19,7 +19,7 @@ plugins/
     scripts/plan-review.sh        # 核心脚本（ExitPlanMode 拦截）
     scripts/precompact-review.sh  # PreCompact hook（compaction 恢复）
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 70 个测试用例
+      plan-review.bats            # 82 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
 ```
@@ -64,6 +64,10 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_ENGINE_TIMEOUT` | `25` | 引擎调用超时秒数（需系统有 timeout/gtimeout） |
 | `REVIEW_API_URL` | _(空)_ | REST API 降级 base URL（OpenAI 兼容格式，如 `https://proxy.example.com`） |
 | `REVIEW_API_KEY` | _(空)_ | REST API 降级 auth key（Bearer token） |
+| `REVIEW_REST_TIMEOUT` | `60` | REST fallback curl 超时秒数（独立于 `REVIEW_ENGINE_TIMEOUT`） |
+| `REVIEW_CAPACITY_DELAY` | `25` | 检测到 MODEL_CAPACITY_EXHAUSTED 后等待秒数（REST 配置时跳过此延迟直接 break） |
+
+敏感变量（`REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
 
 旧变量 `GEMINI_REVIEW_OFF`、`GEMINI_DRY_RUN`、`GEMINI_MAX_REVIEWS` 通过脚本内 fallback 继续生效。
 
@@ -205,7 +209,7 @@ ENGINE_PID=""
 **API 格式**（OpenAI-compatible）：
 - Endpoint：`${REVIEW_API_URL}/v1/chat/completions`
 - Auth：`Authorization: Bearer ${REVIEW_API_KEY}`
-- Body：`{ model, messages: [{role: "system", content: SYSTEM_INSTRUCTIONS}, {role: "user", content: PROMPT_FILE}], max_tokens: 4000, temperature: 0.1 }`
+- Body：`{ model, messages: [{role: "system", content: SYSTEM_INSTRUCTIONS}, {role: "user", content: PROMPT_FILE}], max_tokens: 16000, temperature: 0.1 }`
 - Response 提取：`.choices[0].message.content`
 
 **设计约束**：
@@ -215,3 +219,15 @@ ENGINE_PID=""
 - 回滚 v1.0.17 工作区的 prompt 压缩实验（SYSTEM_INSTRUCTIONS、GLOBAL_MD cap、PROJECT_MD cap、USER_REQ 恢复原值）——REST 降级解决 capacity 问题后，prompt 压缩不再必要
 
 **新增测试**（6 个）：CLI fails + API configured → REST succeeds；CLI fails + API not configured → fail-open；CLI fails + REST fails → fail-open；CLI succeeds → REST not called；curl exit 127 → fail-open；response parsing 提取 choices[0].message.content。
+
+### Capacity Fast-Break + REST 时间窗口（v1.0.18 后续）
+
+**问题**：120s hook timeout 与 Gemini capacity 耗尽时序冲突。全路径耗时：attempt1(25s) + capacity wait(25s) + attempt2(25s) = 75s；REST 只剩 45s，而 curl 需要 ~50s → 被框架杀死。
+
+**修复（Capacity Fast-Break）**：在 capacity 检测分支增加判断：若 `REVIEW_API_URL` + `REVIEW_API_KEY` 均已配置，立即 `break` 跳出 retry loop，跳过剩余 capacity 等待和第二次 CLI 尝试，让 REST 获得 ~110s 窗口。无 REST 配置时行为不变（仍等待并重试）。
+
+**独立 REST 超时**：引入 `REVIEW_REST_TIMEOUT`（默认 60s），与引擎 `REVIEW_ENGINE_TIMEOUT`（25s）分离。REST API 通常需要更长超时（thinking 模型 token 生成慢）。
+
+**max_tokens 截断修复**：REST 请求 `max_tokens` 从 4000 提升至 16000。Thinking 模型的 reasoning tokens 会消耗 token budget，4000 不足以完整输出详细 review 意见。
+
+**新增测试**（2 个）：capacity + REST configured → fast break + REST used；capacity + no REST → retries CLI（第二次成功）。全套 82/82 pass。

@@ -35,6 +35,10 @@ common_setup() {
   # Zero retry delay in tests (production: 2s)
   export REVIEW_RETRY_DELAY=0
 
+  # Zero capacity delay in tests (production: 25s) — prevents test hangs when
+  # capacity-exhausted mock engines are used
+  export REVIEW_CAPACITY_DELAY=0
+
   # High timeout for tests (mock engines return instantly)
   export REVIEW_ENGINE_TIMEOUT=90
 
@@ -101,6 +105,41 @@ create_flaky_engine() {
 if [ ! -f "${state_file}" ]; then
   touch "${state_file}"
   ${first_action}
+fi
+cat << 'ENGINE_OUTPUT'
+${output}
+ENGINE_OUTPUT
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/${name}"
+}
+
+# create_capacity_exhausted_engine <name>
+#   Creates a mock engine that writes RESOURCE_EXHAUSTED to stderr and exits 1.
+#   Triggers the capacity-detection branch in the retry loop.
+create_capacity_exhausted_engine() {
+  local name="$1"
+  cat > "${MOCK_BIN}/${name}" << 'MOCK_EOF'
+#!/bin/bash
+echo '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","domain":"cloudcode-pa.googleapis.com"}}' >&2
+exit 1
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/${name}"
+}
+
+# create_capacity_then_success_engine <name> <success_output>
+#   First call: writes RESOURCE_EXHAUSTED to stderr and exits 1 (capacity-exhausted).
+#   Subsequent calls: return success_output.
+#   Used to verify that retry still fires when REST fallback is NOT configured.
+create_capacity_then_success_engine() {
+  local name="$1"
+  local output="$2"
+  local state_file="${TEST_TEMP_DIR}/.capacity-${name}-state"
+  cat > "${MOCK_BIN}/${name}" << MOCK_EOF
+#!/bin/bash
+if [ ! -f "${state_file}" ]; then
+  touch "${state_file}"
+  echo '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}' >&2
+  exit 1
 fi
 cat << 'ENGINE_OUTPUT'
 ${output}

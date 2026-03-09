@@ -430,6 +430,7 @@ else
           # capacity-exhausted endpoint wastes the time budget REST needs.
           if [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
             echo "plan-review: $REVIEW_ENGINE capacity exhausted, skipping retry (REST fallback available)" >&2
+            log_decision "rest-skip=capacity-fast-break engine=$REVIEW_ENGINE attempt=$engine_attempt"
             break
           fi
           retry_delay="${REVIEW_CAPACITY_DELAY:-25}"
@@ -461,12 +462,13 @@ else
   # REVIEW_API_URL/REVIEW_API_KEY empty → skip (preserves original fail-open).
   if [ -z "$REVIEW" ] && [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
     echo "plan-review: CLI exhausted, trying REST API fallback..." >&2
+    log_decision "rest-start url=${REVIEW_API_URL:+(set)} key=${REVIEW_API_KEY:+(set)}"
     prompt_content=$(cat "$PROMPT_FILE")
     REQ_FILE=$(mktemp)
     jq -n --arg model "${GEMINI_MODEL:-gemini-3.1-pro-preview}" \
           --arg sys "$SYSTEM_INSTRUCTIONS" \
           --arg prompt "$prompt_content" \
-      '{ model: $model, messages: [{ role: "system", content: $sys }, { role: "user", content: $prompt }], max_tokens: 4000, temperature: 0.1 }' \
+      '{ model: $model, messages: [{ role: "system", content: $sys }, { role: "user", content: $prompt }], max_tokens: 16000, temperature: 0.1 }' \
       > "$REQ_FILE"
 
     REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-60}"
@@ -480,7 +482,9 @@ else
     ENGINE_PID=""
     rm -f "$REQ_FILE"; REQ_FILE=""
 
-    REVIEW=$(jq -r '.choices[0].message.content // empty' "$ENGINE_OUT" 2>/dev/null || true)
+    rest_raw=$(cat "$ENGINE_OUT" 2>/dev/null || true)
+    REVIEW=$(printf '%s' "$rest_raw" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+    log_decision "rest-result raw_bytes=$(printf '%s' "$rest_raw" | wc -c | tr -d ' ') review_bytes=$(printf '%s' "$REVIEW" | wc -c | tr -d ' ')"
     : > "$ENGINE_OUT"
     [ -z "$REVIEW" ] || echo "plan-review: REST API fallback succeeded." >&2
   fi
