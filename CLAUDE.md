@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.19 |
+| plan-review | 1.0.20 |
 
 ## 项目结构
 
@@ -162,7 +162,7 @@ read -r TOOL_NAME SESSION_ID < <(...) || true
 
 **问题一（进程残留）**：引擎调用用 command substitution `$(timeout ... gemini ...)` — bash 被 SIGTERM（框架 120s 超时）杀死后，`timeout + gemini` 子进程变成孤儿，最多再跑 45s（`timeout` 到期才 kill gemini）。
 
-**问题二（模型别名）**：脚本默认 `gemini-3-pro-preview`，Gemini CLI 内部将其解析为 `gemini-3.1-pro-preview`，但错误信息暴露实际 model ID，排查时产生歧义。改为显式指定 `gemini-3.1-pro-preview`。
+**问题二（模型别名）**：脚本曾显式指定 `gemini-3.1-pro-preview`，后改回 `gemini-3-pro-preview`（别名）——两者在 Gemini CLI 内部等价，别名更简短且与官方文档一致。
 
 **修复（进程残留）**：引擎调用从 command substitution 改为 background + wait 模式，显式追踪 `ENGINE_PID`，扩展 trap 覆盖 EXIT/INT/TERM/HUP：
 
