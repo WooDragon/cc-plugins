@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.17 |
+| plan-review | 1.0.18 |
 
 ## 项目结构
 
@@ -62,6 +62,8 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_MAX_ROUNDS` | `3` | 非 Critical 最大磋商轮次（CONCERNS 累计） |
 | `REVIEW_MAX_TOTAL_ROUNDS` | `20` | 全局绝对上限（含 REJECT 轮次），到达后硬拦截 |
 | `REVIEW_ENGINE_TIMEOUT` | `25` | 引擎调用超时秒数（需系统有 timeout/gtimeout） |
+| `REVIEW_API_URL` | _(空)_ | REST API 降级 base URL（OpenAI 兼容格式，如 `https://proxy.example.com`） |
+| `REVIEW_API_KEY` | _(空)_ | REST API 降级 auth key（Bearer token） |
 
 旧变量 `GEMINI_REVIEW_OFF`、`GEMINI_DRY_RUN`、`GEMINI_MAX_REVIEWS` 通过脚本内 fallback 继续生效。
 
@@ -191,3 +193,25 @@ ENGINE_PID=""
 **修复二（ENGINE_TIMEOUT 25s）**：默认值从 45 降为 25，将 CLI 内部 retry 机会从 3-4 次压缩到 1-2 次。全路径时序验证：attempt1(25s) + REVIEW_CAPACITY_DELAY(25s) + attempt2(25s) = 75s，在 120s hook timeout 内有 45s 安全余量。需要更慢响应的场景可用 `REVIEW_ENGINE_TIMEOUT=45` 覆盖。
 
 **已同步改动**：REVIEW_CAPACITY_DELAY 检测逻辑（检测新增日志字节中的 RESOURCE_EXHAUSTED|MODEL_CAPACITY，命中时等待 25s）亦在本版本随以上两项一起 commit。
+
+### CLI 优先 + REST API 降级（v1.0.18）
+
+**问题**：`cloudcode-pa.googleapis.com`（Code Assist 免费层）持续 429，CLI 三层 retry 叠加后最多 60 次 API 调用仍失败。用户有自定义 API proxy（OpenAI-compatible），走不同 capacity 池。
+
+**修复**：retry loop 结束后、fail-open 之前插入 REST API 降级路径。零侵入现有逻辑。
+
+**降级条件**：CLI 产出空 `REVIEW` **且** `REVIEW_API_URL` + `REVIEW_API_KEY` 均非空。任一为空则跳过，保持原 fail-open 行为。
+
+**API 格式**（OpenAI-compatible）：
+- Endpoint：`${REVIEW_API_URL}/v1/chat/completions`
+- Auth：`Authorization: Bearer ${REVIEW_API_KEY}`
+- Body：`{ model, messages: [{role: "system", content: SYSTEM_INSTRUCTIONS}, {role: "user", content: PROMPT_FILE}], max_tokens: 4000, temperature: 0.1 }`
+- Response 提取：`.choices[0].message.content`
+
+**设计约束**：
+- CLI 模式下 PROMPT_FILE 已含 SYSTEM_INSTRUCTIONS 前缀（Gemini 引擎），REST fallback 将 SYSTEM_INSTRUCTIONS 独立传入 system message，PROMPT_FILE 全文作 user message。system 中重复无害——system 位置的权重正确，user 中的副本只是略多 token
+- `REQ_FILE`（请求体临时文件）由 `_cleanup()` 统一管理，SIGTERM 时自动清理
+- curl 以 background + wait 模式运行，复用 `ENGINE_PID` 追踪和 `TIMEOUT_CMD` 超时包裹
+- 回滚 v1.0.17 工作区的 prompt 压缩实验（SYSTEM_INSTRUCTIONS、GLOBAL_MD cap、PROJECT_MD cap、USER_REQ 恢复原值）——REST 降级解决 capacity 问题后，prompt 压缩不再必要
+
+**新增测试**（6 个）：CLI fails + API configured → REST succeeds；CLI fails + API not configured → fail-open；CLI fails + REST fails → fail-open；CLI succeeds → REST not called；curl exit 127 → fail-open；response parsing 提取 choices[0].message.content。

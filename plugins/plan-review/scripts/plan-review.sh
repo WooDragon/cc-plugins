@@ -24,6 +24,8 @@
 #   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds, default 25 (needs timeout/gtimeout)
 #   REVIEW_RETRY_DELAY=N         — seconds between retries on non-capacity failure (default: 2)
 #   REVIEW_CAPACITY_DELAY=N      — seconds to wait when MODEL_CAPACITY_EXHAUSTED detected (default: 25)
+#   REVIEW_API_URL=<url>         — REST API fallback base URL (OpenAI-compatible, e.g. https://proxy.example.com)
+#   REVIEW_API_KEY=<key>         — REST API fallback auth key (Bearer token)
 set -euo pipefail
 
 INPUT=$(cat)
@@ -275,12 +277,13 @@ Use Chinese for the review output.'
 
 ENGINE_OUT=""
 ENGINE_PID=""
+REQ_FILE=""
 PROMPT_FILE=$(mktemp)
 # Cleanup: remove temp files and kill tracked engine subprocess.
 # Called on EXIT (normal), INT (Ctrl-C), TERM (framework hook timeout),
 # and HUP (terminal disconnect). Idempotent — safe to call multiple times.
 _cleanup() {
-  rm -f "$PROMPT_FILE" "${ENGINE_OUT:-}"
+  rm -f "$PROMPT_FILE" "${ENGINE_OUT:-}" "${REQ_FILE:-}"
   [ -z "${ENGINE_PID:-}" ] || kill "$ENGINE_PID" 2>/dev/null || true
 }
 trap '_cleanup' EXIT
@@ -446,6 +449,34 @@ else
     # Non-empty response obtained — exit retry loop
     break
   done
+
+  # --- REST API fallback: CLI exhausted, try OpenAI-compatible endpoint ---
+  # Zero-intrusion: only fires when CLI produced no result AND env vars are set.
+  # REVIEW_API_URL/REVIEW_API_KEY empty → skip (preserves original fail-open).
+  if [ -z "$REVIEW" ] && [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
+    echo "plan-review: CLI exhausted, trying REST API fallback..." >&2
+    prompt_content=$(cat "$PROMPT_FILE")
+    REQ_FILE=$(mktemp)
+    jq -n --arg model "${GEMINI_MODEL:-gemini-3.1-pro-preview}" \
+          --arg sys "$SYSTEM_INSTRUCTIONS" \
+          --arg prompt "$prompt_content" \
+      '{ model: $model, messages: [{ role: "system", content: $sys }, { role: "user", content: $prompt }], max_tokens: 4000, temperature: 0.1 }' \
+      > "$REQ_FILE"
+
+    ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} curl -s \
+      -X POST "${REVIEW_API_URL}/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${REVIEW_API_KEY}" \
+      -d @"$REQ_FILE" -o "$ENGINE_OUT" 2>>"$LOG_FILE" &
+    ENGINE_PID=$!
+    wait "$ENGINE_PID" 2>/dev/null || true
+    ENGINE_PID=""
+    rm -f "$REQ_FILE"; REQ_FILE=""
+
+    REVIEW=$(jq -r '.choices[0].message.content // empty' "$ENGINE_OUT" 2>/dev/null || true)
+    : > "$ENGINE_OUT"
+    [ -z "$REVIEW" ] || echo "plan-review: REST API fallback succeeded." >&2
+  fi
 
   # All attempts exhausted → fail-open with visible WARNING
   if [ -z "$REVIEW" ]; then

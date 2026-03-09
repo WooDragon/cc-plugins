@@ -45,6 +45,10 @@ common_setup() {
   unset GEMINI_REVIEW_OFF
   unset GEMINI_DRY_RUN
   unset GEMINI_MAX_REVIEWS
+
+  # Prevent REST fallback env vars from leaking in
+  unset REVIEW_API_URL
+  unset REVIEW_API_KEY
 }
 
 common_teardown() {
@@ -103,6 +107,41 @@ ${output}
 ENGINE_OUTPUT
 MOCK_EOF
   chmod +x "${MOCK_BIN}/${name}"
+}
+
+# create_mock_curl <response_body>
+#   Creates an executable mock curl at MOCK_BIN/curl that writes <response_body>
+#   to the file specified by -o flag (simulating curl -o behavior).
+create_mock_curl() {
+  local body="$1"
+  cat > "${MOCK_BIN}/curl" << MOCK_EOF
+#!/bin/bash
+# Parse -o flag to find output file
+out_file=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out_file="\$2"; shift 2 ;;
+    *)  shift ;;
+  esac
+done
+if [ -n "\$out_file" ]; then
+  cat > "\$out_file" << 'BODY'
+${body}
+BODY
+fi
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/curl"
+}
+
+# create_failing_curl <exit_code>
+#   Creates a mock curl that always fails with the given exit code.
+create_failing_curl() {
+  local exit_code="$1"
+  cat > "${MOCK_BIN}/curl" << MOCK_EOF
+#!/bin/bash
+exit ${exit_code}
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/curl"
 }
 
 # --- Input Construction ---

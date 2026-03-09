@@ -1223,3 +1223,106 @@ All good."
   run_hook_raw_stdin "not-valid-json"
   assert_log_contains "ENTRY"
 }
+
+# =============================================================================
+# REST API Fallback (v1.0.18)
+# =============================================================================
+
+# 75. CLI fails + API configured → REST succeeds
+@test "rest-fallback: CLI fails + API configured → REST succeeds" {
+  create_failing_engine "gemini" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nLooks good via REST."}}]}'
+  INPUT=$(build_input)
+
+  # Step 1: CLI fails → REST fallback → APPROVE → ack-deny
+  run_hook
+  assert_ack_approve_json
+  local engine_stderr="$HOOK_STDERR"
+  [[ "$engine_stderr" == *"REST API fallback succeeded"* ]]
+
+  # Step 2: ack-round → allow
+  run_hook
+  assert_approve_json
+}
+
+# 76. CLI fails + API not configured → fail-open (original behavior)
+@test "rest-fallback: CLI fails + API not configured → fail-open" {
+  create_failing_engine "gemini" 1
+  # REVIEW_API_URL and REVIEW_API_KEY unset by common_setup
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
+}
+
+# 77. CLI fails + REST also fails → fail-open
+@test "rest-fallback: CLI fails + REST also fails → fail-open" {
+  create_failing_engine "gemini" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_failing_curl 1
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
+}
+
+# 78. CLI succeeds → REST not called
+@test "rest-fallback: CLI succeeds → REST not called" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+All good from CLI."
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  # No mock curl — if script calls curl, it would fail or use system curl
+  # (which would fail to connect to localhost:9999)
+  INPUT=$(build_input)
+  run_hook_to_completion
+
+  assert_approve_json
+  # Should NOT mention REST fallback
+  [[ "$HOOK_STDERR" != *"REST API fallback"* ]]
+}
+
+# 79. CLI fails + curl not found → fail-open
+@test "rest-fallback: curl not found → fail-open" {
+  create_failing_engine "gemini" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  # Remove curl from PATH by not creating a mock (MOCK_BIN has priority)
+  # and ensuring no system curl is reachable — create a no-op to shadow it
+  cat > "${MOCK_BIN}/curl" << 'EOF'
+#!/bin/bash
+exit 127
+EOF
+  chmod +x "${MOCK_BIN}/curl"
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
+}
+
+# 80. REST response parsing extracts choices[0].message.content
+@test "rest-fallback: response parsing extracts choices[0].message.content" {
+  create_failing_engine "gemini" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl '{"choices":[{"message":{"content":"<verdict>CONCERNS</verdict>\n[Major] Missing error handling."}}]}'
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"Missing error handling"* ]]
+}
