@@ -426,6 +426,12 @@ else
         # Check only log bytes written during this attempt to avoid matching old entries.
         if tail -c "+$((log_pos_before + 1))" "$LOG_FILE" 2>/dev/null \
              | grep -qE "RESOURCE_EXHAUSTED|MODEL_CAPACITY" 2>/dev/null; then
+          # If REST fallback is configured, skip retry immediately — retrying a
+          # capacity-exhausted endpoint wastes the time budget REST needs.
+          if [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
+            echo "plan-review: $REVIEW_ENGINE capacity exhausted, skipping retry (REST fallback available)" >&2
+            break
+          fi
           retry_delay="${REVIEW_CAPACITY_DELAY:-25}"
           echo "plan-review: $REVIEW_ENGINE capacity exhausted, waiting ${retry_delay}s for recovery..." >&2
         else
@@ -463,7 +469,8 @@ else
       '{ model: $model, messages: [{ role: "system", content: $sys }, { role: "user", content: $prompt }], max_tokens: 4000, temperature: 0.1 }' \
       > "$REQ_FILE"
 
-    ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} curl -s \
+    REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-60}"
+    ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $REST_TIMEOUT} curl -s \
       -X POST "${REVIEW_API_URL}/v1/chat/completions" \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer ${REVIEW_API_KEY}" \
