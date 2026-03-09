@@ -21,6 +21,9 @@
 #   REVIEW_ENGINE=gemini         — review engine: "gemini" (default) or "claude"
 #   CLAUDE_MODEL=opus            — Claude engine model (default: opus)
 #   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3.1-pro-preview)
+#   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds, default 25 (needs timeout/gtimeout)
+#   REVIEW_RETRY_DELAY=N         — seconds between retries on non-capacity failure (default: 2)
+#   REVIEW_CAPACITY_DELAY=N      — seconds to wait when MODEL_CAPACITY_EXHAUSTED detected (default: 25)
 set -euo pipefail
 
 INPUT=$(cat)
@@ -336,6 +339,22 @@ else
     CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
   else
     GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"
+
+    # Isolated Gemini home: disable skills injection (prevents extra 10-30KB system prompt
+    # from ~/.agents/skills/ and ~/.gemini/skills/ from inflating token count and worsening
+    # MODEL_CAPACITY_EXHAUSTED). Auth files are symlinked from real ~/.gemini/ so credentials
+    # stay current without duplication. Created once, reused across invocations.
+    _HOOK_GEMINI="$HOME/.claude/.gemini-hook-home"
+    if [ ! -f "$_HOOK_GEMINI/.gemini/settings.json" ]; then
+      mkdir -p "$_HOOK_GEMINI/.gemini"
+      for _f in oauth_creds.json google_accounts.json installation_id \
+                 state.json trustedFolders.json projects.json; do
+        [ -e "$HOME/.gemini/$_f" ] && \
+          ln -sf "$HOME/.gemini/$_f" "$_HOOK_GEMINI/.gemini/$_f" || true
+      done
+      printf '{"selectedAuthType":"oauth-personal","skills":{"enabled":false}}' \
+        > "$_HOOK_GEMINI/.gemini/settings.json"
+    fi
   fi
 
   # Portable timeout: timeout (GNU/Homebrew) > gtimeout (coreutils) > none
@@ -345,7 +364,10 @@ else
   elif command -v gtimeout >/dev/null 2>&1; then
     TIMEOUT_CMD="gtimeout"
   fi
-  ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-45}"
+  # 25s default: Gemini CLI has internal retry that can burn 3-4 API calls in 45s,
+  # amplifying capacity exhaustion. 25s allows 1-2 internal retries and leaves
+  # sufficient budget for our outer retry + REVIEW_CAPACITY_DELAY within 120s limit.
+  ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-25}"
 
   # --- Engine invocation with retry (2 attempts: 1 initial + 1 retry) ---
   # Background + wait pattern: tracks ENGINE_PID so _cleanup can kill the engine
@@ -354,6 +376,8 @@ else
   REVIEW=""
   for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
     engine_exit=0
+    # Snapshot log position before call — used after failure to detect capacity-specific 429
+    log_pos_before=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
     if [ "$REVIEW_ENGINE" = "claude" ]; then
       # Strip Claude Code internal env vars to prevent recursive hook/plugin loading.
       # Fragile (depends on internal implementation), but necessary: user authenticates
@@ -374,7 +398,7 @@ else
       wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
       ENGINE_PID=""
     else
-      ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} gemini -m "$GEMINI_MODEL" \
+      GEMINI_CLI_HOME="$_HOOK_GEMINI" ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} gemini -m "$GEMINI_MODEL" \
         < "$PROMPT_FILE" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
       ENGINE_PID=$!
       wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
@@ -385,8 +409,19 @@ else
     if [ "$engine_exit" != "0" ]; then
       REVIEW=""
       if [ "$engine_attempt" -lt 2 ]; then
-        echo "plan-review: $REVIEW_ENGINE failed (attempt $engine_attempt/2, exit $engine_exit), retrying..." >&2
-        sleep "${REVIEW_RETRY_DELAY:-2}"
+        # Detect capacity-exhausted 429 (MODEL_CAPACITY_EXHAUSTED via cloudcode-pa.googleapis.com).
+        # These outages last minutes — the default 2s retry delay is useless;
+        # a longer wait gives the server time to recover.
+        # Check only log bytes written during this attempt to avoid matching old entries.
+        if tail -c "+$((log_pos_before + 1))" "$LOG_FILE" 2>/dev/null \
+             | grep -qE "RESOURCE_EXHAUSTED|MODEL_CAPACITY" 2>/dev/null; then
+          retry_delay="${REVIEW_CAPACITY_DELAY:-25}"
+          echo "plan-review: $REVIEW_ENGINE capacity exhausted, waiting ${retry_delay}s for recovery..." >&2
+        else
+          retry_delay="${REVIEW_RETRY_DELAY:-2}"
+          echo "plan-review: $REVIEW_ENGINE failed (attempt $engine_attempt/2, exit $engine_exit), retrying in ${retry_delay}s..." >&2
+        fi
+        sleep "$retry_delay"
       fi
       continue
     fi

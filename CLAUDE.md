@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.15 |
+| plan-review | 1.0.16 |
 
 ## 项目结构
 
@@ -61,7 +61,7 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_DRY_RUN` | `0` | `1` 跳过引擎调用 |
 | `REVIEW_MAX_ROUNDS` | `3` | 非 Critical 最大磋商轮次（CONCERNS 累计） |
 | `REVIEW_MAX_TOTAL_ROUNDS` | `20` | 全局绝对上限（含 REJECT 轮次），到达后硬拦截 |
-| `REVIEW_ENGINE_TIMEOUT` | `45` | 引擎调用超时秒数（需系统有 timeout/gtimeout） |
+| `REVIEW_ENGINE_TIMEOUT` | `25` | 引擎调用超时秒数（需系统有 timeout/gtimeout） |
 
 旧变量 `GEMINI_REVIEW_OFF`、`GEMINI_DRY_RUN`、`GEMINI_MAX_REVIEWS` 通过脚本内 fallback 继续生效。
 
@@ -133,7 +133,7 @@ APPROVE 不再静默放行——`allow` 决策的 `permissionDecisionReason` 在
 | `REVIEW_COUNTER_DIR` | `/tmp/claude-reviews` | counter 文件目录 |
 | `REVIEW_PLAN_DIR` | `$HOME/.claude/plans` | plan 文件 fallback 目录 |
 | `REVIEW_RETRY_DELAY` | `2` | 引擎重试间隔秒数 |
-| `REVIEW_ENGINE_TIMEOUT` | `45` | 引擎调用超时秒数 |
+| `REVIEW_ENGINE_TIMEOUT` | `25` | 引擎调用超时秒数 |
 
 生产环境不设置这些变量，脚本 fallback 到默认路径。测试通过注入临时目录实现完全隔离。
 
@@ -179,3 +179,15 @@ ENGINE_PID=""
 ```
 
 **效果**：框架 SIGTERM 触发 `_cleanup`，gemini 被立即 kill，不再有孤儿进程。
+
+### Gemini Skills 注入 + 429 Capacity 耗尽（v1.0.16）
+
+**根因一（Skills 注入）**：Gemini CLI 从 `~/.agents/skills/` 和 `~/.gemini/skills/` 加载 SKILL.md 文件作为额外系统 prompt。prompt 已达 15-30KB，skills 再注入 10-30KB，大幅增加 token 量，加重 MODEL_CAPACITY_EXHAUSTED 概率。
+
+**根因二（内部 retry 放大）**：Gemini CLI 遇到 429 会用 backoff 自动 retry 3-4 次。45s 超时窗口内可积累 4-5 次 CLI 内部重试，加上脚本层 2 次重试，总计 6-8 次 API calls 在 ~90s 内打到 capacity-limited 服务端。
+
+**修复一（隔离 Gemini home）**：在 `$HOME/.claude/.gemini-hook-home/` 创建持久化 home，settings.json 写 `{"selectedAuthType":"oauth-personal","skills":{"enabled":false}}`，auth 文件通过 symlink 指向真实 `~/.gemini/`（保持凭证自动同步）。调用前注入 `GEMINI_CLI_HOME="$_HOOK_GEMINI"`，无 skills 目录 → 零注入。
+
+**修复二（ENGINE_TIMEOUT 25s）**：默认值从 45 降为 25，将 CLI 内部 retry 机会从 3-4 次压缩到 1-2 次。全路径时序验证：attempt1(25s) + REVIEW_CAPACITY_DELAY(25s) + attempt2(25s) = 75s，在 120s hook timeout 内有 45s 安全余量。需要更慢响应的场景可用 `REVIEW_ENGINE_TIMEOUT=45` 覆盖。
+
+**已同步改动**：REVIEW_CAPACITY_DELAY 检测逻辑（检测新增日志字节中的 RESOURCE_EXHAUSTED|MODEL_CAPACITY，命中时等待 25s）亦在本版本随以上两项一起 commit。
