@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.14 |
+| plan-review | 1.0.15 |
 
 ## 项目结构
 
@@ -151,3 +151,31 @@ read -r TOOL_NAME SESSION_ID < <(...) || true
 行为语义：jq 失败时变量保持空字符串，脚本继续执行 → `log_entry` 正常写 ENTRY → tool-name guard 拦截 → `exit 0`。
 
 **新增测试**：`run_hook_raw_stdin()` 辅助函数（绕过 `${INPUT:-default}` fallback）+ 测试 #71-74 覆盖空/非法 stdin 场景。
+
+### 引擎进程残留管理 + 默认模型固定（v1.0.15）
+
+**问题一（进程残留）**：引擎调用用 command substitution `$(timeout ... gemini ...)` — bash 被 SIGTERM（框架 120s 超时）杀死后，`timeout + gemini` 子进程变成孤儿，最多再跑 45s（`timeout` 到期才 kill gemini）。
+
+**问题二（模型别名）**：脚本默认 `gemini-3-pro-preview`，Gemini CLI 内部将其解析为 `gemini-3.1-pro-preview`，但错误信息暴露实际 model ID，排查时产生歧义。改为显式指定 `gemini-3.1-pro-preview`。
+
+**修复（进程残留）**：引擎调用从 command substitution 改为 background + wait 模式，显式追踪 `ENGINE_PID`，扩展 trap 覆盖 EXIT/INT/TERM/HUP：
+
+```bash
+_cleanup() {
+  rm -f "$PROMPT_FILE" "${ENGINE_OUT:-}"
+  [ -z "${ENGINE_PID:-}" ] || kill "$ENGINE_PID" 2>/dev/null || true
+}
+trap '_cleanup' EXIT
+trap '_cleanup; exit 130' INT TERM HUP
+```
+
+引擎调用：
+```bash
+${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} gemini -m "$GEMINI_MODEL" \
+  < "$PROMPT_FILE" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
+ENGINE_PID=$!
+wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
+ENGINE_PID=""
+```
+
+**效果**：框架 SIGTERM 触发 `_cleanup`，gemini 被立即 kill，不再有孤儿进程。

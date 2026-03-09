@@ -20,7 +20,7 @@
 #   REVIEW_MAX_TOTAL_ROUNDS=N    — absolute max total rounds (incl. REJECT), default 20
 #   REVIEW_ENGINE=gemini         — review engine: "gemini" (default) or "claude"
 #   CLAUDE_MODEL=opus            — Claude engine model (default: opus)
-#   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3-pro-preview)
+#   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3.1-pro-preview)
 set -euo pipefail
 
 INPUT=$(cat)
@@ -270,8 +270,18 @@ else in your response without the tags.
 
 Use Chinese for the review output.'
 
+ENGINE_OUT=""
+ENGINE_PID=""
 PROMPT_FILE=$(mktemp)
-trap 'rm -f "$PROMPT_FILE"' EXIT
+# Cleanup: remove temp files and kill tracked engine subprocess.
+# Called on EXIT (normal), INT (Ctrl-C), TERM (framework hook timeout),
+# and HUP (terminal disconnect). Idempotent — safe to call multiple times.
+_cleanup() {
+  rm -f "$PROMPT_FILE" "${ENGINE_OUT:-}"
+  [ -z "${ENGINE_PID:-}" ] || kill "$ENGINE_PID" 2>/dev/null || true
+}
+trap '_cleanup' EXIT
+trap '_cleanup; exit 130' INT TERM HUP
 
 # Engine-specific prefix: Claude → system-prompt channel; Gemini → file prefix
 if [ "$REVIEW_ENGINE" = "claude" ]; then
@@ -325,7 +335,7 @@ else
   if [ "$REVIEW_ENGINE" = "claude" ]; then
     CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
   else
-    GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-pro-preview}"
+    GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"
   fi
 
   # Portable timeout: timeout (GNU/Homebrew) > gtimeout (coreutils) > none
@@ -338,8 +348,12 @@ else
   ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-45}"
 
   # --- Engine invocation with retry (2 attempts: 1 initial + 1 retry) ---
+  # Background + wait pattern: tracks ENGINE_PID so _cleanup can kill the engine
+  # process if the hook script itself is terminated (e.g. framework 120s timeout).
+  ENGINE_OUT=$(mktemp)
   REVIEW=""
   for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
+    engine_exit=0
     if [ "$REVIEW_ENGINE" = "claude" ]; then
       # Strip Claude Code internal env vars to prevent recursive hook/plugin loading.
       # Fragile (depends on internal implementation), but necessary: user authenticates
@@ -348,30 +362,33 @@ else
       # + --tools "" (no tool calls = no PreToolUse events).
       unset CLAUDECODE
       unset CLAUDE_CODE_ENTRYPOINT
-      REVIEW=$(PLAN_REVIEW_RUNNING=1 ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} claude -p \
+      PLAN_REVIEW_RUNNING=1 ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} claude -p \
         --model "$CLAUDE_MODEL" \
         --setting-sources local \
         --no-session-persistence \
         --tools "" \
         --disable-slash-commands \
         --system-prompt "$SYSTEM_PROMPT" \
-        < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
-        REVIEW=""
-        if [ "$engine_attempt" -lt 2 ]; then
-          echo "plan-review: claude -p failed (attempt $engine_attempt/2), retrying..." >&2
-          sleep "${REVIEW_RETRY_DELAY:-2}"
-        fi
-        continue
-      }
+        < "$PROMPT_FILE" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
+      ENGINE_PID=$!
+      wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
+      ENGINE_PID=""
     else
-      REVIEW=$(${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} gemini -m "$GEMINI_MODEL" < "$PROMPT_FILE" 2>>"$LOG_FILE") || {
-        REVIEW=""
-        if [ "$engine_attempt" -lt 2 ]; then
-          echo "plan-review: gemini failed (attempt $engine_attempt/2), retrying..." >&2
-          sleep "${REVIEW_RETRY_DELAY:-2}"
-        fi
-        continue
-      }
+      ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} gemini -m "$GEMINI_MODEL" \
+        < "$PROMPT_FILE" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
+      ENGINE_PID=$!
+      wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
+      ENGINE_PID=""
+    fi
+    REVIEW=$(cat "$ENGINE_OUT" 2>/dev/null || true)
+    : > "$ENGINE_OUT"
+    if [ "$engine_exit" != "0" ]; then
+      REVIEW=""
+      if [ "$engine_attempt" -lt 2 ]; then
+        echo "plan-review: $REVIEW_ENGINE failed (attempt $engine_attempt/2, exit $engine_exit), retrying..." >&2
+        sleep "${REVIEW_RETRY_DELAY:-2}"
+      fi
+      continue
     fi
 
     # Engine succeeded (exit 0) but returned empty → retry
