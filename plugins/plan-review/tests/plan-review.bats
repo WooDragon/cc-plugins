@@ -1367,3 +1367,78 @@ EOF
   run_hook
   assert_approve_json
 }
+
+# =============================================================================
+# REST Fallback Diagnostics (v1.0.21)
+# =============================================================================
+
+# 83. rest-result log contains http status field on success
+@test "rest-fallback: rest-result log contains http status field" {
+  create_failing_engine "gemini" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nLooks good."}}]}'
+  INPUT=$(build_input)
+
+  run_hook
+  assert_ack_approve_json
+  assert_log_contains "rest-result http=200"
+}
+
+# 84. ENGINE_OUT non-empty with API error body → rest-debug api_error logged
+@test "rest-fallback: api error body → rest-debug api_error logged" {
+  create_failing_engine "gemini" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  # Error response has no .choices → REVIEW empty; has .error.message → api_error branch
+  create_mock_curl '{"error":{"code":429,"message":"Rate limit exceeded"}}' "429"
+  INPUT=$(build_input)
+
+  run_hook
+  assert_approve_json  # fail-open: REST returned no valid review content
+  assert_log_contains "rest-result http=429"
+  assert_log_contains "rest-debug api_error=Rate limit exceeded"
+}
+
+# 85. ENGINE_OUT empty (connection failure) → no rest-debug logged
+@test "rest-fallback: connection failure (empty body) → no rest-debug logged" {
+  create_failing_engine "gemini" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_failing_curl 7  # exit 7 = connection refused; curl writes nothing to -o file
+  INPUT=$(build_input)
+
+  run_hook
+  assert_approve_json  # fail-open
+  assert_log_contains "rest-result http=000 raw_bytes=0"
+  # Empty body → [ -s ENGINE_OUT ] false → no rest-debug entry
+  local log_file="${REVIEW_LOG_DIR}/plan-review.log"
+  ! grep -q "rest-debug" "$log_file"
+}
+
+# 86. Non-JSON body with control chars → body_prefix branch strips control chars
+@test "rest-fallback: non-JSON body with control chars → body_prefix filtered in log" {
+  create_failing_engine "gemini" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  # Hand-write mock: outputs non-JSON binary content (no .error.message) + status "200"
+  cat > "${MOCK_BIN}/curl" << 'SCRIPT_EOF'
+#!/bin/bash
+out_file=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out_file="$2"; shift 2 ;;
+    *)  shift ;;
+  esac
+done
+[ -n "$out_file" ] && printf 'Hello\x01\x02World\x03' > "$out_file"
+printf '200'
+SCRIPT_EOF
+  chmod +x "${MOCK_BIN}/curl"
+  INPUT=$(build_input)
+
+  run_hook
+  assert_approve_json  # fail-open: no valid review content
+  # Control chars \x01\x02\x03 must be stripped; printable text preserved
+  assert_log_contains "rest-debug body_prefix=HelloWorld"
+}

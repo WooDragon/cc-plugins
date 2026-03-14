@@ -276,6 +276,7 @@ else in your response without the tags.
 Use Chinese for the review output.'
 
 ENGINE_OUT=""
+ENGINE_STATUS=""
 ENGINE_PID=""
 REQ_FILE=""
 PROMPT_FILE=$(mktemp)
@@ -283,7 +284,7 @@ PROMPT_FILE=$(mktemp)
 # Called on EXIT (normal), INT (Ctrl-C), TERM (framework hook timeout),
 # and HUP (terminal disconnect). Idempotent — safe to call multiple times.
 _cleanup() {
-  rm -f "$PROMPT_FILE" "${ENGINE_OUT:-}" "${REQ_FILE:-}"
+  rm -f "$PROMPT_FILE" "${ENGINE_OUT:-}" "${ENGINE_STATUS:-}" "${REQ_FILE:-}"
   [ -z "${ENGINE_PID:-}" ] || kill "$ENGINE_PID" 2>/dev/null || true
 }
 trap '_cleanup' EXIT
@@ -384,6 +385,7 @@ else
   # Background + wait pattern: tracks ENGINE_PID so _cleanup can kill the engine
   # process if the hook script itself is terminated (e.g. framework 120s timeout).
   ENGINE_OUT=$(mktemp)
+  ENGINE_STATUS="${ENGINE_OUT}.status"
   REVIEW=""
   for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
     engine_exit=0
@@ -472,19 +474,45 @@ else
       > "$REQ_FILE"
 
     REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-60}"
-    ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $REST_TIMEOUT} curl -s \
+    # -sS: -s suppresses progress meter, -S re-enables error messages (connection-level errors
+    # like "Failed to connect" would be silenced by -s alone, making raw_bytes=0 undiagnosable).
+    # -w "%{http_code}": write HTTP status to stdout (redirected to ENGINE_STATUS); response
+    # body goes to ENGINE_OUT via -o. Read ENGINE_STATUS only AFTER wait completes.
+    ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $REST_TIMEOUT} curl -sS \
       -X POST "${REVIEW_API_URL}/v1/chat/completions" \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer ${REVIEW_API_KEY}" \
-      -d @"$REQ_FILE" -o "$ENGINE_OUT" 2>>"$LOG_FILE" &
+      -d @"$REQ_FILE" \
+      -o "$ENGINE_OUT" \
+      -w "%{http_code}" \
+      2>>"$LOG_FILE" > "$ENGINE_STATUS" &
     ENGINE_PID=$!
     wait "$ENGINE_PID" 2>/dev/null || true
     ENGINE_PID=""
     rm -f "$REQ_FILE"; REQ_FILE=""
 
-    rest_raw=$(cat "$ENGINE_OUT" 2>/dev/null || true)
-    REVIEW=$(printf '%s' "$rest_raw" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
-    log_decision "rest-result raw_bytes=$(printf '%s' "$rest_raw" | wc -c | tr -d ' ') review_bytes=$(printf '%s' "$REVIEW" | wc -c | tr -d ' ')"
+    # Read status after wait — shell creates ENGINE_STATUS on redirect, content written by curl.
+    # Explicit empty check: command substitution strips trailing newlines, but file may be empty
+    # (connection-level failure before HTTP handshake) → use "000" as sentinel for no-response.
+    rest_http_status=$(cat "$ENGINE_STATUS" 2>/dev/null)
+    [ -z "$rest_http_status" ] && rest_http_status="000"
+
+    REVIEW=$(jq -r '.choices[0].message.content // empty' "$ENGINE_OUT" 2>/dev/null || true)
+    raw_bytes=$(wc -c < "$ENGINE_OUT" | tr -d ' ')
+    review_bytes=$(printf '%s' "$REVIEW" | wc -c | tr -d ' ')
+    log_decision "rest-result http=$rest_http_status raw_bytes=$raw_bytes review_bytes=$review_bytes"
+
+    # ENGINE_OUT non-empty but REVIEW empty: log error body for diagnosis.
+    # [ -s ] checks file is non-empty (avoids false positive on connection failure).
+    if [ -z "$REVIEW" ] && [ -s "$ENGINE_OUT" ]; then
+      rest_error=$(jq -r '.error.message // empty' "$ENGINE_OUT" 2>/dev/null || true)
+      if [ -n "$rest_error" ]; then
+        log_decision "rest-debug api_error=$(printf '%s' "$rest_error" | head -c 200)"
+      else
+        # tr -d '\000-\037': strip control characters to keep log single-line safe
+        log_decision "rest-debug body_prefix=$(head -c 200 "$ENGINE_OUT" | tr -d '\000-\037')"
+      fi
+    fi
     : > "$ENGINE_OUT"
     [ -z "$REVIEW" ] || echo "plan-review: REST API fallback succeeded." >&2
   fi

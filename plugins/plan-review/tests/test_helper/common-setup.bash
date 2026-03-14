@@ -148,11 +148,14 @@ MOCK_EOF
   chmod +x "${MOCK_BIN}/${name}"
 }
 
-# create_mock_curl <response_body>
-#   Creates an executable mock curl at MOCK_BIN/curl that writes <response_body>
-#   to the file specified by -o flag (simulating curl -o behavior).
+# create_mock_curl <response_body> [http_status]
+#   Creates an executable mock curl at MOCK_BIN/curl that:
+#   - writes <response_body> to the file specified by -o flag (curl -o behavior)
+#   - prints http_status to stdout (simulating curl -w "%{http_code}" behavior)
+#   http_status defaults to "200".
 create_mock_curl() {
   local body="$1"
+  local status="${2:-200}"
   cat > "${MOCK_BIN}/curl" << MOCK_EOF
 #!/bin/bash
 # Parse -o flag to find output file
@@ -168,6 +171,8 @@ if [ -n "\$out_file" ]; then
 ${body}
 BODY
 fi
+# Simulate curl -w "%{http_code}": write status to stdout (no trailing newline)
+printf '%s' "${status}"
 MOCK_EOF
   chmod +x "${MOCK_BIN}/curl"
 }
