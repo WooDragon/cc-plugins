@@ -376,10 +376,17 @@ else
   elif command -v gtimeout >/dev/null 2>&1; then
     TIMEOUT_CMD="gtimeout"
   fi
-  # 25s default: Gemini CLI has internal retry that can burn 3-4 API calls in 45s,
-  # amplifying capacity exhaustion. 25s allows 1-2 internal retries and leaves
-  # sufficient budget for our outer retry + REVIEW_CAPACITY_DELAY within 120s limit.
-  ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-25}"
+  # Engine-specific timeout defaults:
+  # - Gemini: 25s caps internal retry amplification on 429 capacity exhaustion
+  #   (CLI retries 3-4× internally; 25s allows 1-2 retries within 120s budget).
+  # - Claude: 90s needed for thorough review generation; claude -p has no internal
+  #   retry amplification, so a single long timeout is safe. Single attempt fits
+  #   within the 120s framework hook limit with margin.
+  if [ "$REVIEW_ENGINE" = "claude" ]; then
+    ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-90}"
+  else
+    ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-25}"
+  fi
 
   # --- Engine invocation with retry (2 attempts: 1 initial + 1 retry) ---
   # Background + wait pattern: tracks ENGINE_PID so _cleanup can kill the engine
@@ -473,7 +480,7 @@ else
       '{ model: $model, messages: [{ role: "system", content: $sys }, { role: "user", content: $prompt }], max_tokens: 16000, temperature: 0.1 }' \
       > "$REQ_FILE"
 
-    REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-60}"
+    REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-90}"
     # -sS: -s suppresses progress meter, -S re-enables error messages (connection-level errors
     # like "Failed to connect" would be silenced by -s alone, making raw_bytes=0 undiagnosable).
     # -w "%{http_code}": write HTTP status to stdout (redirected to ENGINE_STATUS); response

@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.21 |
+| plan-review | 1.0.22 |
 
 ## 项目结构
 
@@ -61,10 +61,10 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_DRY_RUN` | `0` | `1` 跳过引擎调用 |
 | `REVIEW_MAX_ROUNDS` | `3` | 非 Critical 最大磋商轮次（CONCERNS 累计） |
 | `REVIEW_MAX_TOTAL_ROUNDS` | `20` | 全局绝对上限（含 REJECT 轮次），到达后硬拦截 |
-| `REVIEW_ENGINE_TIMEOUT` | `25` | 引擎调用超时秒数（需系统有 timeout/gtimeout） |
+| `REVIEW_ENGINE_TIMEOUT` | gemini=`25` / claude=`90` | 引擎调用超时秒数（需系统有 timeout/gtimeout）；按引擎分流：Gemini 25s 抑制内部 retry 放大，Claude 90s 保证完整 review 输出 |
 | `REVIEW_API_URL` | _(空)_ | REST API 降级 base URL（OpenAI 兼容格式，如 `https://proxy.example.com`） |
 | `REVIEW_API_KEY` | _(空)_ | REST API 降级 auth key（Bearer token） |
-| `REVIEW_REST_TIMEOUT` | `60` | REST fallback curl 超时秒数（独立于 `REVIEW_ENGINE_TIMEOUT`） |
+| `REVIEW_REST_TIMEOUT` | `90` | REST fallback curl 超时秒数（独立于 `REVIEW_ENGINE_TIMEOUT`） |
 | `REVIEW_CAPACITY_DELAY` | `25` | 检测到 MODEL_CAPACITY_EXHAUSTED 后等待秒数（REST 配置时跳过此延迟直接 break） |
 
 敏感变量（`REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
