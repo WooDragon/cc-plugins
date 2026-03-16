@@ -28,6 +28,7 @@
 #   REVIEW_CAPACITY_DELAY=N      — seconds to wait when MODEL_CAPACITY_EXHAUSTED detected (default: 25)
 #   REVIEW_API_URL=<url>         — REST API fallback base URL (OpenAI-compatible, e.g. https://proxy.example.com)
 #   REVIEW_API_KEY=<key>         — REST API fallback auth key (Bearer token)
+#   REVIEW_ENGINE_DEGRADE_TTL=N  — seconds Gemini stays in degraded state after capacity exhaustion (default: 3600)
 set -euo pipefail
 
 INPUT=$(cat)
@@ -129,6 +130,8 @@ COUNTER_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
 mkdir -p "$COUNTER_DIR"
 COUNTER_FILE="$COUNTER_DIR/.review-count-${SESSION_ID}"
 APPROVE_MARKER="$COUNTER_DIR/.review-approved-${SESSION_ID}"
+# Gemini degraded state file (global, no session suffix — persists across hooks)
+DEGRADE_FILE="$COUNTER_DIR/.gemini-degraded"
 
 # --- Read counter (new format ATTEMPT:TOTAL, backward-compat with old single-number) ---
 IFS=: read -r ATTEMPT TOTAL_ROUNDS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0")"
@@ -390,6 +393,28 @@ else
     ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-25}"
   fi
 
+  # --- Gemini degraded-state check ---
+  # If Gemini was capacity-exhausted recently and REST is configured,
+  # skip CLI entirely — gives REST the full ~115s budget.
+  REVIEW_ENGINE_DEGRADE_TTL="${REVIEW_ENGINE_DEGRADE_TTL:-3600}"
+  _gemini_skip_cli=0
+  _fail_reason=""
+  if [ "$REVIEW_ENGINE" = "gemini" ] && [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
+    if [ -f "$DEGRADE_FILE" ]; then
+      degrade_ts=$(cat "$DEGRADE_FILE" 2>/dev/null)
+      [[ "$degrade_ts" =~ ^[0-9]+$ ]] || degrade_ts=0
+      now_ts=$(date +%s)
+      degrade_age=$(( now_ts - degrade_ts ))
+      if (( degrade_age < REVIEW_ENGINE_DEGRADE_TTL )); then
+        remaining_degrade=$(( REVIEW_ENGINE_DEGRADE_TTL - degrade_age ))
+        echo "plan-review: gemini degraded state active (${degrade_age}s ago, TTL=${REVIEW_ENGINE_DEGRADE_TTL}s, ${remaining_degrade}s remaining), skipping CLI → REST fallback" >&2
+        log_decision "gemini-degraded skip-cli remaining_degrade=${remaining_degrade}s"
+        _gemini_skip_cli=1
+        _fail_reason="Gemini: degraded state (${degrade_age}s ago, expires in ${remaining_degrade}s)"
+      fi
+    fi
+  fi
+
   # --- Engine invocation with retry (2 attempts: 1 initial + 1 retry) ---
   # Background + wait pattern: tracks ENGINE_PID so _cleanup can kill the engine
   # process if the hook script itself is terminated (e.g. framework 120s timeout).
@@ -398,6 +423,11 @@ else
   REVIEW=""
   HOOK_BUDGET="${REVIEW_HOOK_BUDGET:-115}"
   for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
+    # Degraded-state skip: jump out of CLI retry immediately on first iteration.
+    if (( engine_attempt == 1 )) && [ "$_gemini_skip_cli" = "1" ]; then
+      break
+    fi
+
     # Time-budget guard: on retry, check remaining wall-clock time can fit
     # a full ENGINE_TIMEOUT. Prevents framework 120s SIGTERM from killing
     # the script mid-retry, making REST fallback unreachable.
@@ -442,6 +472,7 @@ else
     : > "$ENGINE_OUT"
     if [ "$engine_exit" != "0" ]; then
       REVIEW=""
+      _fail_reason="${REVIEW_ENGINE}: exit ${engine_exit}"
       if [ "$engine_attempt" -lt 2 ]; then
         # Detect capacity-exhausted 429 (MODEL_CAPACITY_EXHAUSTED via cloudcode-pa.googleapis.com).
         # These outages last minutes — the default 2s retry delay is useless;
@@ -449,9 +480,15 @@ else
         # Check only log bytes written during this attempt to avoid matching old entries.
         if tail -c "+$((log_pos_before + 1))" "$LOG_FILE" 2>/dev/null \
              | grep -qE "RESOURCE_EXHAUSTED|MODEL_CAPACITY" 2>/dev/null; then
+          _fail_reason="${REVIEW_ENGINE}: capacity exhausted (MODEL_CAPACITY_EXHAUSTED)"
           # If REST fallback is configured, skip retry immediately — retrying a
           # capacity-exhausted endpoint wastes the time budget REST needs.
           if [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
+            # Persist degraded state: subsequent hooks skip CLI for TTL seconds.
+            if [ "$REVIEW_ENGINE" = "gemini" ]; then
+              printf '%s' "$(date +%s)" > "$DEGRADE_FILE" 2>/dev/null || true
+              log_decision "gemini-degrade-write ts=$(date +%s)"
+            fi
             echo "plan-review: $REVIEW_ENGINE capacity exhausted, skipping retry (REST fallback available)" >&2
             log_decision "rest-skip=capacity-fast-break engine=$REVIEW_ENGINE attempt=$engine_attempt"
             break
@@ -528,6 +565,9 @@ else
     raw_bytes=$(wc -c < "$ENGINE_OUT" | tr -d ' ')
     review_bytes=$(printf '%s' "$REVIEW" | wc -c | tr -d ' ')
     log_decision "rest-result http=$rest_http_status raw_bytes=$raw_bytes review_bytes=$review_bytes"
+    if [ -z "$REVIEW" ]; then
+      _fail_reason="${_fail_reason:+${_fail_reason}; }REST: http=${rest_http_status} raw_bytes=${raw_bytes}"
+    fi
 
     # ENGINE_OUT non-empty but REVIEW empty: log error body for diagnosis.
     # [ -s ] checks file is non-empty (avoids false positive on connection failure).
@@ -544,10 +584,23 @@ else
     [ -z "$REVIEW" ] || echo "plan-review: REST API fallback succeeded." >&2
   fi
 
-  # All attempts exhausted → fail-open with visible WARNING
+  # All attempts exhausted
   if [ -z "$REVIEW" ]; then
-    log_decision "decision=allow reason=engine-exhausted engine=$REVIEW_ENGINE"
-    allow_with_reason "[WARNING] 引擎调用失败（已重试），审阅跳过。详见 $LOG_FILE"
+    if [ -n "$_fail_reason" ]; then
+      # Engines were tried but all failed — deny with explanation so LLM can retry.
+      deny_msg="plan-review: all review engines failed — ${_fail_reason}. Call ExitPlanMode again to retry."
+      log_decision "decision=deny reason=engines-failed detail=${_fail_reason}"
+      echo "$deny_msg" >&2
+      DENY_JSON=$(printf '%s' "$deny_msg" | jq -Rs .)
+      cat << EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${DENY_JSON}}}
+EOF
+    else
+      # No engines attempted (dry-run exits earlier; this path = unconfigured engine)
+      log_decision "decision=allow reason=engine-not-attempted"
+      allow_with_reason "[WARNING] 引擎调用失败（已重试），审阅跳过。详见 $LOG_FILE"
+    fi
+    exit 0
   fi
 fi
 

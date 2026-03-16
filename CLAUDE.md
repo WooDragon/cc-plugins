@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.23 |
+| plan-review | 1.0.24 |
 
 ## 项目结构
 
@@ -67,6 +67,7 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_REST_TIMEOUT` | `90` | REST fallback curl 超时秒数（独立于 `REVIEW_ENGINE_TIMEOUT`） |
 | `REVIEW_HOOK_BUDGET` | `115` | hook 总时间预算秒数（框架 120s 限制 - 5s 余量），控制 retry loop 和 REST timeout 钳制 |
 | `REVIEW_CAPACITY_DELAY` | `25` | 检测到 MODEL_CAPACITY_EXHAUSTED 后等待秒数（REST 配置时跳过此延迟直接 break） |
+| `REVIEW_ENGINE_DEGRADE_TTL` | `3600` | Gemini 降级状态 TTL 秒数；capacity exhaustion 后后续 hook 在 TTL 内直接跳过 CLI 走 REST |
 
 敏感变量（`REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
 
@@ -248,3 +249,25 @@ ENGINE_PID=""
 **时序验证**（ENGINE_TIMEOUT=70s 场景）：A1: 70s + 2s → budget 43<70 → break → REST(min(90,40)=40s) → 总耗时 ~115s，框架限制内。
 
 **新增测试**（4 个）：budget exhausted + REST → skip retry → REST fires；budget sufficient → normal retry；budget exhausted + no REST → fail-open；REST timeout clamped to remaining budget。全套 90/90 pass。
+
+### Gemini 降级状态持久化 + 失败明确拒绝（v1.0.24）
+
+**问题一（时间窗口不足）**：`REVIEW_ENGINE_TIMEOUT=70` 时，Gemini CLI 消耗 70s 才触发 capacity-fast-break，剩余预算 45s，REST 被钳制到 42s，而服务端实际耗时 47s → curl 被杀 → http=000 fail-open。
+
+**问题二（静默 fail-open 无法重试）**：所有引擎都失败时，旧实现静默 allow 并打印 `[WARNING]`，Claude 认为审阅已跳过并继续。实际上引擎只是暂时不可用，Claude 应能选择重试。
+
+**修复一（降级状态持久化）**：
+
+- 降级文件：`$COUNTER_DIR/.gemini-degraded`（无 session suffix，跨 hook 持久）
+- 写入时机：capacity-fast-break 触发时（Gemini + REST 均配置）
+- 跳过条件：下次 hook 进入时，`_gemini_skip_cli=1`，retry loop 第 1 次迭代立即 break
+- TTL：`REVIEW_ENGINE_DEGRADE_TTL`（默认 3600s）；过期后降级无效，正常走 Gemini
+- 效果：REST 获得完整 ~115s 预算，而不是 capacity 等待耗尽后的残余 45s
+
+**修复二（fail-deny 替代 fail-open）**：
+
+- `_fail_reason` 变量追踪所有引擎失败原因（CLI 失败 / capacity exhausted / REST http 状态）
+- 所有引擎失败 + `_fail_reason` 非空 → `deny` 并推送失败原因给 Claude，Claude 可告知用户并重试
+- `_fail_reason` 为空（理论路径，引擎压根未被调用）→ 保留旧 `allow_with_reason("[WARNING]...")` 兜底
+
+**新增测试**（7 个，#91-97）：fresh degraded → skip CLI + REST used；expired degraded → Gemini called；fresh degraded + no REST → Gemini called；capacity-fast-break → degraded file written；regular failure → no degrade；capacity + REST fails → deny with reason；degraded + REST fails → deny with combined reason。全套 97/97 pass。

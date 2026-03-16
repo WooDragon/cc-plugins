@@ -189,17 +189,17 @@ teardown() {
   [[ "$reason" == *"not found"* ]]
 }
 
-# 13. Engine call fails (non-zero exit) — retried then allow JSON with WARNING
-@test "engine: call fails → retry then allow JSON with WARNING" {
+# 13. Engine call fails (non-zero exit) — retried then deny with failure reason
+@test "engine: call fails → retry then deny with failure reason" {
   create_failing_engine "gemini" 1
   INPUT=$(build_input)
   run_hook
 
-  assert_approve_json
+  assert_deny_json
   [[ "$HOOK_STDERR" == *"retrying"* ]]
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"[WARNING]"* ]]
+  [[ "$reason" == *"all review engines failed"* ]]
 }
 
 # 14. Engine returns empty response — retried then allow JSON with WARNING
@@ -457,17 +457,17 @@ Issues found on retry." "empty"
   [[ "$HOOK_STDERR" != *"[WARNING]"* ]]
 }
 
-# 31. Both attempts fail → fail-open with explicit WARNING
-@test "retry: both attempts fail → fail-open with WARNING" {
+# 31. Both attempts fail → fail-deny with failure reason
+@test "retry: both attempts fail → fail-deny with failure reason" {
   export REVIEW_ENGINE="claude"
   create_failing_engine "claude" 1
   INPUT=$(build_input)
   run_hook
 
-  assert_approve_json
+  assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"[WARNING]"* ]]
+  [[ "$reason" == *"all review engines failed"* ]]
 }
 
 # =============================================================================
@@ -504,17 +504,17 @@ LGTM after revision."
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
 }
 
-# 27. Engine failure does not touch counter (fail-open, counter unchanged)
+# 27. Engine failure does not touch counter (fail-deny, counter unchanged)
 @test "flow: engine failure does not modify counter" {
   INPUT=$(build_input)
 
   # No counter file exists initially
   [ "$(get_counter_value)" -eq 0 ]
 
-  # Engine fails → fail-open, counter must remain untouched
+  # Engine fails → fail-deny, counter must remain untouched
   create_failing_engine "gemini" 1
   run_hook
-  assert_approve_json
+  assert_deny_json
 
   # Counter file must NOT exist (engine failure should not create one)
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
@@ -534,10 +534,10 @@ Issues found."
   [ "$(get_counter_value)" -eq 1 ]
   [ "$(get_total_rounds)" -eq 1 ]
 
-  # Round 2: engine crashes → fail-open, counter must stay at 1:1
+  # Round 2: engine crashes → fail-deny, counter must stay at 1:1
   create_failing_engine "gemini" 1
   run_hook
-  assert_approve_json
+  assert_deny_json
   [ "$(get_counter_value)" -eq 1 ]
   [ "$(get_total_rounds)" -eq 1 ]
 
@@ -909,16 +909,16 @@ LGTM."
   [[ "$reason" == *"[WARNING]"* ]]
 }
 
-# 47. Engine exhausted → allow JSON with WARNING reason
-@test "skip: engine exhausted → allow JSON with WARNING reason" {
+# 47. Engine exhausted → deny JSON with failure reason (fail-deny, not fail-open)
+@test "skip: engine exhausted → deny JSON with failure reason" {
   create_failing_engine "gemini" 1
   INPUT=$(build_input)
   run_hook
 
-  assert_approve_json
+  assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"[WARNING]"* ]]
+  [[ "$reason" == *"all review engines failed"* ]]
 }
 
 # 48. jq missing → allow JSON with WARNING (hardcoded)
@@ -1170,17 +1170,17 @@ LGTM."
 # Engine Timeout (v1.0.13)
 # =============================================================================
 
-# 69. Engine timeout (exit 124) triggers fail-open via existing retry logic
-@test "timeout: engine timeout triggers fail-open" {
-  # exit 124 = timeout's exit code; both attempts timeout → fail-open
+# 69. Engine timeout (exit 124) triggers fail-deny via existing retry logic
+@test "timeout: engine timeout triggers fail-deny" {
+  # exit 124 = timeout's exit code; both attempts timeout → fail-deny (engines were tried)
   create_failing_engine "gemini" 124
   INPUT=$(build_input)
   run_hook
 
-  assert_approve_json
+  assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"[WARNING]"* ]]
+  [[ "$reason" == *"all review engines failed"* ]]
 }
 
 # 70. Custom REVIEW_ENGINE_TIMEOUT does not break normal fast responses
@@ -1247,21 +1247,21 @@ All good."
   assert_approve_json
 }
 
-# 76. CLI fails + API not configured → fail-open (original behavior)
-@test "rest-fallback: CLI fails + API not configured → fail-open" {
+# 76. CLI fails + API not configured → fail-deny (engines tried, all failed)
+@test "rest-fallback: CLI fails + API not configured → fail-deny" {
   create_failing_engine "gemini" 1
   # REVIEW_API_URL and REVIEW_API_KEY unset by common_setup
   INPUT=$(build_input)
   run_hook
 
-  assert_approve_json
+  assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"[WARNING]"* ]]
+  [[ "$reason" == *"all review engines failed"* ]]
 }
 
-# 77. CLI fails + REST also fails → fail-open
-@test "rest-fallback: CLI fails + REST also fails → fail-open" {
+# 77. CLI fails + REST also fails → fail-deny with combined reason
+@test "rest-fallback: CLI fails + REST also fails → fail-deny with reason" {
   create_failing_engine "gemini" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
@@ -1269,10 +1269,10 @@ All good."
   INPUT=$(build_input)
   run_hook
 
-  assert_approve_json
+  assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"[WARNING]"* ]]
+  [[ "$reason" == *"all review engines failed"* ]]
 }
 
 # 78. CLI succeeds → REST not called
@@ -1291,8 +1291,8 @@ All good from CLI."
   [[ "$HOOK_STDERR" != *"REST API fallback"* ]]
 }
 
-# 79. CLI fails + curl not found → fail-open
-@test "rest-fallback: curl not found → fail-open" {
+# 79. CLI fails + curl not found → fail-deny (REST attempted but failed)
+@test "rest-fallback: curl not found → fail-deny" {
   create_failing_engine "gemini" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
@@ -1306,10 +1306,10 @@ EOF
   INPUT=$(build_input)
   run_hook
 
-  assert_approve_json
+  assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"[WARNING]"* ]]
+  [[ "$reason" == *"all review engines failed"* ]]
 }
 
 # 80. REST response parsing extracts choices[0].message.content
@@ -1395,7 +1395,7 @@ EOF
   INPUT=$(build_input)
 
   run_hook
-  assert_approve_json  # fail-open: REST returned no valid review content
+  assert_deny_json  # fail-deny: engines tried but all failed (CLI + REST)
   assert_log_contains "rest-result http=429"
   assert_log_contains "rest-debug api_error=Rate limit exceeded"
 }
@@ -1409,7 +1409,7 @@ EOF
   INPUT=$(build_input)
 
   run_hook
-  assert_approve_json  # fail-open
+  assert_deny_json  # fail-deny: engines tried but all failed (CLI + REST)
   assert_log_contains "rest-result http=000 raw_bytes=0"
   # Empty body → [ -s ENGINE_OUT ] false → no rest-debug entry
   local log_file="${REVIEW_LOG_DIR}/plan-review.log"
@@ -1438,7 +1438,7 @@ SCRIPT_EOF
   INPUT=$(build_input)
 
   run_hook
-  assert_approve_json  # fail-open: no valid review content
+  assert_deny_json  # fail-deny: engines tried but all failed (CLI + REST)
   # Control chars \x01\x02\x03 must be stripped; printable text preserved
   assert_log_contains "rest-debug body_prefix=HelloWorld"
 }
@@ -1488,8 +1488,8 @@ All good on retry."
   assert_approve_json
 }
 
-# 89. Budget exhausted + no REST → break retry → fail-open
-@test "budget-guard: budget exhausted + no REST → fail-open" {
+# 89. Budget exhausted + no REST → break retry → fail-deny (engine was tried)
+@test "budget-guard: budget exhausted + no REST → fail-deny" {
   export REVIEW_HOOK_BUDGET=1
   create_flaky_engine "gemini" "<verdict>APPROVE</verdict>
 Would succeed on retry."
@@ -1498,12 +1498,12 @@ Would succeed on retry."
 
   run_hook
 
-  # Budget prevents retry, no REST → fail-open
-  assert_approve_json
+  # Budget prevents retry, no REST → fail-deny (engine was tried on attempt 1)
+  assert_deny_json
   [[ "$HOOK_STDERR" == *"time budget exhausted"* ]]
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"[WARNING]"* ]]
+  [[ "$reason" == *"all review engines failed"* ]]
 }
 
 # 90. REST timeout clamped to remaining budget
@@ -1543,4 +1543,131 @@ SCRIPT_EOF
   # ack-round → allow
   run_hook
   assert_approve_json
+}
+
+# =============================================================================
+# Gemini Degraded-State Persistence (v1.0.24)
+# =============================================================================
+
+# 91. Fresh degraded file + REST configured → skip CLI entirely, REST used
+@test "degrade: fresh degraded file + REST configured → skip CLI, REST used" {
+  create_degraded_file 0  # fresh timestamp
+  # Gemini mock returns CONCERNS — if called, result would be deny from CONCERNS, not ack-approve
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+[Major] This should not be seen."
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nREST approved."}}]}'
+  INPUT=$(build_input)
+
+  # Degraded: CLI skipped → REST fires → APPROVE → ack-deny
+  run_hook
+  assert_ack_approve_json
+  assert_log_contains "gemini-degraded skip-cli"
+  [[ "$HOOK_STDERR" == *"gemini degraded state active"* ]]
+  [[ "$HOOK_STDERR" == *"REST API fallback succeeded"* ]]
+
+  # ack-round → allow
+  run_hook
+  assert_approve_json
+}
+
+# 92. Expired degraded file (age > TTL) → normal Gemini invocation
+@test "degrade: expired degraded file → normal Gemini invocation" {
+  # Use tiny TTL (1s) and a 5s-old file → expired
+  export REVIEW_ENGINE_DEGRADE_TTL=1
+  create_degraded_file 5
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+LGTM."
+  INPUT=$(build_input)
+
+  run_hook_to_completion
+  assert_approve_json
+  # Degraded skip must NOT appear in log — Gemini was called normally
+  local log_file="${REVIEW_LOG_DIR}/plan-review.log"
+  ! grep -q "gemini-degraded skip-cli" "$log_file"
+}
+
+# 93. Fresh degraded file + REST NOT configured → degraded check skipped, Gemini called
+@test "degrade: fresh degraded file + REST not configured → Gemini called normally" {
+  create_degraded_file 0  # fresh, but REST not configured
+  # REVIEW_API_URL/REVIEW_API_KEY unset by common_setup — degraded check requires both
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+LGTM from Gemini."
+  INPUT=$(build_input)
+
+  run_hook_to_completion
+  assert_approve_json
+  # No degraded skip in log — REST not configured so check was bypassed
+  local log_file="${REVIEW_LOG_DIR}/plan-review.log"
+  ! grep -q "gemini-degraded skip-cli" "$log_file"
+}
+
+# 94. Capacity-fast-break triggers → degraded file written
+@test "degrade: capacity-fast-break → degraded file written" {
+  create_capacity_exhausted_engine "gemini"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nREST approved."}}]}'
+  INPUT=$(build_input)
+
+  run_hook
+  assert_ack_approve_json
+
+  # Degraded file must have been written
+  assert_degraded_file_written
+  assert_log_contains "gemini-degrade-write"
+
+  # ack-round → allow
+  run_hook
+  assert_approve_json
+}
+
+# 95. Regular failure (exit 1, non-capacity) → degraded file NOT written
+@test "degrade: regular failure (exit 1, non-capacity) → no degraded file written" {
+  create_failing_engine "gemini" 1
+  # No REST configured — regular failure path, not capacity path
+  INPUT=$(build_input)
+
+  run_hook
+  assert_deny_json  # fail-deny (engine tried but failed)
+
+  # Degraded file must NOT have been written (only capacity failures degrade)
+  [ ! -f "${REVIEW_COUNTER_DIR}/.gemini-degraded" ]
+  local log_file="${REVIEW_LOG_DIR}/plan-review.log"
+  ! grep -q "gemini-degrade-write" "$log_file"
+}
+
+# 96. Gemini capacity exhausted + REST fails → deny with combined failure reason
+@test "degrade: capacity + REST fails → deny with failure reason" {
+  create_capacity_exhausted_engine "gemini"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_failing_curl 1
+  INPUT=$(build_input)
+
+  run_hook
+  assert_deny_json
+  [[ "$HOOK_STDERR" == *"all review engines failed"* ]]
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"all review engines failed"* ]]
+  [[ "$reason" == *"capacity exhausted"* ]]
+}
+
+# 97. Degraded state active + REST fails → deny with degraded reason and REST info
+@test "degrade: degraded state + REST fails → deny with degraded + REST reason" {
+  create_degraded_file 0  # fresh
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_failing_curl 7  # connection refused
+  INPUT=$(build_input)
+
+  run_hook
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"all review engines failed"* ]]
+  [[ "$reason" == *"degraded state"* ]]
+  [[ "$reason" == *"REST: http="* ]]
 }

@@ -56,6 +56,12 @@ common_setup() {
 
   # Prevent hook budget override from leaking in
   unset REVIEW_HOOK_BUDGET
+
+  # Prevent degraded state TTL override from leaking in
+  unset REVIEW_ENGINE_DEGRADE_TTL
+
+  # Remove any residual degraded state file from previous tests
+  rm -f "${REVIEW_COUNTER_DIR}/.gemini-degraded"
 }
 
 common_teardown() {
@@ -404,6 +410,25 @@ run_hook_to_completion() {
     ACK_DENY_STDOUT="$HOOK_STDOUT"
     run_hook
   fi
+}
+
+# --- Degraded State Helpers ---
+
+# create_degraded_file [age_seconds]
+#   Creates .gemini-degraded with a timestamp age_seconds in the past (default=0=fresh).
+create_degraded_file() {
+  local age="${1:-0}"
+  local ts=$(( $(date +%s) - age ))
+  printf '%s' "$ts" > "${REVIEW_COUNTER_DIR}/.gemini-degraded"
+}
+
+# assert_degraded_file_written
+#   Verifies .gemini-degraded exists and contains a numeric timestamp.
+assert_degraded_file_written() {
+  local f="${REVIEW_COUNTER_DIR}/.gemini-degraded"
+  [ -f "$f" ] || { echo "degraded file missing: $f"; return 1; }
+  local ts; ts=$(cat "$f" 2>/dev/null)
+  [[ "$ts" =~ ^[0-9]+$ ]] || { echo "non-numeric timestamp: '$ts'"; return 1; }
 }
 
 # --- Assertion Helpers ---
