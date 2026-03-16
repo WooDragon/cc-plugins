@@ -1671,3 +1671,20 @@ LGTM from Gemini."
   [[ "$reason" == *"degraded state"* ]]
   [[ "$reason" == *"REST: http="* ]]
 }
+
+# 98. Regular failure + REST configured → degrade file written at REST entry
+@test "degrade: regular failure + REST configured → degrade file written" {
+  create_failing_engine "gemini" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  # REST also fails — we just care that the degrade file is written before REST runs
+  create_failing_curl 1
+  INPUT=$(build_input)
+
+  run_hook
+  assert_deny_json  # fail-deny (CLI + REST both failed)
+
+  # Degrade file written at REST entry (non-capacity failure path)
+  assert_degraded_file_written
+  assert_log_contains "rest-fallback-triggered"
+}

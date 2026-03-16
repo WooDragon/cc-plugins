@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.24 |
+| plan-review | 1.0.25 |
 
 ## 项目结构
 
@@ -271,3 +271,11 @@ ENGINE_PID=""
 - `_fail_reason` 为空（理论路径，引擎压根未被调用）→ 保留旧 `allow_with_reason("[WARNING]...")` 兜底
 
 **新增测试**（7 个，#91-97）：fresh degraded → skip CLI + REST used；expired degraded → Gemini called；fresh degraded + no REST → Gemini called；capacity-fast-break → degraded file written；regular failure → no degrade；capacity + REST fails → deny with reason；degraded + REST fails → deny with combined reason。全套 97/97 pass。
+
+### Gemini 全失败场景降级扩展（v1.0.25）
+
+**问题**：v1.0.24 的降级文件仅在 `RESOURCE_EXHAUSTED|MODEL_CAPACITY` 时写入。实际上 Gemini 可因 ECONNRESET、timeout（exit 124）等非 capacity 原因失败，这些场景不写降级文件，下次 hook 仍浪费整个 ENGINE_TIMEOUT 在必然失败的 CLI 调用上。
+
+**修复**：在 REST fallback 入口（`REVIEW` 为空 + REST 已配置）写降级文件，条件为 Gemini 实际被调用过（`_gemini_skip_cli=0`）且文件尚未存在（避免 capacity-fast-break 路径重复写）。覆盖所有失败模式：timeout、网络断连、空响应。
+
+**新增测试**（1 个，#98）：普通失败 + REST 配置 → REST 入口写降级文件。全套 98/98 pass。

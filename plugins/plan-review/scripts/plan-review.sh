@@ -521,6 +521,14 @@ else
   # Zero-intrusion: only fires when CLI produced no result AND env vars are set.
   # REVIEW_API_URL/REVIEW_API_KEY empty → skip (preserves original fail-open).
   if [ -z "$REVIEW" ] && [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
+    # Persist Gemini degraded state for any failure mode (not just capacity exhaustion).
+    # Covers timeout (exit 124), network errors (ECONNRESET), empty responses, etc.
+    # Only when Gemini was actually called this invocation (_gemini_skip_cli=0) and the
+    # capacity-fast-break path has not already written the file.
+    if [ "$REVIEW_ENGINE" = "gemini" ] && [ "$_gemini_skip_cli" = "0" ] && [ ! -f "$DEGRADE_FILE" ]; then
+      printf '%s' "$(date +%s)" > "$DEGRADE_FILE" 2>/dev/null || true
+      log_decision "gemini-degrade-write ts=$(date +%s) reason=rest-fallback-triggered"
+    fi
     echo "plan-review: CLI exhausted, trying REST API fallback..." >&2
     log_decision "rest-start url=${REVIEW_API_URL:+(set)} key=${REVIEW_API_KEY:+(set)}"
     prompt_content=$(cat "$PROMPT_FILE")
