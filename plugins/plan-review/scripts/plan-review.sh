@@ -21,7 +21,9 @@
 #   REVIEW_ENGINE=gemini         — review engine: "gemini" (default) or "claude"
 #   CLAUDE_MODEL=opus            — Claude engine model (default: opus)
 #   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3-pro-preview)
-#   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds, default 25 (needs timeout/gtimeout)
+#   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds (default: gemini=25, claude=90; needs timeout/gtimeout)
+#   REVIEW_REST_TIMEOUT=N        — REST API fallback curl timeout, default 90
+#   REVIEW_HOOK_BUDGET=N         — hook total time budget, default 115 (120 framework limit - 5s margin)
 #   REVIEW_RETRY_DELAY=N         — seconds between retries on non-capacity failure (default: 2)
 #   REVIEW_CAPACITY_DELAY=N      — seconds to wait when MODEL_CAPACITY_EXHAUSTED detected (default: 25)
 #   REVIEW_API_URL=<url>         — REST API fallback base URL (OpenAI-compatible, e.g. https://proxy.example.com)
@@ -394,7 +396,19 @@ else
   ENGINE_OUT=$(mktemp)
   ENGINE_STATUS="${ENGINE_OUT}.status"
   REVIEW=""
+  HOOK_BUDGET="${REVIEW_HOOK_BUDGET:-115}"
   for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
+    # Time-budget guard: on retry, check remaining wall-clock time can fit
+    # a full ENGINE_TIMEOUT. Prevents framework 120s SIGTERM from killing
+    # the script mid-retry, making REST fallback unreachable.
+    if (( engine_attempt > 1 )); then
+      remaining=$(( HOOK_BUDGET - SECONDS ))
+      if (( remaining < ENGINE_TIMEOUT )); then
+        echo "plan-review: time budget exhausted for retry (${remaining}s remaining < ${ENGINE_TIMEOUT}s needed), breaking to fallback..." >&2
+        log_decision "skip-retry reason=time-budget remaining=${remaining}s timeout=${ENGINE_TIMEOUT}s budget=${HOOK_BUDGET}s"
+        break
+      fi
+    fi
     engine_exit=0
     # Snapshot log position before call — used after failure to detect capacity-specific 429
     log_pos_before=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
@@ -481,6 +495,12 @@ else
       > "$REQ_FILE"
 
     REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-90}"
+    # Clamp to remaining budget: ensure curl self-terminates before framework
+    # SIGTERM (120s), preserving diagnostic log writes after curl completes.
+    # 3s margin for jq extraction + log_decision after curl returns.
+    remaining=$(( HOOK_BUDGET - SECONDS ))
+    (( remaining - 3 < REST_TIMEOUT )) && REST_TIMEOUT=$(( remaining - 3 ))
+    (( REST_TIMEOUT < 1 )) && REST_TIMEOUT=1
     # -sS: -s suppresses progress meter, -S re-enables error messages (connection-level errors
     # like "Failed to connect" would be silenced by -s alone, making raw_bytes=0 undiagnosable).
     # -w "%{http_code}": write HTTP status to stdout (redirected to ENGINE_STATUS); response

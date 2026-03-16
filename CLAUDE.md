@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.22 |
+| plan-review | 1.0.23 |
 
 ## 项目结构
 
@@ -19,7 +19,7 @@ plugins/
     scripts/plan-review.sh        # 核心脚本（ExitPlanMode 拦截）
     scripts/precompact-review.sh  # PreCompact hook（compaction 恢复）
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 82 个测试用例
+      plan-review.bats            # 90 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
 ```
@@ -65,6 +65,7 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_API_URL` | _(空)_ | REST API 降级 base URL（OpenAI 兼容格式，如 `https://proxy.example.com`） |
 | `REVIEW_API_KEY` | _(空)_ | REST API 降级 auth key（Bearer token） |
 | `REVIEW_REST_TIMEOUT` | `90` | REST fallback curl 超时秒数（独立于 `REVIEW_ENGINE_TIMEOUT`） |
+| `REVIEW_HOOK_BUDGET` | `115` | hook 总时间预算秒数（框架 120s 限制 - 5s 余量），控制 retry loop 和 REST timeout 钳制 |
 | `REVIEW_CAPACITY_DELAY` | `25` | 检测到 MODEL_CAPACITY_EXHAUSTED 后等待秒数（REST 配置时跳过此延迟直接 break） |
 
 敏感变量（`REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
@@ -140,6 +141,7 @@ APPROVE 不再静默放行——`allow` 决策的 `permissionDecisionReason` 在
 | `REVIEW_PLAN_DIR` | `$HOME/.claude/plans` | plan 文件 fallback 目录 |
 | `REVIEW_RETRY_DELAY` | `2` | 引擎重试间隔秒数 |
 | `REVIEW_ENGINE_TIMEOUT` | `25` | 引擎调用超时秒数 |
+| `REVIEW_HOOK_BUDGET` | `115` | hook 总时间预算秒数 |
 
 生产环境不设置这些变量，脚本 fallback 到默认路径。测试通过注入临时目录实现完全隔离。
 
@@ -231,3 +233,18 @@ ENGINE_PID=""
 **max_tokens 截断修复**：REST 请求 `max_tokens` 从 4000 提升至 16000。Thinking 模型的 reasoning tokens 会消耗 token budget，4000 不足以完整输出详细 review 意见。
 
 **新增测试**（2 个）：capacity + REST configured → fast break + REST used；capacity + no REST → retries CLI（第二次成功）。全套 82/82 pass。
+
+### Retry Loop Time-Budget Guard + REST Timeout Clamping（v1.0.23）
+
+**问题一（Retry loop 超框架限制）**：当 `REVIEW_ENGINE_TIMEOUT` 设置 >55s 时（如 Gemini 正常响应 ~60s 需要 70s），两次完整 attempt 耗时必定超出框架 120s 限制。路径：A1 timeout(70s) + sleep(2s) + A2 timeout(70s) = 142s > 120s，框架 SIGTERM 杀死脚本，REST fallback 永远不可达。
+
+**问题二（REST 承诺无法兑现的超时）**：即使 budget guard 让 REST 有机会执行，REST 仍以 `REVIEW_REST_TIMEOUT=90` 做 timeout 包裹。若剩余时间 <90s，框架 SIGTERM 在 curl 完成前杀死脚本，诊断日志不会写入。
+
+**修复**：统一使用 `HOOK_BUDGET - SECONDS` 剩余预算模型（`HOOK_BUDGET` 默认 115 = 120 框架限制 - 5s 余量）：
+
+1. **Retry loop budget guard**：第 2 次迭代前检查 `remaining < ENGINE_TIMEOUT`，不够则 `break` 跳出 retry loop，让 REST fallback 有充足时间窗口
+2. **REST timeout clamping**：`min(REVIEW_REST_TIMEOUT, remaining - 3)` 确保 curl 在框架 SIGTERM 前自行超时退出。3s margin 留给 jq 提取 + log_decision 写入
+
+**时序验证**（ENGINE_TIMEOUT=70s 场景）：A1: 70s + 2s → budget 43<70 → break → REST(min(90,40)=40s) → 总耗时 ~115s，框架限制内。
+
+**新增测试**（4 个）：budget exhausted + REST → skip retry → REST fires；budget sufficient → normal retry；budget exhausted + no REST → fail-open；REST timeout clamped to remaining budget。全套 90/90 pass。

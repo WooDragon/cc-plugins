@@ -53,6 +53,9 @@ common_setup() {
   # Prevent REST fallback env vars from leaking in
   unset REVIEW_API_URL
   unset REVIEW_API_KEY
+
+  # Prevent hook budget override from leaking in
+  unset REVIEW_HOOK_BUDGET
 }
 
 common_teardown() {
