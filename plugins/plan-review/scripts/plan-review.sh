@@ -22,7 +22,7 @@
 #   CLAUDE_MODEL=opus            — Claude engine model (default: opus)
 #   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3-pro-preview)
 #   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds (default: gemini=25, claude=90; needs timeout/gtimeout)
-#   REVIEW_REST_TIMEOUT=N        — REST API fallback curl timeout, default 90
+#   REVIEW_REST_TIMEOUT=N        — REST API fallback curl timeout, default 115 (equals HOOK_BUDGET; clamp logic caps actual value to remaining-3)
 #   REVIEW_HOOK_BUDGET=N         — hook total time budget, default 115 (120 framework limit - 5s margin)
 #   REVIEW_RETRY_DELAY=N         — seconds between retries on non-capacity failure (default: 2)
 #   REVIEW_CAPACITY_DELAY=N      — seconds to wait when MODEL_CAPACITY_EXHAUSTED detected (default: 25)
@@ -539,7 +539,7 @@ else
       '{ model: $model, messages: [{ role: "system", content: $sys }, { role: "user", content: $prompt }], max_tokens: 16000, temperature: 0.1 }' \
       > "$REQ_FILE"
 
-    REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-90}"
+    REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-115}"
     # Clamp to remaining budget: ensure curl self-terminates before framework
     # SIGTERM (120s), preserving diagnostic log writes after curl completes.
     # 3s margin for jq extraction + log_decision after curl returns.

@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.25 |
+| plan-review | 1.0.26 |
 
 ## 项目结构
 
@@ -64,7 +64,7 @@ marketplace name 禁止包含 `claude`、`anthropic`、`official` 等关键词�
 | `REVIEW_ENGINE_TIMEOUT` | gemini=`25` / claude=`90` | 引擎调用超时秒数（需系统有 timeout/gtimeout）；按引擎分流：Gemini 25s 抑制内部 retry 放大，Claude 90s 保证完整 review 输出 |
 | `REVIEW_API_URL` | _(空)_ | REST API 降级 base URL（OpenAI 兼容格式，如 `https://proxy.example.com`） |
 | `REVIEW_API_KEY` | _(空)_ | REST API 降级 auth key（Bearer token） |
-| `REVIEW_REST_TIMEOUT` | `90` | REST fallback curl 超时秒数（独立于 `REVIEW_ENGINE_TIMEOUT`） |
+| `REVIEW_REST_TIMEOUT` | `115` | REST fallback curl 超时秒数（等于 HOOK_BUDGET；钳制逻辑自动截断到 remaining-3，降级路径下 REST 获得完整预算） |
 | `REVIEW_HOOK_BUDGET` | `115` | hook 总时间预算秒数（框架 120s 限制 - 5s 余量），控制 retry loop 和 REST timeout 钳制 |
 | `REVIEW_CAPACITY_DELAY` | `25` | 检测到 MODEL_CAPACITY_EXHAUSTED 后等待秒数（REST 配置时跳过此延迟直接 break） |
 | `REVIEW_ENGINE_DEGRADE_TTL` | `3600` | Gemini 降级状态 TTL 秒数；capacity exhaustion 后后续 hook 在 TTL 内直接跳过 CLI 走 REST |
@@ -279,3 +279,15 @@ ENGINE_PID=""
 **修复**：在 REST fallback 入口（`REVIEW` 为空 + REST 已配置）写降级文件，条件为 Gemini 实际被调用过（`_gemini_skip_cli=0`）且文件尚未存在（避免 capacity-fast-break 路径重复写）。覆盖所有失败模式：timeout、网络断连、空响应。
 
 **新增测试**（1 个，#98）：普通失败 + REST 配置 → REST 入口写降级文件。全套 98/98 pass。
+
+### REST 超时默认值提升（v1.0.26）
+
+**问题**：`REVIEW_REST_TIMEOUT` 默认 90s，但降级路径下 HOOK_BUDGET 剩余约 113s，钳制逻辑 `min(90, 113-3)=90` 让 90s 成为软上限——剩余 23s 预算白白浪费。
+
+**修复**：将 `REVIEW_REST_TIMEOUT` 默认值从 90 提升至 115（等于 `HOOK_BUDGET`）。钳制逻辑 `min(REVIEW_REST_TIMEOUT, remaining-3)` 全权决定实际超时：
+
+- 降级路径（Gemini 完全跳过，SECONDS≈2）：`min(115, 110)=110s`（提升 22s）
+- capacity-fast-break 路径（1 次 CLI 25s，SECONDS≈27）：`min(115, 85)=85s`（vs 旧 85s，持平）
+- 正常双 retry 路径（2 次 CLI 52s+，SECONDS≈54）：`min(115, 58)=58s`（vs 旧 58s，持平）
+
+非降级路径由钳制机制天然保护，无需额外改动。
