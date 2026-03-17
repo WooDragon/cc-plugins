@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.26 |
+| plan-review | 1.0.27 |
 
 ## 项目结构
 
@@ -279,6 +279,18 @@ ENGINE_PID=""
 **修复**：在 REST fallback 入口（`REVIEW` 为空 + REST 已配置）写降级文件，条件为 Gemini 实际被调用过（`_gemini_skip_cli=0`）且文件尚未存在（避免 capacity-fast-break 路径重复写）。覆盖所有失败模式：timeout、网络断连、空响应。
 
 **新增测试**（1 个，#98）：普通失败 + REST 配置 → REST 入口写降级文件。全套 98/98 pass。
+
+### 降级文件过期后 TTL 不刷新（v1.0.27）
+
+**问题**：`REVIEW_ENGINE_DEGRADE_TTL` 到期后，降级文件仍然存在（只是过期），`_gemini_skip_cli=0` → Gemini 重新被调用 → exit 124（70s）→ REST fallback 入口。此处写降级文件的条件含 `! -f "$DEGRADE_FILE"`——文件存在则跳过写入，**时间戳不刷新**。下次 hook 再进来：文件还是那个过期的旧时间戳 → 再次跑 Gemini 70s → REST 仅剩 ~40s（被 clamp）→ 000 循环。
+
+**修复**：移除 REST fallback 入口处的 `! -f "$DEGRADE_FILE"` 条件，让每次 Gemini 失败都无条件刷新时间戳。`capacity-fast-break` 路径在 REST 入口前已写文件，重复写只是将时间戳更新几毫秒，完全无害。
+
+**新增测试**（2 个，#99-100）：
+- #99：过期降级文件 + Gemini 失败 + REST 成功 → 时间戳被刷新（核心 bug 复现 + 验证修复）
+- #100：capacity-fast-break 路径 + REST 成功 → 双写无害（时间戳仍在 10s 内）
+
+全套 100/100 pass。
 
 ### REST 超时默认值提升（v1.0.26）
 

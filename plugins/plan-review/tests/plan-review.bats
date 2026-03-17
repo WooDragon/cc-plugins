@@ -1688,3 +1688,54 @@ LGTM from Gemini."
   assert_degraded_file_written
   assert_log_contains "rest-fallback-triggered"
 }
+
+# 99. Expired degrade file + Gemini fails + REST configured → timestamp refreshed (bug fix)
+# Before fix: `! -f "$DEGRADE_FILE"` blocked timestamp refresh on expired files, causing
+# an infinite loop where Gemini wastes 70s on every hook but REST only gets ~40s (clipped
+# by time-budget guard after Gemini timeout).
+@test "degrade: expired degrade + Gemini fail + REST → timestamp refreshed" {
+  export REVIEW_ENGINE_DEGRADE_TTL=1
+  create_degraded_file 5  # 5s old > 1s TTL → expired; Gemini will be re-called
+  local old_ts; old_ts=$(cat "${REVIEW_COUNTER_DIR}/.gemini-degraded")
+
+  create_failing_engine "gemini" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nREST approved."}}]}'
+  INPUT=$(build_input)
+
+  run_hook
+  assert_ack_approve_json
+
+  # Degrade file must be refreshed: new timestamp >= old timestamp
+  assert_degraded_file_written
+  local new_ts; new_ts=$(cat "${REVIEW_COUNTER_DIR}/.gemini-degraded")
+  (( new_ts >= old_ts )) || { echo "timestamp not refreshed: old=$old_ts new=$new_ts"; return 1; }
+  assert_log_contains "gemini-degrade-write"
+  assert_log_contains "rest-fallback-triggered"
+}
+
+# 100. Capacity-fast-break → degrade file already written; REST entry does not overwrite
+#      (double-write is harmless: timestamps differ by <1s, both numeric, TTL still valid)
+@test "degrade: capacity-fast-break + REST success → degrade file refreshed (double-write harmless)" {
+  create_capacity_exhausted_engine "gemini"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nREST approved."}}]}'
+  INPUT=$(build_input)
+
+  run_hook
+  assert_ack_approve_json
+
+  # Degrade file exists with a valid timestamp (may be written once or twice — both ok)
+  assert_degraded_file_written
+  local ts; ts=$(cat "${REVIEW_COUNTER_DIR}/.gemini-degraded")
+  local now; now=$(date +%s)
+  local age=$(( now - ts ))
+  # Timestamp must be recent (within 10s): proves at least one write succeeded
+  (( age < 10 )) || { echo "degrade timestamp too old: age=${age}s"; return 1; }
+  assert_log_contains "gemini-degrade-write"
+
+  run_hook
+  assert_approve_json
+}

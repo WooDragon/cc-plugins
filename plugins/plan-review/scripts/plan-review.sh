@@ -521,11 +521,13 @@ else
   # Zero-intrusion: only fires when CLI produced no result AND env vars are set.
   # REVIEW_API_URL/REVIEW_API_KEY empty → skip (preserves original fail-open).
   if [ -z "$REVIEW" ] && [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
-    # Persist Gemini degraded state for any failure mode (not just capacity exhaustion).
+    # Persist (or refresh) Gemini degraded state for any failure mode.
     # Covers timeout (exit 124), network errors (ECONNRESET), empty responses, etc.
-    # Only when Gemini was actually called this invocation (_gemini_skip_cli=0) and the
-    # capacity-fast-break path has not already written the file.
-    if [ "$REVIEW_ENGINE" = "gemini" ] && [ "$_gemini_skip_cli" = "0" ] && [ ! -f "$DEGRADE_FILE" ]; then
+    # Always refreshes the timestamp — even if the file already exists but has expired.
+    # Without refresh, an expired degrade file blocks TTL renewal: the check above lets
+    # Gemini run again (_gemini_skip_cli=0), it fails again, but the stale file prevents
+    # writing a new timestamp, creating an infinite retry-with-40s-REST-budget loop.
+    if [ "$REVIEW_ENGINE" = "gemini" ] && [ "$_gemini_skip_cli" = "0" ]; then
       printf '%s' "$(date +%s)" > "$DEGRADE_FILE" 2>/dev/null || true
       log_decision "gemini-degrade-write ts=$(date +%s) reason=rest-fallback-triggered"
     fi
