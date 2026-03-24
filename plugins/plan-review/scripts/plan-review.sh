@@ -253,6 +253,7 @@ Keep your response under 2000 characters.
 4. **Safety** — Security risks, data loss, backwards-compatibility breaks?
 5. **Testability** — Can changes be verified? Missing test scenarios?
 6. **Architecture fit** — Consistent with project patterns?
+7. **Execution topology** — Does each step explicitly annotate its execution location (main context vs Task) and scheduling topology (sequential / parallel / dependency order)? Steps that spawn agents or run multi-phase operations without these annotations are [Major] issues.
 
 ## Severity Definitions
 - **[Critical]** — Blocker: security vulnerabilities, data loss, logic errors producing wrong results, breaking changes to existing behavior, fundamental approach flaws
