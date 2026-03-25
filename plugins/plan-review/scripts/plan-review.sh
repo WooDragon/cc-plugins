@@ -254,10 +254,16 @@ Keep your response under 2000 characters.
 5. **Testability** — Can changes be verified? Missing test scenarios?
 6. **Architecture fit** — Consistent with project patterns?
 7. **Execution topology** — Does each step explicitly annotate its execution location (main context vs Task) and scheduling topology (sequential / parallel / dependency order)? Steps that spawn agents or run multi-phase operations without these annotations are [Major] issues.
+8. **Reuse over reinvention** — Does the plan propose building something that already exists in the project dependencies, framework, or standard library? Custom implementations require explicit justification (e.g., "framework X lacks feature Y" with concrete evidence). Without strong justification, prefer existing solutions. This is a [Major] issue.
+
+## Review Discipline
+- If the plan already provides justification for a design choice, **DO NOT** raise it as an issue unless the justification itself is flawed. Acknowledge the rationale and move on.
+- Focus on gaps the plan author **missed**, not on restating what they already considered.
+- Every issue must cite specific evidence from the plan or project context. Generic warnings without grounding (e.g., "consider edge cases" without naming which) are noise — **OMIT** them.
 
 ## Severity Definitions
 - **[Critical]** — Blocker: security vulnerabilities, data loss, logic errors producing wrong results, breaking changes to existing behavior, fundamental approach flaws
-- **[Major]** — Significant gap: missing error handling on critical paths, poor architecture decisions, performance issues under normal load, incomplete implementation
+- **[Major]** — Significant gap: missing error handling on critical paths, poor architecture decisions, performance issues under normal load, incomplete implementation, reinventing functionality available in existing dependencies without justification
 - **[Minor]** — Polish: naming, style, documentation gaps, minor optimization opportunities
 
 ## Verdict Rules

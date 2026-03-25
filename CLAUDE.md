@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.28 |
+| plan-review | 1.0.29 |
 
 ## 项目结构
 
@@ -19,7 +19,7 @@ plugins/
     scripts/plan-review.sh        # 核心脚本（ExitPlanMode 拦截）
     scripts/precompact-review.sh  # PreCompact hook（compaction 恢复）
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 90 个测试用例
+      plan-review.bats            # 100 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
 ```
@@ -303,3 +303,21 @@ ENGINE_PID=""
 - 正常双 retry 路径（2 次 CLI 52s+，SECONDS≈54）：`min(115, 58)=58s`（vs 旧 58s，持平）
 
 非降级路径由钳制机制天然保护，无需额外改动。
+
+### Execution topology 审阅检查（v1.0.28）
+
+**问题**：Plan 中的步骤缺少执行位置（主上下文 vs Task）和调度拓扑（顺序/并行/依赖）标注时，审阅引擎不会 flag。全局 CLAUDE.md 要求每个步骤必须包含这些标注，但审阅 prompt 没有对应检查项。
+
+**修复**：在 Review Criteria 中新增 criterion #7（Execution topology），明确要求每步标注执行位置和调度拓扑，缺失标注为 [Major]。
+
+### 审阅质量增强——造轮子检测与审阅纪律（v1.0.29）
+
+**问题一（造轮子检测缺失）**：Review Criteria 的 Simplicity 只问 "Is there a simpler approach?"，没有指令要求审阅引擎检查框架/库/项目现有组件是否已解决问题。自写已有组件的行为不会被 flag。
+
+**问题二（重复质疑）**：多轮 Consultation Context 有 "if prior concerns have been addressed, APPROVE"，但首轮没有类似指令。Plan 中已辩护的设计选择仍被机械质疑，浪费磋商轮次。
+
+**修复**：
+
+1. **新增 criterion #8（Reuse over reinvention）**：要求审阅引擎检查 plan 是否在项目依赖、框架或标准库已有解决方案时仍提议自建。无充分辩护视为 [Major]。
+2. **新增 Review Discipline section**：在 Criteria 和 Severity Definitions 之间插入三条审阅纪律——plan 已辩护的选择不重复质疑、聚焦作者遗漏而非已考虑的点、每条 issue 必须引用具体证据（否则 OMIT）。核心否定指令加粗以增强 LLM 注意力权重。
+3. **增强 Major severity 定义**：追加 "reinventing functionality available in existing dependencies without justification"。
