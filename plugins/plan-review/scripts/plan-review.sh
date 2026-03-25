@@ -20,7 +20,7 @@
 #   REVIEW_MAX_TOTAL_ROUNDS=N    — absolute max total rounds (incl. REJECT), default 20
 #   REVIEW_ENGINE=gemini         — review engine: "gemini" (default) or "claude"
 #   CLAUDE_MODEL=opus            — Claude engine model (default: opus)
-#   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3-pro-preview)
+#   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3.1-pro-preview)
 #   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds (default: gemini=25, claude=90; needs timeout/gtimeout)
 #   REVIEW_REST_TIMEOUT=N        — REST API fallback curl timeout, default 115 (equals HOOK_BUDGET; clamp logic caps actual value to remaining-3)
 #   REVIEW_HOOK_BUDGET=N         — hook total time budget, default 115 (120 framework limit - 5s margin)
@@ -354,7 +354,7 @@ else
   if [ "$REVIEW_ENGINE" = "claude" ]; then
     CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
   else
-    GEMINI_MODEL="${GEMINI_MODEL:-gemini-3-pro-preview}"
+    GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"
 
     # Isolated Gemini home: disable skills injection (prevents extra 10-30KB system prompt
     # from ~/.agents/skills/ and ~/.gemini/skills/ from inflating token count and worsening
@@ -542,7 +542,7 @@ else
     log_decision "rest-start url=${REVIEW_API_URL:+(set)} key=${REVIEW_API_KEY:+(set)}"
     prompt_content=$(cat "$PROMPT_FILE")
     REQ_FILE=$(mktemp)
-    jq -n --arg model "${GEMINI_MODEL:-gemini-3-pro-preview}" \
+    jq -n --arg model "${GEMINI_MODEL:-gemini-3.1-pro-preview}" \
           --arg sys "$SYSTEM_INSTRUCTIONS" \
           --arg prompt "$prompt_content" \
       '{ model: $model, messages: [{ role: "system", content: $sys }, { role: "user", content: $prompt }], max_tokens: 16000, temperature: 0.1 }' \
