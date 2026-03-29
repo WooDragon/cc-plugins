@@ -21,7 +21,7 @@
 #   REVIEW_ENGINE=gemini         — review engine: "gemini" (default) or "claude"
 #   CLAUDE_MODEL=opus            — Claude engine model (default: opus)
 #   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3.1-pro-preview)
-#   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds (default: gemini=25, claude=90; needs timeout/gtimeout)
+#   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds (default: gemini=115, claude=90; needs timeout/gtimeout)
 #   REVIEW_REST_TIMEOUT=N        — REST API fallback curl timeout, default 115 (equals HOOK_BUDGET; clamp logic caps actual value to remaining-3)
 #   REVIEW_HOOK_BUDGET=N         — hook total time budget, default 115 (120 framework limit - 5s margin)
 #   REVIEW_RETRY_DELAY=N         — seconds between retries on non-capacity failure (default: 2)
@@ -389,15 +389,15 @@ else
     TIMEOUT_CMD="gtimeout"
   fi
   # Engine-specific timeout defaults:
-  # - Gemini: 25s caps internal retry amplification on 429 capacity exhaustion
-  #   (CLI retries 3-4× internally; 25s allows 1-2 retries within 120s budget).
+  # - Gemini: 115s gives CLI maximum time to respond; on hang/failure the script
+  #   still observes the exit code and can write degrade file + trigger REST fallback.
   # - Claude: 90s needed for thorough review generation; claude -p has no internal
   #   retry amplification, so a single long timeout is safe. Single attempt fits
   #   within the 120s framework hook limit with margin.
   if [ "$REVIEW_ENGINE" = "claude" ]; then
     ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-90}"
   else
-    ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-25}"
+    ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-115}"
   fi
 
   # --- Gemini degraded-state check ---
