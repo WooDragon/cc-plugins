@@ -23,7 +23,7 @@
 #   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3.1-pro-preview)
 #   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds (default: gemini=115, claude=90; needs timeout/gtimeout)
 #   REVIEW_REST_TIMEOUT=N        — REST API fallback curl timeout, default 115 (equals HOOK_BUDGET; clamp logic caps actual value to remaining-3)
-#   REVIEW_HOOK_BUDGET=N         — hook total time budget, default 115 (120 framework limit - 5s margin)
+#   REVIEW_HOOK_BUDGET=N         — hook total time budget, default 595 (600 hook timeout - 5s margin)
 #   REVIEW_RETRY_DELAY=N         — seconds between retries on non-capacity failure (default: 2)
 #   REVIEW_CAPACITY_DELAY=N      — seconds to wait when MODEL_CAPACITY_EXHAUSTED detected (default: 25)
 #   REVIEW_API_URL=<url>         — REST API fallback base URL (OpenAI-compatible, e.g. https://proxy.example.com)
@@ -393,7 +393,7 @@ else
   #   still observes the exit code and can write degrade file + trigger REST fallback.
   # - Claude: 90s needed for thorough review generation; claude -p has no internal
   #   retry amplification, so a single long timeout is safe. Single attempt fits
-  #   within the 120s framework hook limit with margin.
+  #   within the 600s hook timeout with margin.
   if [ "$REVIEW_ENGINE" = "claude" ]; then
     ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-90}"
   else
@@ -424,11 +424,11 @@ else
 
   # --- Engine invocation with retry (2 attempts: 1 initial + 1 retry) ---
   # Background + wait pattern: tracks ENGINE_PID so _cleanup can kill the engine
-  # process if the hook script itself is terminated (e.g. framework 120s timeout).
+  # process if the hook script itself is terminated (e.g. hook timeout SIGTERM).
   ENGINE_OUT=$(mktemp)
   ENGINE_STATUS="${ENGINE_OUT}.status"
   REVIEW=""
-  HOOK_BUDGET="${REVIEW_HOOK_BUDGET:-115}"
+  HOOK_BUDGET="${REVIEW_HOOK_BUDGET:-595}"
   for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
     # Degraded-state skip: jump out of CLI retry immediately on first iteration.
     if (( engine_attempt == 1 )) && [ "$_gemini_skip_cli" = "1" ]; then
@@ -436,7 +436,7 @@ else
     fi
 
     # Time-budget guard: on retry, check remaining wall-clock time can fit
-    # a full ENGINE_TIMEOUT. Prevents framework 120s SIGTERM from killing
+    # a full ENGINE_TIMEOUT. Prevents hook timeout SIGTERM from killing
     # the script mid-retry, making REST fallback unreachable.
     if (( engine_attempt > 1 )); then
       remaining=$(( HOOK_BUDGET - SECONDS ))
@@ -549,8 +549,8 @@ else
       > "$REQ_FILE"
 
     REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-115}"
-    # Clamp to remaining budget: ensure curl self-terminates before framework
-    # SIGTERM (120s), preserving diagnostic log writes after curl completes.
+    # Clamp to remaining budget: ensure curl self-terminates before hook
+    # timeout SIGTERM, preserving diagnostic log writes after curl completes.
     # 3s margin for jq extraction + log_decision after curl returns.
     remaining=$(( HOOK_BUDGET - SECONDS ))
     (( remaining - 3 < REST_TIMEOUT )) && REST_TIMEOUT=$(( remaining - 3 ))

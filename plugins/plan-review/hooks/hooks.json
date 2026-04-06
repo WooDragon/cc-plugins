@@ -8,7 +8,7 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/plan-review.sh",
-            "timeout": 120,
+            "timeout": 600,
             "statusMessage": "Red Team reviewing plan..."
           }
         ]
