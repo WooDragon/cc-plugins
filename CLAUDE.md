@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 marketplace。
 
 | 插件 | 版本 |
 |------|------|
-| plan-review | 1.0.32 |
+| plan-review | 1.0.33 |
 
 ## 项目结构
 
@@ -33,7 +33,7 @@ plugins/
 | `REVIEW_DRY_RUN` | `0` | `1` 跳过引擎调用 |
 | `REVIEW_MAX_ROUNDS` | `3` | 非 Critical 最大磋商轮次（CONCERNS 累计） |
 | `REVIEW_MAX_TOTAL_ROUNDS` | `20` | 全局绝对上限（含 REJECT 轮次），到达后硬拦截 |
-| `REVIEW_ENGINE_TIMEOUT` | gemini=`115` / claude=`90` | 引擎调用超时秒数（需系统有 timeout/gtimeout）；Gemini 115s 给 CLI 充足响应时间，Claude 90s 保证完整 review 输出 |
+| `REVIEW_ENGINE_TIMEOUT` | `595` | 引擎调用超时秒数（需系统有 timeout/gtimeout），单次 CLI 占满预算，失败后 REST 降级 |
 | `REVIEW_API_URL` | _(空)_ | REST API 降级 base URL（OpenAI 兼容格式，如 `https://proxy.example.com`） |
 | `REVIEW_API_KEY` | _(空)_ | REST API 降级 auth key（Bearer token） |
 | `REVIEW_REST_TIMEOUT` | `115` | REST fallback curl 超时秒数（钳制逻辑自动截断到 remaining-3） |
