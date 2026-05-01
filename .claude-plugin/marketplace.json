@@ -1,6 +1,6 @@
 {
   "name": "cc-plugins",
-  "description": "WooDragon's CC plugin marketplace",
+  "description": "WooDragon's CC plugin & skill marketplace",
   "owner": {
     "name": "WooDragon"
   },
@@ -15,6 +15,22 @@
       "source": "./plugins/plan-review",
       "category": "development",
       "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "ppt-press",
+      "description": "PPT toolkit — editorial magazine × e-ink web presentation skills",
+      "version": "1.0.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/ppt-press",
+      "category": "productivity",
+      "homepage": "https://github.com/WooDragon/cc-plugins",
+      "skills": [
+        "./plugins/ppt-press/skills/ppt-create",
+        "./plugins/ppt-press/skills/ppt-deploy",
+        "./plugins/ppt-press/skills/ppt-manage"
+      ]
     }
   ]
 }

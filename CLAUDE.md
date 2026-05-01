@@ -1,12 +1,13 @@
 # cc-plugins
 
-WooDragon 的 Claude Code 插件 marketplace。
+WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 
 ## 当前版本
 
-| 插件 | 版本 |
-|------|------|
-| plan-review | 1.0.33 |
+| 类型 | 名称 | 版本 |
+|------|------|------|
+| Plugin | plan-review | 1.0.33 |
+| Plugin | ppt-press（3 skills） | 1.0.0 |
 
 ## 项目结构
 
@@ -22,6 +23,17 @@ plugins/
       plan-review.bats            # 100 个测试用例
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
+  ppt-press/                     # PPT 发布系统插件（skills-only，预留 hooks）
+    .claude-plugin/plugin.json   # 插件元数据（声明 skills 路径）
+    skills/
+      ppt-create/                # 内容生产（~85KB，含 references + assets）
+        SKILL.md                 # 工作流：需求澄清 → 创建 → 填充 → 自检 → 预览
+        references/              # 5 个参考文档
+        assets/template.astro    # 新 Deck Astro 模板
+      ppt-deploy/                # 构建+测试+部署
+        SKILL.md
+      ppt-manage/                # 检索管理
+        SKILL.md
 ```
 
 ## 环境变量
@@ -85,6 +97,36 @@ APPROVE 不再静默放行——`allow` 决策的 `permissionDecisionReason` 在
 - Ack-deny 不递增任何计数器（它是审批确认，不是磋商轮次）
 - Marker 文件与 counter 在 ack-round 的 allow 路径中原子清理
 - 额外开销：一次无引擎调用的 round-trip（~100ms），相对 10-30s 的审阅延迟可忽略
+
+## Skills
+
+PPT Skills 打包在 `plugins/ppt-press/` 插件内，通过 `plugin.json` 的 `skills` 字段声明路径，被 `npx skills add` 发现。
+
+### PPT 技能包
+
+三个 skill 覆盖 PPT 全生命周期：
+
+| Skill | 职责 | 大小 |
+|-------|------|------|
+| `ppt-create` | 内容生产：需求澄清 → 大纲 → Astro 页面 → 自检 | ~85KB（含 5 references + 1 asset） |
+| `ppt-deploy` | 构建验证 → 批量 Playwright 测试 → Amplify 部署 | ~4KB |
+| `ppt-manage` | deck 列表检索 / 搜索 / URL 复制 | ~2KB |
+
+### 安装
+
+```bash
+npx skills add WooDragon/cc-plugins -g
+npx skills ls -g | grep ppt
+```
+
+### Plugin vs Skill
+
+| 维度 | Plugin | Skill |
+|------|--------|-------|
+| 机制 | Hook 拦截（`hooks.json` + 脚本） | 知识注入（`SKILL.md` + references） |
+| 发现 | `.claude-plugin/` 目录 | `skills/<name>/SKILL.md` 目录 |
+| 执行 | 脚本自动执行 | AI 读取并遵循 |
+| 安装 | `claude plugin add` | `npx skills add` |
 
 ## 历史记录
 

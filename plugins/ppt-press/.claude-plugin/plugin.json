@@ -1,0 +1,13 @@
+{
+  "name": "ppt-press",
+  "description": "PPT press — editorial magazine × e-ink web presentation publishing system",
+  "version": "1.0.0",
+  "author": {
+    "name": "WooDragon"
+  },
+  "skills": [
+    "./skills/ppt-create",
+    "./skills/ppt-deploy",
+    "./skills/ppt-manage"
+  ]
+}

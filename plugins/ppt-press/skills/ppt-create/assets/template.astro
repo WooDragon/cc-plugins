@@ -1,0 +1,108 @@
+---
+// 新 Deck 模板 — 替换 title / theme，按需 import 内容组件
+import DeckLayout    from '@/layouts/DeckLayout.astro';
+import Slide         from '@/components/slides/Slide.astro';
+import Chrome        from '@/components/slides/Chrome.astro';
+import Foot          from '@/components/slides/Foot.astro';
+import Grid          from '@/components/content/Grid.astro';
+import StatCard      from '@/components/content/StatCard.astro';
+import Pipeline      from '@/components/content/Pipeline.astro';
+import PipelineStep  from '@/components/content/PipelineStep.astro';
+import Pillar        from '@/components/content/Pillar.astro';
+import Callout       from '@/components/content/Callout.astro';
+import Rowline       from '@/components/content/Rowline.astro';
+import OptionCard    from '@/components/content/OptionCard.astro';
+import FeatureCard   from '@/components/content/FeatureCard.astro';
+import FrameImg      from '@/components/content/FrameImg.astro';
+import QuoteBlock    from '@/components/content/QuoteBlock.astro';
+---
+
+<DeckLayout title="[必填] PPT 标题 · Deck Title" theme="indigo-porcelain">
+
+  <!-- ========================================================
+       第 01 页：封面 Hero
+       规则：hero 页遮罩薄，不放超过 3 行文字
+       ======================================================== -->
+  <Slide theme="dark" hero animate="hero">
+    <Chrome left="主题 · Theme" right="01 / N" />
+    <div class="frame" style="display:flex;flex-direction:column;justify-content:center;height:100%">
+      <div class="kicker" data-anim>副标题 / 场合</div>
+      <h1 class="h-hero" data-anim>主标题</h1>
+      <div class="meta-row" data-anim>
+        <span>演讲者</span>
+        <span>·</span>
+        <span>YYYY-MM-DD</span>
+      </div>
+    </div>
+    <Foot title="Intro" />
+  </Slide>
+
+  <!-- ========================================================
+       第 02 页：核心数据（StatCard 矩阵）
+       ======================================================== -->
+  <Slide theme="light" animate="cascade">
+    <Chrome left="核心数据 · Key Metrics" right="02 / N" />
+    <div class="frame" style="padding-top:6vh">
+      <div class="kicker" data-anim>快速概览</div>
+      <h2 class="h-xl" data-anim>标题</h2>
+      <p class="lead" data-anim>一句话描述</p>
+      <Grid cols="4" style="margin-top:4vh">
+        <StatCard label="指标 1" value="99" unit="%" note="说明" />
+        <StatCard label="指标 2" value="3" unit="x" note="说明" />
+        <StatCard label="指标 3" value="100k" note="说明" />
+        <StatCard label="指标 4" value="24" unit="h" note="说明" />
+      </Grid>
+    </div>
+    <Foot title="Section Name" />
+  </Slide>
+
+  <!-- ========================================================
+       第 03 页：Pipeline 流水线
+       ======================================================== -->
+  <Slide theme="dark" animate="pipeline">
+    <Chrome left="流程 · Process" right="03 / N" />
+    <div class="frame" style="padding-top:6vh">
+      <div class="kicker" data-anim>分阶段</div>
+      <h2 class="h-xl" data-anim>标题</h2>
+      <Pipeline cols={4}>
+        <PipelineStep nb="Phase 1" title="第一阶段" desc="描述描述描述" />
+        <PipelineStep nb="Phase 2" title="第二阶段" desc="描述描述描述" />
+        <PipelineStep nb="Phase 3" title="第三阶段" desc="描述描述描述" />
+        <PipelineStep nb="Phase 4" title="第四阶段" desc="描述描述描述" />
+      </Pipeline>
+    </div>
+    <Foot title="Section Name" />
+  </Slide>
+
+  <!-- ========================================================
+       第 04 页：大金句 Quote
+       ======================================================== -->
+  <Slide theme="light" hero animate="quote">
+    <Chrome left="引言 · Quote" right="04 / N" />
+    <div class="frame" style="display:flex;flex-direction:column;justify-content:center;height:100%">
+      <QuoteBlock
+        lines={['第一行金句，', '第二行，', '第三行。']}
+        style="font-family:var(--serif-zh);font-weight:700;font-size:5vw;line-height:1.2;max-width:76vw"
+      />
+    </div>
+    <Foot title="Section Name" />
+  </Slide>
+
+  <!-- ========================================================
+       第 05 页：Pillar 三支柱
+       ======================================================== -->
+  <Slide theme="dark" animate="cascade">
+    <Chrome left="核心价值 · Value" right="05 / N" />
+    <div class="frame" style="padding-top:6vh">
+      <div class="kicker" data-anim>三大优势</div>
+      <h2 class="h-xl" data-anim>标题</h2>
+      <Grid cols="3" style="margin-top:4vh">
+        <Pillar icon='<i data-lucide="zap"></i>' title="价值 1" desc="描述描述描述描述描述" />
+        <Pillar icon='<i data-lucide="shield"></i>' title="价值 2" desc="描述描述描述描述描述" />
+        <Pillar icon='<i data-lucide="trending-up"></i>' title="价值 3" desc="描述描述描述描述描述" />
+      </Grid>
+    </div>
+    <Foot title="Section Name" />
+  </Slide>
+
+</DeckLayout>
