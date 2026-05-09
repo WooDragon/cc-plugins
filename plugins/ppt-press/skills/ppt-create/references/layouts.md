@@ -320,7 +320,7 @@ layouts.md 的所有代码块使用 Astro 组件（`<Slide>` / `<Chrome>` / `<Fo
 **要点**：
 - 关键：每个 `frame-img` 必须写死 `height:NNvh`（不要用 `aspect-ratio`），否则网格会撑破
 - 图片会自动 `object-fit:cover + object-position:top`，只裁底部
-- 用 `.grid-3-3`（3×2）或 `.grid-3`（3×1）承载
+- 用 `.grid-3-3`（2×3，2 列×3 行）或 `.grid-3`（3×1）承载
 
 ---
 
@@ -519,7 +519,7 @@ layouts.md 的所有代码块使用 Astro 组件（`<Slide>` / `<Chrome>` / `<Fo
 | `.grid-2-7-5` | 7:5 | 文字为主 + 辅助图 |
 | `.grid-2-8-4` | 8:4（2:1） | 大段文字 + 小图/数据 |
 | `.grid-3` | 1:1:1 | 3 项并列（案例/截图） |
-| `.grid-3-3` | 3×2 | 6 图矩阵 |
+| `.grid-3-3` | 2×3（2 列×3 行） | 6 图矩阵 |
 | `.grid-6` | 3×2 | 6 个数据卡片 |
 
 所有网格都预留 `gap: 3vw 4vh`（水平 3vw、竖直 4vh），可以单独覆写。
