@@ -8,7 +8,7 @@
     {
       "name": "plan-review",
       "description": "Adversarial plan review via cross-model consultation (Gemini/Claude)",
-      "version": "1.0.33",
+      "version": "1.0.34",
       "author": {
         "name": "WooDragon"
       },
@@ -19,13 +19,18 @@
     {
       "name": "ppt-press",
       "description": "PPT toolkit — editorial magazine × e-ink web presentation skills",
-      "version": "1.0.1",
+      "version": "1.0.0",
       "author": {
         "name": "WooDragon"
       },
       "source": "./plugins/ppt-press",
       "category": "productivity",
-      "homepage": "https://github.com/WooDragon/cc-plugins"
+      "homepage": "https://github.com/WooDragon/cc-plugins",
+      "skills": [
+        "./plugins/ppt-press/skills/ppt-create",
+        "./plugins/ppt-press/skills/ppt-deploy",
+        "./plugins/ppt-press/skills/ppt-manage"
+      ]
     }
   ]
 }

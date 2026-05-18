@@ -8,6 +8,7 @@
 # Paths to scripts under test
 HOOK_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/plan-review.sh"
 PRECOMPACT_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/precompact-review.sh"
+DISPATCH_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/dispatch-check.sh"
 
 # --- Setup / Teardown ---
 
@@ -410,6 +411,73 @@ run_hook_to_completion() {
     ACK_DENY_STDOUT="$HOOK_STDOUT"
     run_hook
   fi
+}
+
+# --- Dispatch File Helpers ---
+
+# create_dispatch_file <session_id> <json_content>
+#   Writes a dispatch JSON file to REVIEW_COUNTER_DIR/.dispatch-<session_id>.json.
+create_dispatch_file() {
+  local session="$1"
+  local content="$2"
+  printf '%s' "$content" > "${REVIEW_COUNTER_DIR}/.dispatch-${session}.json"
+}
+
+# build_agent_input [model=X] [subagent_type=Y] [tool_name=Agent] [session_id=S]
+#   Constructs a JSON PreToolUse:Agent input.
+build_agent_input() {
+  local tool_name="Agent"
+  local session_id="test-session"
+  local model=""
+  local subagent_type=""
+
+  for arg in "$@"; do
+    local key="${arg%%=*}"
+    local val="${arg#*=}"
+    case "$key" in
+      tool_name)    tool_name="$val" ;;
+      session_id)   session_id="$val" ;;
+      model)        model="$val" ;;
+      subagent_type) subagent_type="$val" ;;
+    esac
+  done
+
+  # Build tool_input with only non-empty fields
+  local tool_input
+  if [ -n "$model" ] && [ -n "$subagent_type" ]; then
+    tool_input=$(jq -n --arg m "$model" --arg st "$subagent_type" \
+      '{model: $m, subagent_type: $st}')
+  elif [ -n "$model" ]; then
+    tool_input=$(jq -n --arg m "$model" '{model: $m}')
+  elif [ -n "$subagent_type" ]; then
+    tool_input=$(jq -n --arg st "$subagent_type" '{subagent_type: $st}')
+  else
+    tool_input='{}'
+  fi
+
+  jq -n \
+    --arg tn "$tool_name" \
+    --arg sid "$session_id" \
+    --argjson ti "$tool_input" \
+    '{tool_name: $tn, session_id: $sid, tool_input: $ti}'
+}
+
+# run_dispatch_check
+#   Feeds INPUT through the dispatch-check.sh script via stdin.
+#   Sets: HOOK_STDOUT, HOOK_STDERR, HOOK_EXIT
+run_dispatch_check() {
+  local input="${INPUT:-$(build_agent_input)}"
+
+  HOOK_STDOUT=""
+  HOOK_STDERR=""
+  HOOK_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  HOOK_STDOUT=$(bash "$DISPATCH_SCRIPT" <<< "$input" 2>"$stderr_file") || HOOK_EXIT=$?
+  HOOK_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
 }
 
 # --- Degraded State Helpers ---

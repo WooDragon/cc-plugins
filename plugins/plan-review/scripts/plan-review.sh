@@ -84,6 +84,38 @@ plan_hash() {
   fi
 }
 
+# --- Manifest detection helpers (case-insensitive: LLM may write "Worker Agent"/"TASK(") ---
+needs_manifest() { printf '%s' "$1" | grep -qiE '(Task\(|subagent_type|agent_type|Plan agent|Explore agent|worker agent|dev agent)'; }
+has_manifest()   { printf '%s' "$1" | grep -qi '^## Dispatch Manifest'; }
+
+# --- Manifest JSON serializer (called only from APPROVE branch; failures are silent) ---
+# Parses the ## Dispatch Manifest markdown table and outputs a dispatch JSON blob.
+# JSON injection defense: strips stray double-quotes LLM may write in manifest rows.
+parse_manifest_to_json() {
+  local plan="$1" hash="$2"
+  printf '%s\n' "$plan" | awk -v hash="$hash" -v now="$(date +%s)" '
+    /^## Dispatch Manifest/ {in_manifest=1; next}
+    in_manifest && /^## / {in_manifest=0}
+    in_manifest && /^\|/ && !/^\|---/ && !/^\| *step/ {
+      gsub(/^\| *| *\| *$/, ""); n = split($0, f, / *\| */)
+      if (n >= 3) {
+        id=f[1]; at=f[2]; md=f[3]
+        gsub(/^ +| +$/, "", id); gsub(/^ +| +$/, "", at); gsub(/^ +| +$/, "", md)
+        gsub(/"/, "", id); gsub(/"/, "", at); gsub(/"/, "", md)
+        rows[++count] = sprintf("{\"id\":\"%s\",\"agent_type\":%s,\"model\":%s}",
+          id,
+          (at == "-" ? "null" : "\"" at "\""),
+          (md == "-" ? "null" : "\"" md "\""))
+      }
+    }
+    END {
+      printf "{\"plan_hash\":\"%s\",\"created_at\":%s,\"requires_dispatch_check\":true,\"steps\":[", hash, now
+      for (i=1; i<=count; i++) printf "%s%s", (i>1?",":""), rows[i]
+      printf "]}\n"
+    }
+  '
+}
+
 # --- Namespace unification (legacy GEMINI_* fallback — never break userspace) ---
 REVIEW_DISABLED="${REVIEW_DISABLED:-${GEMINI_REVIEW_OFF:-0}}"
 REVIEW_DRY_RUN="${REVIEW_DRY_RUN:-${GEMINI_DRY_RUN:-0}}"
@@ -211,6 +243,25 @@ EOF
   exit 0
 fi
 
+# --- Pre-flight manifest check (AFTER non-critical valve, not before) ---
+# Synthetic CONCERNS (Major, NOT Critical): increments ATTEMPT, subject to MAX_ROUNDS.
+# Positioned downstream of valve so repeated denies eventually hit escalate → fail-open.
+if needs_manifest "$PLAN" && ! has_manifest "$PLAN"; then
+  TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
+  ATTEMPT=$((ATTEMPT + 1))
+  echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
+  log_decision "decision=deny reason=missing-manifest"
+  MANIFEST_MSG="## Red Team Pre-flight — MISSING DISPATCH MANIFEST
+
+Plan 涉及 Agent/Task 调度（检测到关键词），但缺少 \`## Dispatch Manifest\` 表格。
+请在 plan 中追加 manifest 表格后重新调用 ExitPlanMode。格式参考 CLAUDE.md。"
+  MANIFEST_DENY_JSON=$(printf '%s' "$MANIFEST_MSG" | jq -Rs .)
+  cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${MANIFEST_DENY_JSON}}}
+EOF
+  exit 0
+fi
+
 # --- 2. Collect project context ---
 CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 
@@ -255,6 +306,7 @@ Keep your response under 2000 characters.
 6. **Architecture fit** — Consistent with project patterns?
 7. **Execution topology** — Does each step explicitly annotate its execution location (main context vs Task) and scheduling topology (sequential / parallel / dependency order)? Steps that spawn agents or run multi-phase operations without these annotations are [Major] issues.
 8. **Reuse over reinvention** — Does the plan propose building something that already exists in the project dependencies, framework, or standard library? Custom implementations require explicit justification (e.g., "framework X lacks feature Y" with concrete evidence). Without strong justification, prefer existing solutions. This is a [Major] issue.
+9. **Dispatch Manifest** — 若 plan 涉及 Agent/Task 调度，必须包含 `## Dispatch Manifest` 表格，列出每个 step 的 agent_type、model、depends_on、parallel_with。主上下文执行的 step 用 `-` 占位。任一 Agent step 缺 model 视为 [Critical]（REJECT）；缺 manifest 表格本身视为 [Major]（CONCERNS，受 MAX_ROUNDS 安全阀约束）。
 
 ## Review Discipline
 - If the plan already provides justification for a design choice, **DO NOT** raise it as an issue unless the justification itself is flawed. Acknowledge the rationale and move on.
@@ -637,6 +689,19 @@ if [ "$VERDICT" = "APPROVE" ]; then
   log_decision "verdict=APPROVE decision=ack-deny"
   # Write plan hash to marker — ack-round guard compares hash to detect post-approve edits
   printf '%s' "$(plan_hash "$PLAN")" > "$APPROVE_MARKER"
+
+  # Parse manifest → dispatch JSON for Layer 2 enforcement (fail-silent: Layer 2 self-disables)
+  if has_manifest "$PLAN"; then
+    DISPATCH_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
+    mkdir -p "$DISPATCH_DIR" 2>/dev/null || true
+    find "$DISPATCH_DIR" -maxdepth 1 -name '.dispatch-*.json' -mmin +30 -delete 2>/dev/null || true
+    DISPATCH_FILE="$DISPATCH_DIR/.dispatch-${SESSION_ID}.json"
+    parse_manifest_to_json "$PLAN" "$(plan_hash "$PLAN")" > "$DISPATCH_FILE" 2>/dev/null || rm -f "$DISPATCH_FILE"
+    if [ -f "$DISPATCH_FILE" ]; then
+      dispatch_bytes=$(wc -c < "$DISPATCH_FILE" | tr -d ' ')
+      log_decision "manifest-written file=$DISPATCH_FILE bytes=$dispatch_bytes"
+    fi
+  fi
 
   if [ "$TOTAL_ROUNDS" -gt 0 ]; then
     APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED (Round $((TOTAL_ROUNDS + 1)))"

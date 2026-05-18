@@ -1715,6 +1715,176 @@ LGTM from Gemini."
   assert_log_contains "rest-fallback-triggered"
 }
 
+# =============================================================================
+# Dispatch Manifest — Layer 1 (plan-review.sh)
+# =============================================================================
+
+# 101. plan 含 Task( 关键词 + 无 manifest → deny 不调引擎 + counter 递增
+@test "manifest: plan with Task( keyword + no manifest → pre-flight deny + counter increment" {
+  # No mock engine — pre-flight fires before engine call
+  INPUT=$(build_input plan="Step 1: Use Task( to isolate work. No manifest here.")
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"MISSING DISPATCH MANIFEST"* ]]
+  # Counter must be incremented (pre-flight is CONCERNS-equivalent)
+  local attempt; attempt=$(get_counter_value)
+  [ "$attempt" -eq 1 ]
+}
+
+# 102. plan 含 Task( + 完整 manifest → 进入正常引擎审阅路径
+@test "manifest: plan with Task( + Dispatch Manifest → proceeds to engine review" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+Plan looks good with manifest."
+  local plan_with_manifest="## Plan
+Step 1: Use Task( to run analysis.
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | worker    | sonnet| -          | -             |"
+  INPUT=$(build_input "plan=$plan_with_manifest")
+  run_hook
+
+  # Engine was called (ack-deny with APPROVED)
+  assert_ack_approve_json
+}
+
+# 103. plan 不含 Task 关键词 → 不要求 manifest
+@test "manifest: plan without Task/Agent keywords → no manifest required" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+Simple plan, no dispatch needed."
+  INPUT=$(build_input plan="Simple plan: edit file X, run tests, commit.")
+  run_hook
+
+  # Engine was called normally (no pre-flight block)
+  assert_ack_approve_json
+}
+
+# 104. 大小写变体 "Worker Agent" / "TASK(" → 也触发 needs_manifest
+@test "manifest: case variants 'Worker Agent' and 'TASK(' trigger manifest requirement" {
+  INPUT=$(build_input plan="Use Worker Agent for step 2. Also TASK( for isolation.")
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"MISSING DISPATCH MANIFEST"* ]]
+}
+
+# 105. APPROVE 路径 + plan 含 manifest → dispatch JSON 写入且 schema 合法
+@test "manifest: APPROVE path + manifest → dispatch JSON written with valid schema" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+All good."
+  local plan_with_manifest="## Implementation
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | -         | -     | -          | -             |
+| 2    | worker    | sonnet| 1          | -             |"
+  INPUT=$(build_input "plan=$plan_with_manifest")
+  run_hook
+
+  assert_ack_approve_json
+  # Dispatch JSON must exist
+  local dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
+  [ -f "$dispatch_file" ]
+  # Must be valid JSON with required fields
+  jq -e '.requires_dispatch_check == true' "$dispatch_file" >/dev/null
+  jq -e '.plan_hash | length > 0' "$dispatch_file" >/dev/null
+  jq -e '.steps | length == 2' "$dispatch_file" >/dev/null
+  # Step 2 has agent_type and model
+  jq -e '.steps[1].agent_type == "worker"' "$dispatch_file" >/dev/null
+  jq -e '.steps[1].model == "sonnet"' "$dispatch_file" >/dev/null
+}
+
+# 106. APPROVE 路径 + plan 无 manifest → 不写 dispatch JSON
+@test "manifest: APPROVE path + no manifest → no dispatch JSON written" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+Simple plan approved."
+  INPUT=$(build_input plan="Simple plan: edit file, run tests.")
+  run_hook_to_completion
+
+  assert_approve_json
+  # Dispatch file must NOT exist
+  [ ! -f "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+# 107. manifest 行含 stray 引号 → 落地 JSON 仍合法（jq -e 通过）
+@test "manifest: stray quotes in manifest rows → dispatch JSON still valid" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+LGTM."
+  local plan_with_quoted_manifest='## Task( analysis
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | "worker"  | "sonnet" | -       | -             |'
+  INPUT=$(build_input "plan=$plan_with_quoted_manifest")
+  run_hook
+
+  assert_ack_approve_json
+  local dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
+  [ -f "$dispatch_file" ]
+  # Must be parseable by jq (no stray quotes in JSON values)
+  jq -e '.' "$dispatch_file" >/dev/null
+  jq -e '.steps[0].agent_type == "worker"' "$dispatch_file" >/dev/null
+  jq -e '.steps[0].model == "sonnet"' "$dispatch_file" >/dev/null
+}
+
+# 108. pre-flight 反复 deny 至 MAX_ROUNDS → 第 MAX+1 次 valve escalate to user
+@test "manifest: repeated pre-flight denies up to MAX_ROUNDS → valve escalates" {
+  export REVIEW_MAX_ROUNDS=2
+  # No mock engine — pre-flight fires before engine call
+  INPUT=$(build_input plan="Use Task( for analysis.")
+
+  # Round 1: ATTEMPT=0 < MAX=2 → pre-flight deny, ATTEMPT→1
+  run_hook
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"MISSING DISPATCH MANIFEST"* ]]
+
+  # Round 2: ATTEMPT=1 < MAX=2 → pre-flight deny, ATTEMPT→2
+  run_hook
+  assert_deny_json
+
+  # Round 3: ATTEMPT=2 >= MAX=2 → valve fires before pre-flight → allow (ESCALATED)
+  run_hook
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"ESCALATED"* ]]
+}
+
+# 109. APPROVE 写入 dispatch 前清理 stale 文件
+@test "manifest: APPROVE path cleans up stale dispatch files" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+Good."
+  local plan_with_manifest="## Task( work
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | worker    | haiku | -          | -             |"
+
+  # Pre-plant a stale dispatch file (mtime >30min ago via touch -t)
+  local stale_file="${REVIEW_COUNTER_DIR}/.dispatch-other-session.json"
+  printf '{"stale":true}' > "$stale_file"
+  # Backdate by 35 minutes (2100 seconds)
+  touch -t "$(date -v -35M +%Y%m%d%H%M 2>/dev/null || date -d '35 minutes ago' +%Y%m%d%H%M 2>/dev/null || date +%Y%m%d%H%M)" "$stale_file" 2>/dev/null || \
+    python3 -c "import os,time; os.utime('$stale_file', (time.time()-2100, time.time()-2100))" 2>/dev/null || true
+
+  INPUT=$(build_input "plan=$plan_with_manifest")
+  run_hook
+
+  assert_ack_approve_json
+  # Stale file must be cleaned up
+  [ ! -f "$stale_file" ]
+}
+
 # 100. Capacity-fast-break → degrade file already written; REST entry does not overwrite
 #      (double-write is harmless: timestamps differ by <1s, both numeric, TTL still valid)
 @test "degrade: capacity-fast-break + REST success → degrade file refreshed (double-write harmless)" {

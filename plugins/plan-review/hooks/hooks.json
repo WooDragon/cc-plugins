@@ -12,6 +12,28 @@
             "statusMessage": "Red Team reviewing plan..."
           }
         ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/dispatch-check.sh",
+            "timeout": 5,
+            "statusMessage": "Checking dispatch manifest..."
+          }
+        ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/dispatch-check.sh",
+            "timeout": 5,
+            "statusMessage": "Checking dispatch manifest..."
+          }
+        ]
       }
     ],
     "PreCompact": [

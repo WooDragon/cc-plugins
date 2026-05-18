@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 
 | 类型 | 名称 | 版本 |
 |------|------|------|
-| Plugin | plan-review | 1.0.33 |
+| Plugin | plan-review | 1.0.34 |
 | Plugin | ppt-press（3 skills） | 1.0.0 |
 
 ## 项目结构
@@ -17,10 +17,12 @@ plugins/
   plan-review/                    # 对抗性审阅插件
     .claude-plugin/plugin.json    # 插件元数据
     hooks/hooks.json              # PreToolUse + PreCompact hook 声明
-    scripts/plan-review.sh        # 核心脚本（ExitPlanMode 拦截）
+    scripts/plan-review.sh        # 核心脚本（ExitPlanMode 拦截 + Layer 1 manifest 检查）
+    scripts/dispatch-check.sh     # Layer 2 hook（Agent/Task 调度参数强制）
     scripts/precompact-review.sh  # PreCompact hook（compaction 恢复）
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 100 个测试用例
+      plan-review.bats            # 109 个测试用例（含 Dispatch Manifest）
+      dispatch-check.bats         # 14 个测试用例（Layer 2 hook）
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
   ppt-press/                     # PPT 发布系统插件（skills-only，预留 hooks）
@@ -52,6 +54,7 @@ plugins/
 | `REVIEW_HOOK_BUDGET` | `595` | hook 总时间预算秒数（600s hook timeout - 5s 余量），控制 retry loop 和 REST timeout 钳制 |
 | `REVIEW_CAPACITY_DELAY` | `25` | 检测到 MODEL_CAPACITY_EXHAUSTED 后等待秒数（REST 配置时跳过此延迟直接 break） |
 | `REVIEW_ENGINE_DEGRADE_TTL` | `3600` | Gemini 降级状态 TTL 秒数；capacity exhaustion 后后续 hook 在 TTL 内直接跳过 CLI 走 REST |
+| `DISPATCH_CHECK_DISABLED` | `0` | `1` 关闭 Layer 2 dispatch 强制检查（dispatch-check.sh kill switch） |
 
 敏感变量（`REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
 
@@ -69,6 +72,47 @@ plugins/
 | `REVIEW_HOOK_BUDGET` | `115` | hook 总时间预算秒数 |
 
 生产环境不设置这些变量，脚本 fallback 到默认路径。测试通过注入临时目录实现完全隔离。
+
+## Dispatch Manifest 强制规范（v1.0.34）
+
+### Layer 1（生成期，plan-review.sh）
+
+含以下任一关键词（大小写不敏感）的 plan 被视为含 Agent/Task 调度，必须包含 `## Dispatch Manifest` 表格：
+
+```
+Task(  |  subagent_type  |  agent_type  |  Plan agent  |  Explore agent  |  worker agent  |  dev agent
+```
+
+**Manifest 表格格式**：
+```markdown
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | -         | -     | -          | -             |
+| 2    | worker    | sonnet| 1          | -             |
+```
+
+- 主上下文执行的 step：`agent_type` / `model` 填 `-`
+- Agent step：两列都必须填，否则视为 [Critical]（REJECT）
+- 缺 manifest 表格本身：[Major]（CONCERNS，受 MAX_ROUNDS 安全阀约束；到达上限后 escalate to user）
+
+APPROVE 时将 manifest 落地为 `$REVIEW_COUNTER_DIR/.dispatch-{session_id}.json`（tmpfs，OS 重启自动清理）。
+
+### Layer 2（执行期，dispatch-check.sh）
+
+当 dispatch JSON 存在时，拦截 `PreToolUse:Agent` 和 `PreToolUse:Task`，要求 Agent 调用显式传：
+- `subagent_type`（非空字符串）
+- `model`（非空字符串）
+
+两者都提供 → silent allow。缺任一 → deny + manifest 取值预览。
+
+**Dispatch JSON 落地路径**：`/tmp/claude-reviews/.dispatch-{session_id}.json`（与 `.review-count-*` 同目录）
+
+**Stale 清理**：mmin > 30 时自动删除（plan-review.sh APPROVE 路径写入前 + dispatch-check.sh 每次触发时各执行一次 opportunistic 全局清理）
+
+**关闭开关**：`DISPATCH_CHECK_DISABLED=1`
+
+**fail-open 铁律**：任何异常路径（jq 缺失、JSON 损坏、session 为空、文件 IO 失败）一律 silent allow，不阻塞用户工作流。
 
 ## 架构设计
 
@@ -136,3 +180,4 @@ npx skills ls -g | grep ppt
 - [#9 Hook 可靠性与诊断改进 (v1.0.12~v1.0.15)](https://github.com/WooDragon/cc-plugins/issues/9) — Compaction 绕过、入口诊断日志、set-e 静默退出、进程残留
 - [#10 Gemini Capacity & REST 降级体系演进 (v1.0.16~v1.0.27)](https://github.com/WooDragon/cc-plugins/issues/10) — Skills 注入、REST 降级、capacity fast-break、降级持久化
 - [#11 审阅质量增强 & Hook Timeout 修正 (v1.0.28~v1.0.32)](https://github.com/WooDragon/cc-plugins/issues/11) — Execution topology、造轮子检测、hook timeout 认知修正
+- [#12 Dispatch Manifest 双层防御 (v1.0.34)](https://github.com/WooDragon/cc-plugins/issues/12) — Layer 1 manifest 表格强制 + dispatch JSON 落地、Layer 2 Agent/Task 参数校验
