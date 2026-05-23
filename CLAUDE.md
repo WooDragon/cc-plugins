@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 
 | 类型 | 名称 | 版本 |
 |------|------|------|
-| Plugin | plan-review | 1.0.34 |
+| Plugin | plan-review | 1.0.35 |
 | Plugin | ppt-press（3 skills） | 1.0.0 |
 
 ## 项目结构
