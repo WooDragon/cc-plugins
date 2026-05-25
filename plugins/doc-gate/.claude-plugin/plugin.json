@@ -1,0 +1,7 @@
+{
+  "name": "doc-gate",
+  "description": "Document editing governance — doc-maintenance skill + hard gate hook",
+  "version": "1.0.0",
+  "author": { "name": "woodragon" },
+  "skills": ["./skills/doc-maintenance"]
+}

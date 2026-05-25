@@ -26,6 +26,17 @@
       "source": "./plugins/ppt-press",
       "category": "productivity",
       "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "doc-gate",
+      "description": "Document editing governance — doc-maintenance skill + hard gate hook",
+      "version": "1.0.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/doc-gate",
+      "category": "development",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
     }
   ]
 }

@@ -8,6 +8,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 |------|------|------|
 | Plugin | plan-review | 1.0.35 |
 | Plugin | ppt-press（3 skills） | 1.0.0 |
+| Plugin | doc-gate（1 skill + 2 hooks） | 1.0.0 |
 
 ## 项目结构
 
@@ -25,6 +26,19 @@ plugins/
       dispatch-check.bats         # 14 个测试用例（Layer 2 hook）
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
+  doc-gate/                       # 文档编辑门禁插件（skill + hooks 打包）
+    .claude-plugin/plugin.json   # 插件元数据（声明 skills + hooks）
+    hooks/hooks.json             # PreToolUse: Edit, Write, Skill
+    scripts/
+      skill-gate.sh              # 门禁脚本（.md 编辑前检查 marker）
+      skill-marker.sh            # 标记脚本（Skill 调用时写 marker）
+    skills/
+      doc-maintenance/SKILL.md   # 文档维护工作流（从全局 skill 迁入）
+    tests/                       # BDD 测试套件
+      skill-gate.bats            # 39 个测试用例
+      skill-marker.bats          # 10 个测试用例
+      test_helper/
+        common-setup.bash        # 测试基础设施
   ppt-press/                     # PPT 发布系统插件（skills-only，预留 hooks）
     .claude-plugin/plugin.json   # 插件元数据（声明 skills 路径）
     skills/
@@ -55,6 +69,10 @@ plugins/
 | `REVIEW_CAPACITY_DELAY` | `25` | 检测到 MODEL_CAPACITY_EXHAUSTED 后等待秒数（REST 配置时跳过此延迟直接 break） |
 | `REVIEW_ENGINE_DEGRADE_TTL` | `3600` | Gemini 降级状态 TTL 秒数；capacity exhaustion 后后续 hook 在 TTL 内直接跳过 CLI 走 REST |
 | `DISPATCH_CHECK_DISABLED` | `0` | `1` 关闭 Layer 2 dispatch 强制检查（dispatch-check.sh kill switch） |
+| `SKILL_GATE_DISABLED` | `0` | `1` 关闭文档编辑门禁（doc-gate kill switch） |
+| `SKILL_GATE_DIR` | `/tmp/claude-reviews` | marker 目录（与 plan-review 共享） |
+| `SKILL_GATE_LOG_DIR` | _(空)_ | 日志目录（fallback: `REVIEW_LOG_DIR` 或 `~/.claude/logs`） |
+| `SKILL_GATE_STALE_MIN` | `120` | marker stale 清理阈值（分钟），同时作为上下文刷新机制 |
 
 敏感变量（`REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
 
@@ -141,6 +159,22 @@ APPROVE 不再静默放行——`allow` 决策的 `permissionDecisionReason` 在
 - Ack-deny 不递增任何计数器（它是审批确认，不是磋商轮次）
 - Marker 文件与 counter 在 ack-round 的 allow 路径中原子清理
 - 额外开销：一次无引擎调用的 round-trip（~100ms），相对 10-30s 的审阅延迟可忽略
+
+## Doc-Gate 文档编辑门禁（v1.0.0）
+
+Skill + Hook 打包插件：doc-maintenance skill 提供文档维护工作流，PreToolUse hook 强制执行。
+
+**机制**：Edit/Write `.md` 文件时，hook 检查 session 级 marker。无 marker → deny 并提示调用 doc-maintenance skill；skill 调用后 marker 写入，后续 .md 编辑直接放行。
+
+**排除名单**（不触发门禁）：
+- Basename：`CLAUDE.md`、`MEMORY.md`、`SKILL.md`、`README.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`LICENSE.md`
+- Path：`*/.claude/*`、`*/.claude-plugin/*`、`*/node_modules/*`、`*/.git/*`
+
+**Marker 生命周期**：session 级，120min stale 清理（兼做上下文刷新——长 session 后强制重新加载 skill）。
+
+**Fail-open**：jq 缺失、JSON 损坏、session 为空、GATE_DIR 不可写等异常一律静默放行。
+
+**已知边界**：Bash tool 可通过 `sed`/`echo >` 绕过 Edit/Write 管道。CLAUDE.md "Shell 交互工具原则"提供外层约束。
 
 ## Skills
 
