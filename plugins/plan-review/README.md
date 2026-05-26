@@ -36,6 +36,24 @@ ExitPlanMode → hook intercepts → engine reviews
   └─ max rounds reached → allow through (user decides)
 ```
 
+## Review Criteria
+
+Nine criteria — authoritative text lives in `SYSTEM_INSTRUCTIONS` inside `scripts/plan-review.sh`.
+
+| # | Criterion | Focus |
+|---|-----------|-------|
+| 1 | **Correctness** | Does the plan actually solve the stated problem? |
+| 2 | **Completeness** | Missing steps, edge cases, error handling? |
+| 3 | **Simplicity** | Is there a simpler approach? Unnecessary complexity? |
+| 4 | **Safety** | Security risks, data loss, backwards-compatibility breaks? |
+| 5 | **Testability** | Test strategy presence; test pyramid completeness; e2e selector cascade (evidence-gated); deletion completeness for exported symbols |
+| 6 | **Architecture fit** | Consistent with project patterns? |
+| 7 | **Execution topology** | Each step annotated with execution location and scheduling order? |
+| 8 | **Reuse over reinvention** | Using existing dependencies before building custom? |
+| 9 | **Dispatch Manifest** | Agent/Task steps declare `agent_type`, `model`, `depends_on`, `parallel_with`? |
+
+Criterion #5 (Testability) is evidence-gated: e2e selector audits only trigger if the plan or project context reveals e2e coverage (Playwright, Cypress, `*.spec.ts`, `e2e/` directory).
+
 ## Engine Isolation (Claude)
 
 When `REVIEW_ENGINE=claude`, the script spawns `claude -p` with triple isolation:

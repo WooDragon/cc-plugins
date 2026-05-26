@@ -1909,3 +1909,14 @@ Good."
   run_hook
   assert_approve_json
 }
+
+# ---------------------------------------------------------------------------
+# Prompt content integrity
+# ---------------------------------------------------------------------------
+@test "system-instructions: Testability criterion has structured sub-items" {
+  grep -q "Test strategy presence" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "E2E selector cascade" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "evidence-gated" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Deletion completeness" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "3000 characters" "${HOOK_SCRIPT:?Missing hook script}"
+}
