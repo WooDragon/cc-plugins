@@ -2,13 +2,22 @@
 
 WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 
-## 当前版本
+## 插件清单
 
-| 类型 | 名称 | 版本 |
+| 类型 | 名称 | 说明 |
 |------|------|------|
-| Plugin | plan-review | 1.0.36 |
-| Plugin | ppt-press（3 skills） | 1.0.0 |
-| Plugin | doc-gate（1 skill + 2 hooks） | 1.0.1 |
+| Plugin | plan-review | 对抗性审阅（Gemini/Claude） |
+| Plugin | ppt-press（3 skills） | PPT 全生命周期 |
+| Plugin | doc-gate（1 skill + 2 hooks） | 文档编辑门禁 |
+
+## 版本变更铁律
+
+插件代码（scripts/、skills/、hooks/）发生功能性变更（bug fix、feature、breaking change）时，必须同步更新两处版本号：
+
+1. `plugins/<name>/.claude-plugin/plugin.json` → `"version"`
+2. `.claude-plugin/marketplace.json` → 对应插件条目的 `"version"`
+
+两处不一致视为提交不完整，禁止 push。纯文档、纯测试、纯 refactor（不改外部行为）的变更不要求 bump。
 
 ## 项目结构
 
