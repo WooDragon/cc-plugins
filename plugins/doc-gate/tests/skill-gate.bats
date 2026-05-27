@@ -318,3 +318,15 @@ teardown() {
   run_gate
   assert_allowed
 }
+
+@test "e2e: namespaced skill → gate pass" {
+  # Step 1: invoke skill with plugin namespace prefix
+  INPUT=$(build_skill_input skill=doc-gate:doc-maintenance)
+  run_marker
+  [ -f "$SKILL_GATE_DIR/.skill-gate-test-session-doc-maintenance" ]
+
+  # Step 2: edit should now be allowed
+  INPUT=$(build_edit_input file_path=/project/docs/guide.md)
+  run_gate
+  assert_allowed
+}

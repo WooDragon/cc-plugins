@@ -35,8 +35,8 @@ plugins/
     skills/
       doc-maintenance/SKILL.md   # 文档维护工作流（从全局 skill 迁入）
     tests/                       # BDD 测试套件
-      skill-gate.bats            # 39 个测试用例
-      skill-marker.bats          # 10 个测试用例
+      skill-gate.bats            # 40 个测试用例
+      skill-marker.bats          # 13 个测试用例
       test_helper/
         common-setup.bash        # 测试基础设施
   ppt-press/                     # PPT 发布系统插件（skills-only，预留 hooks）

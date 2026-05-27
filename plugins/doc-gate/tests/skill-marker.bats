@@ -34,6 +34,29 @@ teardown() {
   [ -z "$HOOK_STDOUT" ]
 }
 
+# --- Namespaced skill (plugin:skill format) ---
+
+@test "tracked skill: namespaced doc-gate:doc-maintenance → marker with bare name" {
+  INPUT=$(build_skill_input skill=doc-gate:doc-maintenance)
+  run_marker
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -f "$SKILL_GATE_DIR/.skill-gate-test-session-doc-maintenance" ]
+}
+
+@test "tracked skill: namespaced → no colon in marker filename" {
+  INPUT=$(build_skill_input skill=doc-gate:doc-maintenance)
+  run_marker
+  [ ! -f "$SKILL_GATE_DIR/.skill-gate-test-session-doc-gate:doc-maintenance" ]
+}
+
+@test "tracked skill: trailing colon (malformed) → no marker" {
+  INPUT=$(build_skill_input skill=doc-gate:)
+  run_marker
+  local count
+  count=$(find "$SKILL_GATE_DIR" -name '.skill-gate-*' | wc -l)
+  [ "$count" -eq 0 ]
+}
+
 # --- Untracked skill ---
 
 @test "untracked skill: other-skill → no marker" {

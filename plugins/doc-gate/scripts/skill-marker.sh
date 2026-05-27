@@ -26,6 +26,7 @@ _main() {
   [ -n "$SESSION_ID" ] || return
 
   SKILL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_input.skill // ""' 2>/dev/null) || return
+  SKILL_NAME="${SKILL_NAME##*:}"
   [ -n "$SKILL_NAME" ] || return
 
   case " $TRACKED_SKILLS " in
