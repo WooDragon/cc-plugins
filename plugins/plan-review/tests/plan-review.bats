@@ -124,24 +124,48 @@ teardown() {
 }
 
 # 9. Plan from fallback file
-@test "plan: fallback to plan file when tool_input has no plan" {
+@test "plan: fallback to planFilePath when tool_input has no plan" {
   create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
-  create_plan_file "Plan from file system"
-  INPUT=$(build_input_no_plan)
+  local plan_file="${TEST_TEMP_DIR}/session-plan.md"
+  printf '%s' "Plan from planFilePath" > "$plan_file"
+  INPUT=$(build_input_no_plan "planFilePath=${plan_file}")
   run_hook_to_completion
 
   assert_approve_json
 }
 
-# 10. No plan anywhere → allow JSON with SKIP
-@test "plan: no plan content → allow JSON with SKIP" {
+# 10. No plan anywhere → deny (fail-closed)
+@test "plan: no plan content → deny with ERROR" {
   INPUT=$(build_input_no_plan)
   run_hook
 
-  assert_approve_json
+  assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"[SKIP]"* ]]
+  [[ "$reason" == *"[ERROR]"* ]]
+}
+
+# 10b. planFilePath points to non-existent file → deny with path in reason
+@test "plan: planFilePath file missing → deny with path info" {
+  INPUT=$(build_input_no_plan "planFilePath=/tmp/nonexistent-plan-file.md")
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[ERROR]"* ]]
+  [[ "$reason" == *"/tmp/nonexistent-plan-file.md"* ]]
+}
+
+# 10c. planFilePath file exists but plan field empty → reads from file
+@test "plan: planFilePath file exists → reads plan from file" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
+  local plan_file="${TEST_TEMP_DIR}/my-plan.md"
+  printf '%s' "Plan content from file" > "$plan_file"
+  INPUT=$(build_input_no_plan "planFilePath=${plan_file}")
+  run_hook_to_completion
+
+  assert_approve_json
 }
 
 # =============================================================================
@@ -876,15 +900,15 @@ LGTM."
 # Visible Skip Reasons
 # =============================================================================
 
-# 45. No plan content → allow JSON with SKIP reason
-@test "skip: no plan content → allow JSON with SKIP reason" {
+# 45. No plan content → deny (fail-closed, no blind fallback)
+@test "skip: no plan content → deny with ERROR reason" {
   INPUT=$(build_input_no_plan)
   run_hook
 
-  assert_approve_json
+  assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"[SKIP]"* ]]
+  [[ "$reason" == *"[ERROR]"* ]]
 }
 
 # 46. Engine CLI not found → allow JSON with WARNING reason

@@ -177,22 +177,25 @@ TOTAL_ROUNDS=${TOTAL_ROUNDS:-$ATTEMPT}  # old format "3" → ATTEMPT=3, TOTAL_RO
 PLAN=$(echo "$INPUT" | jq -r '.tool_input.plan // ""')
 
 if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
-  # Fallback: read most recent plan file
-  PLAN_DIR="${REVIEW_PLAN_DIR:-$HOME/.claude/plans}"
-  if [ -d "$PLAN_DIR" ]; then
-    PLAN_FILE=$(find "$PLAN_DIR" -maxdepth 1 -name '*.md' -not -name '.*' \
-      -print0 2>>"$LOG_FILE" | xargs -0 ls -t 2>>"$LOG_FILE" | head -1)
-    if [ -n "${PLAN_FILE:-}" ]; then
-      PLAN=$(cat "$PLAN_FILE")
-    fi
+  # Fallback: read from planFilePath (framework-assigned, session-scoped)
+  PLAN_FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.planFilePath // ""')
+  if [ -n "$PLAN_FILE_PATH" ] && [ "$PLAN_FILE_PATH" != "null" ] && [ -f "$PLAN_FILE_PATH" ]; then
+    PLAN=$(cat "$PLAN_FILE_PATH" 2>/dev/null)
   fi
 fi
 
-# Nothing to review → allow with visible reason (clean up residual state first)
+# Fail-closed: no plan content → deny with actionable path info
 if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
-  log_decision "decision=allow reason=no-plan-content"
+  log_decision "decision=deny reason=no-plan-content-fail-closed planFilePath=${PLAN_FILE_PATH:-empty}"
   rm -f "$APPROVE_MARKER" "$COUNTER_FILE"
-  allow_with_reason "[SKIP] 无 plan 内容可审阅"
+  REASON=""
+  if [ -n "${PLAN_FILE_PATH:-}" ] && [ "${PLAN_FILE_PATH:-}" != "null" ]; then
+    REASON="[ERROR] plan 内容未传入。tool_input.plan 为空，planFilePath=\"${PLAN_FILE_PATH}\" 指向的文件不存在。请将 plan 写入该文件后重新调用 ExitPlanMode。"
+  else
+    REASON="[ERROR] plan 内容未传入。tool_input.plan 和 planFilePath 均为空。请确保 ExitPlanMode 调用包含 plan 字段，或将 plan 写入框架指定的 planFilePath 后重试。"
+  fi
+  jq -n --arg r "$REASON" '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":$r}}'
+  exit 0
 fi
 
 # --- Approval ack-round: compare plan hash to detect post-approve modifications ---

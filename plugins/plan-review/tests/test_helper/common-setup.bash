@@ -210,6 +210,7 @@ build_input() {
   local plan="Test plan content"
   local cwd="/tmp"
   local transcript_path=""
+  local plan_file_path=""
 
   for arg in "$@"; do
     local key="${arg%%=*}"
@@ -220,6 +221,7 @@ build_input() {
       plan)            plan="$val" ;;
       cwd)             cwd="$val" ;;
       transcript_path) transcript_path="$val" ;;
+      planFilePath)    plan_file_path="$val" ;;
     esac
   done
 
@@ -230,10 +232,11 @@ build_input() {
     --arg p "$plan" \
     --arg cwd "$cwd" \
     --arg tp "$transcript_path" \
+    --arg pfp "$plan_file_path" \
     '{
       tool_name: $tn,
       session_id: $sid,
-      tool_input: { plan: $p },
+      tool_input: ({ plan: $p } + (if $pfp != "" then { planFilePath: $pfp } else {} end)),
       cwd: $cwd,
       transcript_path: $tp
     }'
@@ -245,14 +248,16 @@ build_input_no_plan() {
   local tool_name="ExitPlanMode"
   local session_id="test-session"
   local cwd="/tmp"
+  local plan_file_path=""
 
   for arg in "$@"; do
     local key="${arg%%=*}"
     local val="${arg#*=}"
     case "$key" in
-      tool_name)  tool_name="$val" ;;
-      session_id) session_id="$val" ;;
-      cwd)        cwd="$val" ;;
+      tool_name)    tool_name="$val" ;;
+      session_id)   session_id="$val" ;;
+      cwd)          cwd="$val" ;;
+      planFilePath) plan_file_path="$val" ;;
     esac
   done
 
@@ -260,10 +265,11 @@ build_input_no_plan() {
     --arg tn "$tool_name" \
     --arg sid "$session_id" \
     --arg cwd "$cwd" \
+    --arg pfp "$plan_file_path" \
     '{
       tool_name: $tn,
       session_id: $sid,
-      tool_input: {},
+      tool_input: (if $pfp != "" then { planFilePath: $pfp } else {} end),
       cwd: $cwd
     }'
 }
