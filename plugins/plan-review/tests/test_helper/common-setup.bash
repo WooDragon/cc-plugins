@@ -543,6 +543,8 @@ assert_approve_json() {
     echo "Expected permissionDecision=allow, got: $decision"
     return 1
   }
+  # Must carry hookEventName (framework rejects hookSpecificOutput without it)
+  assert_hook_event_name
 }
 
 # assert_ack_approve_json
@@ -575,6 +577,22 @@ assert_deny_json() {
   decision=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecision')
   [ "$decision" = "deny" ] || {
     echo "Expected permissionDecision=deny, got: $decision"
+    return 1
+  }
+  # Must carry hookEventName (framework rejects hookSpecificOutput without it)
+  assert_hook_event_name
+}
+
+# assert_hook_event_name
+#   Verifies hookSpecificOutput.hookEventName == "PreToolUse".
+#   The Claude Code framework rejects any hookSpecificOutput missing this field
+#   ("Hook JSON output validation failed"), so every emit path must carry it.
+assert_hook_event_name() {
+  local event_name
+  event_name=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.hookEventName')
+  [ "$event_name" = "PreToolUse" ] || {
+    echo "Expected hookSpecificOutput.hookEventName=PreToolUse, got: '$event_name'"
+    echo "stdout: $HOOK_STDOUT"
     return 1
   }
 }

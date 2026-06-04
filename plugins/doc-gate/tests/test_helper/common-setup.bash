@@ -203,6 +203,15 @@ assert_deny_json() {
     echo "Expected permissionDecision=deny, got: $decision"
     return 1
   }
+  # Must carry hookEventName — the framework rejects any hookSpecificOutput
+  # missing it ("Hook JSON output validation failed").
+  local event_name
+  event_name=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.hookEventName')
+  [ "$event_name" = "PreToolUse" ] || {
+    echo "Expected hookSpecificOutput.hookEventName=PreToolUse, got: '$event_name'"
+    echo "stdout: $HOOK_STDOUT"
+    return 1
+  }
 }
 
 # assert_log_contains <pattern>

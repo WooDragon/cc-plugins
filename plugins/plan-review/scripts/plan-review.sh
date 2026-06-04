@@ -194,7 +194,7 @@ if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   else
     REASON="[ERROR] plan 内容未传入。tool_input.plan 和 planFilePath 均为空。请确保 ExitPlanMode 调用包含 plan 字段，或将 plan 写入框架指定的 planFilePath 后重试。"
   fi
-  jq -n --arg r "$REASON" '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":$r}}'
+  jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
   exit 0
 fi
 

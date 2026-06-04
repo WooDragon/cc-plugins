@@ -909,6 +909,11 @@ LGTM."
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"[ERROR]"* ]]
+  # Regression: this fail-closed deny path must carry hookEventName, else the
+  # framework rejects it with "Hook JSON output validation failed".
+  local event_name
+  event_name=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.hookEventName')
+  [ "$event_name" = "PreToolUse" ]
 }
 
 # 46. Engine CLI not found → allow JSON with WARNING reason
