@@ -143,6 +143,21 @@ APPROVE 时将 manifest 落地为 `$REVIEW_COUNTER_DIR/.dispatch-{session_id}.js
 
 ## 架构设计
 
+### Plan 内容提取链（CC 2.1.x 契约适配，v1.0.40）
+
+ExitPlanMode 的 hook stdin 在不同 CC 版本传递 plan 的方式不同，脚本按优先级三级提取：
+
+1. `tool_input.plan`（旧契约，内联）
+2. `tool_input.planFilePath`（过渡兼容）
+3. **transcript 反查**（CC 2.1.x 新契约）：plan 内容移至 out-of-band 文件（`~/.claude/plans/<slug>.md`），路径仅存于 transcript 的 `attachment.type=="plan_mode"` 记录里，**不进 hook payload**。但 hook stdin 带 `transcript_path`，`resolve_plan_from_transcript()` 据此流式提取最新 planFilePath。
+
+**三重安全门**（反查路径读取前，任一不过即拒绝并 fail-closed）：
+- `[ -f ]` 常规文件强制 —— 防 FIFO/设备文件阻塞读挂死耗尽 600s hook 预算
+- `[ -h ]` 拒绝软链接 + `cd -P` 解析父目录物理路径后再校验 —— 防 plans 目录内软链接穿透白名单读取敏感文件（exfil）
+- 白名单前缀 `${REVIEW_PLAN_DIR:-~/.claude/plans}` + 拒绝 `..`
+
+`RESOLVE_REASON` 全局变量路由三态错误信息（resolved-but-missing / 非法路径 / 全空）。**helper 直接设全局变量**（非 `echo`+`$(...)`），因命令替换的子 shell 会丢弃 RESOLVE_REASON。诊断 dump（v1.0.39）保留作为未来契约变更探针。
+
 ### 严重性分级与磋商终止机制
 
 Prompt 定义三级严重性（Critical/Major/Minor），与 Verdict 强绑定：REJECT=Critical、CONCERNS=Major、APPROVE=Minor-only-or-clean。脚本通过 Verdict tag 路由，不扫正文（消除假阳性）。
@@ -224,3 +239,4 @@ npx skills ls -g | grep ppt
 - [#10 Gemini Capacity & REST 降级体系演进 (v1.0.16~v1.0.27)](https://github.com/WooDragon/cc-plugins/issues/10) — Skills 注入、REST 降级、capacity fast-break、降级持久化
 - [#11 审阅质量增强 & Hook Timeout 修正 (v1.0.28~v1.0.32)](https://github.com/WooDragon/cc-plugins/issues/11) — Execution topology、造轮子检测、hook timeout 认知修正
 - [#12 Dispatch Manifest 双层防御 (v1.0.34)](https://github.com/WooDragon/cc-plugins/issues/12) — Layer 1 manifest 表格强制 + dispatch JSON 落地、Layer 2 Agent/Task 参数校验
+- [#18 CC 2.1.x 契约变更 & transcript 反查恢复 (v1.0.37~v1.0.40)](https://github.com/WooDragon/cc-plugins/issues/18) — fail-closed hookEventName 修复、payload 诊断 dump、plan 移至 out-of-band 文件、transcript_path 反查 + 三重安全门（FIFO/软链接/路径遍历）

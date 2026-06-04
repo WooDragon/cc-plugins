@@ -101,6 +101,92 @@ plan_hash() {
   fi
 }
 
+# --- Transcript-based plan recovery (CC 2.1.x contract: plan lives in an
+#     out-of-band file referenced by the plan_mode attachment, which is NOT in
+#     the hook stdin; only transcript_path is). Resolve the latest plan file
+#     path from the transcript and, if — and only if — it clears three security
+#     gates, set RECOVERED_PATH to its physical absolute path. On any rejection,
+#     leave RECOVERED_PATH empty and set RESOLVE_REASON for the caller's error
+#     messaging.
+#
+#     IMPORTANT: sets globals directly (no echo + $(...)), because command
+#     substitution runs in a subshell and would discard RESOLVE_REASON.
+#
+#     Threat model (defense in depth):
+#       - FIFO / device file → blocking read hangs jq/cat, drains the 600s hook
+#         budget, wedges the whole CLI. Gate: [ -f ] (regular file only).
+#       - Symlink in plans dir → string-prefix whitelist is bypassable; a link to
+#         ~/.ssh/id_rsa or /etc/passwd would be cat'd into the review engine.
+#         Gate: reject [ -h ], then realpath to the physical path before the check.
+#       - Path traversal → reject any '..' in the raw path.
+# ---
+RESOLVE_REASON=""
+RECOVERED_PATH=""
+resolve_plan_from_transcript() {
+  RESOLVE_REASON=""
+  RECOVERED_PATH=""
+  local transcript="$1"
+  # Gate 0: transcript must be a regular file (not FIFO/device → no blocking read).
+  [ -n "$transcript" ] && [ -f "$transcript" ] || { RESOLVE_REASON="no-transcript"; return; }
+
+  # Whitelist root for plan files (REVIEW_PLAN_DIR reused; prod fallback ~/.claude/plans).
+  local whitelist_root="${REVIEW_PLAN_DIR:-$HOME/.claude/plans}"
+
+  # Streaming extraction (line-by-line, no slurp): newest plan_mode planFilePath.
+  local raw_path
+  raw_path=$(jq -r 'select(.attachment?.type == "plan_mode" and .attachment?.planFilePath != null) | .attachment.planFilePath' "$transcript" 2>/dev/null | tail -1 || true)
+  [ -n "$raw_path" ] && [ "$raw_path" != "null" ] || { RESOLVE_REASON="no-plan-attachment"; return; }
+
+  # Gate 1: reject path traversal in the raw path.
+  case "$raw_path" in
+    *..*) RESOLVE_REASON="path-traversal"; return ;;
+  esac
+
+  # Gate 2: reject symlinks outright (don't follow links out of the sandbox).
+  if [ -h "$raw_path" ]; then
+    RESOLVE_REASON="symlink-rejected"
+    return
+  fi
+
+  # Resolve to the physical path before the whitelist check. Resolve the PARENT
+  # directory physically (cd -P collapses symlinked path components) and re-append
+  # the basename — this works whether or not the target file exists yet, and is
+  # portable (no realpath-on-missing-file dependency, which fails on macOS/BSD).
+  local dir base dir_resolved resolved
+  dir=$(dirname "$raw_path"); base=$(basename "$raw_path")
+  if [ ! -d "$dir" ]; then
+    # Parent dir absent → framework named a file under a nonexistent dir; treat as missing.
+    RESOLVE_REASON="resolved-but-missing"
+    return
+  fi
+  dir_resolved=$(cd "$dir" 2>/dev/null && pwd -P) || { RESOLVE_REASON="unresolvable"; return; }
+  [ -n "$dir_resolved" ] || { RESOLVE_REASON="unresolvable"; return; }
+  resolved="${dir_resolved}/${base}"
+
+  # Resolve the whitelist root the same way so the prefix compare is apples-to-apples.
+  local root_resolved
+  if [ -d "$whitelist_root" ]; then
+    root_resolved=$(cd "$whitelist_root" 2>/dev/null && pwd -P) || root_resolved="$whitelist_root"
+  else
+    root_resolved="$whitelist_root"
+  fi
+
+  # Gate 3: physical path must live under the whitelist root.
+  case "$resolved" in
+    "$root_resolved"/*) : ;;
+    *) RESOLVE_REASON="outside-whitelist"; return ;;
+  esac
+
+  # Final: must be an existing regular file (covers "framework named it but never wrote it").
+  if [ ! -f "$resolved" ]; then
+    RESOLVE_REASON="resolved-but-missing"
+    return
+  fi
+
+  RESOLVE_REASON="ok"
+  RECOVERED_PATH="$resolved"
+}
+
 # --- Manifest detection helpers (case-insensitive: LLM may write "Worker Agent"/"TASK(") ---
 needs_manifest() { printf '%s' "$1" | grep -qiE '(Task\(|subagent_type|agent_type|Plan agent|Explore agent|worker agent|dev agent)'; }
 has_manifest()   { printf '%s' "$1" | grep -qi '^## Dispatch Manifest'; }
@@ -201,6 +287,20 @@ if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   fi
 fi
 
+# CC 2.1.x recovery: plan content is in an out-of-band file referenced only by
+# the transcript's plan_mode attachment. Resolve it via transcript_path (the one
+# locator the hook stdin does carry) through the three security gates. The
+# resolver sets RECOVERED_PATH / RESOLVE_REASON globals directly (not via $(...)),
+# so RESOLVE_REASON survives for the fail-closed error routing below.
+if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
+  TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""')
+  resolve_plan_from_transcript "$TRANSCRIPT_PATH"
+  if [ -n "$RECOVERED_PATH" ] && [ -f "$RECOVERED_PATH" ]; then
+    PLAN=$(cat "$RECOVERED_PATH" 2>/dev/null)
+    log_decision "decision=recovered reason=recovered-from-transcript planFilePath=${RECOVERED_PATH}"
+  fi
+fi
+
 # Fail-closed: no plan content → deny with actionable path info
 if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   # Diagnostic: CC 2.1.x carries the plan in an out-of-band file whose path is not
@@ -211,14 +311,22 @@ if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   TI_KEYS=$(echo "$INPUT" | jq -rc '(.tool_input // {} | keys) | @json' 2>/dev/null || echo "?")
   TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null || echo "")
   CWD_VAL=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")
-  log_decision "decision=deny reason=no-plan-content-fail-closed planFilePath=${PLAN_FILE_PATH:-empty} top_keys=${TOP_KEYS} tool_input_keys=${TI_KEYS} transcript_path=${TRANSCRIPT_PATH:-empty} cwd=${CWD_VAL:-empty}"
+  log_decision "decision=deny reason=no-plan-content-fail-closed resolve=${RESOLVE_REASON:-none} planFilePath=${PLAN_FILE_PATH:-empty} top_keys=${TOP_KEYS} tool_input_keys=${TI_KEYS} transcript_path=${TRANSCRIPT_PATH:-empty} cwd=${CWD_VAL:-empty}"
   rm -f "$APPROVE_MARKER" "$COUNTER_FILE"
+  # Three-state error message routed by the resolver's RESOLVE_REASON.
   REASON=""
-  if [ -n "${PLAN_FILE_PATH:-}" ] && [ "${PLAN_FILE_PATH:-}" != "null" ]; then
-    REASON="[ERROR] plan 内容未传入。tool_input.plan 为空，planFilePath=\"${PLAN_FILE_PATH}\" 指向的文件不存在。请将 plan 写入该文件后重新调用 ExitPlanMode。"
-  else
-    REASON="[ERROR] plan 内容未传入。tool_input.plan 和 planFilePath 均为空。请确保 ExitPlanMode 调用包含 plan 字段，或将 plan 写入框架指定的 planFilePath 后重试。"
-  fi
+  case "${RESOLVE_REASON:-}" in
+    resolved-but-missing)
+      REASON="[ERROR] plan 内容未传入。框架在 transcript 中指定了 plan 文件但该文件尚未写入。请确认 plan 已落盘后重新调用 ExitPlanMode。" ;;
+    outside-whitelist|symlink-rejected|path-traversal)
+      REASON="[ERROR] plan 文件路径非法（${RESOLVE_REASON}），出于安全已拒绝读取。plan 文件必须位于 ~/.claude/plans 下且不能是软链接。" ;;
+    *)
+      if [ -n "${PLAN_FILE_PATH:-}" ] && [ "${PLAN_FILE_PATH:-}" != "null" ]; then
+        REASON="[ERROR] plan 内容未传入。tool_input.plan 为空，planFilePath=\"${PLAN_FILE_PATH}\" 指向的文件不存在。请将 plan 写入该文件后重新调用 ExitPlanMode。"
+      else
+        REASON="[ERROR] plan 内容未传入。tool_input.plan 和 planFilePath 均为空，且无法从 transcript 反查到 plan 文件。请确保 plan 已写入框架指定的 plan 文件后重试。"
+      fi ;;
+  esac
   jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
   exit 0
 fi

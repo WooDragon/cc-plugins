@@ -249,15 +249,17 @@ build_input_no_plan() {
   local session_id="test-session"
   local cwd="/tmp"
   local plan_file_path=""
+  local transcript_path=""
 
   for arg in "$@"; do
     local key="${arg%%=*}"
     local val="${arg#*=}"
     case "$key" in
-      tool_name)    tool_name="$val" ;;
-      session_id)   session_id="$val" ;;
-      cwd)          cwd="$val" ;;
-      planFilePath) plan_file_path="$val" ;;
+      tool_name)       tool_name="$val" ;;
+      session_id)      session_id="$val" ;;
+      cwd)             cwd="$val" ;;
+      planFilePath)    plan_file_path="$val" ;;
+      transcript_path) transcript_path="$val" ;;
     esac
   done
 
@@ -266,12 +268,29 @@ build_input_no_plan() {
     --arg sid "$session_id" \
     --arg cwd "$cwd" \
     --arg pfp "$plan_file_path" \
+    --arg tp "$transcript_path" \
     '{
       tool_name: $tn,
       session_id: $sid,
       tool_input: (if $pfp != "" then { planFilePath: $pfp } else {} end),
       cwd: $cwd
-    }'
+    } + (if $tp != "" then { transcript_path: $tp } else {} end)'
+}
+
+# create_transcript_with_plan_file <plan_file_path> [transcript_filename]
+#   Writes a minimal JSONL transcript containing a plan_mode attachment row that
+#   references <plan_file_path> — mirrors the CC 2.1.x out-of-band plan contract.
+#   Echoes the transcript path so callers can pass it as transcript_path.
+create_transcript_with_plan_file() {
+  local plan_file_path="$1"
+  local fname="${2:-transcript.jsonl}"
+  local transcript="${TEST_TEMP_DIR}/${fname}"
+  # A couple of realistic rows + the plan_mode attachment carrying the path.
+  jq -nc --arg p "$plan_file_path" \
+    '{type:"user", message:{role:"user", content:"do the thing"}}' > "$transcript"
+  jq -nc --arg p "$plan_file_path" \
+    '{type:"attachment", attachment:{type:"plan_mode", planFilePath:$p, planExists:true}}' >> "$transcript"
+  printf '%s' "$transcript"
 }
 
 # --- Plan File Helpers ---

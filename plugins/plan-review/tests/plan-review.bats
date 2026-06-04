@@ -169,6 +169,116 @@ teardown() {
 }
 
 # =============================================================================
+# Transcript-based plan recovery (CC 2.1.x out-of-band plan-file contract)
+# =============================================================================
+
+# T1. Whitelisted plan file exists → recover content → normal review (APPROVE)
+@test "transcript: recovers plan from whitelisted file → review proceeds" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
+  printf '# Recovered plan\nStep 1: do X\n' > "${REVIEW_PLAN_DIR}/recovered.md"
+  local transcript
+  transcript=$(create_transcript_with_plan_file "${REVIEW_PLAN_DIR}/recovered.md")
+  INPUT=$(build_input_no_plan "transcript_path=${transcript}")
+  run_hook_to_completion
+
+  assert_approve_json
+  assert_log_contains "recovered-from-transcript"
+}
+
+# T2. Resolved path outside whitelist (/etc/passwd) → reject → fail-closed
+@test "transcript: path outside whitelist → deny (outside-whitelist)" {
+  local transcript
+  transcript=$(create_transcript_with_plan_file "/etc/passwd")
+  INPUT=$(build_input_no_plan "transcript_path=${transcript}")
+  run_hook
+
+  assert_deny_json
+  assert_log_contains "resolve=outside-whitelist"
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"非法"* ]]
+}
+
+# T3. Whitelisted path but file never written → fail-closed (resolved-but-missing)
+@test "transcript: whitelisted file missing → deny (resolved-but-missing)" {
+  local transcript
+  transcript=$(create_transcript_with_plan_file "${REVIEW_PLAN_DIR}/never-written.md")
+  INPUT=$(build_input_no_plan "transcript_path=${transcript}")
+  run_hook
+
+  assert_deny_json
+  assert_log_contains "resolve=resolved-but-missing"
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"尚未写入"* ]]
+}
+
+# T4. transcript_path empty / file absent → fail-closed (no crash, no hang)
+@test "transcript: missing transcript_path → deny (no-transcript)" {
+  INPUT=$(build_input_no_plan)
+  run_hook
+
+  assert_deny_json
+  assert_log_contains "resolve=no-transcript"
+}
+
+# T5. Transcript has no plan_mode attachment → fail-closed
+@test "transcript: no plan_mode attachment → deny (no-plan-attachment)" {
+  local transcript="${TEST_TEMP_DIR}/empty.jsonl"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' > "$transcript"
+  INPUT=$(build_input_no_plan "transcript_path=${transcript}")
+  run_hook
+
+  assert_deny_json
+  assert_log_contains "resolve=no-plan-attachment"
+}
+
+# T6. Path traversal in plan path → reject (path-traversal)
+@test "transcript: path traversal → deny (path-traversal)" {
+  local transcript
+  transcript=$(create_transcript_with_plan_file "${REVIEW_PLAN_DIR}/../../../etc/passwd")
+  INPUT=$(build_input_no_plan "transcript_path=${transcript}")
+  run_hook
+
+  assert_deny_json
+  assert_log_contains "resolve=path-traversal"
+}
+
+# T7. SECURITY: symlink inside whitelist → /etc/passwd → reject (symlink-rejected)
+@test "transcript: symlink escape rejected (symlink-rejected)" {
+  ln -sf /etc/passwd "${REVIEW_PLAN_DIR}/evil-link.md"
+  local transcript
+  transcript=$(create_transcript_with_plan_file "${REVIEW_PLAN_DIR}/evil-link.md")
+  INPUT=$(build_input_no_plan "transcript_path=${transcript}")
+  run_hook
+
+  assert_deny_json
+  assert_log_contains "resolve=symlink-rejected"
+}
+
+# T8. SECURITY: transcript is a FIFO → [ -f ] gate prevents blocking read (no hang)
+@test "transcript: FIFO transcript → deny without hanging" {
+  local fifo="${TEST_TEMP_DIR}/fifo-transcript"
+  mkfifo "$fifo"
+  INPUT=$(build_input_no_plan "transcript_path=${fifo}")
+  # Must return promptly (the [ -f ] gate rejects non-regular files before any read).
+  run_hook
+
+  assert_deny_json
+  assert_log_contains "resolve=no-transcript"
+  rm -f "$fifo"
+}
+
+# T9. Regression: tool_input.plan still works (legacy contract unbroken)
+@test "transcript: inline tool_input.plan still reviewed (legacy contract)" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
+  INPUT=$(build_input plan="Inline legacy plan")
+  run_hook_to_completion
+
+  assert_approve_json
+}
+
+# =============================================================================
 # Dry Run
 # =============================================================================
 
