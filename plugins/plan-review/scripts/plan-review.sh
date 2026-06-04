@@ -60,6 +60,23 @@ log_entry() {
     "${1:-unknown}" "${2:-unknown}" "${3:-}" >> "$LOG_FILE" 2>/dev/null || true
 }
 
+# --- Raw payload capture (diagnostic-only; never let IO failure kill core logic) ---
+# CC 2.1.x moved plan content out of tool_input into an out-of-band plan file whose
+# path is NOT in the hook stdin. When plan extraction fails we dump the complete raw
+# payload + a key-schema summary so the true field layout can be inspected post-hoc.
+dump_payload() {
+  local raw="$1" session="$2"
+  local dump_dir="${LOG_DIR}/payloads"
+  mkdir -p "$dump_dir" 2>/dev/null || return 0
+  local stamp; stamp=$(date -u +"%Y%m%dT%H%M%SZ")
+  local dump_file="${dump_dir}/exitplanmode-${session:-nosession}-${stamp}-$$.json"
+  printf '%s' "$raw" > "$dump_file" 2>/dev/null || return 0
+  # Echo the dump path into the main log so it can be located later.
+  printf '[%s] PAYLOAD-DUMP session=%s file=%s\n' \
+    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${session:-unknown}" "$dump_file" \
+    >> "$LOG_FILE" 2>/dev/null || true
+}
+
 # --- Visible allow helper (eliminates silent exit 0 for non-guard paths) ---
 allow_with_reason() {
   local reason="$1"
@@ -186,7 +203,15 @@ fi
 
 # Fail-closed: no plan content → deny with actionable path info
 if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
-  log_decision "decision=deny reason=no-plan-content-fail-closed planFilePath=${PLAN_FILE_PATH:-empty}"
+  # Diagnostic: CC 2.1.x carries the plan in an out-of-band file whose path is not
+  # in tool_input. Capture the raw payload + a key-schema summary so the actual
+  # field layout (transcript_path, cwd, hidden plan-file fields) can be inspected.
+  dump_payload "$INPUT" "$SESSION_ID"
+  TOP_KEYS=$(echo "$INPUT" | jq -rc '(keys // []) | @json' 2>/dev/null || echo "?")
+  TI_KEYS=$(echo "$INPUT" | jq -rc '(.tool_input // {} | keys) | @json' 2>/dev/null || echo "?")
+  TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null || echo "")
+  CWD_VAL=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")
+  log_decision "decision=deny reason=no-plan-content-fail-closed planFilePath=${PLAN_FILE_PATH:-empty} top_keys=${TOP_KEYS} tool_input_keys=${TI_KEYS} transcript_path=${TRANSCRIPT_PATH:-empty} cwd=${CWD_VAL:-empty}"
   rm -f "$APPROVE_MARKER" "$COUNTER_FILE"
   REASON=""
   if [ -n "${PLAN_FILE_PATH:-}" ] && [ "${PLAN_FILE_PATH:-}" != "null" ]; then

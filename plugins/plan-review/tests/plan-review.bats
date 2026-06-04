@@ -916,6 +916,24 @@ LGTM."
   [ "$event_name" = "PreToolUse" ]
 }
 
+# 45b. No plan content → diagnostic capture: raw payload dumped + key schema logged
+@test "skip: no plan content → dumps raw payload and logs field schema" {
+  INPUT=$(build_input_no_plan "session_id=diag-sess" "cwd=/work/proj")
+  run_hook
+
+  assert_deny_json
+  # Decision log records the field schema (top-level keys, tool_input keys, cwd)
+  # so the actual CC payload layout can be diagnosed without re-instrumenting.
+  assert_log_contains "top_keys="
+  assert_log_contains "tool_input_keys="
+  assert_log_contains "cwd=/work/proj"
+  # A PAYLOAD-DUMP pointer line is written and the raw payload file exists.
+  assert_log_contains "PAYLOAD-DUMP"
+  local dump_count
+  dump_count=$(find "${REVIEW_LOG_DIR}/payloads" -name 'exitplanmode-diag-sess-*.json' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$dump_count" -ge 1 ]
+}
+
 # 46. Engine CLI not found → allow JSON with WARNING reason
 @test "skip: engine CLI not found → allow JSON with WARNING reason" {
   INPUT=$(build_input)
