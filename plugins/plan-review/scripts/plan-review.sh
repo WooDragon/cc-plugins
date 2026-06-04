@@ -122,9 +122,11 @@ plan_hash() {
 # ---
 RESOLVE_REASON=""
 RECOVERED_PATH=""
+RESOLVE_PATH=""
 resolve_plan_from_transcript() {
   RESOLVE_REASON=""
   RECOVERED_PATH=""
+  RESOLVE_PATH=""
   local transcript="$1"
   # Gate 0: transcript must be a regular file (not FIFO/device → no blocking read).
   [ -n "$transcript" ] && [ -f "$transcript" ] || { RESOLVE_REASON="no-transcript"; return; }
@@ -136,6 +138,8 @@ resolve_plan_from_transcript() {
   local raw_path
   raw_path=$(jq -r 'select(.attachment?.type == "plan_mode" and .attachment?.planFilePath != null) | .attachment.planFilePath' "$transcript" 2>/dev/null | tail -1 || true)
   [ -n "$raw_path" ] && [ "$raw_path" != "null" ] || { RESOLVE_REASON="no-plan-attachment"; return; }
+  # Expose the path under evaluation so error messages stay actionable on every reject path.
+  RESOLVE_PATH="$raw_path"
 
   # Gate 1: reject path traversal in the raw path.
   case "$raw_path" in
@@ -162,6 +166,7 @@ resolve_plan_from_transcript() {
   dir_resolved=$(cd "$dir" 2>/dev/null && pwd -P) || { RESOLVE_REASON="unresolvable"; return; }
   [ -n "$dir_resolved" ] || { RESOLVE_REASON="unresolvable"; return; }
   resolved="${dir_resolved}/${base}"
+  RESOLVE_PATH="$resolved"
 
   # Resolve the whitelist root the same way so the prefix compare is apples-to-apples.
   local root_resolved
@@ -311,20 +316,22 @@ if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   TI_KEYS=$(echo "$INPUT" | jq -rc '(.tool_input // {} | keys) | @json' 2>/dev/null || echo "?")
   TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null || echo "")
   CWD_VAL=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")
-  log_decision "decision=deny reason=no-plan-content-fail-closed resolve=${RESOLVE_REASON:-none} planFilePath=${PLAN_FILE_PATH:-empty} top_keys=${TOP_KEYS} tool_input_keys=${TI_KEYS} transcript_path=${TRANSCRIPT_PATH:-empty} cwd=${CWD_VAL:-empty}"
+  log_decision "decision=deny reason=no-plan-content-fail-closed resolve=${RESOLVE_REASON:-none} resolvePath=${RESOLVE_PATH:-empty} planFilePath=${PLAN_FILE_PATH:-empty} top_keys=${TOP_KEYS} tool_input_keys=${TI_KEYS} transcript_path=${TRANSCRIPT_PATH:-empty} cwd=${CWD_VAL:-empty}"
   rm -f "$APPROVE_MARKER" "$COUNTER_FILE"
-  # Three-state error message routed by the resolver's RESOLVE_REASON.
+  # Three-state error message routed by the resolver's RESOLVE_REASON. Every
+  # branch names the plan file path under evaluation (RESOLVE_PATH) so the user
+  # can act — "write your plan to this exact file" instead of a bare directive.
   REASON=""
   case "${RESOLVE_REASON:-}" in
     resolved-but-missing)
-      REASON="[ERROR] plan 内容未传入。框架在 transcript 中指定了 plan 文件但该文件尚未写入。请确认 plan 已落盘后重新调用 ExitPlanMode。" ;;
+      REASON="[ERROR] plan 内容未传入。框架在 transcript 中指定了 plan 文件 \"${RESOLVE_PATH}\"，但该文件尚未写入。请用 Write 将 plan 写入该文件后重新调用 ExitPlanMode。" ;;
     outside-whitelist|symlink-rejected|path-traversal)
-      REASON="[ERROR] plan 文件路径非法（${RESOLVE_REASON}），出于安全已拒绝读取。plan 文件必须位于 ~/.claude/plans 下且不能是软链接。" ;;
+      REASON="[ERROR] plan 文件路径 \"${RESOLVE_PATH}\" 非法（${RESOLVE_REASON}），出于安全已拒绝读取。plan 文件必须位于 ~/.claude/plans 下且不能是软链接。" ;;
     *)
       if [ -n "${PLAN_FILE_PATH:-}" ] && [ "${PLAN_FILE_PATH:-}" != "null" ]; then
         REASON="[ERROR] plan 内容未传入。tool_input.plan 为空，planFilePath=\"${PLAN_FILE_PATH}\" 指向的文件不存在。请将 plan 写入该文件后重新调用 ExitPlanMode。"
       else
-        REASON="[ERROR] plan 内容未传入。tool_input.plan 和 planFilePath 均为空，且无法从 transcript 反查到 plan 文件。请确保 plan 已写入框架指定的 plan 文件后重试。"
+        REASON="[ERROR] plan 内容未传入。tool_input.plan 和 planFilePath 均为空，且无法从 transcript 反查到 plan 文件（${RESOLVE_REASON:-no-transcript}）。请确保 plan 已写入框架指定的 plan 文件后重试。"
       fi ;;
   esac
   jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'

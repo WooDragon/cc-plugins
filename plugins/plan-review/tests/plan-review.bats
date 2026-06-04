@@ -197,6 +197,8 @@ teardown() {
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"非法"* ]]
+  # Message must name the offending path so the user knows what was rejected.
+  [[ "$reason" == *"passwd"* ]]
 }
 
 # T3. Whitelisted path but file never written → fail-closed (resolved-but-missing)
@@ -211,6 +213,9 @@ teardown() {
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"尚未写入"* ]]
+  # Regression: the message MUST name the plan file path (the whole point — tell
+  # the user which file to write). A bare "指定了 plan 文件" with no path is useless.
+  [[ "$reason" == *"never-written.md"* ]]
 }
 
 # T4. transcript_path empty / file absent → fail-closed (no crash, no hang)
