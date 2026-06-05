@@ -134,6 +134,36 @@ teardown() {
   assert_allowed
 }
 
+@test "path exclude: /tmp/foo.md → silent allow" {
+  INPUT=$(build_edit_input file_path=/tmp/foo.md)
+  run_gate
+  assert_allowed
+}
+
+@test "path exclude: /tmp/claude-reviews/plan.md → silent allow" {
+  INPUT=$(build_edit_input file_path=/tmp/claude-reviews/plan.md)
+  run_gate
+  assert_allowed
+}
+
+@test "path exclude: /var/tmp/scratch.md → silent allow" {
+  INPUT=$(build_edit_input file_path=/var/tmp/scratch.md)
+  run_gate
+  assert_allowed
+}
+
+@test "path exclude: /private/tmp/bats.md → silent allow (macOS)" {
+  INPUT=$(build_edit_input file_path=/private/tmp/bats.md)
+  run_gate
+  assert_allowed
+}
+
+@test "path exclude: /var/folders/xx/yz/T/tmp.md → silent allow (macOS)" {
+  INPUT=$(build_edit_input file_path=/var/folders/xx/yz/T/tmp.md)
+  run_gate
+  assert_allowed
+}
+
 # ============================================================
 # Gate enforcement — no marker
 # ============================================================

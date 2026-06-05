@@ -56,6 +56,11 @@ _main() {
     */.claude/*|*/.claude-plugin/*|*/node_modules/*|*/.git/*) return ;;
   esac
 
+  # Temporary directory exclusions (match absolute paths directly)
+  case "$FILE_PATH" in
+    /tmp/*|/var/tmp/*|/var/folders/*|/private/tmp/*) return ;;
+  esac
+
   # Path sanitization (match skill-marker.sh convention)
   SESSION_ID="${SESSION_ID//\//_}"
 

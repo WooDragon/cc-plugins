@@ -193,6 +193,7 @@ Skill + Hook 打包插件：doc-maintenance skill 提供文档维护工作流，
 **排除名单**（不触发门禁）：
 - Basename：`CLAUDE.md`、`MEMORY.md`、`SKILL.md`、`README.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`LICENSE.md`
 - Path：`*/.claude/*`、`*/.claude-plugin/*`、`*/node_modules/*`、`*/.git/*`
+- 临时目录：`/tmp/*`、`/var/tmp/*`、`/var/folders/*`（macOS）、`/private/tmp/*`（macOS）
 
 **Marker 生命周期**：session 级，120min stale 清理（兼做上下文刷新——长 session 后强制重新加载 skill）。
 
