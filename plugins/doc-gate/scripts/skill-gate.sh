@@ -70,7 +70,7 @@ _main() {
   if [ "$IS_GLOBAL_CLAUDE" != "1" ]; then
     # Path exclusions (prepend / to handle relative paths uniformly)
     case "/$FILE_PATH" in
-      */.claude/*|*/.claude-plugin/*|*/node_modules/*|*/.git/*) return ;;
+      */.claude/*|*/.claude-plugin/*|*/.agents/directives/*|*/node_modules/*|*/.git/*) return ;;
     esac
     # Temporary directory exclusions (match absolute paths directly)
     case "$FILE_PATH" in

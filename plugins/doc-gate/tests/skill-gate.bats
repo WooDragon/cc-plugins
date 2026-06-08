@@ -127,6 +127,18 @@ teardown() {
   assert_allowed
 }
 
+@test "path exclude: .agents/directives/handoff.md → silent allow (team-ops progress)" {
+  INPUT=$(build_edit_input file_path=/project/.agents/directives/handoff.md)
+  run_gate
+  assert_allowed
+}
+
+@test "path exclude: relative .agents/directives/x.md → silent allow (team-ops progress)" {
+  INPUT=$(build_edit_input file_path=.agents/directives/dev-001.md)
+  run_gate
+  assert_allowed
+}
+
 @test "path exclude: relative path .claude/plans/x.md → silent allow" {
   INPUT=$(build_edit_input file_path=.claude/plans/x.md)
   run_gate
@@ -409,6 +421,17 @@ teardown() {
   # silently letting it slip into */.claude/* — regression guard for the %/ strip.
   export HOME="${TEST_TEMP_DIR}/mock_home/"
   INPUT=$(build_edit_input file_path="${TEST_TEMP_DIR}/mock_home/.claude/CLAUDE.md")
+  run_gate
+  assert_deny_json
+  assert_log_contains "skill-not-invoked-global"
+}
+
+@test "gate: global CLAUDE.md with glob char in HOME → deny (quoted pattern is literal)" {
+  # The quoted case pattern matches $HOME_DIR LITERALLY, so a glob metachar in
+  # HOME (here '[') must NOT alter matching. Pins the quoting semantics — guards
+  # against a refactor to an unquoted pattern that would break global detection.
+  export HOME="${TEST_TEMP_DIR}/ho[me"
+  INPUT=$(build_edit_input file_path="${TEST_TEMP_DIR}/ho[me/.claude/CLAUDE.md")
   run_gate
   assert_deny_json
   assert_log_contains "skill-not-invoked-global"

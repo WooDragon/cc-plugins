@@ -44,7 +44,7 @@ plugins/
     skills/
       doc-maintenance/SKILL.md   # 文档维护工作流（从全局 skill 迁入）
     tests/                       # BDD 测试套件
-      skill-gate.bats            # 51 个测试用例
+      skill-gate.bats            # 54 个测试用例
       skill-marker.bats          # 13 个测试用例
       test_helper/
         common-setup.bash        # 测试基础设施
@@ -196,7 +196,7 @@ Skill + Hook 打包插件：doc-maintenance skill 提供文档维护工作流，
 
 **排除名单**（不触发门禁）：
 - Basename：`MEMORY.md`（工具自维护）、`SKILL.md`/`CHANGELOG.md`/`LICENSE.md`（特殊格式/非散文，不适用文档维护原则）。`CLAUDE.md`/`README.md`/`CONTRIBUTING.md` 已移出——现为受治理文档
-- Path：`*/.claude/*`、`*/.claude-plugin/*`、`*/node_modules/*`、`*/.git/*`（全局 `~/.claude/CLAUDE.md` 例外，见上）
+- Path：`*/.claude/*`、`*/.claude-plugin/*`、`*/.agents/directives/*`（team-ops 协议进度文件）、`*/node_modules/*`、`*/.git/*`（全局 `~/.claude/CLAUDE.md` 例外，见上）
 - 临时目录：`/tmp/*`、`/var/tmp/*`、`/var/folders/*`（macOS）、`/private/tmp/*`（macOS）
 
 **Marker 生命周期**：session 级，120min stale 清理（兼做上下文刷新——长 session 后强制重新加载 skill）。
