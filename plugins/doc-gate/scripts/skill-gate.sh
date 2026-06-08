@@ -42,24 +42,41 @@ _main() {
   BASENAME="${FILE_PATH##*/}"
   case "$BASENAME" in *.[mM][dD]) ;; *) return ;; esac
 
-  # Basename exclusions (meta files, not governed by doc-maintenance)
-  # readme.md excluded by basename — docs/README.md also excluded (known trade-off)
+  # Global CLAUDE.md identity + basename exclusions share one nocasematch block.
+  # The global match MUST be case-insensitive — macOS/APFS is case-insensitive
+  # by default; never assume path casing (a lowercase ~/.claude/claude.md would
+  # otherwise slip past the global guard into the */.claude/* allow path).
   shopt -s nocasematch
+  # Global config (~/.claude/CLAUDE.md): must gate despite living under .claude/.
+  # Strip a trailing slash from HOME — HOME=/x/ yields /x//.claude/... which would
+  # miss the match and silently let the global config slip into the */.claude/*
+  # allow path. (glob chars in HOME are safe: the quoted pattern matches literally.)
+  HOME_DIR="${HOME:-}"; HOME_DIR="${HOME_DIR%/}"
+  IS_GLOBAL_CLAUDE=0
+  case "$FILE_PATH" in
+    "${HOME_DIR}/.claude/CLAUDE.md") IS_GLOBAL_CLAUDE=1 ;;
+  esac
+  # Basename exclusions — tool-maintained (MEMORY.md) or special-format /
+  # non-prose files (SKILL.md, CHANGELOG.md, LICENSE.md). CLAUDE.md, README.md,
+  # CONTRIBUTING.md are governed documents now and intentionally NOT listed.
   case "$BASENAME" in
-    claude.md|memory.md|skill.md|readme.md|changelog.md|contributing.md|license.md)
-      shopt -u nocasematch; return ;;
+    memory.md|skill.md|changelog.md|license.md) shopt -u nocasematch; return ;;
   esac
   shopt -u nocasematch
 
-  # Path exclusions (prepend / to handle relative paths uniformly)
-  case "/$FILE_PATH" in
-    */.claude/*|*/.claude-plugin/*|*/node_modules/*|*/.git/*) return ;;
-  esac
-
-  # Temporary directory exclusions (match absolute paths directly)
-  case "$FILE_PATH" in
-    /tmp/*|/var/tmp/*|/var/folders/*|/private/tmp/*) return ;;
-  esac
+  # Location-based exclusions — global CLAUDE.md bypasses ALL of them: once its
+  # identity is established it must gate unconditionally, no matter where $HOME
+  # lives (a containerized/test HOME under /tmp must not slip through either).
+  if [ "$IS_GLOBAL_CLAUDE" != "1" ]; then
+    # Path exclusions (prepend / to handle relative paths uniformly)
+    case "/$FILE_PATH" in
+      */.claude/*|*/.claude-plugin/*|*/.agents/directives/*|*/node_modules/*|*/.git/*) return ;;
+    esac
+    # Temporary directory exclusions (match absolute paths directly)
+    case "$FILE_PATH" in
+      /tmp/*|/var/tmp/*|/var/folders/*|/private/tmp/*) return ;;
+    esac
+  fi
 
   # Path sanitization (match skill-marker.sh convention)
   SESSION_ID="${SESSION_ID//\//_}"
@@ -79,15 +96,25 @@ _main() {
   # GATE_DIR not writable → markers can't be created → dead-lock → fail-open
   [ -w "$GATE_DIR" ] || return
 
-  # Deny
-  _log "deny" "skill-not-invoked"
-
+  # Deny — global config gets the highest-strength message + distinct log reason.
   local msg
-  msg="文档编辑门禁：${BASENAME} 是文档文件（.md），编辑前需先调用 doc-maintenance skill 加载文档维护工作流。
+  if [ "$IS_GLOBAL_CLAUDE" = "1" ]; then
+    _log "deny" "skill-not-invoked-global"
+    msg="文档编辑门禁（全局配置 · 最高强度）：正在编辑全局 CLAUDE.md（${FILE_PATH}）。它注入到每一个任务，是污染面最大的文件，改动需极度克制。
+
+编辑前必须先调用 doc-maintenance skill，并套用最严的「全局 CLAUDE.md 通用化原则」：只增跨 2+ 场景生效、确定后基本不变、非单任务的原则性内容；场景特定内容一律外移到对应 skill 或 docs/。
 
 请使用 Skill 工具调用 doc-maintenance，然后重试此操作。
 
 如需关闭门禁，设置 SKILL_GATE_DISABLED=1。"
+  else
+    _log "deny" "skill-not-invoked"
+    msg="文档编辑门禁：${BASENAME} 是文档文件（.md），编辑前需先调用 doc-maintenance skill 加载文档维护工作流。
+
+请使用 Skill 工具调用 doc-maintenance，然后重试此操作。
+
+如需关闭门禁，设置 SKILL_GATE_DISABLED=1。"
+  fi
 
   local deny_json
   deny_json=$(printf '%s' "$msg" | jq -Rs .)

@@ -44,7 +44,7 @@ plugins/
     skills/
       doc-maintenance/SKILL.md   # 文档维护工作流（从全局 skill 迁入）
     tests/                       # BDD 测试套件
-      skill-gate.bats            # 40 个测试用例
+      skill-gate.bats            # 54 个测试用例
       skill-marker.bats          # 13 个测试用例
       test_helper/
         common-setup.bash        # 测试基础设施
@@ -184,15 +184,19 @@ APPROVE 不再静默放行——`allow` 决策的 `permissionDecisionReason` 在
 - Marker 文件与 counter 在 ack-round 的 allow 路径中原子清理
 - 额外开销：一次无引擎调用的 round-trip（~100ms），相对 10-30s 的审阅延迟可忽略
 
-## Doc-Gate 文档编辑门禁（v1.0.0）
+## Doc-Gate 文档编辑门禁（v1.0.0，CLAUDE.md 治理 v1.0.3）
 
 Skill + Hook 打包插件：doc-maintenance skill 提供文档维护工作流，PreToolUse hook 强制执行。
 
 **机制**：Edit/Write `.md` 文件时，hook 检查 session 级 marker。无 marker → deny 并提示调用 doc-maintenance skill；skill 调用后 marker 写入，后续 .md 编辑直接放行。
 
+**CLAUDE.md 强制门禁与分级（v1.0.3，issue #19）**：任何 CLAUDE.md 都走门禁（不再豁免），按层级分两级强度：
+- **全局** `~/.claude/CLAUDE.md`：最高强度。脚本大小写不敏感识别（macOS/APFS 不区分大小写），**无条件门禁**——绕过所有位置排除（路径 + 临时目录），deny 消息含「最高强度」提示 + 日志 reason `skill-not-invoked-global`；doc-maintenance 套用最严「全局 CLAUDE.md 通用化原则」（跨域/稳定/鲁棒/只放原则四判据全过）。
+- **项目级** `<project>/CLAUDE.md`：普通强度走标准门禁，四判据作参考。
+
 **排除名单**（不触发门禁）：
-- Basename：`CLAUDE.md`、`MEMORY.md`、`SKILL.md`、`README.md`、`CHANGELOG.md`、`CONTRIBUTING.md`、`LICENSE.md`
-- Path：`*/.claude/*`、`*/.claude-plugin/*`、`*/node_modules/*`、`*/.git/*`
+- Basename：`MEMORY.md`（工具自维护）、`SKILL.md`/`CHANGELOG.md`/`LICENSE.md`（特殊格式/非散文，不适用文档维护原则）。`CLAUDE.md`/`README.md`/`CONTRIBUTING.md` 已移出——现为受治理文档
+- Path：`*/.claude/*`、`*/.claude-plugin/*`、`*/.agents/directives/*`（team-ops 协议进度文件）、`*/node_modules/*`、`*/.git/*`（全局 `~/.claude/CLAUDE.md` 例外，见上）
 - 临时目录：`/tmp/*`、`/var/tmp/*`、`/var/folders/*`（macOS）、`/private/tmp/*`（macOS）
 
 **Marker 生命周期**：session 级，120min stale 清理（兼做上下文刷新——长 session 后强制重新加载 skill）。
@@ -241,3 +245,4 @@ npx skills ls -g | grep ppt
 - [#11 审阅质量增强 & Hook Timeout 修正 (v1.0.28~v1.0.32)](https://github.com/WooDragon/cc-plugins/issues/11) — Execution topology、造轮子检测、hook timeout 认知修正
 - [#12 Dispatch Manifest 双层防御 (v1.0.34)](https://github.com/WooDragon/cc-plugins/issues/12) — Layer 1 manifest 表格强制 + dispatch JSON 落地、Layer 2 Agent/Task 参数校验
 - [#18 CC 2.1.x 契约变更 & transcript 反查恢复 (v1.0.37~v1.0.40)](https://github.com/WooDragon/cc-plugins/issues/18) — fail-closed hookEventName 修复、payload 诊断 dump、plan 移至 out-of-band 文件、transcript_path 反查 + 三重安全门（FIFO/软链接/路径遍历）
+- [#19 CLAUDE.md 强制门禁 & 全局/项目级分级 (v1.0.3)](https://github.com/WooDragon/cc-plugins/issues/19) — basename 豁免收缩（CLAUDE/README/CONTRIBUTING 纳入门禁）、全局 `~/.claude/CLAUDE.md` 大小写不敏感识别 + 无条件门禁（绕过位置排除）、deny 消息分级 + `skill-not-invoked-global` 日志、doc-maintenance 通用化原则章节、放弃 `DOC_GATE_FORCE_INCLUDE` 改用零配置内建规则

@@ -51,11 +51,10 @@ teardown() {
 # Basename exclusions
 # ============================================================
 
-@test "exclude: CLAUDE.md → silent allow" {
+@test "gate: project CLAUDE.md without marker → deny" {
   INPUT=$(build_edit_input file_path=/project/CLAUDE.md)
   run_gate
-  assert_allowed
-  [ -z "$HOOK_STDOUT" ]
+  assert_deny_json
 }
 
 @test "exclude: MEMORY.md → silent allow" {
@@ -70,10 +69,10 @@ teardown() {
   assert_allowed
 }
 
-@test "exclude: README.md → silent allow" {
+@test "gate: README.md without marker → deny" {
   INPUT=$(build_edit_input file_path=/project/README.md)
   run_gate
-  assert_allowed
+  assert_deny_json
 }
 
 @test "exclude: CHANGELOG.md → silent allow" {
@@ -82,10 +81,10 @@ teardown() {
   assert_allowed
 }
 
-@test "exclude: CONTRIBUTING.md → silent allow" {
+@test "gate: CONTRIBUTING.md without marker → deny" {
   INPUT=$(build_edit_input file_path=/project/CONTRIBUTING.md)
   run_gate
-  assert_allowed
+  assert_deny_json
 }
 
 @test "exclude: LICENSE.md → silent allow" {
@@ -94,10 +93,10 @@ teardown() {
   assert_allowed
 }
 
-@test "exclude: case-insensitive — claude.MD → silent allow" {
+@test "gate: project claude.MD without marker → deny (case-insensitive)" {
   INPUT=$(build_edit_input file_path=/project/claude.MD)
   run_gate
-  assert_allowed
+  assert_deny_json
 }
 
 # ============================================================
@@ -124,6 +123,18 @@ teardown() {
 
 @test "path exclude: .git/hooks/readme.md → silent allow" {
   INPUT=$(build_edit_input file_path=/project/.git/hooks/readme.md)
+  run_gate
+  assert_allowed
+}
+
+@test "path exclude: .agents/directives/handoff.md → silent allow (team-ops progress)" {
+  INPUT=$(build_edit_input file_path=/project/.agents/directives/handoff.md)
+  run_gate
+  assert_allowed
+}
+
+@test "path exclude: relative .agents/directives/x.md → silent allow (team-ops progress)" {
+  INPUT=$(build_edit_input file_path=.agents/directives/dev-001.md)
   run_gate
   assert_allowed
 }
@@ -357,6 +368,78 @@ teardown() {
 
   # Step 2: edit should now be allowed
   INPUT=$(build_edit_input file_path=/project/docs/guide.md)
+  run_gate
+  assert_allowed
+}
+
+# ============================================================
+# CLAUDE.md governance — project & global tiers
+# ============================================================
+
+@test "gate: project CLAUDE.md with marker → allow" {
+  create_gate_marker
+  INPUT=$(build_edit_input file_path=/project/CLAUDE.md)
+  run_gate
+  assert_allowed
+}
+
+@test "gate: global ~/.claude/CLAUDE.md without marker → deny (global branch)" {
+  # mock HOME lives under mktemp's tmpdir (/var/folders on macOS, /tmp on Linux),
+  # so this also asserts the global identity bypasses the TEMP-DIR exclusion,
+  # not merely the */.claude/* path exclusion.
+  export HOME="${TEST_TEMP_DIR}/mock_home"
+  INPUT=$(build_edit_input file_path="${HOME}/.claude/CLAUDE.md")
+  run_gate
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"全局"* ]]
+  assert_log_contains "skill-not-invoked-global"
+}
+
+@test "gate: global lowercase ~/.claude/claude.md without marker → deny (case-insensitive global)" {
+  export HOME="${TEST_TEMP_DIR}/mock_home"
+  INPUT=$(build_edit_input file_path="${HOME}/.claude/claude.md")
+  run_gate
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"全局"* ]]
+  assert_log_contains "skill-not-invoked-global"
+}
+
+@test "gate: global ~/.claude/CLAUDE.md with marker → allow" {
+  export HOME="${TEST_TEMP_DIR}/mock_home"
+  create_gate_marker
+  INPUT=$(build_edit_input file_path="${HOME}/.claude/CLAUDE.md")
+  run_gate
+  assert_allowed
+}
+
+@test "gate: global CLAUDE.md with trailing-slash HOME → deny (HOME normalized)" {
+  # HOME=/x/ would otherwise yield /x//.claude/... and miss the global match,
+  # silently letting it slip into */.claude/* — regression guard for the %/ strip.
+  export HOME="${TEST_TEMP_DIR}/mock_home/"
+  INPUT=$(build_edit_input file_path="${TEST_TEMP_DIR}/mock_home/.claude/CLAUDE.md")
+  run_gate
+  assert_deny_json
+  assert_log_contains "skill-not-invoked-global"
+}
+
+@test "gate: global CLAUDE.md with glob char in HOME → deny (quoted pattern is literal)" {
+  # The quoted case pattern matches $HOME_DIR LITERALLY, so a glob metachar in
+  # HOME (here '[') must NOT alter matching. Pins the quoting semantics — guards
+  # against a refactor to an unquoted pattern that would break global detection.
+  export HOME="${TEST_TEMP_DIR}/ho[me"
+  INPUT=$(build_edit_input file_path="${TEST_TEMP_DIR}/ho[me/.claude/CLAUDE.md")
+  run_gate
+  assert_deny_json
+  assert_log_contains "skill-not-invoked-global"
+}
+
+@test "exclude: non-global ~/.claude/plugins/cache/x/CLAUDE.md → silent allow" {
+  export HOME="${TEST_TEMP_DIR}/mock_home"
+  INPUT=$(build_edit_input file_path="${HOME}/.claude/plugins/cache/x/CLAUDE.md")
   run_gate
   assert_allowed
 }
