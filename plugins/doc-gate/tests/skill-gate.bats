@@ -404,6 +404,16 @@ teardown() {
   assert_allowed
 }
 
+@test "gate: global CLAUDE.md with trailing-slash HOME → deny (HOME normalized)" {
+  # HOME=/x/ would otherwise yield /x//.claude/... and miss the global match,
+  # silently letting it slip into */.claude/* — regression guard for the %/ strip.
+  export HOME="${TEST_TEMP_DIR}/mock_home/"
+  INPUT=$(build_edit_input file_path="${TEST_TEMP_DIR}/mock_home/.claude/CLAUDE.md")
+  run_gate
+  assert_deny_json
+  assert_log_contains "skill-not-invoked-global"
+}
+
 @test "exclude: non-global ~/.claude/plugins/cache/x/CLAUDE.md → silent allow" {
   export HOME="${TEST_TEMP_DIR}/mock_home"
   INPUT=$(build_edit_input file_path="${HOME}/.claude/plugins/cache/x/CLAUDE.md")

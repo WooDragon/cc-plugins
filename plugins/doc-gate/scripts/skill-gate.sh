@@ -48,9 +48,13 @@ _main() {
   # otherwise slip past the global guard into the */.claude/* allow path).
   shopt -s nocasematch
   # Global config (~/.claude/CLAUDE.md): must gate despite living under .claude/.
+  # Strip a trailing slash from HOME — HOME=/x/ yields /x//.claude/... which would
+  # miss the match and silently let the global config slip into the */.claude/*
+  # allow path. (glob chars in HOME are safe: the quoted pattern matches literally.)
+  HOME_DIR="${HOME:-}"; HOME_DIR="${HOME_DIR%/}"
   IS_GLOBAL_CLAUDE=0
   case "$FILE_PATH" in
-    "${HOME:-}/.claude/CLAUDE.md") IS_GLOBAL_CLAUDE=1 ;;
+    "${HOME_DIR}/.claude/CLAUDE.md") IS_GLOBAL_CLAUDE=1 ;;
   esac
   # Basename exclusions — tool-maintained (MEMORY.md) or special-format /
   # non-prose files (SKILL.md, CHANGELOG.md, LICENSE.md). CLAUDE.md, README.md,
