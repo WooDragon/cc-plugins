@@ -104,16 +104,12 @@ _main() {
 
 编辑前必须先调用 doc-maintenance skill，并套用最严的「全局 CLAUDE.md 通用化原则」：只增跨 2+ 场景生效、确定后基本不变、非单任务的原则性内容；场景特定内容一律外移到对应 skill 或 docs/。
 
-请使用 Skill 工具调用 doc-maintenance，然后重试此操作。
-
-如需关闭门禁，设置 SKILL_GATE_DISABLED=1。"
+请使用 Skill 工具调用 doc-maintenance，然后重试此操作。禁止通过环境变量绕过门禁——仅当 skill 工具本身故障无法调用时，才可设置 SKILL_GATE_DISABLED=1 临时放行。"
   else
     _log "deny" "skill-not-invoked"
     msg="文档编辑门禁：${BASENAME} 是文档文件（.md），编辑前需先调用 doc-maintenance skill 加载文档维护工作流。
 
-请使用 Skill 工具调用 doc-maintenance，然后重试此操作。
-
-如需关闭门禁，设置 SKILL_GATE_DISABLED=1。"
+请使用 Skill 工具调用 doc-maintenance，然后重试此操作。禁止通过环境变量绕过门禁——仅当 skill 工具本身故障无法调用时，才可设置 SKILL_GATE_DISABLED=1 临时放行。"
   fi
 
   local deny_json
