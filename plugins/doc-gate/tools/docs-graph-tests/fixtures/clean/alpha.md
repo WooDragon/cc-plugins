@@ -1,3 +1,0 @@
-# Alpha
-
-- [Beta](beta.md)

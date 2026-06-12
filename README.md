@@ -10,7 +10,7 @@ WooDragon's CC plugin & skill marketplace.
 claude plugin add WooDragon/cc-plugins
 ```
 
-**Skills (PPT toolkit):**
+**Skills:**
 
 ```bash
 npx skills add WooDragon/cc-plugins -g
@@ -20,12 +20,15 @@ npx skills add WooDragon/cc-plugins -g
 
 | Plugin | Description |
 |--------|-------------|
-| [plan-review](./plugins/plan-review/) | Adversarial red-team review of implementation plans via Gemini/Claude |
+| [plan-review](./plugins/plan-review/) | Adversarial plan review via cross-model consultation (Gemini/Claude) |
+| [doc-gate](./plugins/doc-gate/) | Document editing governance — doc-maintenance skill + hard gate hook |
+| [ppt-press](./plugins/ppt-press/) | PPT toolkit — editorial magazine × e-ink web presentation skills |
 
-## Skills (via ppt-press plugin)
+## Skills
 
-| Skill | Description |
-|-------|-------------|
-| [ppt-create](./plugins/ppt-press/skills/ppt-create/) | Generate editorial magazine × e-ink web presentations (Astro) |
-| [ppt-deploy](./plugins/ppt-press/skills/ppt-deploy/) | Build, test, and deploy PPT decks to AWS Amplify |
-| [ppt-manage](./plugins/ppt-press/skills/ppt-manage/) | List, search, and retrieve PPT deck URLs |
+| Skill | Plugin | Description |
+|-------|--------|-------------|
+| [ppt-create](./plugins/ppt-press/skills/ppt-create/) | ppt-press | Generate editorial magazine × e-ink web presentations (Astro) |
+| [ppt-deploy](./plugins/ppt-press/skills/ppt-deploy/) | ppt-press | Build, test, and deploy PPT decks to AWS Amplify |
+| [ppt-manage](./plugins/ppt-press/skills/ppt-manage/) | ppt-press | List, search, and retrieve PPT deck URLs |
+| [doc-maintenance](./plugins/doc-gate/skills/doc-maintenance/) | doc-gate | Document maintenance workflow with pre/post-flight checks |
