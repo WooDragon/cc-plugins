@@ -41,9 +41,37 @@ LINK_PATTERN = re.compile(r'(?<!\!)\[([^\]]*)\]\(([^)]+)\)')
 CODE_FENCE = re.compile(r'^```')
 
 
-def get_repo_root() -> Path:
-    """默认使用当前工作目录作为 repo 根目录"""
-    return Path.cwd()
+def detect_root(start_path: str, override_root: str = None) -> str:
+    if override_root:
+        p = Path(override_root)
+        if p.is_dir():
+            return str(p.resolve())
+
+    home = Path.home()
+    current = Path(start_path).resolve()
+    if current.is_file():
+        current = current.parent
+
+    first_git = None
+    depth = 0
+    while current != home and current != current.parent and depth < 64:
+        has_claude_md = (current / 'CLAUDE.md').exists()
+        has_git = (current / '.git').exists()
+
+        if has_claude_md:
+            if first_git is None or has_git:
+                return str(current)
+
+        if has_git and first_git is None:
+            first_git = current
+
+        current = current.parent
+        depth += 1
+
+    if first_git:
+        return str(first_git)
+
+    return os.getcwd()
 
 
 def is_excluded(path: Path, root: Path) -> bool:
@@ -342,7 +370,7 @@ def cmd_export(args, root: Path):
 
 def main():
     # 推导 repo 根目录
-    default_root = get_repo_root()
+    default_root = Path(detect_root(str(Path.cwd())))
 
     parser = argparse.ArgumentParser(
         prog='docs-graph.py',

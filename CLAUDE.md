@@ -87,6 +87,7 @@ plugins/
 | `SKILL_GATE_LOG_DIR` | _(空)_ | 日志目录（fallback: `REVIEW_LOG_DIR` 或 `~/.claude/logs`） |
 | `SKILL_GATE_STALE_MIN` | `120` | marker stale 清理阈值（分钟），同时作为上下文刷新机制 |
 | `RECALL_GATE_DISABLED` | `0` | `1` 关闭词法召回门禁（recall-gate kill switch） |
+| `RECALL_GATE_ROOT` | _(空)_ | 显式指定 recall 语料库根目录（覆盖 CLAUDE.md + .git 共现自动检测） |
 | `RECALL_GATE_THRESHOLD` | `0.30` | BM25 最低分数阈值（低于此分数的结果不显示） |
 | `RECALL_GATE_TOP_N` | `5` | 召回结果最大返回条数 |
 | `RECALL_GATE_STALE_MIN` | `120` | recall marker stale 清理阈值（分钟） |

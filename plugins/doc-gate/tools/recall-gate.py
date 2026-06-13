@@ -211,6 +211,43 @@ def build_indexes(corpus: list) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Root detection
+# ---------------------------------------------------------------------------
+
+def detect_root(start_path: str, override_root: str = None) -> str:
+    if override_root:
+        p = Path(override_root)
+        if p.is_dir():
+            return str(p.resolve())
+
+    home = Path.home()
+    current = Path(start_path).resolve()
+    if current.is_file():
+        current = current.parent
+
+    first_git = None
+    depth = 0
+    while current != home and current != current.parent and depth < 64:
+        has_claude_md = (current / 'CLAUDE.md').exists()
+        has_git = (current / '.git').exists()
+
+        if has_claude_md:
+            if first_git is None or has_git:
+                return str(current)
+
+        if has_git and first_git is None:
+            first_git = current
+
+        current = current.parent
+        depth += 1
+
+    if first_git:
+        return str(first_git)
+
+    return os.getcwd()
+
+
+# ---------------------------------------------------------------------------
 # Single-pass scanner: BM25 corpus + link adjacency
 # ---------------------------------------------------------------------------
 
@@ -322,7 +359,12 @@ def check_broken_outlinks(content: str, target_file: str, root: str, all_files: 
 
 def cmd_gate(args):
     content = sys.stdin.read()
-    root = str(Path(args.root).resolve())
+    if args.root:
+        root = str(Path(args.root).resolve())
+    else:
+        start = str(Path(args.target_file).resolve()) if args.target_file else os.getcwd()
+        env_override = os.environ.get('RECALL_GATE_ROOT', '').strip() or None
+        root = detect_root(start, override_root=env_override)
 
     if args.target_file:
         target_file = os.path.relpath(args.target_file, root) if os.path.isabs(args.target_file) else args.target_file
@@ -370,7 +412,7 @@ def cmd_gate(args):
 
 def main():
     parser = argparse.ArgumentParser(description='recall-gate: BM25 recall + link graph gate.')
-    parser.add_argument('--root', required=True, help='Repo root directory')
+    parser.add_argument('--root', default=None, help='Repo root directory (auto-detected if omitted)')
     parser.add_argument('--target-file', default='', help='File being edited (relative to root)')
     parser.add_argument('--threshold', type=float, default=0.30, help='Min combined score (default: 0.30)')
     parser.add_argument('--top-n', type=int, default=5, help='Max recall results (default: 5)')

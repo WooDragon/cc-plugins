@@ -8,6 +8,7 @@
 #
 # Environment variables:
 #   RECALL_GATE_DISABLED=1       — kill switch
+#   RECALL_GATE_ROOT             — explicit repo root override (bypasses auto-detection)
 #   RECALL_GATE_THRESHOLD        — min BM25 score (default: 0.30)
 #   RECALL_GATE_TOP_N            — max recall results (default: 5)
 #   RECALL_GATE_STALE_MIN        — marker staleness minutes (default: 120)
@@ -90,34 +91,27 @@ _main() {
   # Phase 9: Stale cleanup
   find "$GATE_DIR" -maxdepth 1 -name '.recall-gate-*' -mmin +"$STALE_MIN" -delete 2>/dev/null || true
 
-  # Phase 10: Root detect
-  REPO_ROOT=$(git -C "${FILE_PATH%/*}" rev-parse --show-toplevel 2>/dev/null) || REPO_ROOT="$PWD"
-
-  # Phase 11: Content extract
+  # Phase 10: Content extract (root detection moved to Python — detect_root)
   if [ "$TOOL_NAME" = "Write" ]; then
     CONTENT=$(printf '%s' "$INPUT" | jq -r '.tool_input.content // ""' 2>/dev/null) || return
   else
     CONTENT=$(printf '%s' "$INPUT" | jq -r '.tool_input.new_string // ""' 2>/dev/null) || return
   fi
 
-  # REL_PATH — pass as args to avoid shell injection from quotes in paths
-  REL_PATH=$(python3 -c "import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))" "$FILE_PATH" "$REPO_ROOT" 2>/dev/null) || REL_PATH="$BASENAME"
-
-  # Phase 12: Python invoke — fail-open on any error
+  # Phase 11: Python invoke — fail-open on any error
   TOOL_DIR="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}/tools"
   RESULT=$(printf '%s' "$CONTENT" | python3 "$TOOL_DIR/recall-gate.py" \
-    --root "$REPO_ROOT" \
-    --target-file "$REL_PATH" \
+    --target-file "$FILE_PATH" \
     --threshold "${RECALL_GATE_THRESHOLD:-0.30}" \
     --top-n "${RECALL_GATE_TOP_N:-5}" \
     --json gate 2>/dev/null) || return
 
-  # Phase 13: Parse result
+  # Phase 12: Parse result
   HAS_FINDINGS=$(printf '%s' "$RESULT" | jq -r '.has_findings // false' 2>/dev/null) || return
 
   [ "$HAS_FINDINGS" = "true" ] || return
 
-  # Phase 14: Write marker + format deny message + output deny JSON
+  # Phase 13: Write marker + format deny message + output deny JSON
 
   # GATE_DIR must be writable to place the marker
   [ -w "$GATE_DIR" ] || return
