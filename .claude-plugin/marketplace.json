@@ -29,8 +29,8 @@
     },
     {
       "name": "doc-gate",
-      "description": "Document editing governance — doc-maintenance skill + hard gate hook",
-      "version": "1.0.5",
+      "description": "Document editing governance — doc-maintenance skill + hard gate + recall advisory",
+      "version": "1.2.0",
       "author": {
         "name": "WooDragon"
       },

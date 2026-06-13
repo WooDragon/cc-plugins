@@ -21,7 +21,7 @@ npx skills add WooDragon/cc-plugins -g
 | Plugin | Description |
 |--------|-------------|
 | [plan-review](./plugins/plan-review/) | Adversarial plan review via cross-model consultation (Gemini/Claude) |
-| [doc-gate](./plugins/doc-gate/) | Document editing governance — doc-maintenance skill + hard gate hook |
+| [doc-gate](./plugins/doc-gate/) | Document editing governance — skill gate + lexical recall advisory + link graph tools |
 | [ppt-press](./plugins/ppt-press/) | PPT toolkit — editorial magazine × e-ink web presentation skills |
 
 ## Skills

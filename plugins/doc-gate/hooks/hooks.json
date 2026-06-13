@@ -1,5 +1,5 @@
 {
-  "description": "Hard gate: require doc-maintenance skill before editing .md documentation files",
+  "description": "Document governance: skill gate (hard) + recall gate (soft advisory)",
   "hooks": {
     "PreToolUse": [
       {
@@ -9,6 +9,11 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/skill-gate.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/recall-gate.sh",
+            "timeout": 10
           }
         ]
       },
@@ -19,6 +24,11 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/skill-gate.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/recall-gate.sh",
+            "timeout": 10
           }
         ]
       },

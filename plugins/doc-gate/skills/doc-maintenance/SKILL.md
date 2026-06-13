@@ -114,7 +114,12 @@ CLAUDE.md 是 Claude Code 的配置入口，会注入任务上下文，是污染
 
 ### 内置工具
 
-本 Skill 包含零依赖文档链接图谱 CLI `tools/docs-graph.py`，提供断链检测、反向引用查询等能力。详见 [使用指南](../../docs/docs-graph-usage.md)。重命名、归档、重组操作的引用扫描步骤均优先使用此工具。
+doc-gate 插件包含两个零依赖 Python CLI 工具：
+
+- **`tools/recall-gate.py`** — BM25 词法召回 + 链接图谱合并引擎。由 PreToolUse hook 自动调用，在首次编辑 .md 文件时执行三维分析（内容召回、孤儿检测、出链验证），以 deny-once-per-file 模式呈现结果。无需手动调用——编辑 .md 时 hook 自动触发，结果会在 deny 消息中展示相关文档列表。
+- **`tools/docs-graph.py`** — 链接图谱独立 CLI（7 子命令：check / backlinks / links / orphans / hubs / related / export）。重命名、归档、重组操作的引用扫描步骤优先使用此工具。
+
+**recall-gate 与 doc-maintenance 的协作**：recall-gate hook 在 skill-gate 之后运行。调用 doc-maintenance skill（写入 marker）后首次编辑 .md，recall-gate 会自动展示相关文档——Pre-flight 第 5 步「确认不存在已有文档覆盖同一内容」可直接参考此结果，无需额外手动搜索。
 
 ## 3. 项目适配
 
@@ -144,7 +149,7 @@ CLAUDE.md 是 Claude Code 的配置入口，会注入任务上下文，是污染
 2. 定位对应检查单（§5）
 3. 如项目有文档框架文件（§3），读取其层位定义
 4. 确认目标文档应放在哪一层、文件名是否恰当
-5. 如为 CREATE，确认不存在已有文档覆盖同一内容
+5. 如为 CREATE，确认不存在已有文档覆盖同一内容（recall-gate hook 会在首次编辑时自动展示相关文档列表，可直接参考其结果）
 
 ### 4.2 Execute（执行文档操作）
 

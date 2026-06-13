@@ -8,7 +8,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 |------|------|------|
 | Plugin | plan-review | 对抗性审阅（Gemini/Claude） |
 | Plugin | ppt-press（3 skills） | PPT 全生命周期 |
-| Plugin | doc-gate（1 skill + 2 hooks） | 文档编辑门禁 |
+| Plugin | doc-gate（1 skill + 3 hooks + 2 tools） | 文档编辑门禁 + 词法召回 |
 
 ## 版本变更铁律
 
@@ -35,15 +35,19 @@ plugins/
       dispatch-check.bats         # 14 个测试用例（Layer 2 hook）
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
-  doc-gate/                       # 文档编辑门禁插件（skill + hooks 打包）
+  doc-gate/                       # 文档编辑门禁 + 词法召回插件
     .claude-plugin/plugin.json   # 插件元数据（声明 skills + hooks）
-    hooks/hooks.json             # PreToolUse: Edit, Write, Skill
+    hooks/hooks.json             # PreToolUse: Edit(skill-gate+recall-gate), Write(同), Skill(marker)
     scripts/
-      skill-gate.sh              # 门禁脚本（.md 编辑前检查 marker）
+      skill-gate.sh              # 硬门禁（.md 编辑前检查 doc-maintenance marker）
       skill-marker.sh            # 标记脚本（Skill 调用时写 marker）
+      recall-gate.sh             # 软门禁（BM25 召回 + 孤儿检测 + 出链验证，deny-once-per-file）
+    tools/
+      recall-gate.py             # BM25 + 链接图谱合并引擎（单趟扫描，零依赖）
+      docs-graph.py              # 链接图谱独立 CLI（7 子命令：check/backlinks/links/orphans/hubs/related/export）
     skills/
-      doc-maintenance/SKILL.md   # 文档维护工作流（从全局 skill 迁入）
-    tests/                       # BDD 测试套件
+      doc-maintenance/SKILL.md   # 文档维护工作流
+    tests/                       # BDD 测试套件（skill-gate + skill-marker）
       skill-gate.bats            # 54 个测试用例
       skill-marker.bats          # 13 个测试用例
       test_helper/
@@ -82,6 +86,10 @@ plugins/
 | `SKILL_GATE_DIR` | `/tmp/claude-reviews` | marker 目录（与 plan-review 共享） |
 | `SKILL_GATE_LOG_DIR` | _(空)_ | 日志目录（fallback: `REVIEW_LOG_DIR` 或 `~/.claude/logs`） |
 | `SKILL_GATE_STALE_MIN` | `120` | marker stale 清理阈值（分钟），同时作为上下文刷新机制 |
+| `RECALL_GATE_DISABLED` | `0` | `1` 关闭词法召回门禁（recall-gate kill switch） |
+| `RECALL_GATE_THRESHOLD` | `0.30` | BM25 最低分数阈值（低于此分数的结果不显示） |
+| `RECALL_GATE_TOP_N` | `5` | 召回结果最大返回条数 |
+| `RECALL_GATE_STALE_MIN` | `120` | recall marker stale 清理阈值（分钟） |
 
 敏感变量（`REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
 
@@ -103,9 +111,18 @@ plugins/
 
 ## Doc-Gate 文档编辑门禁
 
-Skill + Hook 打包插件：doc-maintenance skill 提供文档维护工作流，PreToolUse hook 强制执行。Edit/Write `.md` 文件时，hook 检查 session 级 marker，无 marker 则 deny 并提示调用 doc-maintenance skill。
+双层门禁：硬门禁（skill-gate）+ 软门禁（recall-gate）。
 
-CLAUDE.md 按层级分两级门禁强度：全局 `~/.claude/CLAUDE.md` 最严（无条件门禁 + 通用化四判据全过），项目级普通强度。
+**硬门禁（skill-gate）**：Edit/Write `.md` 文件时检查 session 级 marker，无 marker 则 deny 并提示调用 doc-maintenance skill。CLAUDE.md 按层级分两级强度：全局 `~/.claude/CLAUDE.md` 最严（无条件门禁 + 通用化四判据全过），项目级普通强度。
+
+**软门禁（recall-gate）**：首次编辑某 .md 文件时执行三维分析，deny-once-per-file（重试即通过）：
+- **内容维度**：BM25 词法召回，表面已有文档可能与待写内容重叠
+- **结构维度**：孤儿检测（backlinks），标记无入链文件（最易产生重复）
+- **完整性维度**：出链验证，检查内容引用的文件是否存在
+
+recall-gate 内含 double-deny guard：skill-gate 启用且 marker 不存在时跳过（避免双重拒绝）。`SKILL_GATE_DISABLED=1` 时 recall-gate 独立运行。
+
+**独立工具**：`tools/docs-graph.py` 提供链接图谱查询（断链检测、反向引用、孤儿文档、枢纽文档、2 跳邻域、JSON 导出）。
 
 ## Skills
 
