@@ -58,7 +58,7 @@ _main() {
 
   # Phase 6: Path exclusions
   case "/$FILE_PATH" in
-    */.claude/*|*/.claude-plugin/*|*/.agents/directives/*|*/node_modules/*|*/.git/*) return ;;
+    */.claude/*|*/.claude-plugin/*|*/.agents/directives/*|*/node_modules/*|*/.git/*|*/logs/*) return ;;
   esac
   case "$FILE_PATH" in
     /tmp/*|/var/tmp/*|/var/folders/*|/private/tmp/*) return ;;

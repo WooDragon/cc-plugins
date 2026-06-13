@@ -15,59 +15,16 @@ docs-graph.py — 文档链接图谱查询工具
 版本：1.0.0
 """
 
-import re
 import sys
-import os
 import json
 import argparse
-import urllib.parse
 from pathlib import Path
 from collections import defaultdict, deque
 
-
-# 默认排除的目录（路径部件匹配）
-EXCLUDED_DIRS = {'.git', '.agents', 'node_modules', '.venv', 'research', 'docs-graph-tests'}
-
-# orphans 白名单（文件名匹配）
-ORPHAN_WHITELIST = {'CLAUDE.md', 'README.md', 'MEMORY.md'}
-
-# orphans 白名单目录（路径部件包含时排除）
-ORPHAN_WHITELIST_DIRS = {'archive'}
-
-# 链接提取正则（排除图片 ![]()）
-LINK_PATTERN = re.compile(r'(?<!\!)\[([^\]]*)\]\(([^)]+)\)')
-
-# code block 开始/结束标记
-CODE_FENCE = re.compile(r'^```')
-
-
-def detect_root(start_path: str, override_root: str = None) -> str:
-    if override_root:
-        p = Path(override_root)
-        if p.is_dir():
-            return str(p.resolve())
-
-    home = Path.home()
-    current = Path(start_path).resolve()
-    if current.is_file():
-        current = current.parent
-
-    outermost_claude = None
-    first_git = None
-    depth = 0
-    while current != home and current != current.parent and depth < 64:
-        if (current / 'CLAUDE.md').exists():
-            outermost_claude = current
-        if (current / '.git').exists() and first_git is None:
-            first_git = current
-        current = current.parent
-        depth += 1
-
-    if outermost_claude:
-        return str(outermost_claude)
-    if first_git:
-        return str(first_git)
-    return os.getcwd()
+from _doc_gate_common import (
+    EXCLUDED_DIRS, ORPHAN_WHITELIST,
+    detect_root, should_skip_link, resolve_link, extract_links_from_content,
+)
 
 
 def is_excluded(path: Path, root: Path) -> bool:
@@ -80,70 +37,17 @@ def is_excluded(path: Path, root: Path) -> bool:
 
 
 def extract_links(filepath: Path):
+    """从文件读取内容并提取链接（薄包装：读文件 + 委托 extract_links_from_content）。
+
+    errors='replace' 与 recall-gate 的 'ignore' 不同——坏字节行为差异刻意留在
+    各自调用点，不下沉到 common。
+    返回 [(line_no, link_text, link_target), ...]，line_no 从 1 开始。
     """
-    从文件中提取所有链接，跳过 code block 内的链接。
-    返回列表：[(line_no, link_text, link_target), ...]
-    line_no 从 1 开始。
-    """
-    results = []
-    in_code_block = False
     try:
         content = filepath.read_text(encoding='utf-8', errors='replace')
     except OSError:
-        return results
-
-    for lineno, line in enumerate(content.splitlines(), start=1):
-        # 检测 code fence 切换
-        if CODE_FENCE.match(line.strip()):
-            in_code_block = not in_code_block
-            continue
-
-        if in_code_block:
-            continue
-
-        for text, target in LINK_PATTERN.findall(line):
-            results.append((lineno, text, target))
-
-    return results
-
-
-def should_skip_link(target: str) -> bool:
-    """判断链接是否应跳过（外部链接、纯锚点、绝对路径）"""
-    if target.startswith(('http://', 'https://', 'mailto:', '#', 'file://', '/')):
-        return True
-    return False
-
-
-def resolve_link(source_file: Path, target: str, root: Path):
-    """
-    解析链接目标为绝对路径。
-    1. 剥离锚点
-    2. URL 解码
-    3. 相对路径解析
-    4. 验证在 root 内
-    返回 Path 或 None（越界/空）
-    """
-    # 剥离锚点
-    target = target.split('#')[0]
-    if not target:
-        return None
-
-    # URL 解码
-    target = urllib.parse.unquote(target)
-
-    # 解析路径
-    try:
-        resolved = (source_file.parent / target).resolve()
-    except (ValueError, OSError):
-        return None
-
-    # 验证在 root 内（防止软链越界）
-    try:
-        resolved.relative_to(root.resolve())
-    except ValueError:
-        return None
-
-    return resolved
+        return []
+    return extract_links_from_content(content)
 
 
 def scan_all_files(root: Path):
@@ -265,10 +169,7 @@ def cmd_orphans(args, root: Path):
         # 白名单文件名
         if f.name in ORPHAN_WHITELIST:
             continue
-        # 白名单目录
         rel = f.relative_to(root)
-        if any(part in ORPHAN_WHITELIST_DIRS for part in rel.parts):
-            continue
         # 零入链
         if not backward.get(f):
             orphans.append(str(rel))

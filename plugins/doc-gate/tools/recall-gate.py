@@ -6,18 +6,16 @@ import sys
 import math
 import json
 import argparse
-import urllib.parse
 from pathlib import Path
 from collections import Counter
 
-
-EXCLUDED_DIRS = {'.git', '.agents', 'node_modules', '.venv', 'research', 'docs-graph-tests'}
-ORPHAN_WHITELIST = {'CLAUDE.md', 'README.md', 'MEMORY.md'}
+from _doc_gate_common import (
+    EXCLUDED_DIRS, ORPHAN_WHITELIST, CODE_FENCE,
+    detect_root, should_skip_link, resolve_link, extract_links_from_content,
+)
 
 _EN_TOKEN_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9_.-]{1,}')
 _ZH_RUN_RE = re.compile(r'[一-鿿]+')
-_CODE_FENCE_RE = re.compile(r'^```')
-_LINK_PATTERN = re.compile(r'(?<!\!)\[([^\]]*)\]\(([^)]+)\)')
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +44,7 @@ def _strip_fences(content: str) -> str:
     lines = []
     in_fence = False
     for line in content.splitlines():
-        if _CODE_FENCE_RE.match(line):
+        if CODE_FENCE.match(line):
             in_fence = not in_fence
             continue
         if not in_fence:
@@ -60,45 +58,6 @@ def _extract_title(content: str) -> str:
         if stripped.startswith('# '):
             return stripped[2:].strip()
     return ''
-
-
-# ---------------------------------------------------------------------------
-# Link graph functions (ported from docs-graph.py)
-# ---------------------------------------------------------------------------
-
-def extract_links_from_content(content: str) -> list:
-    """Extract links from content string. Returns [(lineno, text, target), ...]"""
-    results = []
-    in_code_block = False
-    for lineno, line in enumerate(content.splitlines(), start=1):
-        if _CODE_FENCE_RE.match(line.strip()):
-            in_code_block = not in_code_block
-            continue
-        if in_code_block:
-            continue
-        for text, target in _LINK_PATTERN.findall(line):
-            results.append((lineno, text, target))
-    return results
-
-
-def should_skip_link(target: str) -> bool:
-    return target.startswith(('http://', 'https://', 'mailto:', '#', 'file://', '/'))
-
-
-def resolve_link(source_file: Path, target: str, root: Path):
-    target = target.split('#')[0]
-    if not target:
-        return None
-    target = urllib.parse.unquote(target)
-    try:
-        resolved = (source_file.parent / target).resolve()
-    except (ValueError, OSError):
-        return None
-    try:
-        resolved.relative_to(root.resolve())
-    except ValueError:
-        return None
-    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -208,39 +167,6 @@ def build_indexes(corpus: list) -> tuple:
     total_title_len = sum(len(doc['title_tokens']) for doc in corpus)
     avg_title_dl = total_title_len / len(corpus) if corpus else 1.0
     return content_idf, title_idf, avg_dl, avg_title_dl
-
-
-# ---------------------------------------------------------------------------
-# Root detection
-# ---------------------------------------------------------------------------
-
-def detect_root(start_path: str, override_root: str = None) -> str:
-    if override_root:
-        p = Path(override_root)
-        if p.is_dir():
-            return str(p.resolve())
-
-    home = Path.home()
-    current = Path(start_path).resolve()
-    if current.is_file():
-        current = current.parent
-
-    outermost_claude = None
-    first_git = None
-    depth = 0
-    while current != home and current != current.parent and depth < 64:
-        if (current / 'CLAUDE.md').exists():
-            outermost_claude = current
-        if (current / '.git').exists() and first_git is None:
-            first_git = current
-        current = current.parent
-        depth += 1
-
-    if outermost_claude:
-        return str(outermost_claude)
-    if first_git:
-        return str(first_git)
-    return os.getcwd()
 
 
 # ---------------------------------------------------------------------------

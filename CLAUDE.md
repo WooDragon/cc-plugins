@@ -43,6 +43,7 @@ plugins/
       skill-marker.sh            # 标记脚本（Skill 调用时写 marker）
       recall-gate.sh             # 软门禁（BM25 召回 + 孤儿检测 + 出链验证，deny-once-per-file）
     tools/
+      _doc_gate_common.py        # 共享模块：排除名单 + 链接图谱原语单一来源（recall-gate/docs-graph 共用）
       recall-gate.py             # BM25 + 链接图谱合并引擎（单趟扫描，零依赖）
       docs-graph.py              # 链接图谱独立 CLI（7 子命令：check/backlinks/links/orphans/hubs/related/export）
     skills/
