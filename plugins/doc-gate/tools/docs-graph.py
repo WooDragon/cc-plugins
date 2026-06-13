@@ -52,25 +52,21 @@ def detect_root(start_path: str, override_root: str = None) -> str:
     if current.is_file():
         current = current.parent
 
+    outermost_claude = None
     first_git = None
     depth = 0
     while current != home and current != current.parent and depth < 64:
-        has_claude_md = (current / 'CLAUDE.md').exists()
-        has_git = (current / '.git').exists()
-
-        if has_claude_md:
-            if first_git is None or has_git:
-                return str(current)
-
-        if has_git and first_git is None:
+        if (current / 'CLAUDE.md').exists():
+            outermost_claude = current
+        if (current / '.git').exists() and first_git is None:
             first_git = current
-
         current = current.parent
         depth += 1
 
+    if outermost_claude:
+        return str(outermost_claude)
     if first_git:
         return str(first_git)
-
     return os.getcwd()
 
 
