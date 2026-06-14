@@ -158,5 +158,6 @@ recall-gate 内含 double-deny guard：skill-gate 启用且 marker 不存在时�
 - [#12 Dispatch Manifest 双层防御 (v1.0.34)](https://github.com/WooDragon/cc-plugins/issues/12) — Layer 1 manifest 表格强制 + dispatch JSON 落地、Layer 2 Agent/Task 参数校验
 - [#18 CC 2.1.x 契约变更 & transcript 反查恢复 (v1.0.37~v1.0.40)](https://github.com/WooDragon/cc-plugins/issues/18) — fail-closed hookEventName 修复、payload 诊断 dump、plan 移至 out-of-band 文件、transcript_path 反查 + 三重安全门（FIFO/软链接/路径遍历）
 - [#19 CLAUDE.md 强制门禁 & 全局/项目级分级 (v1.0.3)](https://github.com/WooDragon/cc-plugins/issues/19) — basename 豁免收缩（CLAUDE/README/CONTRIBUTING 纳入门禁）、全局 `~/.claude/CLAUDE.md` 大小写不敏感识别 + 无条件门禁（绕过位置排除）、deny 消息分级 + `skill-not-invoked-global` 日志、doc-maintenance 通用化原则章节、放弃 `DOC_GATE_FORCE_INCLUDE` 改用零配置内建规则
+- [#24 去重维护规范 & dedup 工具 YAGNI 决策 (v1.4.0)](https://github.com/WooDragon/cc-plugins/issues/24) — 实证研判（两库 103 篇 md 双轮扫描，真债仅 0.4%）毙掉 dedup 工具伪需求降级 backlog，doc-maintenance 补「去重维护」规范（单一来源 / 跨项目共享 / 定期 DEDUP 处置流程），复用现有 orphans/backlinks/check
 
 @~/.claude/projects/-Users-woodragon-Work-github-cc-plugins/CLAUDE.md
