@@ -37,6 +37,17 @@
       "source": "./plugins/doc-gate",
       "category": "development",
       "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "code-search",
+      "description": "Code search & symbol navigation — pick the right tool (ast-grep/ripgrep/grep/find/glob) by search intent",
+      "version": "1.0.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/code-search",
+      "category": "development",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
     }
   ]
 }

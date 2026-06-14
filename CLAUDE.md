@@ -9,6 +9,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 | Plugin | plan-review | 对抗性审阅（Gemini/Claude） |
 | Plugin | ppt-press（3 skills） | PPT 全生命周期 |
 | Plugin | doc-gate（1 skill + 3 hooks + 2 tools） | 文档编辑门禁 + 词法召回 |
+| Plugin | code-search（1 skill） | 代码搜索与符号导航方法论（纯 skill，零 hook） |
 
 ## 版本变更铁律
 
@@ -64,6 +65,11 @@ plugins/
         SKILL.md
       ppt-manage/                # 检索管理
         SKILL.md
+  code-search/                   # 代码搜索方法论插件（纯 skill，零 hook）
+    .claude-plugin/plugin.json   # 插件元数据（纯 skill）
+    skills/
+      code-search/SKILL.md       # 工具决策树 + 按意图策略 + 组合技巧 + 上下文经济
+    README.md                    # 面向安装者说明
 ```
 
 ## 环境变量
@@ -137,6 +143,18 @@ recall-gate 内含 double-deny guard：skill-gate 启用且 marker 不存在时�
 | `ppt-create` | 内容生产：需求澄清 → 大纲 → Astro 页面 → 自检 | ~85KB（含 5 references + 1 asset） |
 | `ppt-deploy` | 构建验证 → 批量 Playwright 测试 → Amplify 部署 | ~4KB |
 | `ppt-manage` | deck 列表检索 / 搜索 / URL 复制 | ~2KB |
+
+### 代码搜索技能
+
+`code-search` skill 注入代码搜索方法论，让 Claude 按搜索意图选对工具，不漏触发、不滥用全库 grep：
+
+| 维度 | 内容 |
+|------|------|
+| 工具决策树 | 结构搜索 → ast-grep；文本 → Grep；文件定位 → Glob；读取 → Read |
+| 按意图策略 | 找定义 / 找引用 / 调用链 / 结构概览 / 文本模式各有首选工具 |
+| 上下文经济 | 大检索派子 agent 隔离，只回收结论 |
+
+触发靠 description 语义匹配（中英关键词 + 口语化说法全覆盖），不用 hook——搜代码无可判定的 tool-level 信号，且高频动作门禁会破坏工作流。
 
 ### Plugin vs Skill
 
