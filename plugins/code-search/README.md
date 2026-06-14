@@ -13,12 +13,14 @@ claude plugin add code-search@WooDragon-cc-plugins
 
 ## What it does
 
-| Dimension | Guidance |
-|-----------|----------|
-| **Tool decision tree** | structure → ast-grep · text → Grep · file lookup → Glob · read → Read |
-| **Strategy by intent** | definition / references / call chain / structure overview / text pattern each have a preferred tool |
-| **Combine moves** | narrow-then-widen, locate-then-read, converge layer by layer |
-| **Context economy** | offload large / exploratory searches to an isolated sub-agent, return conclusions only |
+| Symptom | Tool |
+|---------|------|
+| Find a symbol's **definition** / jump to definition | **ctags** (`ctags -R` index → `readtags` lookup) |
+| Find code matching an **AST structure shape** (imports, call forms, component defs, try/catch) | **ast-grep** (`ast-grep run -p`) |
+| Find **callers** / plain text / strings | **grep** (1–2 hops suffice) |
+| Precise call graph when grep/ctags fall short | **LSP/SCIP** (gopls, rust-analyzer, SCIP) |
+
+Plus anti-pattern correction (never grep for definitions), ctags command templates (.tsx langmap, kind filters, dependency exclusion via `git ls-files | ctags -L -`), and context-economy rules (offload large searches to a sub-agent).
 
 ## Triggering
 

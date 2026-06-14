@@ -146,15 +146,16 @@ recall-gate 内含 double-deny guard：skill-gate 启用且 marker 不存在时�
 
 ### 代码搜索技能
 
-`code-search` skill 注入代码搜索方法论，让 Claude 按搜索意图选对工具，不漏触发、不滥用全库 grep：
+`code-search` skill 注入代码检索执行层方法论，让 Claude 按「症状」选对工具，不漏触发、不滥用 grep：
 
-| 维度 | 内容 |
+| 症状 | 工具 |
 |------|------|
-| 工具决策树 | 结构搜索 → ast-grep；文本 → Grep；文件定位 → Glob；读取 → Read |
-| 按意图策略 | 找定义 / 找引用 / 调用链 / 结构概览 / 文本模式各有首选工具 |
-| 上下文经济 | 大检索派子 agent 隔离，只回收结论 |
+| 找符号定义 / 跳转到定义 | **ctags**（建索引 + readtags 查） |
+| 找 AST 结构形状（import / 调用形态 / 组件定义 / try-catch） | **ast-grep**（`run -p`） |
+| 找 caller / 纯文本 | **grep**（1-2 跳够） |
+| grep/ctags 扛不住的精确调用图 | **LSP/SCIP**（gopls / rust-analyzer） |
 
-触发靠 description 语义匹配（中英关键词 + 口语化说法全覆盖），不用 hook——搜代码无可判定的 tool-level 信号，且高频动作门禁会破坏工作流。
+含反模式纠偏（禁 grep 找定义）、ctags 命令模板与坑、升级信号。与全局 CLAUDE.md「代码检索」路由一致。触发靠 description 语义匹配，不用 hook——搜代码无可判定的 tool-level 信号，高频动作门禁会破坏工作流。
 
 ### Plugin vs Skill
 
