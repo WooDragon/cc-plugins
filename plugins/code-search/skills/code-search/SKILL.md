@@ -1,67 +1,112 @@
 ---
 name: code-search
 description: |
-  代码搜索与符号导航——在代码库里找定义、找引用、追调用链、看结构、跑正则。当需要：
-  - 查找函数/类/方法/变量/常量/类型/接口的定义（"X 在哪定义"、"找 X 的定义"、"where is X defined"、"jump to definition"、"跳转到定义"）
-  - 追踪符号的所有引用/调用点（"谁调用了 X"、"X 在哪被用到"、"find references/usages"、"call sites"、"哪些文件用了 X"）
-  - 分析调用链、依赖、import 关系（"X 的调用链"、"谁 import 了 Y"、"dependency/call graph"、"依赖分析"）
-  - 跨文件搜文本/正则/字符串字面量（grep、ripgrep、正则匹配、"全局搜 X"、"search for pattern"、"搜一下哪里有"）
-  - 按文件名/路径定位文件、看目录树/项目结构（"有哪些 X 文件"、"文件树"、"项目结构"、"find files"、"glob"）
-  - 定位 TODO/FIXME/标记注释或特定代码模式（"所有 TODO"、"找所有 catch 块"、ast 结构模式匹配）
-  - 在动手改代码、读代码、理解陌生代码库之前先定位相关代码
-  时调用此 Skill，按工具决策树选对 ast-grep / ripgrep / grep / find / Glob / Read，避免盲目全库 grep、避免把大检索结果塞满主上下文。
-  Triggers: 代码搜索, 搜代码, 查找代码, 找函数, 找定义, 找用法, 找引用, 符号导航, 代码导航, 调用链, 依赖分析, 全局搜索, grep, ripgrep, rg, ast-grep, sg, find files, search code, find function, find references, where defined, who calls, call graph, codebase search, locate code, navigate code.
+  代码搜索与符号导航——按「症状」选对工具（ctags / ast-grep / grep），别一上来就 grep。当需要：
+  - 找某符号的定义 / 跳转到定义（"X 在哪定义"、"这个函数/类/方法在哪"、"find definition"、"jump to definition"）→ ctags
+  - 找符合某 AST 结构形状的代码（import 语句、特定调用形态、React 组件定义、所有 try/catch）→ ast-grep
+  - 找谁调用了 X / caller 调用点 / 纯文本·字符串出现处（"who calls X"、"find references/callers"、"全局搜 X"）→ grep
+  - 追调用链 / 依赖影响面分析、理解陌生代码库前定位相关代码
+  - 大库精确调用图 grep/ctags 扛不住时的升级路径（LSP/SCIP）
+  时调用此 Skill，按决策表选工具、抄命令模板，避免用 grep 找定义（漏重载/跨行签名/注释噪音）、避免用正则凑 AST 结构。
+  Triggers: 代码搜索, 搜代码, 找定义, 符号定位, 跳转到定义, 找 caller, 谁调用, 调用链, AST 结构匹配, 全局搜索, ctags, ast-grep, grep, find definition, find references, who calls, jump to definition, code navigation.
 ---
 
 # 代码搜索
 
-在代码库里定位代码：找定义、找引用、追调用链、看结构、跑正则。核心一句话——**按搜索意图选对工具，别一上来就 `grep -r`**。
+代码检索执行层：找代码先按**症状**选工具，三件套分工明确——别一上来就 `grep`。
 
-## 决策原则
+## §1 决策表（症状 → 工具）
 
-搜索前先问：**我找的是「语法结构」还是「文本」？**
+| 症状 | 工具 | 命令骨架 |
+|------|------|---------|
+| 找某符号**定义** / 跳转到定义 | **ctags** | 建索引 → `readtags` 查 → 文件 + 定位 + kind |
+| 找符合某 **AST 结构形状**的代码（import、特定调用形态、组件定义、所有 try/catch） | **ast-grep** | `ast-grep run -p '<pattern>' --lang <lang>` |
+| 找**谁调用了 X** / caller 调用点 / 纯文本·字符串 | **grep** | Grep 工具（ripgrep 内核）；调用链 1-2 跳够 |
 
-- **结构**（函数/类/方法/类型/import 的定义与调用）→ `ast-grep`（命令 `ast-grep`，部分环境别名 `sg`），按 AST 匹配，不受格式、换行、注释干扰。
-- **文本**（字符串字面量、注释、配置值、日志、跨语言关键词）→ **Grep 工具**（Claude Code 原生，ripgrep 内核），正则匹配。
-- ast-grep 表达不了的结构 → 回退 Grep / 正则。
+一句话记忆：**定义找 ctags，结构找 ast-grep，调用与文本找 grep。**
 
-## §1 工具决策树
+## §2 反模式纠偏
 
-| 搜索目标 | 首选 | 要点 / 示例 |
-|---------|------|------------|
-| 函数/类/方法/类型/接口**定义** | `ast-grep` | `ast-grep -p 'function $NAME($$$)'`、`-p 'class $NAME'`、`-p 'def $NAME'`；`-l <lang>` 指定语言 |
-| 符号**引用/调用点** | Grep 工具 / `ast-grep` | 快速铺开用 Grep 搜符号名；噪音大时换 `ast-grep -p '$NAME($$$)'` 精确匹配调用形态 |
-| 文本 / 正则 / 字面量 | **Grep 工具** | 原生 Grep（rg 内核）优先于裸 `rg`/`grep`；用 `-A/-B/-C` 看上下文、`type` 过滤语言、`glob` 限路径 |
-| 文件名 / 路径定位 | **Glob 工具** | `**/*.ts`、`**/test_*.py`；多条件或按时间/大小回退 `find` |
-| import / 依赖关系 | `ast-grep` | 匹配 import/require/use 语句结构，比正则稳 |
-| 目录树 / 结构概览 | Glob / `find` | 先摸结构建坐标系，再精搜 |
-| 已知文件读内容 | **Read** | 禁止 `cat`/`head`/`tail` |
+最常见的错误 = 该用 ctags/ast-grep 时一上来就 grep。
 
-## §2 按意图选策略
+- ❌ **用 grep 找函数/类定义** → 漏重载、漏跨行签名、被注释和字符串里的同名淹没。→ 用 **ctags**。
+- ❌ **用正则凑 AST 结构匹配**（如"所有 `await fetch(...)`"）→ 正则表达不准语法树形状，转义地狱还漏。→ 用 **ast-grep**。
+- ✅ **grep 的正确边界**：caller 调用点验证、纯文本/字符串搜索、ast-grep 表达不了的跨语义场景、以及**没有 tags 索引时找定义的降级兜底**（带噪音，临时用）。
 
-- **找定义**：ast-grep 结构匹配（`function/class/def/type/interface $NAME`）。比 grep 准——不会把调用点、同名字符串、注释误当定义。
-- **找引用/调用点**：Grep 符号名快速铺开；若噪音大（同名变量、注释命中），换 ast-grep 调用模式 `$NAME($$$)` 收敛。
-- **调用链 / 依赖**：组合——先 ast-grep 定位定义，再找所有调用点，按需逐层展开。别指望一条命令出全图。
-- **结构概览**：Glob 看文件分布、`find` 看目录树，建立坐标系后再精搜。
-- **文本模式**：纯文本 / 正则 / 配置值 / 日志，直接 Grep 工具，用 `type` 和路径缩范围。
+## §3 ctags —— 符号定义索引（主力）
 
-## §3 组合技巧
+找定义的正解。两步索引模型：建一次索引，之后 O(1) 查表，跨语言统一。实测 5 语言（TS/Py/Go/Rust/Shell）定义定位零偏差。
 
-- **先窄后宽**：先 Glob 把文件集缩到目标范围（按目录 / 扩展名），再在范围内 Grep，别全库扫。
-- **先定位后读**：先 ast-grep / Grep 拿到 `file:line`，再 Read 精读——不要 Read 一堆文件靠肉眼找。
-- **逐层收敛**：命中太多就加 `type`、限路径、换结构匹配收紧，而不是翻页看完。
+```bash
+# 第一步 建索引（task 内首次建一次，后续复用）——必须排除依赖/构建产物
+git ls-files | ctags --links=no -L - --langmap=TypeScript:+.tsx   # git 项目优先：只索引版本控制内文件，天然避开 node_modules/dist/.gitignore
+ctags -R --exclude=node_modules --exclude=dist --exclude=.git --langmap=TypeScript:+.tsx .   # 非 git 项目兜底
 
-## §4 上下文经济
+# 第二步 查定义（替代 grep 找定义）
+readtags -t tags -en "functionName"
+# 输出：functionName <TAB> path/to/file.py <TAB> /^def functionName(...):$/;" <TAB> kind:f <TAB> typeref:...
+# → 拿到文件路径 + 定位模式 + kind，再用 Read 精读
+```
 
-搜索结果会占用上下文，按规模分流：
+特性：tags 是纯文本派生物，**零依赖、可 100% 重建**（删了 `ctags -R` 再来一遍，11.5k 文件 repo 约 9s）；过期直接重建，不像 LSP 要常驻进程。
 
+**五个必知坑**：
+1. **`.tsx` 默认盲区** → 不加 `--langmap=TypeScript:+.tsx` 时 React 组件 0 收录。
+2. **Rust trait 被标 `kind:interface`**（语义偏移）→ 查询时结合 `language:` 字段区分。
+3. **TS 局部 const 噪音**（实测 openclaw tags 达 67MB）→ 建索引加 `--kinds-TypeScript=f,c,i,m` 只收函数/类/接口/方法。
+4. **Shell heredoc 的 `EOF` 被当符号** → 下游按 kind 过滤。
+5. **未排除依赖/构建产物**（node_modules / dist / target / vendor）→ tags 爆炸 + 第三方同名符号淹没精度。用上面的 `git ls-files | ctags -L -`（git 项目）或 `--exclude`（非 git）。
+
+## §4 ast-grep —— AST 结构模式匹配
+
+找"符合某语法形状的代码"，不是找符号定义（那归 ctags）。按语法树匹配，不受格式/换行/注释干扰。
+
+```bash
+# 一次性搜索：-p 模式，--lang 语言；元变量 $VAR=单节点，$$$=多节点序列
+ast-grep run -p 'await fetch($$$)' --lang typescript          # 所有 await fetch 调用
+ast-grep run -p 'class $X extends $BASE { $$$ }' --lang typescript  # 所有继承某类的 class
+ast-grep run -p 'import { $$$ } from "react"' --lang typescript  # tsx/jsx 文件也用 --lang typescript
+ast-grep run -p 'try { $$$ } catch ($E) { $$$ }' --lang typescript  # 所有 try/catch（TS/JS）
+ast-grep run -p 'if $ERR != nil { $$$ }' --lang go            # Go 错误检查惯用结构（Go 无 try/catch）
+
+# 规则文件批量扫描
+ast-grep scan -r rule.yml <path>
+
+# 结构化改写：-U / --update-all 才写回文件（默认仅打印 diff）
+ast-grep run -p '<old>' --rewrite '<new>' -U --lang go
+```
+
+语言值：`js` / `typescript`（tsx/jsx 也用此值）/ `python` / `go` / `rust` / `bash`。命令名 `ast-grep`（别名 `sg`），子命令是 `run`——旧式裸 `sg -p` 不对。pattern 必须是**合法的完整语法片段**（如 `class` 要带 `{ $$$ }` 类体），否则 ast-grep 报 ERROR node、匹配为空。
+
+## §5 grep —— 调用点与文本
+
+LLM 本就熟练，不补用法，只守边界：
+- **caller 调用点验证**：找"谁调用了 X"用符号名 grep；实测调用链 **1-2 跳完全够**。
+- **纯文本 / 字符串字面量 / 配置值 / 日志**。
+- 用 Claude Code 原生 **Grep 工具**（ripgrep 内核），`-A/-B/-C` 看上下文、`type` 过滤语言、`glob` 限路径。先缩范围再搜，别全库裸扫。
+
+## §6 升级信号
+
+grep/ctags 扛不住时——**巨型库 grep 超时** / **需 3+ 跳才能理清波及面** / **接口多态需精确类型推断**（caller 含接口/泛型，文本匹配漏报）/ **要系统主动推断影响面**——正解是 **LSP/SCIP 系**（确定性静态分析）：
+
+- `gopls`（Go）、`rust-analyzer`（Rust，支持 SCIP 输出）、`CodeGraphContext` 的 SCIP fallback（多语言）。
+
+**不是 graphify / codegraph**：启发式 name-match，实测 Rust caller 漏报 ~85%、Go 接口方法漏报 100%、codegraph 还有 Shell 全缺口。
+
+## §7 上下文经济
+
+搜索结果会吃上下文：
 - **精确、单次即得**（已知符号名、明确路径）→ 直接搜。
-- **结果不可预测 / 需多轮检索 / 大范围探索**（陌生代码库摸索、"找出所有用到 X 的地方再分析"）→ 若运行环境支持子任务隔离（如 Claude Code 的 Task / subagent），派子 agent 执行，**只回收结论**，别把成百上千行匹配灌进主上下文。检索取数是低推理活，适合卸载到更轻量的执行单元。
+- **结果不可预测 / 多轮探索 / 大范围检索**（陌生大库摸索、"找出所有用到 X 的地方再分析"）→ 若环境支持子任务隔离（如 Claude Code 的 Task / subagent），派子 agent 执行，**只回收结论**，别把成百上千行匹配灌进主上下文。
 
-## §5 反模式
+禁 `cd`（用工具的路径参数）；读文件用 Read，不用 `cat` / `head` / `tail`。
 
-- ❌ 一上来 `grep -r pattern .` 不缩范围 → 噪音淹没信号；先 Glob 缩范围或用 ast-grep 结构搜。
-- ❌ 用 `cat` / `head` / `tail` 读文件 → 用 Read。
-- ❌ 能用 ast-grep 结构搜（找函数定义）却用脆弱正则硬凑 → 换行、参数、注释一变就漏。
-- ❌ 大范围检索直接在主上下文跑 → 污染上下文；派 Task 隔离。
-- ❌ `cd` 切目录 → 用工具的路径参数代替。
+## §8 安装
+
+成熟系统工具，不分发二进制：
+```bash
+# macOS
+brew install universal-ctags ast-grep
+# Debian/Ubuntu：universal-ctags 走 apt；ast-grep 走 cargo install ast-grep（或下载 GitHub release）
+```
+要求 **Universal Ctags**（非老的 exuberant-ctags，参数差异大）。
