@@ -202,7 +202,7 @@ manifest_has_real_agent() {
     /^## Dispatch Manifest/ {in_m=1; next}
     in_m && /^## / {in_m=0}
     in_m && /^ *$/ {in_m=0}
-    in_m && /^\|/ && !/^\|---/ && !/^\| *step/ {
+    in_m && /^\|/ && !/^\|---/ && !/^\| *[Ss][Tt][Ee][Pp]/ {
       gsub(/^\| *| *\| *$/, ""); n = split($0, f, / *\| */)
       if (n >= 2) { at=f[2]; gsub(/^ +| +$|"/, "", at); if (at != "-" && at != "") found=1 }
     }
@@ -219,7 +219,7 @@ parse_manifest_to_json() {
     /^## Dispatch Manifest/ {in_manifest=1; next}
     in_manifest && /^## / {in_manifest=0}
     in_manifest && /^ *$/ {in_manifest=0}
-    in_manifest && /^\|/ && !/^\|---/ && !/^\| *step/ {
+    in_manifest && /^\|/ && !/^\|---/ && !/^\| *[Ss][Tt][Ee][Pp]/ {
       gsub(/^\| *| *\| *$/, ""); n = split($0, f, / *\| */)
       if (n >= 3) {
         id=f[1]; at=f[2]; md=f[3]
@@ -508,7 +508,8 @@ Keep your response under 3000 characters.
 6. **Architecture fit** — Consistent with project patterns?
 7. **Dispatch Discipline** — Task complexity determines execution strategy:
    - **Simple task** (single-concern, no interface/dependency changes): main context
-     self-executes; manifest all-dash is valid; manifest table itself is optional.
+     self-executes; no manifest table required. If dispatch keywords appear in the
+     plan text, either remove them or declare at least one real agent step.
    - **Complex task** (multi-concern, interface changes, cross-module coordination):
      main context MUST act as dispatcher — at least one step delegates to a typed
      agent with explicit model. All-dash manifest on a complex plan is [Critical]
