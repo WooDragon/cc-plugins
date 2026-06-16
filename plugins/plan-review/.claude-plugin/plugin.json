@@ -1,7 +1,7 @@
 {
   "name": "plan-review",
   "description": "Adversarial plan review via cross-model consultation (Gemini/Claude)",
-  "version": "1.0.41",
+  "version": "1.0.42",
   "author": {
     "name": "woodragon"
   }

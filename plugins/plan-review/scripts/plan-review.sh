@@ -477,10 +477,43 @@ Keep your response under 3000 characters.
 9. **Dispatch Manifest** — 若 plan 涉及 Agent/Task 调度，必须包含 `## Dispatch Manifest` 表格，列出每个 step 的 agent_type、model、depends_on、parallel_with。主上下文执行的 step 用 `-` 占位。任一 Agent step 缺 model 视为 [Critical]（REJECT）；缺 manifest 表格本身视为 [Major]（CONCERNS，受 MAX_ROUNDS 安全阀约束）。
 
 ## Review Discipline
-- If the plan already provides justification for a design choice, **DO NOT** raise it as an issue unless the justification itself is flawed. Acknowledge the rationale and move on.
 - Focus on gaps the plan author **missed**, not on restating what they already considered.
-- Every issue must cite specific evidence from the plan or project context. Generic warnings without grounding (e.g., "consider edge cases" without naming which) are noise — **OMIT** them.
-- Tool names, agent type identifiers, and API parameter names in the plan are opaque references to the author'"'"'s runtime — **NEVER** flag them as errors, hallucinations, or incorrect naming. This is out of scope.
+- Every issue MUST cite specific evidence from the plan or project context.
+
+## Finding Quality Gate (pre-report self-check)
+A false positive here is **amplified**: each spurious finding burns one scarce
+negotiation round (MAX_ROUNDS) that a genuine issue then never gets. Suppress
+aggressively. Gate EVERY finding through these four checks before reporting it.
+
+1. **Confidence threshold** — Self-assess whether the finding is a grounded defect or a guess.
+   - Low confidence + Minor/Major → **DROP** it silently. Generic warnings without a
+     named case (e.g. "consider edge cases" / "add error handling" with no specific
+     path) are ungrounded — omit them.
+   - Low confidence + suspected **Critical** (security, data loss, irreversible
+     corruption) → **DO NOT drop** — false-negative cost is catastrophic. Keep it,
+     prefix the description with `[UNVERIFIED]`, and treat it as Major (→ CONCERNS,
+     NOT REJECT): the suspicion surfaces to the human without hard-blocking on a guess.
+   - High confidence → report normally.
+
+2. **False-positive registry — never raise these:**
+   - Naming / style / formatting preferences (never a finding on their own).
+   - Magic constants the plan or context documents as a fixed contract.
+   - Repetition that is deliberate emphasis or required by the output format.
+   - A design choice the plan already justified — unless the justification is itself
+     flawed; then attack the justification, not the choice.
+   - Tool names, agent-type identifiers, API parameter names (out of scope — see Scope Boundary).
+
+3. **Severity calibration (anti-drift)** — Match severity to demonstrable impact:
+   - A style / naming / "could be cleaner" preference is **never** Major or Critical.
+   - Critical requires a concrete, named blocker (a specific vuln, a specific data-loss
+     path, wrong-result logic) — not a general worry.
+
+4. **Verdict↔severity pre-flight** — Before writing the verdict tag, confirm it matches
+   your highest-severity SURVIVING finding (post-gate), so the verdict never contradicts
+   the body (no "ghost reports"):
+   - any confirmed [Critical] → REJECT
+   - highest is [Major], or any [UNVERIFIED] suspicion → CONCERNS
+   - only [Minor] or none → APPROVE
 
 ## Severity Definitions
 - **[Critical]** — Blocker: security vulnerabilities, data loss, logic errors producing wrong results, breaking changes to existing behavior, fundamental approach flaws
@@ -489,16 +522,19 @@ Keep your response under 3000 characters.
 
 ## Verdict Rules
 - **APPROVE**: No issues, or only Minor items remaining
-- **CONCERNS**: Major items present but no Critical
-- **REJECT**: Critical items present
+- **CONCERNS**: Major items present (including any `[UNVERIFIED]` suspicion) but no confirmed Critical
+- **REJECT**: confirmed Critical items present
 
 Verdict is the structured severity signal — the automation routes on verdict tags only,
-no body scanning. Strictly follow verdict-severity correspondence.
+no body scanning. Strictly follow verdict-severity correspondence (see Finding Quality
+Gate check 4 — the verdict must match your highest surviving finding).
 
 ## Output Format
 - FIRST line must be a verdict tag: <verdict>APPROVE</verdict> or <verdict>CONCERNS</verdict> or <verdict>REJECT</verdict>
 - List issues, each prefixed with severity tag: `[Critical]`, `[Major]`, or `[Minor]`
 - Each issue format: `[Severity] description → impact → suggested fix`
+- A low-confidence but high-severity suspicion (Quality Gate check 1) is emitted as
+  `[Major] [UNVERIFIED] description → ...` — surfaced for the human, never as REJECT
 - If a severity level has no issues, omit it entirely
 - End with brief strengths of the plan (if any)
 
