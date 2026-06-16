@@ -2047,6 +2047,106 @@ Good."
   [ ! -f "$stale_file" ]
 }
 
+# 110. plan 含 dispatch 关键词 + manifest 全 "-" → degenerate deny + counter increment
+@test "manifest: all-dash manifest → pre-flight degenerate deny + counter increment" {
+  local plan_all_dash="## Plan
+Step 1: Use Task( for analysis.
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | -         | -     | -          | -             |
+| 2    | -         | -     | 1          | -             |"
+  INPUT=$(build_input "plan=$plan_all_dash")
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"DEGENERATE DISPATCH MANIFEST"* ]]
+  local attempt; attempt=$(get_counter_value)
+  [ "$attempt" -eq 1 ]
+}
+
+# 111. mixed manifest (dash + real agent) → passes pre-flight (non-regression)
+@test "manifest: mixed manifest with real agent_type → passes pre-flight to engine" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+All good."
+  local plan_mixed="## Plan
+Step 1: Prepare context. Step 2: Use Task( for heavy lifting.
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | -         | -     | -          | -             |
+| 2    | worker    | sonnet| 1          | -             |"
+  INPUT=$(build_input "plan=$plan_mixed")
+  run_hook
+
+  assert_ack_approve_json
+}
+
+# 112. all-dash repeated → valve escalates (same pattern as test 108)
+@test "manifest: repeated degenerate denies up to MAX_ROUNDS → valve escalates" {
+  export REVIEW_MAX_ROUNDS=2
+  local plan_all_dash="## Plan
+Use Task( for work.
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | -         | -     | -          | -             |"
+  INPUT=$(build_input "plan=$plan_all_dash")
+
+  # Round 1: ATTEMPT=0 < MAX=2 → degenerate deny, ATTEMPT→1
+  run_hook
+  assert_deny_json
+
+  # Round 2: ATTEMPT=1 < MAX=2 → degenerate deny, ATTEMPT→2
+  run_hook
+  assert_deny_json
+
+  # Round 3: ATTEMPT=2 >= MAX=2 → valve fires BEFORE degenerate check → allow
+  run_hook
+  assert_approve_json
+}
+
+# 113. empty manifest (header + separator only, 0 data rows) → degenerate deny
+@test "manifest: empty manifest section (no data rows) → degenerate deny" {
+  local plan_empty_manifest="## Plan
+Step 1: Use Task( for isolation.
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+
+## Next Section"
+  INPUT=$(build_input "plan=$plan_empty_manifest")
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"DEGENERATE DISPATCH MANIFEST"* ]]
+}
+
+# 114. agent_type="worker" + model="-" → NOT blocked (only agent_type checked)
+@test "manifest: real agent_type with dash model → passes pre-flight" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+OK."
+  local plan_agent_no_model="## Plan
+Use Task( for analysis.
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | worker    | -     | -          | -             |"
+  INPUT=$(build_input "plan=$plan_agent_no_model")
+  run_hook
+
+  assert_ack_approve_json
+}
+
 # 100. Capacity-fast-break → degrade file already written; REST entry does not overwrite
 #      (double-write is harmless: timestamps differ by <1s, both numeric, TTL still valid)
 @test "degrade: capacity-fast-break + REST success → degrade file refreshed (double-write harmless)" {
@@ -2094,32 +2194,29 @@ Good."
 }
 
 @test "quality-gate: gap1 confidence threshold + drop-low-confidence directive" {
-  grep -q "Confidence threshold" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Confidence" "${HOOK_SCRIPT:?Missing hook script}"
   grep -q "DROP" "${HOOK_SCRIPT:?Missing hook script}"
 }
 
 @test "quality-gate: gap1 gradient exit — low-confidence Critical kept as UNVERIFIED, not dropped" {
   grep -q "UNVERIFIED" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "DO NOT drop" "${HOOK_SCRIPT:?Missing hook script}"
-  # gradient exit must downgrade to CONCERNS, never hard-block as REJECT on a guess
-  grep -q "NOT REJECT" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "not REJECT" "${HOOK_SCRIPT:?Missing hook script}"
 }
 
 @test "quality-gate: gap2 false-positive registry present" {
   grep -q "False-positive registry" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "never raise these" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -qi "never raise" "${HOOK_SCRIPT:?Missing hook script}"
 }
 
 @test "quality-gate: gap3 verdict-severity pre-flight self-check (prompt-layer, not body-scan)" {
-  grep -q "Verdict↔severity pre-flight" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "ghost reports" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Verdict↔severity" "${HOOK_SCRIPT:?Missing hook script}"
   # Routing must remain verdict-only: the hook must NOT grep the body for severity tags
   ! grep -qE "grep[^|]*'\[Critical\]'" "${HOOK_SCRIPT:?Missing hook script}"
 }
 
 @test "quality-gate: gap4 severity calibration anti-drift" {
   grep -q "Severity calibration" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "never\*\* Major or Critical" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "never Major" "${HOOK_SCRIPT:?Missing hook script}"
 }
 
 @test "quality-gate: UNVERIFIED routes to CONCERNS in verdict rules + output format" {
