@@ -2082,3 +2082,49 @@ Good."
   grep -q "Deletion completeness" "${HOOK_SCRIPT:?Missing hook script}"
   grep -q "3000 characters" "${HOOK_SCRIPT:?Missing hook script}"
 }
+
+# ---------------------------------------------------------------------------
+# Finding Quality Gate (issue #30) — prompt-layer denoising directives.
+# These are static prompt-content assertions: the gate operates inside the
+# review engine (LLM self-check), so it cannot be exercised at runtime here.
+# We assert the four gap-closing directives are present in SYSTEM_INSTRUCTIONS.
+# ---------------------------------------------------------------------------
+@test "system-instructions: Finding Quality Gate section present" {
+  grep -q "Finding Quality Gate" "${HOOK_SCRIPT:?Missing hook script}"
+}
+
+@test "quality-gate: gap1 confidence threshold + drop-low-confidence directive" {
+  grep -q "Confidence threshold" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "DROP" "${HOOK_SCRIPT:?Missing hook script}"
+}
+
+@test "quality-gate: gap1 gradient exit — low-confidence Critical kept as UNVERIFIED, not dropped" {
+  grep -q "UNVERIFIED" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "DO NOT drop" "${HOOK_SCRIPT:?Missing hook script}"
+  # gradient exit must downgrade to CONCERNS, never hard-block as REJECT on a guess
+  grep -q "NOT REJECT" "${HOOK_SCRIPT:?Missing hook script}"
+}
+
+@test "quality-gate: gap2 false-positive registry present" {
+  grep -q "False-positive registry" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "never raise these" "${HOOK_SCRIPT:?Missing hook script}"
+}
+
+@test "quality-gate: gap3 verdict-severity pre-flight self-check (prompt-layer, not body-scan)" {
+  grep -q "Verdict↔severity pre-flight" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "ghost reports" "${HOOK_SCRIPT:?Missing hook script}"
+  # Routing must remain verdict-only: the hook must NOT grep the body for severity tags
+  ! grep -qE "grep[^|]*'\[Critical\]'" "${HOOK_SCRIPT:?Missing hook script}"
+}
+
+@test "quality-gate: gap4 severity calibration anti-drift" {
+  grep -q "Severity calibration" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "never\*\* Major or Critical" "${HOOK_SCRIPT:?Missing hook script}"
+}
+
+@test "quality-gate: UNVERIFIED routes to CONCERNS in verdict rules + output format" {
+  # CONCERNS bucket explicitly includes UNVERIFIED suspicions
+  grep -q "UNVERIFIED.*suspicion.*but no confirmed Critical\|including any .UNVERIFIED" "${HOOK_SCRIPT:?Missing hook script}"
+  # output format documents the [Major] [UNVERIFIED] emission shape
+  grep -q '\[Major\] \[UNVERIFIED\]' "${HOOK_SCRIPT:?Missing hook script}"
+}
