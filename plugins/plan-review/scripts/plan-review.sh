@@ -196,6 +196,20 @@ resolve_plan_from_transcript() {
 needs_manifest() { printf '%s' "$1" | grep -qiE '(Task\(|subagent_type|agent_type|Plan agent|Explore agent|worker agent|dev agent)'; }
 has_manifest()   { printf '%s' "$1" | grep -qi '^## Dispatch Manifest'; }
 
+# Returns 0 if at least one manifest data row has a non-dash agent_type.
+manifest_has_real_agent() {
+  printf '%s\n' "$1" | awk '
+    /^## Dispatch Manifest/ {in_m=1; next}
+    in_m && /^## / {in_m=0}
+    in_m && /^ *$/ {in_m=0}
+    in_m && /^\|/ && !/^\|---/ && !/^\| *step/ {
+      gsub(/^\| *| *\| *$/, ""); n = split($0, f, / *\| */)
+      if (n >= 2) { at=f[2]; gsub(/^ +| +$|"/, "", at); if (at != "-" && at != "") found=1 }
+    }
+    END { exit (found ? 0 : 1) }
+  '
+}
+
 # --- Manifest JSON serializer (called only from APPROVE branch; failures are silent) ---
 # Parses the ## Dispatch Manifest markdown table and outputs a dispatch JSON blob.
 # JSON injection defense: strips stray double-quotes LLM may write in manifest rows.
@@ -204,6 +218,7 @@ parse_manifest_to_json() {
   printf '%s\n' "$plan" | awk -v hash="$hash" -v now="$(date +%s)" '
     /^## Dispatch Manifest/ {in_manifest=1; next}
     in_manifest && /^## / {in_manifest=0}
+    in_manifest && /^ *$/ {in_manifest=0}
     in_manifest && /^\|/ && !/^\|---/ && !/^\| *step/ {
       gsub(/^\| *| *\| *$/, ""); n = split($0, f, / *\| */)
       if (n >= 3) {
@@ -405,6 +420,25 @@ EOF
   exit 0
 fi
 
+# --- Pre-flight degenerate manifest check (all agent_type == "-") ---
+# Fires when manifest is present but declares zero real agent steps.
+if needs_manifest "$PLAN" && has_manifest "$PLAN" && ! manifest_has_real_agent "$PLAN"; then
+  TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
+  ATTEMPT=$((ATTEMPT + 1))
+  echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
+  log_decision "decision=deny reason=degenerate-manifest"
+  DEGEN_MSG="## Red Team Pre-flight — DEGENERATE DISPATCH MANIFEST
+
+Plan 含 Agent/Task 调度关键词，但 Manifest 所有行 agent_type 均为 \`-\`（全主上下文）。
+若任务确实简单（单一关注点、无接口变更），请移除 dispatch 关键词或改写为直接执行描述。
+若任务复杂，请在 manifest 中声明真实 agent 步骤。"
+  DEGEN_DENY_JSON=$(printf '%s' "$DEGEN_MSG" | jq -Rs .)
+  cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${DEGEN_DENY_JSON}}}
+EOF
+  exit 0
+fi
+
 # --- 2. Collect project context ---
 CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 
@@ -472,48 +506,33 @@ Keep your response under 3000 characters.
      local/internal symbols, or provably dead code with no external consumers (grep
      evidence in the plan).
 6. **Architecture fit** — Consistent with project patterns?
-7. **Execution topology** — Does each step explicitly annotate its execution location (main context vs Task) and scheduling topology (sequential / parallel / dependency order)? Steps that spawn agents or run multi-phase operations without these annotations are [Major] issues.
+7. **Dispatch Discipline** — Task complexity determines execution strategy:
+   - **Simple task** (single-concern, no interface/dependency changes): main context
+     self-executes; manifest all-dash is valid; manifest table itself is optional.
+   - **Complex task** (multi-concern, interface changes, cross-module coordination):
+     main context MUST act as dispatcher — at least one step delegates to a typed
+     agent with explicit model. All-dash manifest on a complex plan is [Critical]
+     (main session hoarding work it should delegate).
+   - Manifest format: Agent steps require both agent_type + model (full name, no
+     abbreviation). Main-context steps use `-`. Missing manifest when dispatch
+     keywords are present = [Major]. Agent step missing model = [Critical].
 8. **Reuse over reinvention** — Does the plan propose building something that already exists in the project dependencies, framework, or standard library? Custom implementations require explicit justification (e.g., "framework X lacks feature Y" with concrete evidence). Without strong justification, prefer existing solutions. This is a [Major] issue.
-9. **Dispatch Manifest** — 若 plan 涉及 Agent/Task 调度，必须包含 `## Dispatch Manifest` 表格，列出每个 step 的 agent_type、model、depends_on、parallel_with。主上下文执行的 step 用 `-` 占位。任一 Agent step 缺 model 视为 [Critical]（REJECT）；缺 manifest 表格本身视为 [Major]（CONCERNS，受 MAX_ROUNDS 安全阀约束）。
 
 ## Review Discipline
 - Focus on gaps the plan author **missed**, not on restating what they already considered.
 - Every issue MUST cite specific evidence from the plan or project context.
 
 ## Finding Quality Gate (pre-report self-check)
-A false positive here is **amplified**: each spurious finding burns one scarce
-negotiation round (MAX_ROUNDS) that a genuine issue then never gets. Suppress
-aggressively. Gate EVERY finding through these four checks before reporting it.
+False positives burn scarce negotiation rounds. Gate EVERY finding:
 
-1. **Confidence threshold** — Self-assess whether the finding is a grounded defect or a guess.
-   - Low confidence + Minor/Major → **DROP** it silently. Generic warnings without a
-     named case (e.g. "consider edge cases" / "add error handling" with no specific
-     path) are ungrounded — omit them.
-   - Low confidence + suspected **Critical** (security, data loss, irreversible
-     corruption) → **DO NOT drop** — false-negative cost is catastrophic. Keep it,
-     prefix the description with `[UNVERIFIED]`, and treat it as Major (→ CONCERNS,
-     NOT REJECT): the suspicion surfaces to the human without hard-blocking on a guess.
-   - High confidence → report normally.
-
-2. **False-positive registry — never raise these:**
-   - Naming / style / formatting preferences (never a finding on their own).
-   - Magic constants the plan or context documents as a fixed contract.
-   - Repetition that is deliberate emphasis or required by the output format.
-   - A design choice the plan already justified — unless the justification is itself
-     flawed; then attack the justification, not the choice.
-   - Tool names, agent-type identifiers, API parameter names (out of scope — see Scope Boundary).
-
-3. **Severity calibration (anti-drift)** — Match severity to demonstrable impact:
-   - A style / naming / "could be cleaner" preference is **never** Major or Critical.
-   - Critical requires a concrete, named blocker (a specific vuln, a specific data-loss
-     path, wrong-result logic) — not a general worry.
-
-4. **Verdict↔severity pre-flight** — Before writing the verdict tag, confirm it matches
-   your highest-severity SURVIVING finding (post-gate), so the verdict never contradicts
-   the body (no "ghost reports"):
-   - any confirmed [Critical] → REJECT
-   - highest is [Major], or any [UNVERIFIED] suspicion → CONCERNS
-   - only [Minor] or none → APPROVE
+1. **Confidence** — Low confidence + Minor/Major → DROP silently. Low confidence +
+   suspected Critical → keep as `[UNVERIFIED]`, downgrade to Major (→ CONCERNS, not REJECT).
+2. **False-positive registry** — Never raise: naming/style preferences, justified design
+   choices (attack the justification instead), tool/agent-type/parameter names (Scope Boundary).
+3. **Severity calibration** — Style is never Major/Critical. Critical requires a concrete,
+   named blocker (specific vuln, data-loss path, wrong-result logic).
+4. **Verdict↔severity** — Confirm verdict matches highest surviving finding:
+   confirmed Critical → REJECT; Major or UNVERIFIED → CONCERNS; Minor-only → APPROVE.
 
 ## Severity Definitions
 - **[Critical]** — Blocker: security vulnerabilities, data loss, logic errors producing wrong results, breaking changes to existing behavior, fundamental approach flaws
