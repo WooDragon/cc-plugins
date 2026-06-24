@@ -1891,6 +1891,10 @@ LGTM from Gemini."
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"MISSING DISPATCH MANIFEST"* ]]
+  # Deny message must embed a self-contained format example (not just "see CLAUDE.md").
+  # Assert tokens that ONLY appear in the embedded example, so the old code can't pass.
+  [[ "$reason" == *"parallel_with"* ]]
+  [[ "$reason" == *"填写规则"* ]]
   # Counter must be incremented (pre-flight is CONCERNS-equivalent)
   local attempt; attempt=$(get_counter_value)
   [ "$attempt" -eq 1 ]
@@ -2064,6 +2068,9 @@ Step 1: Use Task( for analysis.
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"DEGENERATE DISPATCH MANIFEST"* ]]
+  # Deny message must embed the self-contained format example.
+  [[ "$reason" == *"parallel_with"* ]]
+  [[ "$reason" == *"填写规则"* ]]
   local attempt; attempt=$(get_counter_value)
   [ "$attempt" -eq 1 ]
 }

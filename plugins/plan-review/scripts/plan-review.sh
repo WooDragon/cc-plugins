@@ -210,6 +210,28 @@ manifest_has_real_agent() {
   '
 }
 
+# --- Canonical manifest example (single source of truth for both deny messages) ---
+# Single-quoted heredoc: backticks, $ and <placeholders> stay literal (no command
+# substitution, no expansion). Embedded verbatim into deny reasons so a blocked LLM
+# sees the exact format inline instead of guessing column names from CLAUDE.md.
+# Agent-row values are <placeholders>, not a copy-pastable real step, so the LLM
+# can't paste the example wholesale and inject a phantom dispatch step.
+MANIFEST_EXAMPLE=$(cat <<'MANIFEST_EOF'
+格式示例（占位值 <...> 替换为你 plan 的真实步骤，勿原样复制本表）：
+
+## Dispatch Manifest
+| step | agent_type    | model   | depends_on | parallel_with |
+|------|---------------|---------|------------|---------------|
+| 1    | -             | -       | -          | -             |
+| 2    | <agent_type>  | <model> | 1          | -             |
+
+填写规则：
+- 主上下文执行的 step：agent_type 与 model 两列均填 `-`。
+- 委派给 Agent 的 step：两列必填，model 用全名（sonnet / opus / haiku）。
+- depends_on / parallel_with：填依赖/并行的 step 号，无则填 `-`。
+MANIFEST_EOF
+)
+
 # --- Manifest JSON serializer (called only from APPROVE branch; failures are silent) ---
 # Parses the ## Dispatch Manifest markdown table and outputs a dispatch JSON blob.
 # JSON injection defense: strips stray double-quotes LLM may write in manifest rows.
@@ -412,7 +434,9 @@ if needs_manifest "$PLAN" && ! has_manifest "$PLAN"; then
   MANIFEST_MSG="## Red Team Pre-flight — MISSING DISPATCH MANIFEST
 
 Plan 涉及 Agent/Task 调度（检测到关键词），但缺少 \`## Dispatch Manifest\` 表格。
-请在 plan 中追加 manifest 表格后重新调用 ExitPlanMode。格式参考 CLAUDE.md。"
+请在 plan 中追加 manifest 表格后重新调用 ExitPlanMode。
+
+${MANIFEST_EXAMPLE}"
   MANIFEST_DENY_JSON=$(printf '%s' "$MANIFEST_MSG" | jq -Rs .)
   cat <<EOF
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${MANIFEST_DENY_JSON}}}
@@ -430,8 +454,10 @@ if needs_manifest "$PLAN" && has_manifest "$PLAN" && ! manifest_has_real_agent "
   DEGEN_MSG="## Red Team Pre-flight — DEGENERATE DISPATCH MANIFEST
 
 Plan 含 Agent/Task 调度关键词，但 Manifest 所有行 agent_type 均为 \`-\`（全主上下文）。
-若任务确实简单（单一关注点、无接口变更），请移除 dispatch 关键词或改写为直接执行描述。
-若任务复杂，请在 manifest 中声明真实 agent 步骤。"
+- 若任务确实简单（单一关注点、无接口变更）：**首选**移除 plan 中的 dispatch 关键词，改写为直接执行描述。
+- 若任务复杂：在 manifest 中至少声明一个真实 agent 步骤（agent_type 与 model 两列均填实值）。
+
+${MANIFEST_EXAMPLE}"
   DEGEN_DENY_JSON=$(printf '%s' "$DEGEN_MSG" | jq -Rs .)
   cat <<EOF
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${DEGEN_DENY_JSON}}}
