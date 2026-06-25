@@ -492,7 +492,14 @@ fi
 # --- 4. Compose prompt ---
 # Static instructions: single canonical source for both engines.
 # Claude → --system-prompt (independent KV cache); Gemini → prompt file prefix.
-SYSTEM_INSTRUCTIONS='# Red Team Plan Review
+# Quoted heredoc ('EOF') → body is pure literal: $, backtick, parens, and
+# apostrophe are all safe, no escaping needed. We use `read -r -d ''` rather
+# than `$(cat <<'EOF')`: bash 3.2 (macOS /bin/bash) mis-parses unbalanced
+# parens like "Task(" inside a command-substituted heredoc, erroring with
+# "unexpected EOF looking for matching )". The read form has no command
+# substitution and is immune. `|| true` absorbs read's exit 1 at EOF (set -e).
+IFS= read -r -d '' SYSTEM_INSTRUCTIONS << 'EOF' || true
+# Red Team Plan Review
 
 You are a senior software architect performing an ADVERSARIAL review of the
 following implementation plan. Your job is to find flaws before implementation
@@ -532,14 +539,41 @@ Keep your response under 3000 characters.
      local/internal symbols, or provably dead code with no external consumers (grep
      evidence in the plan).
 6. **Architecture fit** — Consistent with project patterns?
-7. **Dispatch Discipline** — Task complexity determines execution strategy:
-   - **Simple task** (single-concern, no interface/dependency changes): main context
-     self-executes; no manifest table required. If dispatch keywords appear in the
-     plan text, either remove them or declare at least one real agent step.
-   - **Complex task** (multi-concern, interface changes, cross-module coordination):
-     main context MUST act as dispatcher — at least one step delegates to a typed
-     agent with explicit model. All-dash manifest on a complex plan is [Critical]
-     (main session hoarding work it should delegate).
+7. **Dispatch Economy** — Work nature determines who executes, to protect the
+   main context's lifespan and minimize token cost. Classify each step by its
+   NATURE (not by a fuzzy complexity estimate), then check the assigned tier:
+   - **Decision work** (architecture, root-cause debugging, requirements
+     breakdown, plan authoring, review judgment) → tier `opus` → runs in main
+     context (manifest model/agent_type = `-`).
+   - **Implementation work** (writing code, editing files, producing content)
+     → tier `sonnet` → MUST be delegated to a typed agent.
+   - **Retrieval work** (read-only exploration, search, data extraction with
+     zero reasoning) → tier `haiku` → MUST be delegated to a typed agent.
+   The default is to delegate: only decision steps legitimately stay in main
+   context. The single whole-plan exemption is **Tier 0** — ALL of: single
+   file, no new dependency, no API-contract / DB-schema change, no cross-file
+   coordination, not an ops task. A Tier-0 plan needs no manifest at all. Do
+   NOT count lines of code to judge Tier 0 — the moment a plan touches multiple
+   files, adds a dependency, or changes an interface, it is not Tier 0 and its
+   implementation steps must be delegated, regardless of how few lines they are.
+   Even a Tier-0 plan, if its text contains dispatch keywords (Task(,
+   subagent_type, worker agent, etc.), must still obey the underlying syntax
+   gate: either remove the keywords or supply a full manifest — otherwise a
+   static check will hard-block it (avoid the split-brain where the reviewer
+   approves but the script rejects).
+   - **Severity calibration** (do not weaken the existing rule):
+     - **Full hoarding** — a non-Tier-0 plan whose manifest leaves ALL
+       implementation/retrieval steps on `-` (main session swallowing every
+       offloadable task) → [Critical] → REJECT. This preserves the existing
+       contract: an all-dash manifest on a complex plan is a Critical blocker.
+     - **Partial hoarding** — individual implementation steps kept in main,
+       a sonnet-grade task kept in main, OR main context (opus) hoarding
+       retrieval/extraction work → [Major] → CONCERNS. Opus hoarding retrieval
+       (haiku-grade, zero-reasoning, high-token work) pollutes the main window
+       worse than hoarding code-writing, so it must force CONCERNS, never Minor.
+     - **Pure mis-tiering / fragmentation** — a sonnet-grade task already inside
+       an agent, or implementation steps sharing one file set split across
+       multiple agents that each reload the same context → [Minor].
    - Manifest format: Agent steps require both agent_type + model (full name, no
      abbreviation). Main-context steps use `-`. Missing manifest when dispatch
      keywords are present = [Major]. Agent step missing model = [Critical].
@@ -588,7 +622,8 @@ IMPORTANT: The verdict MUST be wrapped in <verdict></verdict> XML tags on the
 very first line. This is machine-parsed. Do NOT place verdict keywords anywhere
 else in your response without the tags.
 
-Use Chinese for the review output.'
+Use Chinese for the review output.
+EOF
 
 ENGINE_OUT=""
 ENGINE_STATUS=""

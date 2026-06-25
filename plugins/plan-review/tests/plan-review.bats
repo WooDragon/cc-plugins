@@ -2232,3 +2232,45 @@ Use Task( for analysis.
   # output format documents the [Major] [UNVERIFIED] emission shape
   grep -q '\[Major\] \[UNVERIFIED\]' "${HOOK_SCRIPT:?Missing hook script}"
 }
+
+# =============================================================================
+# Dispatch Economy — Criterion 7 regression (v1.0.44 → v1.0.45)
+# Asserts: (1) bash syntax still valid after heredoc refactor,
+#          (2) new Criterion 7 token set is present in SYSTEM_INSTRUCTIONS,
+#          (3) manifest detection path still passes through to engine (non-regression).
+# =============================================================================
+
+# 115. bash syntax check — quoted heredoc must have matching delimiters
+@test "dispatch-economy: bash -n reports no syntax errors after heredoc refactor" {
+  run bash -n "${HOOK_SCRIPT:?Missing hook script}"
+  [ "$status" -eq 0 ]
+}
+
+# 116. Criterion 7 token presence — new prompt content has not been reverted
+@test "dispatch-economy: Criterion 7 tokens present in SYSTEM_INSTRUCTIONS" {
+  grep -q "Dispatch Economy"      "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Full hoarding"         "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Partial hoarding"      "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Retrieval work"        "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "split-brain"           "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Decision work"         "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Implementation work"   "${HOOK_SCRIPT:?Missing hook script}"
+}
+
+# 117. manifest detection survives prompt refactor — Task( + manifest reaches engine
+# Non-regression: same scenario as test 102, re-asserted post-heredoc-refactor.
+@test "dispatch-economy: Task( + Dispatch Manifest still proceeds to engine review after refactor" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+Dispatch Economy verified."
+  local plan_with_manifest="## Plan
+Step 1: Use Task( for isolation.
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | worker    | sonnet| -          | -             |"
+  INPUT=$(build_input "plan=$plan_with_manifest")
+  run_hook
+
+  assert_ack_approve_json
+}
