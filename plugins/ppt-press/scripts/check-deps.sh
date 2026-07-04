@@ -7,7 +7,11 @@ set -euo pipefail
 SCOPE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --scope) SCOPE="$2"; shift 2 ;;
+    --scope)
+      if [[ -z "${2:-}" ]]; then
+        echo "Error: --scope requires a value" >&2; exit 2
+      fi
+      SCOPE="$2"; shift 2 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
