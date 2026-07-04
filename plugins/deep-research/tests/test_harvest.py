@@ -798,6 +798,39 @@ class TestGatewayRetry(unittest.TestCase):
         self.assertEqual(result, ok_response)
         m.assert_called_once()
 
+    def test_socket_timeout_retries_then_recovers(self):
+        # A network-layer timeout (no HTTP status at all) must be retried
+        # under the same transient backoff schedule as a 5xx, not raised
+        # straight through on the first failure.
+        ok_response = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
+        with mock.patch("harvest._http_json_post", side_effect=[socket.timeout("timed out"), ok_response]) as m, \
+             mock.patch("harvest.time.sleep") as sleep_mock:
+            result = harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
+        self.assertEqual(result, ok_response)
+        self.assertEqual(m.call_count, 2)
+        sleep_mock.assert_called_once_with(5)  # first backoff in the transient schedule
+
+    def test_socket_timeout_exhausted_raises_runtime_error(self):
+        with mock.patch("harvest._http_json_post",
+                         side_effect=[socket.timeout("t1"), socket.timeout("t2"), socket.timeout("t3")]) as m, \
+             mock.patch("harvest.time.sleep"):
+            with self.assertRaises(RuntimeError) as ctx:
+                harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
+        self.assertEqual(m.call_count, 3)
+        self.assertIn("after 3 attempts", str(ctx.exception))
+
+    def test_urlerror_without_status_also_retried(self):
+        # urllib.error.URLError (e.g. connection refused / DNS failure) has
+        # no .code at all -- must be classified transient, same as timeout.
+        ok_response = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
+        with mock.patch("harvest._http_json_post",
+                         side_effect=[harvest.urllib.error.URLError("connection refused"), ok_response]) as m, \
+             mock.patch("harvest.time.sleep") as sleep_mock:
+            result = harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
+        self.assertEqual(result, ok_response)
+        self.assertEqual(m.call_count, 2)
+        sleep_mock.assert_called_once_with(5)
+
 
 # ---------------------------------------------------------------------------
 # search / fetch backend degradation + read_local
@@ -1506,6 +1539,31 @@ class TestWorkerDriver(unittest.TestCase):
         self.assertEqual(result.status, "OK")
         claim = result.findings["claims"][0]
         self.assertNotIn("language", claim)  # absent optional field not injected at worker level
+
+    def test_mixed_valid_and_invalid_claims_stripped_not_failed(self):
+        # 10 valid claims (real fetched text) + 3 invalid (never-fetched
+        # excerpts) in the same findings JSON, on the very first turn --
+        # citation_retry_used is still False so this triggers the one nudge,
+        # and the model's retry response repeats the same 3 invalid claims
+        # unchanged. The worker must not FAIL: finalize_findings() strips
+        # the 3 invalid claims per-claim and ships the 10 valid ones, status
+        # OK, invalid_claim_count == 3.
+        fact = "Rayleigh scattering explains the blue sky."
+        valid_claims = [{"claim": f"valid claim {i}", "excerpt": fact, "url": "https://a.com/x"}
+                        for i in range(10)]
+        invalid_claims = [{"claim": f"invalid claim {i}", "excerpt": f"never fetched text {i}",
+                            "url": "https://a.com/x"} for i in range(3)]
+        client = ScriptedClient([
+            assistant_tool_call("c1", "fetch", {"url": "https://a.com/x"}),
+            assistant_final(findings_block(valid_claims + invalid_claims)),
+            assistant_final(findings_block(valid_claims + invalid_claims)),
+        ])
+        result = self._run(client)
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(len(result.findings["claims"]), 10)
+        self.assertEqual(result.findings["invalid_claim_count"], 3)
+        self.assertEqual(len(result.rejected_claims), 3)
+        self.assertTrue(all(rc["reject_reason"] == "excerpt_not_substring" for rc in result.rejected_claims))
 
 
 class TestAppendOrMergeUser(unittest.TestCase):

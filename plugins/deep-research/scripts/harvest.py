@@ -456,7 +456,14 @@ def _http_json_post_with_retry(url, payload, headers, timeout):
     Classification is fixed on the first failure's status code and the
     matching backoff schedule is followed to exhaustion -- no lock is held
     across this function or its sleeps, so worker/judge threads never block
-    each other while backing off."""
+    each other while backing off.
+
+    Two failure shapes share one retry loop: an HTTP response with a status
+    code (HTTPError -- classified transient/4xx by status), and a network-
+    layer failure with no status code at all (URLError/socket.timeout --
+    always treated as transient, same as a 5xx). HTTPError must be caught
+    before URLError since urllib raises HTTPError as a URLError subclass;
+    catching the parent first would swallow the status-code-bearing case."""
     backoffs = None
     attempt = 0
     while True:
@@ -471,6 +478,15 @@ def _http_json_post_with_retry(url, payload, headers, timeout):
             retries_done = attempt - 1
             if retries_done >= len(backoffs):
                 raise RuntimeError(f"HTTP {status} after {attempt} attempts") from e
+            time.sleep(backoffs[retries_done])
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            # No status code (connection refused/reset, DNS failure, read
+            # timeout, ...) -- always transient, same schedule as 429/5xx.
+            if backoffs is None:
+                backoffs = _GATEWAY_RETRY_BACKOFFS_TRANSIENT
+            retries_done = attempt - 1
+            if retries_done >= len(backoffs):
+                raise RuntimeError(f"network error after {attempt} attempts: {e}") from e
             time.sleep(backoffs[retries_done])
 
 
@@ -995,7 +1011,14 @@ class GatewayClient:
 def make_client_factory(config):
     gw = config["gateway"]
     api_key = os.environ.get(gw["api_key_env"], "")
-    timeout = config["limits"]["call_timeout_s"]
+    # Chat-completion calls (panel + judge) run their own agentic reasoning
+    # and can legitimately take far longer than a single search/fetch call
+    # -- decoupled from limits.call_timeout_s (which bounds only the fetch/
+    # search backends) so raising one doesn't silently also relax the
+    # other. .get() with a default so an older config without this key
+    # doesn't KeyError; it just falls back to the same default declared in
+    # harvest.config.json.
+    timeout = config.get("limits", {}).get("completion_timeout_s", 600)
 
     def factory(model_id):
         return GatewayClient(gw["base_url"], api_key, model_id, timeout)
@@ -1150,6 +1173,15 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
                 messages.append({"role": "user", "content": build_citation_feedback(invalid)})
                 continue
 
+            # Second pass through here (citation_retry_used already True) or
+            # a first pass with zero invalid claims both fall through to the
+            # same finalize call -- finalize_findings() re-runs
+            # validate_claims() itself and strips per-claim rather than
+            # failing the whole worker: any invalid claims still present
+            # after the one nudge are dropped (counted in
+            # invalid_claim_count / rejected_claims), the valid ones ship.
+            # There is no path here that returns FAILED for invalid
+            # citations alone.
             return finalize_findings(alias, model_id, data, journal)
 
         # Step budget exhausted without a normal finalize above -- rather
@@ -1163,7 +1195,13 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
         # could respond to it -- and two consecutive user messages trip a
         # 400 on most gateways.
         append_or_merge_user(messages, _FORCED_SYNTHESIS_PROMPT)
-        resp = client.complete(messages=messages, tools=None)
+        # tools=TOOL_SCHEMAS (not None) here even though the prompt forbids
+        # further tool calls: keeping the tools block identical to every
+        # preceding turn's payload lets the gateway's prompt cache match on
+        # the unchanged prefix instead of invalidating it over a
+        # tools-block diff. The prompt text is what actually stops the
+        # model from calling a tool, not the schema's absence.
+        resp = client.complete(messages=messages, tools=TOOL_SCHEMAS)
         message = _extract_message(resp)
         if message is None:
             return WorkerResult(alias, model_id, "FAILED", None, journal, "step_limit_no_synthesis")
