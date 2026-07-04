@@ -106,16 +106,20 @@ check_env_file() {
 }
 
 check_playwright() {
-  local PW_DIR
-  if [[ "$(uname)" == "Darwin" ]]; then
-    PW_DIR="$HOME/Library/Caches/ms-playwright"
-  else
-    PW_DIR="$HOME/.cache/ms-playwright"
+  local REVISION
+  REVISION=$(node -p "require('./node_modules/playwright-core/browsers.json').browsers.find(b=>b.name==='chromium').revision" 2>/dev/null) || true
+  if [[ -z "$REVISION" || "$REVISION" == "undefined" ]]; then
+    fail "Playwright — node_modules 中未找到或 browsers.json 异常" "npm install"
+    return
   fi
-  if [[ -d "$PW_DIR" ]] && [[ "$(ls -A "$PW_DIR" 2>/dev/null)" ]]; then
-    pass "Playwright browsers 已安装"
+
+  local PW_DIR
+  [[ "$(uname)" == "Darwin" ]] && PW_DIR="$HOME/Library/Caches/ms-playwright" || PW_DIR="$HOME/.cache/ms-playwright"
+
+  if [[ -d "$PW_DIR/chromium-$REVISION" ]]; then
+    pass "Playwright browsers (chromium-$REVISION)"
   else
-    fail "Playwright browsers — 未安装" "npx playwright install"
+    fail "Playwright browsers — 需要 chromium-$REVISION" "npx playwright install"
   fi
 }
 
