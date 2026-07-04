@@ -1172,9 +1172,16 @@ def _append_user_blocks(anth, content):
     present (Anthropic rejects two consecutive user messages). `content` may
     be a str, a single block dict, or a list of blocks; the merged turn is
     normalized to a block list when mixing shapes."""
-    if content is None:
-        content = ""
-    incoming = content if isinstance(content, list) else [content] if isinstance(content, dict) else [{"type": "text", "text": content}]
+    if isinstance(content, list):
+        incoming = content
+    elif isinstance(content, dict):
+        incoming = [content]
+    elif content:  # non-empty string
+        incoming = [{"type": "text", "text": content}]
+    else:  # None or "" -> contribute nothing; never fabricate an empty text
+        incoming = []  # block (Anthropic rejects empty text blocks -> 400)
+    if not incoming:
+        return
     if anth and anth[-1]["role"] == "user":
         existing = anth[-1]["content"]
         if isinstance(existing, str):

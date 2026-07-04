@@ -2499,6 +2499,28 @@ class TestAnthropicConversion(unittest.TestCase):
         results = anth[1]["content"]
         self.assertEqual([r["tool_use_id"] for r in results], ["a", "b"])
         self.assertTrue(all(r["type"] == "tool_result" for r in results))
+    def test_empty_user_content_produces_no_empty_text_block(self):
+        # Anthropic rejects empty text blocks; an empty/None user turn must
+        # contribute nothing rather than {"type":"text","text":""}.
+        for empty in ("", None):
+            _s, anth = harvest._oai_messages_to_anthropic([{"role": "user", "content": empty}])
+            for m in anth:
+                blocks = m["content"] if isinstance(m["content"], list) else []
+                for b in blocks:
+                    self.assertFalse(b.get("type") == "text" and b.get("text") == "",
+                                     f"empty text block leaked for content={empty!r}")
+
+    def test_empty_user_after_tool_result_does_not_append_empty_block(self):
+        # Merging an empty user turn into a trailing tool_result user turn must
+        # not tack on an empty text block.
+        msgs = [
+            {"role": "tool", "tool_call_id": "a", "content": "res"},
+            {"role": "user", "content": ""},
+        ]
+        _s, anth = harvest._oai_messages_to_anthropic(msgs)
+        user_blocks = anth[-1]["content"]
+        self.assertEqual([b["type"] for b in user_blocks], ["tool_result"])
+
     def test_no_two_consecutive_user_turns(self):
         # A tool-result user turn immediately followed by a user message must
         # merge, not produce back-to-back user turns (Anthropic 400).
