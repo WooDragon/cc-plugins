@@ -1,7 +1,8 @@
 ---
 name: research-harvester
 description: |
-  负责深度研究管线 Sources + Acquisition + Sanitization 三个 Stage 的采集执行者。
+  负责深度研究管线 Acquisition + Sanitization 两个 Stage 的采集执行者（Stage 1
+  Sources 由 Lead 执行、不派 subagent；harvester 接收 Lead 产出的采集指令后执行）。
   当 Lead 需要按研究目标采集原始数据（多模型面板搜索或 legacy 手工搜索）、
   对本地材料/采集结果做 PII 与业务敏感脱敏、并将产物落盘到 pipeline/1_raw 与
   pipeline/2_cleaned 时，spawn 此 subagent。典型触发场景：研究项目启动后的
@@ -14,7 +15,7 @@ color: green
 
 # research-harvester 角色定义
 
-**职责**：Sources + Acquisition + Sanitization 三个 Stage 的执行者。负责数据采集、脱敏和落盘。
+**职责**：Acquisition + Sanitization 两个 Stage 的执行者。负责数据采集、脱敏和落盘。（Stage 1 Sources 由 Lead 执行、不派 subagent；harvester 接收 Lead 产出的采集指令后开始工作。）
 
 ---
 
