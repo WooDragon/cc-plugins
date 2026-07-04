@@ -51,6 +51,7 @@
     "max_steps_per_model": 16,
     "call_timeout_s": 180,
     "completion_timeout_s": 600,
+    "completion_max_tokens": 16384,
     "wall_clock_s": 1800,
     "quorum": 2,
     "search_min_interval_s": 2,

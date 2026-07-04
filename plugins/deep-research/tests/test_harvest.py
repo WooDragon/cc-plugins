@@ -2446,6 +2446,187 @@ class TestFetchReportRealStats(unittest.TestCase):
             tmpdir.cleanup()
 
 
+# ---------------------------------------------------------------------------
+# Anthropic-native client: OpenAI <-> Anthropic protocol conversion
+# ---------------------------------------------------------------------------
+
+class TestAnthropicConversion(unittest.TestCase):
+    def test_system_hoisted_to_top_level(self):
+        msgs = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "hi"}]
+        system, anth = harvest._oai_messages_to_anthropic(msgs)
+        self.assertEqual(system, "SYS")
+        self.assertEqual(anth, [{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+
+    def test_no_system_yields_none(self):
+        system, anth = harvest._oai_messages_to_anthropic([{"role": "user", "content": "hi"}])
+        self.assertIsNone(system)
+
+    def test_assistant_tool_calls_become_tool_use_blocks(self):
+        msgs = [{"role": "assistant", "content": None,
+                 "tool_calls": [{"id": "tc1", "function": {"name": "search",
+                                 "arguments": json.dumps({"query": "中文"})}}]}]
+        _system, anth = harvest._oai_messages_to_anthropic(msgs)
+        self.assertEqual(anth[0]["role"], "assistant")
+        blocks = anth[0]["content"]
+        self.assertEqual(len(blocks), 1)  # no empty text block prepended
+        self.assertEqual(blocks[0]["type"], "tool_use")
+        self.assertEqual(blocks[0]["id"], "tc1")
+        self.assertEqual(blocks[0]["input"], {"query": "中文"})
+
+    def test_assistant_text_plus_tool_call(self):
+        msgs = [{"role": "assistant", "content": "thinking",
+                 "tool_calls": [{"id": "t", "function": {"name": "fetch", "arguments": "{}"}}]}]
+        _s, anth = harvest._oai_messages_to_anthropic(msgs)
+        blocks = anth[0]["content"]
+        self.assertEqual(blocks[0], {"type": "text", "text": "thinking"})
+        self.assertEqual(blocks[1]["type"], "tool_use")
+
+    def test_plain_assistant_returns_string(self):
+        _s, anth = harvest._oai_messages_to_anthropic([{"role": "assistant", "content": "answer"}])
+        self.assertEqual(anth[0]["content"], "answer")
+
+    def test_consecutive_tool_messages_merged_into_one_user_turn(self):
+        msgs = [
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "a", "function": {"name": "search", "arguments": "{}"}},
+                {"id": "b", "function": {"name": "fetch", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "a", "content": "resA"},
+            {"role": "tool", "tool_call_id": "b", "content": "resB"},
+        ]
+        _s, anth = harvest._oai_messages_to_anthropic(msgs)
+        self.assertEqual(len(anth), 2)  # assistant + single merged user
+        self.assertEqual(anth[1]["role"], "user")
+        results = anth[1]["content"]
+        self.assertEqual([r["tool_use_id"] for r in results], ["a", "b"])
+        self.assertTrue(all(r["type"] == "tool_result" for r in results))
+
+    def test_empty_user_content_produces_no_empty_text_block(self):
+        # Anthropic rejects empty text blocks; an empty/None user turn must
+        # contribute nothing rather than {"type":"text","text":""}.
+        for empty in ("", None):
+            _s, anth = harvest._oai_messages_to_anthropic([{"role": "user", "content": empty}])
+            for m in anth:
+                blocks = m["content"] if isinstance(m["content"], list) else []
+                for b in blocks:
+                    self.assertFalse(b.get("type") == "text" and b.get("text") == "",
+                                     f"empty text block leaked for content={empty!r}")
+
+    def test_empty_user_after_tool_result_does_not_append_empty_block(self):
+        # Merging an empty user turn into a trailing tool_result user turn must
+        # not tack on an empty text block.
+        msgs = [
+            {"role": "tool", "tool_call_id": "a", "content": "res"},
+            {"role": "user", "content": ""},
+        ]
+        _s, anth = harvest._oai_messages_to_anthropic(msgs)
+        user_blocks = anth[-1]["content"]
+        self.assertEqual([b["type"] for b in user_blocks], ["tool_result"])
+
+    def test_no_two_consecutive_user_turns(self):
+        # A tool-result user turn immediately followed by a user message must
+        # merge, not produce back-to-back user turns (Anthropic 400).
+        msgs = [
+            {"role": "tool", "tool_call_id": "a", "content": "res"},
+            {"role": "user", "content": "nudge"},
+        ]
+        _s, anth = harvest._oai_messages_to_anthropic(msgs)
+        user_turns = [m for m in anth if m["role"] == "user"]
+        self.assertEqual(len(user_turns), 1)
+        types = [b["type"] for b in user_turns[0]["content"]]
+        self.assertEqual(types, ["tool_result", "text"])
+
+    def test_tools_none_returns_none(self):
+        self.assertIsNone(harvest._oai_tools_to_anthropic(None))
+        self.assertIsNone(harvest._oai_tools_to_anthropic([]))
+
+    def test_tools_converted_to_input_schema(self):
+        anth = harvest._oai_tools_to_anthropic(harvest.TOOL_SCHEMAS)
+        self.assertEqual(len(anth), len(harvest.TOOL_SCHEMAS))
+        self.assertEqual(anth[0]["name"], "search")
+        self.assertIn("input_schema", anth[0])
+        self.assertNotIn("parameters", anth[0])
+
+    def test_outbound_text_only_content_is_string(self):
+        resp = {"content": [{"type": "text", "text": "hello"}], "stop_reason": "end_turn"}
+        oai = harvest._anthropic_resp_to_oai(resp)
+        msg = oai["choices"][0]["message"]
+        self.assertEqual(msg["content"], "hello")
+        self.assertNotIn("tool_calls", msg)
+        self.assertEqual(oai["choices"][0]["finish_reason"], "end_turn")
+
+    def test_outbound_tool_use_only_content_none(self):
+        resp = {"content": [{"type": "tool_use", "id": "x", "name": "search",
+                             "input": {"query": "q"}}], "stop_reason": "tool_use"}
+        msg = harvest._anthropic_resp_to_oai(resp)["choices"][0]["message"]
+        self.assertIsNone(msg["content"])
+        self.assertEqual(msg["tool_calls"][0]["id"], "x")
+        self.assertEqual(json.loads(msg["tool_calls"][0]["function"]["arguments"]), {"query": "q"})
+
+    def test_outbound_extract_message_compatible(self):
+        # _extract_message must read the converted shape unchanged.
+        resp = {"content": [{"type": "text", "text": "j"}], "stop_reason": "end_turn"}
+        oai = harvest._anthropic_resp_to_oai(resp)
+        self.assertEqual(harvest._extract_message(oai), oai["choices"][0]["message"])
+
+    def test_roundtrip_tool_use_idempotent(self):
+        # outbound -> append -> inbound must preserve id/name/input.
+        resp = {"content": [{"type": "tool_use", "id": "rid", "name": "fetch",
+                             "input": {"url": "http://x", "q": "中文查询"}},
+                            {"type": "text", "text": "note"}], "stop_reason": "tool_use"}
+        msg = harvest._anthropic_resp_to_oai(resp)["choices"][0]["message"]
+        _s, anth = harvest._oai_messages_to_anthropic([msg])
+        blocks = anth[0]["content"]
+        # text block first (non-empty), then tool_use with restored input
+        self.assertEqual(blocks[0], {"type": "text", "text": "note"})
+        tu = blocks[1]
+        self.assertEqual(tu["id"], "rid")
+        self.assertEqual(tu["name"], "fetch")
+        self.assertEqual(tu["input"], {"url": "http://x", "q": "中文查询"})
+
+    def test_cache_control_on_tools_tail_only(self):
+        tools = [{"name": "a", "input_schema": {}}, {"name": "b", "input_schema": {}}]
+        harvest._inject_cache_control(None, tools, [])
+        self.assertNotIn("cache_control", tools[0])
+        self.assertEqual(tools[1]["cache_control"], {"type": "ephemeral"})
+
+    def test_cache_control_promotes_system_string_to_block(self):
+        system = harvest._inject_cache_control("SYS", None, [])
+        self.assertEqual(system, [{"type": "text", "text": "SYS",
+                                   "cache_control": {"type": "ephemeral"}}])
+
+    def test_cache_control_empty_system_untouched(self):
+        self.assertIsNone(harvest._inject_cache_control(None, None, []))
+        self.assertEqual(harvest._inject_cache_control("", None, []), "")
+
+    def test_cache_control_on_message_tail_string_content(self):
+        msgs = [{"role": "user", "content": "hi"}]
+        harvest._inject_cache_control(None, None, msgs)
+        self.assertEqual(msgs[0]["content"],
+                         [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}])
+
+    def test_cache_control_on_message_tail_block_list(self):
+        msgs = [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "a", "content": "r1"},
+            {"type": "tool_result", "tool_use_id": "b", "content": "r2"}]}]
+        harvest._inject_cache_control(None, None, msgs)
+        blocks = msgs[0]["content"]
+        self.assertNotIn("cache_control", blocks[0])
+        self.assertEqual(blocks[1]["cache_control"], {"type": "ephemeral"})
+
+    def test_cache_control_skips_empty_tail_text_block(self):
+        # An empty text block cannot carry cache_control; mark the prior real
+        # block instead.
+        blocks = [{"type": "text", "text": "real"}, {"type": "text", "text": ""}]
+        harvest._mark_block_list_tail(blocks)
+        self.assertEqual(blocks[0]["cache_control"], {"type": "ephemeral"})
+        self.assertNotIn("cache_control", blocks[1])
+
+    def test_empty_message_content_not_marked(self):
+        msgs = [{"role": "user", "content": ""}]
+        harvest._inject_cache_control(None, None, msgs)
+        self.assertEqual(msgs[0]["content"], "")  # untouched, no empty block created
+
+
 class argparse_ns:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)

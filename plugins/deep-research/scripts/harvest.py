@@ -1008,6 +1008,345 @@ class GatewayClient:
         return _http_json_post_with_retry(url, payload, headers, self.timeout_s)
 
 
+# ---------------------------------------------------------------------------
+# Anthropic-native client (claude models only)
+#
+# claude models get a dedicated path to the gateway's Anthropic-native
+# /messages endpoint (not the OpenAI-compatible /chat/completions used for
+# gemini/gpt) so that prompt caching (cache_control) actually takes effect --
+# the OpenAI-compat conversion in the gateway silently drops cache_control,
+# so claude via that path never caches. This client speaks the exact same
+# complete(messages, tools) -> OpenAI-shaped-dict interface as GatewayClient,
+# so run_worker / judge_clusters stay identical; all protocol translation is
+# confined to the pure functions below.
+# ---------------------------------------------------------------------------
+
+def _read_http_error_body(e):
+    """Best-effort read of an HTTPError's response body so Anthropic's own
+    error diagnostics (e.g. {"error":{"message":"messages: roles must
+    alternate ..."}}) survive into the raised exception instead of being
+    swallowed as a bare status code."""
+    try:
+        return e.read().decode("utf-8", "replace")[:800]
+    except Exception:
+        return "<error body unavailable>"
+
+
+def _anthropic_post_with_retry(url, payload, headers, timeout):
+    """Retry wrapper for the Anthropic /messages endpoint. Unlike the OpenAI
+    gateway path, a non-transient 4xx (400/401/403/404) is NOT retried -- a
+    malformed request body fails identically on a resend, so we surface the
+    Anthropic error body immediately for debugging. Only 429/408/5xx and
+    network-layer failures follow the transient backoff schedule. HTTPError
+    is caught before URLError (its parent) so the status-bearing case isn't
+    swallowed."""
+    backoffs = _GATEWAY_RETRY_BACKOFFS_TRANSIENT
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return _http_json_post(url, payload, headers, timeout)
+        except urllib.error.HTTPError as e:
+            status = e.code
+            transient = status in (429, 408) or 500 <= status < 600
+            body = _read_http_error_body(e)
+            if not transient:
+                raise RuntimeError(f"Anthropic HTTP {status}: {body}") from e
+            if attempt - 1 >= len(backoffs):
+                raise RuntimeError(f"Anthropic HTTP {status} after {attempt} attempts: {body}") from e
+            time.sleep(backoffs[attempt - 1])
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            if attempt - 1 >= len(backoffs):
+                raise RuntimeError(f"Anthropic network error after {attempt} attempts: {e}") from e
+            time.sleep(backoffs[attempt - 1])
+
+
+def _oai_tools_to_anthropic(tools):
+    """OpenAI function-tool schema -> Anthropic tool schema. Returns None when
+    there are no tools (judge path passes tools=None) so the caller can omit
+    the field entirely rather than send tools:null / tools:[]."""
+    if not tools:
+        return None
+    out = []
+    for t in tools:
+        fn = t.get("function", {})
+        out.append({
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+        })
+    return out
+
+
+def _assistant_to_anthropic_content(msg):
+    """Convert one OpenAI assistant message into an Anthropic assistant
+    content-block list: leading text block (only if non-empty -- Anthropic
+    rejects empty text blocks) followed by one tool_use block per tool_call.
+    A plain-text assistant turn (no tool_calls) returns its string content
+    directly. tool_call arguments are JSON strings (json.dumps output on the
+    outbound side); json.loads restores the dict for tool_use.input, tolerant
+    of a malformed/empty string."""
+    tool_calls = msg.get("tool_calls") or []
+    text = msg.get("content")
+    if not tool_calls:
+        # Plain assistant answer. Anthropic needs a non-empty content; fall
+        # back to a single space if the model somehow returned empty (should
+        # not happen on a no-tool turn, but never emit an empty text block).
+        return text if isinstance(text, str) and text else " "
+    blocks = []
+    if isinstance(text, str) and text:
+        blocks.append({"type": "text", "text": text})
+    for tc in tool_calls:
+        fn = tc.get("function", {})
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        blocks.append({
+            "type": "tool_use",
+            "id": tc.get("id", ""),
+            "name": fn.get("name", ""),
+            "input": args,
+        })
+    return blocks
+
+
+def _oai_messages_to_anthropic(messages):
+    """Split an OpenAI-style messages list into (system, anthropic_messages).
+
+    - role=system  -> hoisted into the top-level `system` (concatenated if
+      more than one; there is only ever one here in practice).
+    - role=user    -> passed through (content is str or a content-block list).
+    - role=assistant -> text + tool_use blocks (see helper).
+    - role=tool    -> a tool_result block; *consecutive* tool messages are
+      merged into a single user turn (Anthropic requires all tool_result
+      blocks answering the previous assistant's tool_use to live in one user
+      message). run_worker appends one role=tool per tool_call, so this run of
+      tool messages must collapse into one user turn.
+
+    Adjacent same-role user turns are also merged, mirroring the gateway's
+    "no two consecutive user messages" constraint that append_or_merge_user
+    already relies on."""
+    system_parts = []
+    anth = []
+    i = 0
+    n = len(messages)
+    while i < n:
+        msg = messages[i]
+        role = msg.get("role")
+        if role == "system":
+            content = msg.get("content")
+            if isinstance(content, str):
+                system_parts.append(content)
+            elif isinstance(content, list):
+                for blk in content:
+                    if isinstance(blk, dict) and blk.get("type") == "text":
+                        system_parts.append(blk.get("text", ""))
+            i += 1
+            continue
+        if role == "tool":
+            # Collapse the maximal run of consecutive tool messages into one
+            # user turn of tool_result blocks.
+            results = []
+            while i < n and messages[i].get("role") == "tool":
+                tmsg = messages[i]
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tmsg.get("tool_call_id", ""),
+                    "content": tmsg.get("content", ""),
+                })
+                i += 1
+            _append_user_blocks(anth, results)
+            continue
+        if role == "assistant":
+            anth.append({"role": "assistant", "content": _assistant_to_anthropic_content(msg)})
+            i += 1
+            continue
+        # role == user (or unknown -> treat as user)
+        _append_user_blocks(anth, msg.get("content"))
+        i += 1
+    system = "\n\n".join(p for p in system_parts if p) if system_parts else None
+    return system, anth
+
+
+def _append_user_blocks(anth, content):
+    """Append `content` as a user turn, merging into a trailing user turn if
+    present (Anthropic rejects two consecutive user messages). `content` may
+    be a str, a single block dict, or a list of blocks; the merged turn is
+    normalized to a block list when mixing shapes."""
+    if isinstance(content, list):
+        incoming = content
+    elif isinstance(content, dict):
+        incoming = [content]
+    elif content:  # non-empty string
+        incoming = [{"type": "text", "text": content}]
+    else:  # None or "" -> contribute nothing; never fabricate an empty text
+        incoming = []  # block (Anthropic rejects empty text blocks -> 400)
+    if not incoming:
+        return
+    if anth and anth[-1]["role"] == "user":
+        existing = anth[-1]["content"]
+        if isinstance(existing, str):
+            existing = [{"type": "text", "text": existing}] if existing else []
+        elif isinstance(existing, dict):
+            existing = [existing]
+        existing.extend(incoming)
+        anth[-1]["content"] = existing
+    else:
+        anth.append({"role": "user", "content": incoming})
+
+
+def _anthropic_resp_to_oai(resp):
+    """Anthropic /messages response -> OpenAI chat-completions shape so
+    _extract_message (resp["choices"][0]["message"]) and the run_worker /
+    judge_clusters loops read it unchanged.
+
+    - text blocks are concatenated into `content`.
+    - tool_use blocks become OpenAI tool_calls (arguments re-serialized to a
+      JSON string via json.dumps, matching what the OpenAI path produces).
+    - content is a string for a text-only reply (judge / final synthesis rely
+      on a str here); it is None only when the turn is purely tool_use, which
+      run_worker's `message.get("content") or ""` and the inbound converter
+      both tolerate.
+    - stop_reason is surfaced as finish_reason for observability (e.g.
+      max_tokens truncation shows up instead of silently yielding half a
+      JSON blob)."""
+    content_blocks = resp.get("content") or []
+    text_parts = []
+    tool_calls = []
+    for blk in content_blocks:
+        btype = blk.get("type")
+        if btype == "text":
+            text_parts.append(blk.get("text", ""))
+        elif btype == "tool_use":
+            tool_calls.append({
+                "id": blk.get("id", ""),
+                "type": "function",
+                "function": {
+                    "name": blk.get("name", ""),
+                    "arguments": json.dumps(blk.get("input", {}), ensure_ascii=False),
+                },
+            })
+    message = {"role": "assistant"}
+    if tool_calls:
+        message["content"] = "".join(text_parts) if text_parts else None
+        message["tool_calls"] = tool_calls
+    else:
+        message["content"] = "".join(text_parts)
+    return {
+        "choices": [{"message": message, "finish_reason": resp.get("stop_reason")}],
+        "usage": resp.get("usage", {}),
+    }
+
+
+class AnthropicGatewayClient:
+    def __init__(self, base_url, api_key, model_id, timeout_s, max_tokens):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model_id = model_id
+        self.timeout_s = timeout_s
+        self.max_tokens = max_tokens
+
+    def complete(self, messages, tools):
+        system, anth_messages = _oai_messages_to_anthropic(messages)
+        anth_tools = _oai_tools_to_anthropic(tools)
+        system = _inject_cache_control(system, anth_tools, anth_messages)
+        payload = {
+            "model": self.model_id,
+            "max_tokens": self.max_tokens,
+            "messages": anth_messages,
+        }
+        if system is not None:
+            payload["system"] = system
+        if anth_tools is not None:
+            payload["tools"] = anth_tools
+        url = self.base_url + "/messages"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        }
+        resp = _anthropic_post_with_retry(url, payload, headers, self.timeout_s)
+        return _anthropic_resp_to_oai(resp)
+
+
+_CACHE_CONTROL = {"type": "ephemeral"}
+# Anthropic allows at most 4 cache breakpoints. We use 3: tools tail, system
+# tail, and the last message content block (the moving conversation
+# breakpoint). All use the default 5-minute TTL rather than the "1h" option:
+# a worker's agentic loop and the judge call all complete well inside 5
+# minutes, so the longer TTL buys nothing here while its 2x write cost and
+# the unsettled beta-header requirement for "ttl":"1h" (the docs don't state
+# whether it needs an anthropic-beta header) would only add risk. A
+# breakpoint caches the ENTIRE prefix up to and including its block, in the
+# fixed order tools -> system -> messages, so these three points let every
+# turn read the whole static prefix (tools+system) plus all prior history
+# from cache and pay full price only for the newest increment.
+
+
+def _mark_block_list_tail(blocks):
+    """Attach cache_control to the last cacheable (dict) block in a list.
+    Anthropic rejects cache_control on an empty text block, so skip a tail
+    block that is an empty-text block. No-op if there is no dict block."""
+    for blk in reversed(blocks):
+        if not isinstance(blk, dict):
+            continue
+        if blk.get("type") == "text" and not blk.get("text"):
+            continue
+        blk["cache_control"] = dict(_CACHE_CONTROL)
+        return True
+    return False
+
+
+def _mark_message_tail(messages):
+    """Move the conversation breakpoint onto the last content block of the
+    last message. String content is promoted to a one-text-block list so the
+    marker has somewhere to live (Anthropic accepts either shape); an empty
+    string is left untouched (nothing cacheable, and an empty text block is
+    rejected)."""
+    if not messages:
+        return
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str):
+        if not content:
+            return
+        last["content"] = [{"type": "text", "text": content, "cache_control": dict(_CACHE_CONTROL)}]
+    elif isinstance(content, list) and content:
+        _mark_block_list_tail(content)
+
+
+def _inject_cache_control(system, tools, messages):
+    """Attach cache_control breakpoints in place for maximal prefix caching.
+
+    cache_control cannot ride on a bare string, so a non-empty system string
+    is promoted here into a single cache-marked text block list (Anthropic
+    accepts system as either a string or a block list); an already-block-list
+    system just gets its tail marked. Because this rewrites system, the value
+    is RETURNED and AnthropicGatewayClient.complete must send the returned
+    system in the payload -- tools and messages are mutated in place. An empty
+    or None system is returned untouched (nothing cacheable).
+
+    Breakpoints: tools tail + system tail (static prefix) + last message
+    content block (see _mark_message_tail). Returns the (possibly rewritten)
+    system value."""
+    if tools:
+        _mark_block_list_tail(tools)
+    if isinstance(system, str) and system:
+        system = [{"type": "text", "text": system, "cache_control": dict(_CACHE_CONTROL)}]
+    elif isinstance(system, list) and system:
+        _mark_block_list_tail(system)
+    _mark_message_tail(messages)
+    # Known limit: only the single moving message breakpoint is used, so if
+    # one turn ever appended >=20 content blocks (Anthropic's incremental-
+    # cache lookback window) the prior breakpoint would fall out of window and
+    # that one turn would miss cache. In this pipeline a turn adds ~2 blocks
+    # (one tool_use + one tool_result), so the window is never approached; a
+    # 4th "anchor" breakpoint would only pay off with heavy parallel tool use
+    # and is deliberately omitted to keep the strategy simple.
+    return system
+
+
 def make_client_factory(config):
     gw = config["gateway"]
     api_key = os.environ.get(gw["api_key_env"], "")
@@ -1019,8 +1358,21 @@ def make_client_factory(config):
     # doesn't KeyError; it just falls back to the same default declared in
     # harvest.config.json.
     timeout = config.get("limits", {}).get("completion_timeout_s", 600)
+    # Anthropic requires max_tokens; OpenAI treats it as optional so the
+    # OpenAI path never set it. Read from config with a generous default so
+    # large findings/judge outputs aren't truncated (truncation would surface
+    # as finish_reason=max_tokens and a half-parsed JSON). Same .get()-with-
+    # default back-compat pattern as completion_timeout_s.
+    max_tokens = config.get("limits", {}).get("completion_max_tokens", 16384)
 
     def factory(model_id):
+        # claude models go through the Anthropic-native /messages path so
+        # prompt caching can take effect; everything else (gemini/gpt) stays
+        # on the OpenAI-compatible /chat/completions gateway. Same
+        # complete(messages, tools) interface either way, so run_judge_with_
+        # fallback can freely mix the two client types across its candidates.
+        if model_id.startswith("claude"):
+            return AnthropicGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens)
         return GatewayClient(gw["base_url"], api_key, model_id, timeout)
 
     return factory

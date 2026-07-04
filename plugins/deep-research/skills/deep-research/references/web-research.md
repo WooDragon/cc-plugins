@@ -71,6 +71,8 @@ python3 <harvest.py 路径> run --goal-file intake/requirements/research-goal.md
 
 **超时与重试（gateway completion 独立于 fetch）**：panel/judge 的 chat-completion 调用有独立超时 `completion_timeout_s`（`harvest.config.json` 的 `limits`，默认 **600s**），与 fetch/search 后端的 `call_timeout_s`（默认 180s）解耦——completion 要跑完整个 agentic 推理，长上下文下远超单次抓取耗时，二者共用一个超时会互相拖累。读取用带默认值的安全方式，旧 config 无该字段时回退 600s（向后兼容）。completion 调用的重试按**异常类归一**：HTTP 状态码错误（429/5xx）与网络层瞬时故障（读超时 `socket.timeout` / `URLError` 无状态码）走同一条 transient 退避链，避免「读超时穿透判死整个 worker」——最该重试的瞬时故障恰恰是无状态码那类。
 
+**claude 模型走 Anthropic 原生路径（prompt caching 生效）**：`panel_models` / `judge_model` 里模型名以 `claude` 开头的，由 `harvest.py` 的 `make_client_factory` 路由到 `AnthropicGatewayClient`——走网关的 Anthropic 原生 `/v1/messages` 入站，而非 gemini/gpt 用的 OpenAI 兼容 `/chat/completions`。原因：OpenAI 兼容转换路径会静默丢弃 `cache_control`，claude 经该路径**永远不缓存**；原生路径下 system/tools/messages 三处的 `cache_control` 原样透传给上游 Anthropic，prompt caching 真正生效（实测二次调用 `cache_read_input_tokens` 命中，历史 token 仅付 0.1× 价）。协议转换（OpenAI↔Anthropic 双向）封装在 client 内的模块级纯函数，`run_worker` / `judge_clusters` 循环零改动、仍只见 OpenAI 形状。缓存断点采**最大化**策略：tools 末块 + system 末块（静态前缀，一次写入长期复用）+ messages 最后一个 content block（每轮移动的会话断点），共 3 个断点（上限 4），全用默认 5min TTL（worker loop 与 judge 均远短于 5min，不必冒 1h TTL 的 beta-header 风险与 2× 写入成本）。`completion_max_tokens`（`limits`，默认 **16384**）为 Anthropic 必填的 `max_tokens` 供值，旧 config 无该字段时回退 16384。claude 原生路径的错误可观测性独立：非 transient 4xx（400 等协议错误）**不重试**，并把 Anthropic 返回的 error body 带进异常，便于现场调协议。
+
 **fallback 链（仅未启用 harvest.py 或经用户豁免 `legacy-exemption.md`）**：
 
 **1. Gemini CLI（主力）**
