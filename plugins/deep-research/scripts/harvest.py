@@ -1007,7 +1007,7 @@ def make_client_factory(config):
 # Panel worker driver
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(goal_text, local_manifest, alias):
+def build_system_prompt(goal_text, local_manifest, alias, max_steps):
     lines = [
         "You are one member of a multi-model research panel. Decompose the "
         "research goal independently and collect evidence with the tools.",
@@ -1020,6 +1020,12 @@ def build_system_prompt(goal_text, local_manifest, alias):
         "excerpt must be copied from the original text.",
         "3. Only cite text that literally appears in a tool result.",
         "4. Search in both Chinese and English for each core concept.",
+        f"5. You have a budget of about {max_steps} tool-use rounds.",
+        "6. Search bilingually to map sources first, then fetch the most relevant "
+        "few, then STOP and output the findings JSON.",
+        "7. A reliable partial result is better than being cut off empty-handed -- "
+        "converge before the budget runs out rather than searching breadth-first "
+        "until the wall.",
         "Final output must be exactly one JSON code block with schema: "
         '{"claims": [{"claim": "...", "excerpt": "...", "url": "...", '
         '"credibility": 1-5, "language": "zh|en|..."}], '
@@ -1051,6 +1057,52 @@ class WorkerResult:
         self.rejected_claims = rejected_claims or []
 
 
+def append_or_merge_user(messages, text):
+    """Append `text` as a new user turn, unless the trailing message is
+    already role=user -- gateways reject two consecutive user-role messages
+    with a 400, and the parse-retry / citation-retry paths both leave a
+    role=user message as the last turn, so a forced-synthesis nudge landing
+    right after one of those retries must merge into it instead of piling on
+    a second one. `content` on a message can be a plain string or a list of
+    content blocks (multi-part messages) -- merge according to whichever
+    shape is already there rather than assuming str."""
+    if messages and messages[-1]["role"] == "user":
+        content = messages[-1]["content"]
+        if isinstance(content, list):
+            content.append({"type": "text", "text": text})
+        elif isinstance(content, str):
+            messages[-1]["content"] = content + "\n" + text
+        else:
+            # Unexpected content shape -- fall back to a safe string merge
+            # rather than guessing at block structure.
+            messages[-1]["content"] = str(content) + "\n" + text
+    else:
+        messages.append({"role": "user", "content": text})
+
+
+def finalize_findings(alias, model_id, data, journal):
+    """Shared tail of the findings pipeline: assign per-claim IDs, verify
+    every citation against the journal, and assemble the OK WorkerResult.
+    Used both by the loop's normal end-of-turn finalize and by the forced-
+    synthesis path after the step budget is exhausted -- both start from a
+    freshly parsed findings dict and finish identically. The citation-retry
+    branch (loop only, at most once per worker) runs *before* this is
+    called; this function never retries, it only finalizes."""
+    claims = assign_claim_ids(alias, data["claims"])
+    fetch_index = build_fetch_index(journal)
+    journal_urls = build_journal_url_set(journal)
+    valid, invalid = validate_claims(claims, fetch_index, journal_urls)
+    data["claims"] = valid
+    data["invalid_claim_count"] = len(invalid)
+    return WorkerResult(alias, model_id, "OK", data, journal, None, rejected_claims=build_rejected_claims(invalid))
+
+
+_FORCED_SYNTHESIS_PROMPT = (
+    "Tool-use budget exhausted. Based ONLY on the evidence you have already "
+    "fetched, output the findings JSON now. Do not call any more tools."
+)
+
+
 def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
                 goal_text, local_manifest, local_dir):
     journal = []
@@ -1059,7 +1111,8 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
         max_steps = limits["max_steps_per_model"]
         deadline = time.monotonic() + limits["wall_clock_s"]
         messages = [
-            {"role": "system", "content": build_system_prompt(goal_text, local_manifest, alias)},
+            {"role": "system", "content": build_system_prompt(goal_text, local_manifest, alias,
+                                                                limits["max_steps_per_model"])},
             {"role": "user", "content": goal_text},
         ]
         parse_retry_used = False
@@ -1097,11 +1150,28 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
                 messages.append({"role": "user", "content": build_citation_feedback(invalid)})
                 continue
 
-            data["claims"] = valid
-            data["invalid_claim_count"] = len(invalid)
-            return WorkerResult(alias, model_id, "OK", data, journal, None, rejected_claims=build_rejected_claims(invalid))
+            return finalize_findings(alias, model_id, data, journal)
 
-        return WorkerResult(alias, model_id, "FAILED", None, journal, "step_limit_exceeded")
+        # Step budget exhausted without a normal finalize above -- rather
+        # than discard every claim already fetched (the old behavior:
+        # instant FAILED, throwing away real evidence and risking a
+        # below-quorum panel), force one last no-tools synthesis call so
+        # the worker converts whatever it already gathered into findings.
+        # append_or_merge_user (not a plain append) because the last
+        # message here can already be role=user -- a parse-retry or
+        # citation-retry nudge that ran out of turns before the model
+        # could respond to it -- and two consecutive user messages trip a
+        # 400 on most gateways.
+        append_or_merge_user(messages, _FORCED_SYNTHESIS_PROMPT)
+        resp = client.complete(messages=messages, tools=None)
+        message = _extract_message(resp)
+        if message is None:
+            return WorkerResult(alias, model_id, "FAILED", None, journal, "step_limit_no_synthesis")
+        content = message.get("content") or ""
+        data, err = parse_findings_json(content)
+        if err:
+            return WorkerResult(alias, model_id, "FAILED", None, journal, "step_limit_no_synthesis")
+        return finalize_findings(alias, model_id, data, journal)
     except Exception as e:
         return WorkerResult(alias, model_id, "FAILED", None, journal, f"exception: {e}")
 

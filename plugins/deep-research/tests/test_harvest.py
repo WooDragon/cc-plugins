@@ -37,15 +37,23 @@ def base_config(**overrides):
 
 
 class ScriptedClient:
-    """Fake OpenAI-compatible client: returns canned responses in order."""
+    """Fake OpenAI-compatible client: returns canned responses in order.
+    Also records a shallow snapshot of the messages list passed to each
+    complete() call (message dicts are appended-only past this point, never
+    mutated in place after being recorded here -- except by
+    append_or_merge_user's in-place merge, which by construction only ever
+    touches the *last* message and only runs before this snapshot is taken,
+    so the snapshot always reflects what the model actually received)."""
 
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = 0
+        self.messages_log = []
 
     def complete(self, messages, tools):
         resp = self._responses[self.calls]
         self.calls += 1
+        self.messages_log.append(list(messages))
         if callable(resp):
             return resp(messages, tools)
         return resp
@@ -1412,18 +1420,67 @@ class TestWorkerDriver(unittest.TestCase):
         result = self._run(client)
         self.assertEqual(result.status, "OK")
 
-    def test_step_limit_exhaustion_fails_gracefully(self):
+    def test_step_limit_triggers_forced_synthesis_returns_ok(self):
+        # Budget exhausted after two fetch-only rounds must no longer throw
+        # the already-fetched evidence away -- the forced no-tools
+        # synthesis call (the 3rd client.complete()) gets one last chance
+        # to turn it into findings, and here it does.
+        cfg = base_config()
+        cfg["limits"]["max_steps_per_model"] = 2
+        fact = "Rayleigh scattering explains the blue sky."
+        client = ScriptedClient([
+            assistant_tool_call("c1", "fetch", {"url": "https://a.com/1"}),
+            assistant_tool_call("c2", "fetch", {"url": "https://a.com/2"}),
+            assistant_final(findings_block([
+                {"claim": "c", "excerpt": fact, "url": "https://a.com/2", "credibility": 4, "language": "en"}])),
+        ])
+        with mock.patch("harvest.call_fetch_backend", return_value=fact):
+            result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+        self.assertEqual(client.calls, 3)
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(len(result.findings["claims"]), 1)
+        self.assertEqual(result.findings["invalid_claim_count"], 0)
+
+    def test_forced_synthesis_still_empty_stays_failed(self):
+        # Forced synthesis is the last chance, not another retry loop -- if
+        # it still comes back invalid/empty, the worker fails with a reason
+        # distinct from the old step_limit_exceeded so callers can tell
+        # "never even tried to synthesize" apart from "tried and failed".
         cfg = base_config()
         cfg["limits"]["max_steps_per_model"] = 2
         client = ScriptedClient([
             assistant_tool_call("c1", "fetch", {"url": "https://a.com/1"}),
             assistant_tool_call("c2", "fetch", {"url": "https://a.com/2"}),
-            assistant_tool_call("c3", "fetch", {"url": "https://a.com/3"}),
+            assistant_final("not valid json"),
         ])
         with mock.patch("harvest.call_fetch_backend", return_value="text"):
             result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+        self.assertEqual(client.calls, 3)
         self.assertEqual(result.status, "FAILED")
-        self.assertEqual(result.reason, "step_limit_exceeded")
+        self.assertEqual(result.reason, "step_limit_no_synthesis")
+
+    def test_forced_synthesis_after_retry_no_consecutive_user(self):
+        # If the step budget runs out right after a citation-retry nudge
+        # (which leaves messages[-1] as role=user), the forced-synthesis
+        # prompt must merge into that message rather than append a second
+        # consecutive user turn -- most gateways 400 on that.
+        cfg = base_config()
+        cfg["limits"]["max_steps_per_model"] = 1
+        client = ScriptedClient([
+            assistant_final(findings_block([
+                {"claim": "c", "excerpt": "never fetched text", "url": "https://a.com/x"}])),
+            assistant_final(findings_block([])),
+        ])
+        result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+        self.assertEqual(result.status, "OK")
+        forced_messages = client.messages_log[1]
+        roles = [m["role"] for m in forced_messages]
+        for i in range(len(roles) - 1):
+            self.assertFalse(roles[i] == "user" and roles[i + 1] == "user",
+                              f"consecutive user turns at index {i}: {forced_messages}")
+        self.assertEqual(forced_messages[-1]["role"], "user")
+        self.assertIn("citation verification", forced_messages[-1]["content"])
+        self.assertIn("Tool-use budget exhausted", forced_messages[-1]["content"])
 
     def test_worker_exception_isolated_not_raised(self):
         class ExplodingClient:
@@ -1449,6 +1506,39 @@ class TestWorkerDriver(unittest.TestCase):
         self.assertEqual(result.status, "OK")
         claim = result.findings["claims"][0]
         self.assertNotIn("language", claim)  # absent optional field not injected at worker level
+
+
+class TestAppendOrMergeUser(unittest.TestCase):
+    """Direct unit tests for the append_or_merge_user helper -- covers both
+    content shapes a message can carry (plain string, and a list of
+    OpenAI-style content blocks) independent of run_worker's own retry
+    plumbing."""
+
+    def test_appends_new_user_turn_when_last_is_not_user(self):
+        messages = [{"role": "system", "content": "sys"}, {"role": "assistant", "content": "hi"}]
+        harvest.append_or_merge_user(messages, "nudge")
+        self.assertEqual(len(messages), 3)
+        self.assertEqual(messages[-1], {"role": "user", "content": "nudge"})
+
+    def test_appends_new_user_turn_when_messages_empty(self):
+        messages = []
+        harvest.append_or_merge_user(messages, "nudge")
+        self.assertEqual(messages, [{"role": "user", "content": "nudge"}])
+
+    def test_merges_into_trailing_user_str_content(self):
+        messages = [{"role": "user", "content": "first nudge"}]
+        harvest.append_or_merge_user(messages, "second nudge")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], "first nudge\nsecond nudge")
+
+    def test_merges_into_trailing_user_list_content_without_typeerror(self):
+        messages = [{"role": "user", "content": [{"type": "text", "text": "first nudge"}]}]
+        harvest.append_or_merge_user(messages, "second nudge")
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["content"], [
+            {"type": "text", "text": "first nudge"},
+            {"type": "text", "text": "second nudge"},
+        ])
 
 
 # ---------------------------------------------------------------------------
