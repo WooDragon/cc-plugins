@@ -30,6 +30,7 @@ mkdir my-ppt && cd my-ppt
 |------|:----:|:------:|:------:|:------:|
 | Node.js ≥ 18 | ✓ | ✓ | ✓ | ✓ |
 | npm install | · | ✓ | ✓ | · |
+| Python 3 | · | · | ✓ | · |
 | Playwright browsers | · | · | ✓ | · |
 | AWS CLI | · | · | ✓ | · |
 | .env (AWS credentials) | · | · | ✓ | · |

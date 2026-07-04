@@ -1,7 +1,7 @@
 {
   "name": "ppt-press",
   "description": "PPT press — self-contained editorial magazine × e-ink web presentation publishing system with scaffold, dependency checking, and full lifecycle skills",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "author": {
     "name": "WooDragon"
   },

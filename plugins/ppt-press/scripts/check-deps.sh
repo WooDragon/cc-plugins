@@ -85,6 +85,14 @@ check_aws_cli() {
   fi
 }
 
+check_python3() {
+  if command -v python3 >/dev/null 2>&1; then
+    pass "python3 ($(python3 --version 2>&1))"
+  else
+    fail "python3 — 未安装" "brew install python3"
+  fi
+}
+
 check_env_file() {
   if [[ -f ".env" ]] && grep -q 'AWS_PROFILE' .env 2>/dev/null; then
     pass ".env 含 AWS_PROFILE"
@@ -137,6 +145,7 @@ case "$SCOPE" in
     check_node_modules
     check_deploy_script
     check_aws_cli
+    check_python3
     check_env_file
     check_playwright
     ;;
