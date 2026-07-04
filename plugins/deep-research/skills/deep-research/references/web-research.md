@@ -65,7 +65,11 @@ python3 <harvest.py 路径> run --goal-file intake/requirements/research-goal.md
 
 三个异构面板模型（由 `harvest.config.json` 的 `panel_models` 配置，当前为 gemini/gpt/claude 三家族）并行各跑独立 agentic loop 自主检索，内部 search 后端链按优先级降级（agy-cli → 网关 gemini → tavily → DuckDuckGo 兜底，见 [context-economics.md](./context-economics.md)）；merge 阶段裁判模型产出共识标签与 Fusion 五元组分析，落盘 `merged-findings.json` + 带机械门数据的 `fetch-report.md`。exit 3（`UNAVAILABLE`）时 harvester 停止并上报 Lead，**不自行转 fallback**（见 deep-research 插件的 research-harvester subagent 工具链）。
 
-**agentic loop 收敛语义（强制收尾兜底）**：每个 panel worker 的 loop 有 `max_steps_per_model` 轮工具预算（LLM 回合数，非工具调用数），system prompt 会告知该预算并引导「先双语搜索摸清源 → fetch 最相关几篇 → 主动停下吐 findings JSON」。**预算耗尽不再直接丢弃已采证据**：loop 结束后强制发一次 `tools=None` 的收尾 synthesis 调用，让 worker 把已 fetch 的证据收敛成 findings，再走同一套引用机械门校验（追不到已 fetch 内容的 claim 照剔）。收尾仍无合法产出才判 `step_limit_no_synthesis` 失败。此设计避免「worker 采足证据却因未主动收尾被整个作废、进而拖垮 quorum」。`wall_clock_s` 超时是另一条独立硬停路径（濒临墙钟死线不再追加调用），不走强制收尾。
+**agentic loop 收敛语义（强制收尾兜底）**：每个 panel worker 的 loop 有 `max_steps_per_model` 轮工具预算（LLM 回合数，非工具调用数），system prompt 会告知该预算并引导「先双语搜索摸清源 → fetch 最相关几篇 → 主动停下吐 findings JSON」。**预算耗尽不再直接丢弃已采证据**：loop 结束后强制发一次收尾 synthesis 调用，让 worker 把已 fetch 的证据收敛成 findings，再走同一套引用机械门校验（追不到已 fetch 内容的 claim 照剔）。收尾仍无合法产出才判 `step_limit_no_synthesis` 失败。此设计避免「worker 采足证据却因未主动收尾被整个作废、进而拖垮 quorum」。`wall_clock_s` 超时是另一条独立硬停路径（濒临墙钟死线不再追加调用），不走强制收尾。
+
+> **收尾调用保持 `tools=TOOL_SCHEMAS`（KV-cache 前缀稳定）**：收尾 synthesis 调用**不清空 tools 参数**——它与循环内每一轮的 payload 保持相同的 tools 块，靠 `_FORCED_SYNTHESIS_PROMPT` 的自然语言指令约束模型停止调工具。原因：多数网关将 tools 序列化进 prompt 前缀，tools 从 `TOOL_SCHEMAS` 切成 `None` 会使整个 KV-cache 前缀失效，而收尾恰好发生在上下文最大的一轮，冷算全部 token 会显著抬高延迟并逼近超时。真正阻止模型调工具的是 prompt 文本，不是 schema 的移除。（judge 调用是独立会话、不共享 worker 前缀，保持 `tools=None` 不变。）
+
+**超时与重试（gateway completion 独立于 fetch）**：panel/judge 的 chat-completion 调用有独立超时 `completion_timeout_s`（`harvest.config.json` 的 `limits`，默认 **600s**），与 fetch/search 后端的 `call_timeout_s`（默认 180s）解耦——completion 要跑完整个 agentic 推理，长上下文下远超单次抓取耗时，二者共用一个超时会互相拖累。读取用带默认值的安全方式，旧 config 无该字段时回退 600s（向后兼容）。completion 调用的重试按**异常类归一**：HTTP 状态码错误（429/5xx）与网络层瞬时故障（读超时 `socket.timeout` / `URLError` 无状态码）走同一条 transient 退避链，避免「读超时穿透判死整个 worker」——最该重试的瞬时故障恰恰是无状态码那类。
 
 **fallback 链（仅未启用 harvest.py 或经用户豁免 `legacy-exemption.md`）**：
 
