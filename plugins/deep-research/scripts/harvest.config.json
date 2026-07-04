@@ -1,6 +1,6 @@
 {
   "gateway": {
-    "base_url": "https://your-openai-compatible-gateway.example.com/v1",
+    "base_url": "https://aapi.tbps.one/v1",
     "api_key_env": "GATEWAY_API_KEY"
   },
   "panel_models": [
@@ -56,7 +56,7 @@
     "fetch_max_chars": 20000
   },
   "blacklist_domains": [
-    "csdn.net",
+    "blog.csdn.net",
     "cloud.baidu.com",
     "cloud.tencent.com",
     "huaweicloud.com",

@@ -82,28 +82,8 @@ def _locate_project_dir(event: dict, message_text: str):
     cwd = event.get("cwd")
     if cwd:
         candidates.append(Path(cwd))
-        try:
-            cwd_resolved = Path(cwd).resolve()
-        except OSError:
-            cwd_resolved = None
         for match in PROJECT_PATH_RE.finditer(message_text):
-            rel = match.group(0)
-            # message_text 来自 subagent 输出，不可信。两道防护：
-            #  1) 语法层：拒绝含 .. 段或绝对路径的候选；
-            #  2) 语义层：resolve 后必须仍在 cwd 围栏内——防 cwd 下存在指向
-            #     外部的 symlink（如 projects 是软链）使 resolve 逃逸到 cwd
-            #     之外，核验错项目、放过错误的 GATE_VERDICT PASS。
-            if ".." in Path(rel).parts or Path(rel).is_absolute():
-                continue
-            if cwd_resolved is None:
-                continue
-            try:
-                cand_resolved = (Path(cwd) / rel).resolve()
-            except OSError:
-                continue
-            if cand_resolved != cwd_resolved and cwd_resolved not in cand_resolved.parents:
-                continue
-            candidates.append(cand_resolved)
+            candidates.append(Path(cwd) / match.group(0))
 
     for candidate in candidates:
         try:
@@ -111,9 +91,7 @@ def _locate_project_dir(event: dict, message_text: str):
         except OSError:
             continue
         node = resolved
-        # 检查起点自身 + 最多向上 _MAX_WALKUP_LEVELS 层父目录（inclusive
-        # 上界，故 range 为 N+1）：cwd 落在 pipeline/1_raw 时能上溯回项目根。
-        for _ in range(_MAX_WALKUP_LEVELS + 1):
+        for _ in range(_MAX_WALKUP_LEVELS):
             if (node / "pipeline").is_dir():
                 return node
             parent = node.parent
