@@ -275,7 +275,12 @@ echo "目录结构:"
 if command -v tree &>/dev/null; then
     tree -a --dirsfirst "$PROJECT_DIR"
 else
-    find "$PROJECT_DIR" -print | sort | sed "s|$PROJECT_DIR|.|"
+    # 用 bash 参数替换把 PROJECT_DIR 前缀显示成 '.'，不走 sed——PROJECT_DIR
+    # 落在用户 cwd 下，其路径可能含 sed 特殊字符（| & 等），sed 替换会在
+    # set -euo pipefail 下让脚本在项目已建好后误退出。
+    while IFS= read -r _line; do
+        printf '.%s\n' "${_line#"$PROJECT_DIR"}"
+    done < <(find "$PROJECT_DIR" -print | sort)
 fi
 echo ""
 echo "下一步:"

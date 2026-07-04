@@ -619,11 +619,11 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         self.assertEqual(harvest._ddg_extract_target_url(href), target)
 
     def test_real_bot_check_page_detected_and_distinguished(self):
-        # Real HTML snapshot captured from https://html.duckduckgo.com/html/?q=sqlite+wal
-        # on this machine -- DuckDuckGo returns its anti-bot interstitial
-        # ("Select all squares containing a duck") instead of results. This
-        # must be reported as a distinct, diagnosable reason, not a generic
-        # "no results" -- it's an IP-reputation block, not a parser bug.
+        # Minimal synthetic fixture carrying DuckDuckGo's anti-bot interstitial
+        # markers (anomaly-modal / challenge-form) and no result__a links.
+        # When DDG returns its bot-check page instead of results, this must be
+        # reported as a distinct, diagnosable reason, not a generic "no
+        # results" -- it's an IP-reputation block, not a parser bug.
         fixture = _FIXTURES_DIR / "ddg_anomaly_real.html"
         raw = fixture.read_bytes()
         with mock.patch("harvest.urllib.request.urlopen", return_value=FakeHTTPResponse(raw)):
