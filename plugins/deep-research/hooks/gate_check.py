@@ -83,7 +83,14 @@ def _locate_project_dir(event: dict, message_text: str):
     if cwd:
         candidates.append(Path(cwd))
         for match in PROJECT_PATH_RE.finditer(message_text):
-            candidates.append(Path(cwd) / match.group(0))
+            rel = match.group(0)
+            # message_text 来自 subagent 输出，不可信：拒绝含 .. 段或绝对
+            # 路径的候选，否则 `projects/../otherproj` 之类会 resolve 到 cwd
+            # 之外，可能核验错项目、放过错误的 GATE_VERDICT PASS。只接受
+            # 老实待在 cwd 下的相对路径。
+            if ".." in Path(rel).parts or Path(rel).is_absolute():
+                continue
+            candidates.append(Path(cwd) / rel)
 
     for candidate in candidates:
         try:

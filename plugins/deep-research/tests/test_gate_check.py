@@ -64,6 +64,20 @@ class TestLocateProjectDir(unittest.TestCase):
         # 拿不到 cwd 时没有相对基准，该候选整体跳过（不臆造绝对路径）。
         self.assertIsNone(gate_check._locate_project_dir({}, "见 projects/demo/pipeline/x"))
 
+    def test_message_path_with_dotdot_traversal_is_rejected(self):
+        # copilot review on #37: message_text 不可信，含 .. 段的相对路径
+        # （projects/../otherproj）不得 resolve 到 cwd 之外，否则可能核验
+        # 错项目、放过错误的 GATE_VERDICT PASS。这类候选整体拒绝。
+        sibling = self.base / "otherproj"
+        (sibling / "pipeline").mkdir(parents=True)
+        # cwd 下另建一个合法但无 pipeline 的 workspace，确保唯一能命中的
+        # 只有穿越到的 sibling——若穿越未被拦，就会错误返回 sibling。
+        workspace = self.base / "workspace"
+        workspace.mkdir()
+        event = {"cwd": str(workspace)}
+        message = "见 projects/../../otherproj/pipeline/verification/x"
+        self.assertIsNone(gate_check._locate_project_dir(event, message))
+
 
 class TestGatePassRegex(unittest.TestCase):
     """copilot review on #25: GATE_PASS_RE was not anchored to a standalone
