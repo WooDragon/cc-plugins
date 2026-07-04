@@ -2499,6 +2499,7 @@ class TestAnthropicConversion(unittest.TestCase):
         results = anth[1]["content"]
         self.assertEqual([r["tool_use_id"] for r in results], ["a", "b"])
         self.assertTrue(all(r["type"] == "tool_result" for r in results))
+
     def test_empty_user_content_produces_no_empty_text_block(self):
         # Anthropic rejects empty text blocks; an empty/None user turn must
         # contribute nothing rather than {"type":"text","text":""}.

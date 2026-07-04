@@ -1059,6 +1059,8 @@ def _anthropic_post_with_retry(url, payload, headers, timeout):
             if attempt - 1 >= len(backoffs):
                 raise RuntimeError(f"Anthropic network error after {attempt} attempts: {e}") from e
             time.sleep(backoffs[attempt - 1])
+
+
 def _oai_tools_to_anthropic(tools):
     """OpenAI function-tool schema -> Anthropic tool schema. Returns None when
     there are no tools (judge path passes tools=None) so the caller can omit
@@ -1317,16 +1319,17 @@ def _mark_message_tail(messages):
 def _inject_cache_control(system, tools, messages):
     """Attach cache_control breakpoints in place for maximal prefix caching.
 
-    system is passed through unchanged here: the outbound payload always
-    sends system as a top-level string (see AnthropicGatewayClient.complete),
-    and cache_control cannot ride on a bare string, so the system breakpoint
-    is applied by _inject_cache_control's caller only when system is a block
-    list. To keep the static prefix (tools+system) cacheable we convert system
-    to a single cache-marked text block right here when it is a non-empty
-    string, and mark the tail when it is already a block list.
+    cache_control cannot ride on a bare string, so a non-empty system string
+    is promoted here into a single cache-marked text block list (Anthropic
+    accepts system as either a string or a block list); an already-block-list
+    system just gets its tail marked. Because this rewrites system, the value
+    is RETURNED and AnthropicGatewayClient.complete must send the returned
+    system in the payload -- tools and messages are mutated in place. An empty
+    or None system is returned untouched (nothing cacheable).
 
-    Returns the (possibly rewritten) system value so the caller can use it
-    for the payload -- tools and messages are mutated in place."""
+    Breakpoints: tools tail + system tail (static prefix) + last message
+    content block (see _mark_message_tail). Returns the (possibly rewritten)
+    system value."""
     if tools:
         _mark_block_list_tail(tools)
     if isinstance(system, str) and system:
