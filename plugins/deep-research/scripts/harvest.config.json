@@ -56,7 +56,7 @@
     "fetch_max_chars": 20000
   },
   "blacklist_domains": [
-    "blog.csdn.net",
+    "csdn.net",
     "cloud.baidu.com",
     "cloud.tencent.com",
     "huaweicloud.com",
