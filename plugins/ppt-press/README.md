@@ -1,43 +1,59 @@
 # ppt-press
 
-"电子杂志 × 电子墨水"风格网页 PPT 发布系统的 AI 技能包。
+"电子杂志 × 电子墨水"风格网页 PPT 发布系统——完全自包含的 AI 技能包。
 
-团队成员通过 Claude Code 驱动全流程：需求澄清 → 内容生产 → 构建测试 → 线上发布 → 检索管理。使用者不需要懂 Astro 或前端代码。
+安装插件 → scaffold 新项目 → 开发内容 → 测试 → 部署，全链路通过 Claude Code 驱动，使用者不需要懂 Astro 或前端代码。
 
-## 依赖
+## 快速开始
 
-### 必须
+```bash
+# 安装插件
+claude plugin add ppt-press@WooDragon-cc-plugins
 
-| 依赖 | 说明 |
-|------|------|
-| **PPT 框架项目** | 包含 `astro.config.ts`、`src/layouts/DeckLayout.astro`、`scripts/deploy.sh` 的 Astro 仓库。联系项目管理员获取，或从模板仓库克隆 |
-| **Node.js ≥ 18** | Astro 构建 + 预览服务 |
-| **Claude Code** | AI 读取 skill 并执行操作 |
-
-### 部署时需要
-
-| 依赖 | 说明 |
-|------|------|
-| **AWS CLI** | `deploy.sh` 通过 Amplify API 上传构建产物 |
-| **`.env` 文件** | 项目根目录，包含 `AWS_PROFILE` 和 `AWS_REGION` |
-
-### 测试时需要
-
-| 依赖 | 说明 |
-|------|------|
-| **Playwright** | `npx playwright install` 安装浏览器引擎 |
+# 在空目录中初始化 PPT 框架
+mkdir my-ppt && cd my-ppt
+# 然后对 Claude Code 说："初始化 PPT 项目"
+```
 
 ## Skills
 
-| Skill | 触发词 | 职�� |
-|-------|--------|------|
-| **ppt-create** | "做 PPT"、"杂志风"、"web deck" | 需求澄清 → 大纲 → Astro 页面生成 → 质量自检 → 本地预览 |
-| **ppt-deploy** | "部署"、"发布"、"上线" | `npm run build` → 批量 Playwright 测试 → `deploy.sh` 上传 Amplify → 线上验证 |
-| **ppt-manage** | "有哪些 PPT"、"找 deck" | 列表 / 搜索 / JSON 导出 / URL 复制 |
+| Skill | 触发词 | 职责 | 前置依赖 |
+|-------|--------|------|----------|
+| **ppt-init** | "初始化 PPT"、"scaffold PPT"、"ppt init" | 从零 scaffold 完整框架 | Node.js ≥ 18 |
+| **ppt-create** | "做 PPT"、"杂志风"、"web deck" | 需求澄清 → 大纲 → Astro 页面 → 自检 | 已初始化的框架 |
+| **ppt-deploy** | "部署"、"发布"、"上线" | build → Playwright 测试 → Amplify 部署 | 框架 + Playwright + AWS |
+| **ppt-manage** | "有哪些 PPT"、"找 deck" | 列表 / 搜索 / JSON / URL 复制 | 框架 |
 
-### 典型工作流
+## 依赖矩阵
+
+| 依赖 | init | create | deploy | manage |
+|------|:----:|:------:|:------:|:------:|
+| Node.js ≥ 18 | ✓ | ✓ | ✓ | ✓ |
+| npm install | · | ✓ | ✓ | · |
+| Python 3 | · | · | ✓ | · |
+| Playwright browsers | · | · | ✓ | · |
+| AWS CLI | · | · | ✓ | · |
+| .env (AWS credentials) | · | · | ✓ | · |
+
+**唯一硬依赖是 Node.js ≥ 18**——其余按使用的 skill 按需安装。
+
+## 运行时依赖检查
+
+插件内置 `scripts/check-deps.sh`，每个 skill 执行前自动验证对应 scope 的依赖。缺失项输出修复命令，LLM 可自行执行修复后重试，无需人工干预：
 
 ```
+[PASS] node >= 18 (v22.6.0)
+[PASS] npm (10.8.2)
+[FAIL] node_modules/ — 不存在
+       修复: npm install
+```
+
+## 典型工作流
+
+```
+用户: "帮我搭一个 PPT 项目"
+  → ppt-init: scaffold 框架 → npm install → npm run build → 完成
+
 用户: "帮我做一个关于 XX 的分享 PPT"
   → ppt-create: 6 问澄清 → 叙事弧 → 生成 Astro 页面 → checklist 自检
 
@@ -51,17 +67,18 @@
 ## 安装
 
 ```bash
-# 全局安装（推荐）
-npx skills add WooDragon/cc-plugins -g
+# 从 marketplace 安装
+claude plugin add ppt-press@WooDragon-cc-plugins
 
 # 验证
-npx skills ls -g | grep ppt
+claude plugin list | grep ppt
 ```
 
-安装后在任何 PPT 框架项目目录启动 Claude Code，skills 自动可用。
+安装后在任何目录启动 Claude Code，说"初始化 PPT 项目"即可开始。
 
-## 不包含什么
+## 包含什么
 
-- **不包含 PPT 框架本身**（Astro 项目、WebGL shader、CSS 样式、JS 导航逻辑）——这些在用户的项目仓库里
-- **不包含可执行脚���**（`deploy.sh`、`list-decks.js`）——脚本留在项目中，skill 只教 AI 怎么用
-- **不包含 hooks**——当前是纯 skills 插件，预留 hooks 扩展点（如未来的 ppt-guard 质量门禁）
+- **完整 PPT 框架 scaffold**（`assets/scaffold/`）——Astro 项目、WebGL shader、CSS 样式、JS 导航、Playwright 测试
+- **4 个 AI Skills**——覆盖 init / create / deploy / manage 全生命周期
+- **运行时依赖检查脚本**（`scripts/check-deps.sh`）——LLM 自助修复
+- **可选部署模块**（`assets/optional/`）——AWS Amplify 部署脚本，init 时按需启用

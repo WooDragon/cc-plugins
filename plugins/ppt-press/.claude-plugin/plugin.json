@@ -1,11 +1,12 @@
 {
   "name": "ppt-press",
-  "description": "PPT press — editorial magazine × e-ink web presentation publishing system",
-  "version": "1.0.1",
+  "description": "PPT press — self-contained editorial magazine × e-ink web presentation publishing system with scaffold, dependency checking, and full lifecycle skills",
+  "version": "2.0.1",
   "author": {
     "name": "WooDragon"
   },
   "skills": [
+    "./skills/ppt-init",
     "./skills/ppt-create",
     "./skills/ppt-deploy",
     "./skills/ppt-manage"

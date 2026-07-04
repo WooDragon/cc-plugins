@@ -7,16 +7,13 @@ and computes consensus labels. All citations are verified by exact substring/
 URL matching against a recorded tool-call journal -- never by LLM judgment.
 
 Stdlib only, with one optional soft dependency: curl_cffi (only used by the
-"curl-cffi" fetch backend; every other code path is pure stdlib). curl_cffi
-is soft-imported once at module load (try/except ImportError sets
-_HAS_CURL_CFFI); a missing package is therefore never a hard import error for
-consumers of this module (including the SubagentStop hook). At `run` time, a
-config that *declares* the "curl-cffi" backend but can't import the package
-makes `run` exit 4 immediately (see _check_curl_cffi_available()) rather than
-silently degrading -- a missing dependency for a backend you asked for is a
-setup error the caller should fix, not a fetch failure to route around. A
-config without a "curl-cffi" backend entry simply never touches curl_cffi at
-runtime. See tests/test_harvest.py for behavior coverage.
+"curl-cffi" fetch backend; every other code path is pure stdlib). Config
+without a "curl-cffi" fetch backend entry never imports curl_cffi at all; a
+config that declares it but doesn't have it installed makes `run` exit 4
+immediately (see _check_curl_cffi_available()) rather than silently
+degrading -- a missing dependency is a setup error the caller should fix,
+not a fetch failure to route around. See scripts/tests/test_harvest.py for
+behavior coverage.
 """
 
 import argparse
@@ -41,12 +38,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # curl_cffi is an optional soft dependency (the "curl-cffi" fetch backend
-# only). Soft-import here so a missing package is never a hard crash for
-# consumers of this module (including the SubagentStop hook, which imports
-# harvest.py on every turn). Runtime behavior when it's absent is NOT a
-# silent degrade: if the config declares the "curl-cffi" backend, cmd_run()
-# exits 4 (see _check_curl_cffi_available()); if the config doesn't declare
-# it, curl_cffi is simply never touched. Either way the import itself is safe.
+# only): the core pipeline stays stdlib-only and degrades cleanly to the
+# next fetch backend when it isn't installed. Never import it at module
+# scope unconditionally -- that would turn a missing optional package into
+# a hard crash for every consumer of this module (including the
+# SubagentStop hook, which imports harvest.py on every turn).
 try:
     from curl_cffi import requests as curl_cffi_requests
     from curl_cffi.const import CurlOpt as CurlCffiOpt

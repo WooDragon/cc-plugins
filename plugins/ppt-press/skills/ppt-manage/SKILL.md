@@ -9,8 +9,15 @@ PPT deck 检索与管理工具。
 
 ## Prerequisites
 
-- 当前目录是 PPT 框架项目（含 `scripts/list-decks.js`）
-- 需先执行过 `npm run build`（检索依赖 `dist/manifest.json`）
+**在执行任何操作前，先运行依赖检查**：
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-deps.sh" --scope manage
+```
+
+如果有 `[FAIL]` 项，按提示的「修复」命令逐一解决后重新运行检查。全部 `[PASS]` 再继续。
+
+如果框架不存在，先调用 **ppt-init** skill 初始化项目。
 
 ## 命令
 

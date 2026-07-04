@@ -1,0 +1,131 @@
+/*
+ * grids.css — 布局网格与定位工具
+ */
+
+/* ============ 基础 flex 工具 ============ */
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 2.4vh;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 3vw;
+}
+
+.fill { flex: 1; }
+.center { align-items: center; justify-content: center; text-align: center; }
+
+/* ============ 绝对定位快捷类 ============ */
+.bottom-left {
+  position: absolute;
+  left: 6vw;
+  bottom: 9vh;
+  max-width: 50vw;
+}
+
+.bottom-right {
+  position: absolute;
+  right: 6vw;
+  bottom: 9vh;
+  max-width: 50vw;
+  text-align: right;
+}
+
+.top-right {
+  position: absolute;
+  right: 6vw;
+  top: 6vh;
+  text-align: right;
+}
+
+/* ============ Split 两列 ============ */
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4vw;
+  flex: 1;
+  align-items: center;
+}
+
+.split-55 {
+  display: grid;
+  grid-template-columns: 55fr 45fr;
+  gap: 5vw;
+  flex: 1;
+  align-items: stretch;
+}
+
+/* ============ 六格 / 九格网格 ============ */
+.grid-6 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 2vh 4vw;
+  flex: 1;
+  align-content: center;
+  padding: 2vh 0;
+}
+
+.grid-9 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 3vh 4vw;
+  flex: 1;
+  align-content: center;
+}
+
+/* ============ 四格 / 三格网格 ============ */
+.grid-4 {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 4vh 6vw;
+  flex: 1;
+  align-content: center;
+}
+
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 2vh 4vw;
+  flex: 1;
+  align-content: center;
+}
+
+/* ============ 三列等比（3-3）============ */
+.grid-3-3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 2.4vh 2vw;
+}
+
+/* ============ 两列黄金比例变体 ============ */
+/* 7:5 — 正文 + 侧边 */
+.grid-2-7-5 {
+  display: grid;
+  grid-template-columns: 7fr 5fr;
+  gap: 3vw 4vh;
+  align-items: start;
+}
+
+/* 6:6 — 等分两列 */
+.grid-2-6-6 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3vw 4vh;
+  align-items: start;
+}
+
+/* 8:4 — 正文 + 辅助 */
+.grid-2-8-4 {
+  display: grid;
+  grid-template-columns: 8fr 4fr;
+  gap: 3vw 4vh;
+  align-items: start;
+}

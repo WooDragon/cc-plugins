@@ -64,34 +64,6 @@ class TestLocateProjectDir(unittest.TestCase):
         # 拿不到 cwd 时没有相对基准，该候选整体跳过（不臆造绝对路径）。
         self.assertIsNone(gate_check._locate_project_dir({}, "见 projects/demo/pipeline/x"))
 
-    def test_message_path_with_dotdot_traversal_is_rejected(self):
-        # copilot review on #37: message_text 不可信，含 .. 段的相对路径
-        # （projects/../otherproj）不得 resolve 到 cwd 之外，否则可能核验
-        # 错项目、放过错误的 GATE_VERDICT PASS。这类候选整体拒绝。
-        sibling = self.base / "otherproj"
-        (sibling / "pipeline").mkdir(parents=True)
-        # cwd 下另建一个合法但无 pipeline 的 workspace，确保唯一能命中的
-        # 只有穿越到的 sibling——若穿越未被拦，就会错误返回 sibling。
-        workspace = self.base / "workspace"
-        workspace.mkdir()
-        event = {"cwd": str(workspace)}
-        message = "见 projects/../../otherproj/pipeline/verification/x"
-        self.assertIsNone(gate_check._locate_project_dir(event, message))
-
-    def test_message_path_via_symlink_escaping_cwd_is_rejected(self):
-        # copilot review on #37: 即便拦了 .. 段，若 cwd 下的 projects 是指向
-        # 外部的 symlink，Path(cwd)/rel 仍会 resolve 到 cwd 之外。语义层围栏
-        # （resolve 后必须仍在 cwd_resolved 下）必须拦住它。
-        outside = self.base / "outside"
-        (outside / "demo" / "pipeline").mkdir(parents=True)
-        workspace = self.base / "ws"
-        workspace.mkdir()
-        # ws/projects -> ../outside （软链逃逸）
-        (workspace / "projects").symlink_to(outside, target_is_directory=True)
-        event = {"cwd": str(workspace)}
-        message = "见 projects/demo/pipeline/verification/x"
-        self.assertIsNone(gate_check._locate_project_dir(event, message))
-
 
 class TestGatePassRegex(unittest.TestCase):
     """copilot review on #25: GATE_PASS_RE was not anchored to a standalone

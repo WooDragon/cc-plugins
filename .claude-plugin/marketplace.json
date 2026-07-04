@@ -18,8 +18,8 @@
     },
     {
       "name": "ppt-press",
-      "description": "PPT toolkit — editorial magazine × e-ink web presentation skills",
-      "version": "1.0.1",
+      "description": "Self-contained PPT publishing — scaffold + create + deploy + manage with runtime dependency checking",
+      "version": "2.0.1",
       "author": {
         "name": "WooDragon"
       },

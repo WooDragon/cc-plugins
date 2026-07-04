@@ -3,10 +3,10 @@
 # 深度研究项目初始化脚本 (v3)
 #
 # 用法:
-#   ./create-research-project.sh "研究主题"                       # 交互式选择类型
-#   ./create-research-project.sh "研究主题" --type web-research   # 指定类型
-#   ./create-research-project.sh "研究主题" --type data-extraction
-#   ./create-research-project.sh --help
+#   ./create_research_project.sh "研究主题"                       # 交互式选择类型
+#   ./create_research_project.sh "研究主题" --type web-research   # 指定类型
+#   ./create_research_project.sh "研究主题" --type data-extraction
+#   ./create_research_project.sh --help
 
 set -euo pipefail
 
@@ -26,7 +26,7 @@ VALID_TYPES=("web-research" "data-extraction")
 # ---------------------------------------------------------------------------
 show_help() {
     cat <<'USAGE'
-用法: ./create-research-project.sh "研究主题" [--type <类型>]
+用法: ./create_research_project.sh "研究主题" [--type <类型>]
 
 参数:
   "研究主题"              研究主题名称（必填，第一个非 flag 参数）
@@ -35,8 +35,8 @@ show_help() {
   --help                  显示本帮助信息
 
 示例:
-  ./create-research-project.sh "AI Agent 架构演进"
-  ./create-research-project.sh "供应链数据分析" --type data-extraction
+  ./create_research_project.sh "AI Agent 架构演进"
+  ./create_research_project.sh "供应链数据分析" --type data-extraction
 USAGE
     exit 0
 }
@@ -119,29 +119,8 @@ fi
 
 # ---------------------------------------------------------------------------
 # 目录名和路径
-#
-# 项目建在用户当前工作目录（$(pwd)）下，因此 DIR_NAME 必须净化为安全 slug：
-# 剥除路径分隔符 '/'、'..' 等，防止 topic="../foo" 或含 '/' 的主题穿越到
-# 非预期路径。净化后为空（如主题全是特殊字符）则报错退出，不静默降级。
 # ---------------------------------------------------------------------------
-DIR_NAME=$(printf '%s' "$TOPIC_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
-# 净化采用「黑名单剔除危险字符」而非「白名单只留 alnum」——后者在 LC_ALL=C
-# 环境下会把 CJK 等非 ASCII 全部吞掉（[:alnum:] 是 locale 相关的），导致纯
-# 中文主题净化为空而误报错。这里只剔除路径穿越/文件系统危险字符：
-#   - 路径分隔符 /、反斜杠
-#   - 前导点（. 开头会得到隐藏目录 / .. 穿越）
-#   - shell 元字符与控制类 ASCII（* ? : | 等，用穿越安全的保守集）
-# 保留 CJK、字母、数字、下划线、连字符等可安全作目录名的字符。
-DIR_NAME=$(printf '%s' "$DIR_NAME" \
-    | tr '/\\' '__' \
-    | tr -d '\000-\037' \
-    | sed -E 's#[*?:|<>"]#_#g; s#\.\.+#_#g; s#^\.+##; s#_+#_#g; s#^_+##; s#_+$##')
-
-if [[ -z "$DIR_NAME" ]]; then
-    echo "错误: 主题名 '$TOPIC_NAME' 无法生成安全目录名（净化后为空），请换一个可作目录名的主题" >&2
-    exit 1
-fi
-
+DIR_NAME=$(echo "$TOPIC_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
 PROJECT_DIR="$(pwd)/$DIR_NAME"
 
 if [[ -d "$PROJECT_DIR" ]]; then
@@ -199,18 +178,6 @@ FALLBACK_GITIGNORE
 fi
 
 # ---------------------------------------------------------------------------
-# sed 替换值转义
-#
-# TOPIC_NAME 是用户原始输入，直接插入 sed 替换式的 RHS 会被 sed 特殊字符
-# （分隔符 | @、& 回引用、反斜杠）破坏或注入。统一转义后再用于所有替换。
-# 转义顺序：先反斜杠，再 & 和两种分隔符 | @（一条字符类里 & 自引用即可）。
-# ---------------------------------------------------------------------------
-sed_escape() {
-    printf '%s' "$1" | sed -e 's#[\\&|@]#\\&#g'
-}
-TOPIC_ESC=$(sed_escape "$TOPIC_NAME")
-
-# ---------------------------------------------------------------------------
 # 项目 CLAUDE.md -- 从模板复制并替换占位符
 # ---------------------------------------------------------------------------
 CLAUDE_TMPL="$TEMPLATE_DIR/project-claude-md.tmpl"
@@ -218,7 +185,7 @@ if [[ -f "$CLAUDE_TMPL" ]]; then
     # 注：研究类型占位符 {web-research | data-extraction} 内部含 '|'，
     # 故该条 sed 改用 '@' 作分隔符，避免与占位符内的 '|' 冲突（否则 sed 表达式被截断）。
     sed \
-        -e "s|{TOPIC_NAME}|$TOPIC_ESC|g" \
+        -e "s|{TOPIC_NAME}|$TOPIC_NAME|g" \
         -e "s|{DATE}|$(date '+%Y-%m-%d')|g" \
         -e "s|{PLAYBOOK}|$PROJECT_TYPE|g" \
         -e "s@{web-research | data-extraction}@$PROJECT_TYPE@g" \
@@ -236,7 +203,7 @@ fi
 GOAL_TMPL="$TEMPLATE_DIR/research-goal.md.tmpl"
 GOAL_DEST="$PROJECT_DIR/intake/requirements/research-goal.md"
 if [[ -f "$GOAL_TMPL" ]]; then
-    sed -e "s|{TOPIC_NAME}|$TOPIC_ESC|g" "$GOAL_TMPL" > "$GOAL_DEST"
+    sed -e "s|{TOPIC_NAME}|$TOPIC_NAME|g" "$GOAL_TMPL" > "$GOAL_DEST"
 else
     echo "警告: 未找到 research-goal.md 模板 ($GOAL_TMPL)，跳过" >&2
 fi
@@ -275,12 +242,7 @@ echo "目录结构:"
 if command -v tree &>/dev/null; then
     tree -a --dirsfirst "$PROJECT_DIR"
 else
-    # 用 bash 参数替换把 PROJECT_DIR 前缀显示成 '.'，不走 sed——PROJECT_DIR
-    # 落在用户 cwd 下，其路径可能含 sed 特殊字符（| & 等），sed 替换会在
-    # set -euo pipefail 下让脚本在项目已建好后误退出。
-    while IFS= read -r _line; do
-        printf '.%s\n' "${_line#"$PROJECT_DIR"}"
-    done < <(find "$PROJECT_DIR" -print | sort)
+    find "$PROJECT_DIR" -print | sort | sed "s|$PROJECT_DIR|.|"
 fi
 echo ""
 echo "下一步:"

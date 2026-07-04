@@ -1,0 +1,41 @@
+/*
+ * animation.css — [data-anim] 动效系统基态与 motion-ready 覆盖
+ *
+ * 工作原理：
+ *   1. 默认状态：[data-anim] 元素可见（opacity:1），保证无 JS / 无网络时阅读不受影响
+ *   2. Motion One 加载成功后，JS 给 body 加 .motion-ready class
+ *   3. motion-ready 下：[data-anim] 隐藏，等待 JS 调用 playSlide(i) 执行入场动画
+ *   4. 竖屏模式（portrait media query）：覆盖回 opacity:1，不跑入场动画（见 responsive.css）
+ *
+ * 5 种 recipe（由 JS animation.ts 实现，此处只维护基态 CSS）：
+ *   cascade    — 子元素逐个 stagger 120ms 淡入 + y:16→0（默认）
+ *   hero       — hero 页慢 stagger 180ms
+ *   quote      — blockquote 逐行 fade（data-anim="line"）
+ *   directional — 左右方向滑入（data-anim="left|right"）
+ *   pipeline   — Space/→ 手动推进步骤（data-animate="pipeline"）
+ */
+
+/* ============ 基态：可见（无 JS fallback 时保证可读） ============ */
+[data-anim] {
+  opacity: 1;
+}
+
+/* ============ motion-ready：隐藏，等待 JS 动画 ============ */
+body.motion-ready [data-anim] {
+  opacity: 0;
+}
+
+/* directional recipe：左右偏移基态 */
+body.motion-ready [data-anim="left"]  { transform: translateX(-24px); }
+body.motion-ready [data-anim="right"] { transform: translateX(24px); }
+
+/* quote recipe：逐行基态 */
+body.motion-ready [data-anim="line"] {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+/* pipeline recipe：steps 半透明等待激活 */
+body.motion-ready [data-animate="pipeline"] [data-anim] {
+  opacity: 0.15;
+}

@@ -1,0 +1,13 @@
+---
+import type { HTMLAttributes } from 'astro/types';
+
+interface Props extends HTMLAttributes<'div'> {
+  cols?: 3 | 4 | 5;
+}
+
+const { cols = 4, class: className, ...rest } = Astro.props;
+---
+
+<div {...rest} class:list={['pipeline', className]} data-cols={cols}>
+  <slot />
+</div>
