@@ -1,0 +1,67 @@
+{
+  "gateway": {
+    "base_url": "https://aapi.tbps.one/v1",
+    "api_key_env": "GATEWAY_API_KEY"
+  },
+  "panel_models": [
+    "gemini-3.5-flash",
+    "gpt-5.4",
+    "claude-sonnet-4-6"
+  ],
+  "judge_model": "claude-opus-4-6",
+  "search_backends": [
+    {
+      "type": "agy-cli",
+      "model": "Gemini 3.5 Flash (Low)"
+    },
+    {
+      "type": "gateway-gemini",
+      "model": "gemini-2.5-flash"
+    },
+    {
+      "type": "tavily",
+      "api_key_env": "TAVILY_API_KEY"
+    },
+    {
+      "type": "duckduckgo"
+    }
+  ],
+  "fetch_backends": [
+    {
+      "type": "curl-cffi",
+      "impersonate": "chrome"
+    },
+    {
+      "type": "tavily-extract",
+      "api_key_env": "TAVILY_API_KEY"
+    },
+    {
+      "type": "jina-reader",
+      "api_key_env": "JINA_API_KEY"
+    },
+    {
+      "type": "urllib-ua"
+    }
+  ],
+  "local_sources": {
+    "enabled": false,
+    "dir": "intake/local_sources"
+  },
+  "limits": {
+    "max_steps_per_model": 16,
+    "call_timeout_s": 180,
+    "wall_clock_s": 1800,
+    "quorum": 2,
+    "search_min_interval_s": 2,
+    "fetch_max_chars": 20000
+  },
+  "blacklist_domains": [
+    "blog.csdn.net",
+    "cloud.baidu.com",
+    "cloud.tencent.com",
+    "huaweicloud.com",
+    "aliyun.com",
+    "volcengine.com",
+    "juejin.cn"
+  ]
+}

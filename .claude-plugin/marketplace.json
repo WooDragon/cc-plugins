@@ -48,6 +48,17 @@
       "source": "./plugins/code-search",
       "category": "development",
       "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "deep-research",
+      "description": "Deep research framework — 7-Stage pipeline + role-specialized subagents (harvester/analyst/reviewer) + multi-model harvest & citation-verification gate",
+      "version": "1.0.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/deep-research",
+      "category": "research",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
     }
   ]
 }

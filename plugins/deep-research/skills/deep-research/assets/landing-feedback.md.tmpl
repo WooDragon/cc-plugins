@@ -1,0 +1,83 @@
+---
+status: active
+authority: CURRENT
+last-updated: {DATE}
+landing-target: {被落地的已交付结论文件 + 章节}
+---
+
+# {TOPIC_NAME} Stage 8 Landing & Feedback 回填
+
+> ⚠ **EXPERIMENTAL（Stage 8）**：Stage 8 为 track_h 草案（#11）落地，待 ≥1 真实项目字面复制验证后转 stable。本模板即验证载体——用它跑一次 Landing，检验四分类 / handoff / 边界声明是否够用。本项目遵循 deep-research 框架，框架指令见 deep-research skill 的 references/pipeline.md Stage 8 + references/principles.md 原则 5。
+>
+> **填写者**：Lead（落地实测后自评回写，非审阅）。**触发**：已交付结论被真实落地、产生「设计预期 vs 落地实际」delta 之后。Stage 8 不设 Gate，本文逐段自检（见 deep-research skill 的 references/quality-gates.md「Stage 8 自检」）。
+
+落地时间：{DATE}
+被落地结论：{指向 deliverables/final/ 的具体文件 + 章节}
+落地位置：{结论实际落进了哪个仓库 / 框架 / 系统}
+
+---
+
+## ① 落地概览
+
+{结论落地为何物、落到哪、落地实测的整体吻合度。SRE executive summary 风格——三五句话说清「设计的东西真落下去后，整体对不对」。}
+
+## ② 设计 → 实践 Delta 表
+
+逐条对照「设计预期 vs 落地实际」，归四类。每条须**文字化**（写自然语言对照，verbal feedback 优于打分）。四分类定义见 deep-research skill 的 references/principles.md 原则 5「Landing delta 四分类」。
+
+| # | delta（设计预测 vs 实践发现） | 分类 | 触发动作 |
+|---|------------------------------|------|---------|
+| 1 | {设计预测 X，落地发现 Y} | ① 被验证正确 | 标注稳定，无动作 |
+| 2 | {设计预测 X，落地推翻为 Y} | ② 被推翻 | → Correction Record（§③ 分述） |
+| 3 | {设计未覆盖 X，落地暴露需要 Y} | ③ 暴露留白 | → 补轨 handoff（§③ 分述） |
+| 4 | {设计未预见 X，落地涌现出更优 Y} | ④ 正向 emergent | 反推设计约束是否过保守 |
+
+> 四分类速记：① 标稳定 / ② 走 Correction Record（独立文件） / ③ 注册补轨 / ④ 喂回下轮设计假设。第④类专填「设计未预见的正确涌现」，对抗复盘框架的正向偏盲，勿混进①。
+
+## ③ delta 分述
+
+仅②被推翻、③暴露留白需展开（①④在表内说清即可）。
+
+### ② 被推翻 delta → Correction Record
+
+每条②追加独立 `correction-YYYYMMDD-{slug}.md`（**不覆盖原文**），双向链接。机制见 deep-research skill 的 references/principles.md 原则 5。
+
+- **delta #{n}**：{被推翻的结论引用（文件+章节）}
+  - 推翻依据：{落地实测数据 / 新来源，须可追溯}
+  - 修正类型：`Obsoletes`（完全推翻）/ `Updates`（部分修订）
+  - Correction Record 文件：`correction-{DATE}-{slug}.md`
+  - 下游影响范围：{哪些其他结论依赖同一原始数据，需一并审视}
+
+### ③ 暴露留白 delta → 补轨 handoff
+
+每条③按 SRE action-item 闭环登记为补轨，录入项目 CLAUDE.md 补轨登记表。机制见 deep-research skill 的 references/principles.md 原则 6。**限量：只注册高价值补轨，防灌水稀释主线。**
+
+- **delta #{n}**：{暴露的留白}
+  - 补轨 slug：`track_{x}_{slug}`
+  - owner：{谁负责这条补轨}
+  - 触发 delta：{由哪条落地 delta 裂变而来}
+  - 研究目标：{补轨要回答的子问题，须与主线正交}
+  - 追踪状态：{未启动 / G1 / G2 / G3 / 完成}
+
+> 补充信号源：Landing 时「采集到但综合未用」（retrieved-but-unused）的证据也是补轨候选信号。
+
+## ④ 方法论边界声明（n=1 防护）
+
+> 单一落地样本是**理论推广**的合法起点，但不是**总体推广**。本节强制写清边界，使用者自判相似度。五项缺一不可。
+
+1. **理论推广非总体推广**：声明「在 {X 条件} 下 {Y 机制} 产生 {Z 结果}」，不声称通用。
+2. **厚描述**：落地背景条件 = {项目类型 / 规模 / 约束 / 团队形态}，供后来者自判相似度。
+3. **竞争性解释**：本次 Landing 的判断**可能错在哪** = {列出}；为何排除 = {证据}。
+4. **边界条件声明**：适用边界 = {显式写明在什么情境下本 Landing 结论成立 / 不成立}。
+5. **复制逻辑升级**：本次为第 {n} 个验证样本。{第二项目字面复制（相似情境）/ 第三项目理论复制（对比情境）}。n 从 1 到 N 的正道，非凑数。
+
+## ⑤ 权威指针 + 补轨登记
+
+- **deliverables 索引**：本 Landing 已登记入 [deliverables INDEX](../final/INDEX.md)，权威级别 {PRIMARY / CURRENT / HISTORICAL}。
+- **补轨登记表**：§③ 注册的补轨已回写项目 CLAUDE.md 补轨登记表，状态可追踪。
+- **被修正结论标注**：§③ 涉及的②被推翻结论，原文档 front matter 已加 `superseded-by` 指针，双向链接闭合（原则 5 失效标注协议）。
+
+---
+
+> **Stage 8 自检清单**（写完逐项过，见 deep-research skill 的 references/quality-gates.md）：☐ delta 四分类完整无遗漏 ☐ 每条②有独立 Correction Record + 双向链接 ☐ 每条③有补轨登记（owner+目标） ☐ ④正向 emergent 已文字化为上行信号 ☐ 方法论边界五项齐全
+

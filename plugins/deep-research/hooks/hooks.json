@@ -1,0 +1,17 @@
+{
+  "description": "Deep research G1 gate: mechanically verifies GATE_VERDICT: G1 PASS claims against harvest.py's citation-verification tombstone (fail-open on any technical uncertainty, block only on a genuine business-level FAIL/UNAVAILABLE)",
+  "hooks": {
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/gate_check.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

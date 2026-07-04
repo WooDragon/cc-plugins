@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""
+通用脱敏脚本模板 — L1 schema-aware + L2 regex fallback.
+
+使用方法：
+  1. 将本文件复制到项目 pipeline/2_cleaned/redact.py
+  2. 根据项目需求修改 L1_RULES 和 L2_PATTERNS
+  3. 在 EXEMPTIONS 中添加豁免规则（或从配置文件加载）
+  4. 运行：python redact.py pipeline/1_raw/objects pipeline/2_cleaned/objects
+
+自定义点（搜索 TODO 标记）：
+  - L1_RULES: 按字段名匹配的脱敏规则
+  - L2_PATTERNS: 值正则兜底规则
+  - EXEMPTIONS: 脱敏豁免清单
+  - INPUT_STRUCTURE: 输入文件结构（schema/views/records 等）
+"""
+import argparse
+import hashlib
+import json
+import logging
+import re
+import sys
+from pathlib import Path
+from typing import Any, Callable
+
+# ============================================================================
+# 配置区 — 项目级定制从这里开始
+# ============================================================================
+
+# ----- L1: schema-aware 黑名单 (字段名正则 → 策略) -------------------------
+# 顺序敏感：第一个匹配的规则生效。
+# 策略值：hash_<prefix> | name | phone | email | idcard | money | longtext
+# TODO: 根据项目实际字段名调整正则
+L1_RULES: list[tuple[re.Pattern, str]] = [
+    # 实体名称 — 使用 hash 保留关联性
+    (re.compile(r"客户(名称|名)|company|公司(名称|名)"), "hash_cust"),
+    (re.compile(r"单位(名称|名)|organization"), "hash_org"),
+    (re.compile(r"供应商(名称|名)|vendor"), "hash_supp"),
+    # PII 字段 — 完全替换
+    (re.compile(r"联系人|联络人|姓名(?!.*table)"), "name"),
+    (re.compile(r"电话|手机|phone|mobile|^tel$|联系方式"), "phone"),
+    (re.compile(r"邮箱|email|e-mail"), "email"),
+    (re.compile(r"身份证|id_?card|ssn"), "idcard"),
+    # 金额 — 数值和文本均替换
+    (re.compile(r"金额|总价|单价|价格|费用|amount|price|cost"), "money"),
+    # 长文本 — 仅做 L2 正则扫描
+    (re.compile(r"备注|remark|note|comment|说明"), "longtext"),
+]
+
+# ----- L2: 值正则兜底 (应用于所有 string 值) --------------------------------
+# TODO: 根据项目目标地域补充模式（如美国 SSN、欧洲 IBAN 等）
+L2_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"1[3-9]\d{9}"), "[PHONE]"),                          # 中国手机号
+    (re.compile(r"[\w.+\-]+@[\w\-]+\.[\w.\-]+"), "[EMAIL]"),          # 邮箱
+    (re.compile(r"(?<!\d)\d{17}[\dxX](?!\d)"), "[ID]"),               # 中国身份证
+]
+
+# ----- 脱敏豁免清单 ---------------------------------------------------------
+# 格式：(object_id, field_name) 组合。匹配的字段跳过 L1 和 L2。
+# TODO: 从项目 CLAUDE.md 的豁免声明加载，或在此静态声明
+EXEMPTIONS: set[tuple[str, str]] = {
+    # ("tblXxx", "IP地址"),  # 示例：ISP/IDC 项目豁免 IP 字段
+}
+
+# ----- 输入文件结构 ---------------------------------------------------------
+# 每个 object 目录下期望的文件名
+# TODO: 根据实际 API 输出调整
+INPUT_FILES = {
+    "schema": "schema.json",
+    "views": "views.json",
+    "records": "records_sample.json",
+}
+OUTPUT_SUFFIX = "_redacted"
+
+# ============================================================================
+# 脱敏引擎 — 通常不需要修改
+# ============================================================================
+
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+log = logging.getLogger("redact")
+
+# --- 统计计数器 ---
+stats = {"files_processed": 0, "fields_redacted": 0, "fields_exempted": 0}
+
+
+def _hash_token(prefix: str, value: str) -> str:
+    """生成稳定 hash 令牌，同一原文在不同表中产生相同 hash，保留关联性。"""
+    h = hashlib.sha1(value.encode("utf-8")).hexdigest()[:8]
+    return f"{prefix}_{h}"
+
+
+def _redact_money(v: Any) -> Any:
+    """金额脱敏：数值和非空字符串均替换为 [¥xxx]。"""
+    if isinstance(v, (int, float)):
+        return "[¥xxx]"
+    if isinstance(v, str) and v.strip():
+        return "[¥xxx]"
+    return v
+
+
+def _strategy_apply(strategy: str, v: Any) -> Any:
+    """根据 L1 策略对单个值执行脱敏。"""
+    if v is None:
+        return None
+    if strategy.startswith("hash_"):
+        prefix = strategy.split("_", 1)[1].upper()
+        return _hash_token(prefix, str(v)) if v else v
+    if strategy == "name":
+        return "[REDACTED_NAME]" if isinstance(v, str) and v.strip() else v
+    if strategy == "phone":
+        return "[PHONE]" if isinstance(v, str) and v.strip() else v
+    if strategy == "email":
+        return "[EMAIL]" if isinstance(v, str) and v.strip() else v
+    if strategy == "idcard":
+        return "[ID]" if isinstance(v, str) and v.strip() else v
+    if strategy == "money":
+        return _redact_money(v)
+    if strategy == "longtext":
+        return _l2_string(v) if isinstance(v, str) else v
+    return v
+
+
+def _classify_field(name: str) -> str | None:
+    """L1 分类：根据字段名匹配脱敏策略，返回策略名或 None。"""
+    if not isinstance(name, str):
+        return None
+    for pat, strat in L1_RULES:
+        if pat.search(name):
+            return strat
+    return None
+
+
+def _l2_string(s: str) -> str:
+    """L2 正则兜底：对字符串逐一应用值正则替换。"""
+    out = s
+    for pat, repl in L2_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def _walk(value: Any, transform: Callable[[Any], Any]) -> Any:
+    """递归遍历 JSON 结构，对所有 string 叶节点应用 transform。"""
+    if isinstance(value, str):
+        return transform(value)
+    if isinstance(value, list):
+        return [_walk(x, transform) for x in value]
+    if isinstance(value, dict):
+        return {k: _walk(v, transform) for k, v in value.items()}
+    return value
+
+
+def _redact_l2_only(obj: Any) -> Any:
+    """仅应用 L2 正则扫描（不触发 L1 策略）。"""
+    return _walk(obj, _l2_string)
+
+
+# ============================================================================
+# 文件级处理器 — 按输入文件类型分别处理
+# TODO: 根据实际 API 返回的 JSON 结构调整字段路径
+# ============================================================================
+
+def redact_schema(raw: dict) -> dict:
+    """
+    Schema 文件脱敏。
+    字段名保留（业务标签），对 description/help_text/style/property 做 L2 扫描。
+    """
+    out = json.loads(json.dumps(raw))  # deep copy
+    fields = out.get("data", {}).get("fields", [])
+    for f in fields:
+        for k in ("description", "help_text", "style", "property"):
+            if k in f:
+                f[k] = _redact_l2_only(f[k])
+    stats["files_processed"] += 1
+    return out
+
+
+def redact_views(raw: dict) -> dict:
+    """
+    Views 文件脱敏。
+    视图名做 L2 扫描（可能含人名），filter/sort 条件值做 L2 扫描。
+    """
+    out = json.loads(json.dumps(raw))
+    views = out.get("data", {}).get("views", [])
+    for v in views:
+        if isinstance(v.get("name"), str):
+            v["name"] = _l2_string(v["name"])
+        if "_meta" in v:
+            v["_meta"] = _redact_l2_only(v["_meta"])
+    stats["files_processed"] += 1
+    return out
+
+
+def redact_records(raw: dict, object_id: str) -> dict:
+    """
+    Records 文件脱敏。
+    按列名匹配 L1 策略，未命中的列做 L2 兜底扫描。
+    豁免清单中的 (object_id, field_name) 组合跳过脱敏。
+    """
+    data_section = raw.get("data", {})
+    if data_section.get("skipped") is True:
+        return raw
+
+    out = json.loads(json.dumps(raw))
+    rows = out.get("data", {}).get("data", [])
+    col_names: list[str] = out.get("data", {}).get("fields", [])
+
+    if not rows or not col_names:
+        out["data"] = _redact_l2_only(out.get("data", {}))
+        stats["files_processed"] += 1
+        return out
+
+    # 构建列策略映射，检查豁免
+    col_strategy: list[str | None] = []
+    for cn in col_names:
+        if (object_id, cn) in EXEMPTIONS:
+            col_strategy.append(None)  # 豁免：跳过 L1
+            stats["fields_exempted"] += 1
+        else:
+            strat = _classify_field(cn)
+            if strat:
+                stats["fields_redacted"] += 1
+            col_strategy.append(strat)
+
+    redacted_rows: list[list[Any]] = []
+    for row in rows:
+        if not isinstance(row, list):
+            redacted_rows.append(row)
+            continue
+        new_row: list[Any] = []
+        for j, cell in enumerate(row):
+            # 豁免字段也跳过 L2（已在豁免清单中声明安全）
+            if j < len(col_names) and (object_id, col_names[j]) in EXEMPTIONS:
+                new_row.append(cell)
+                continue
+            strat = col_strategy[j] if j < len(col_strategy) else None
+            if strat is None:
+                new_row.append(_walk(cell, _l2_string))
+            elif strat.startswith("hash_") and isinstance(cell, str):
+                new_row.append(_strategy_apply(strat, cell))
+            elif strat == "money":
+                new_row.append(_redact_money(cell))
+            else:
+                new_row.append(_walk(cell, lambda s: _strategy_apply(strat, s)))
+        redacted_rows.append(new_row)
+
+    out["data"]["data"] = redacted_rows
+    stats["files_processed"] += 1
+    return out
+
+
+# ============================================================================
+# Driver
+# ============================================================================
+
+def _safe_load(path: Path) -> dict | None:
+    try:
+        with path.open("r", encoding="utf-8") as fp:
+            return json.load(fp)
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("cannot load %s: %s", path, e)
+        return None
+
+
+def _safe_dump(obj: Any, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fp:
+        json.dump(obj, fp, ensure_ascii=False, indent=2)
+
+
+def process_object(obj_dir: Path, out_root: Path) -> tuple[bool, str]:
+    """
+    处理单个 object 目录：读取 schema/views/records → 脱敏 → 输出。
+    object_id 从目录名提取（格式：<id>_<name> 或纯 <id>）。
+    """
+    dir_name = obj_dir.name
+    object_id = dir_name.split("_", 1)[0]
+    out_dir = out_root / object_id
+
+    schema_in = obj_dir / INPUT_FILES["schema"]
+    views_in = obj_dir / INPUT_FILES["views"]
+    records_in = obj_dir / INPUT_FILES["records"]
+
+    schema_raw = _safe_load(schema_in)
+    views_raw = _safe_load(views_in)
+    records_raw = _safe_load(records_in)
+    if schema_raw is None or views_raw is None or records_raw is None:
+        return False, f"missing input(s) in {obj_dir}"
+
+    is_skip = (
+        isinstance(records_raw.get("data"), dict)
+        and records_raw["data"].get("skipped") is True
+    )
+
+    schema_red = redact_schema(schema_raw)
+    views_red = redact_views(views_raw)
+    records_red = redact_records(records_raw, object_id)
+
+    _safe_dump(schema_red, out_dir / f"schema{OUTPUT_SUFFIX}.json")
+    _safe_dump(views_red, out_dir / f"views{OUTPUT_SUFFIX}.json")
+    _safe_dump(records_red, out_dir / f"records{OUTPUT_SUFFIX}.json")
+    return True, f"{dir_name} ({'skip' if is_skip else 'redacted'})"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="L1+L2 双层脱敏：从 pipeline/1_raw/ 读，写到 pipeline/2_cleaned/"
+    )
+    ap.add_argument("input_root", type=Path, help="pipeline/1_raw/objects")
+    ap.add_argument("output_root", type=Path, help="pipeline/2_cleaned/objects")
+    args = ap.parse_args()
+
+    if not args.input_root.is_dir():
+        log.fatal("input root not a dir: %s", args.input_root)
+        return 1
+
+    obj_dirs = sorted(p for p in args.input_root.iterdir() if p.is_dir())
+    if not obj_dirs:
+        log.fatal("no object dirs under %s", args.input_root)
+        return 1
+
+    ok = 0
+    fails: list[str] = []
+    for od in obj_dirs:
+        success, msg = process_object(od, args.output_root)
+        if success:
+            ok += 1
+            log.info(msg)
+        else:
+            fails.append(msg)
+            log.error(msg)
+
+    # --- 统计摘要 ---
+    log.info("")
+    log.info("===== 脱敏统计 =====")
+    log.info("处理文件数: %d", stats["files_processed"])
+    log.info("L1 命中字段数: %d", stats["fields_redacted"])
+    log.info("豁免字段数: %d", stats["fields_exempted"])
+    log.info("object 成功/总计: %d/%d; 失败: %d", ok, len(obj_dirs), len(fails))
+
+    if fails:
+        log.error("失败列表:")
+        for f in fails:
+            log.error("  - %s", f)
+
+    return 0 if not fails else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
