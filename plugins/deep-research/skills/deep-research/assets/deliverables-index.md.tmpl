@@ -1,0 +1,32 @@
+# {TOPIC_NAME} 交付物索引
+
+> 当 `deliverables/final/` 含多个文档时必须有本文件，声明文档间权威关系，避免读者误读已过期结论。
+> 本项目遵循 deep-research 框架，框架指令见 deep-research skill 的 references/principles.md 原则 5「deliverables 多文档权威规范」。
+
+最后更新：{DATE}
+
+## 权威关系表
+
+| 文件 | 主题 | 状态 | 权威级别 | 替代关系 |
+|------|------|------|----------|----------|
+| `report.md` | {主报告主题} | active | PRIMARY | — |
+| `executive_summary.md` | 执行摘要 | active | CURRENT | 配合 report.md 读 |
+| `{slug}.md` | {子主题} | superseded | HISTORICAL | 被 `correction-YYYYMMDD-{slug}.md` 取代 |
+
+## 字段说明
+
+**状态 (status)**：`active` 当前有效 / `superseded` 已被完全取代 / `partially-superseded` 部分取代 / `deprecated` 废弃。与各文档 front matter 的 `status` 字段一致。
+
+**权威级别 (authority)**：
+
+- **PRIMARY**：唯一权威入口，读者从此进入。
+- **CURRENT**：有效但非唯一，需配合 PRIMARY 一起读。
+- **HISTORICAL**：已被推翻，保留作推理底稿，不作为当前结论。
+
+**替代关系**：若被 Correction Record 修正，指向取代它的文档（`correction-YYYYMMDD-{slug}.md`），形成双向链接。
+
+## 阅读顺序
+
+1. 先读 PRIMARY（`report.md`）获取当前权威结论。
+2. CURRENT 文档作为补充，与 PRIMARY 配合读。
+3. HISTORICAL 文档仅在需要追溯「结论为何改变」时查阅，不作为当前依据。

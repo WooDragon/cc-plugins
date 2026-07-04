@@ -1,0 +1,56 @@
+<!--
+research-goal.md — 研究根本目标锚（举证责任锚定元原则的物理载体）
+
+何时填：G0 Problem Validation Gate，由 Lead 与用户对齐后填写。
+作用：全程唯一价值基准。G3 证伪审计据此做 cite 回链检查——任何评判判据
+必须能 cite 本文件的小节标题或原句文本，cite 不上即判据无效。
+机制说明见 deep-research skill 的 references/principles.md「举证责任锚定（横切元原则）」。
+-->
+
+# 研究根本目标 — {TOPIC_NAME}
+
+## primary_job
+
+<!--
+一句话 JTBD 格式："当 [情境]，需要 [动机]，以便 [结果]。"
+这是本研究被"雇佣"来完成的根本任务。必须由用户确认，含糊/缺失 → G0 Recycle。
+反例（不可接受）："比较 A 和 B 工具" —— 这是手段不是 job。
+正例："当团队在大型 repo 做代码理解时，需要更省 token 的符号检索方案，以便降低单次会话成本。"
+-->
+
+[待 G0 与用户对齐填写]
+
+## goal（判据正面）
+
+<!--
+一行起。从 primary_job 推导出的"什么可以充当价值判据"。
+判据必须服务 primary_job，不能是工具/方案的内在属性。
+例（primary_job=省 token）："唯一价值判据 = 方案能否降低端到端 token 消耗。"
+-->
+
+[待填写]
+
+## non_goals（判据反面 —— 显式写"什么不能当判据"）
+
+<!--
+一行起。直接对抗"判据漂移"：显式列出哪些属性不得充当价值判据。
+这是防止"用工具内在属性冒充价值判据"的硬约束。
+例："不以『是否有持久化索引』『是否支持某语法』等工具内在属性作为直接判据——
+它们只有在能映射到 primary_job（省 token）时才间接相关。"
+-->
+
+[待填写]
+
+## 研究类型
+
+<!-- selection（N 个互斥方案择一）| non-selection（综述/趋势/事实核验等）
+     selection 类型触发 G1 候选集完备性检查；non-selection 豁免。 -->
+
+[selection | non-selection]
+
+## signed_off
+
+<!-- 用户对齐确认。未 sign-off 不进 Acquisition。 -->
+
+- **对齐状态**：[ ] 用户已确认 primary_job 与 non_goals
+- **确认日期**：[YYYY-MM-DD]

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<!--
+  Minimal synthetic fixture for test_real_bot_check_page_detected_and_distinguished.
+  Reproduces the two signals _search_duckduckgo() keys on to distinguish an
+  IP-reputation bot-check interstitial from a genuine zero-results page:
+    1. presence of a bot-check marker (_DDG_BOT_CHECK_MARKERS: anomaly-modal / challenge-form)
+    2. NO result__a anchors (parser finds zero results, falls through to bot-check branch)
+  Deliberately NOT a verbatim third-party page dump (avoids repo bloat and any
+  copyright concern) -- it only carries the markers the detector needs.
+-->
+<html lang="en">
+<head><title>DuckDuckGo</title></head>
+<body>
+  <div class="anomaly-modal">
+    <form class="challenge-form" action="/challenge" method="post">
+      <p>Please verify you are a human. Select all squares containing a duck.</p>
+      <button type="submit">Verify</button>
+    </form>
+  </div>
+</body>
+</html>

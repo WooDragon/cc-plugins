@@ -1,0 +1,24 @@
+# !! 不要删除此 .gitignore -- 删除后下次 commit 会泄漏 raw 数据
+
+# v3 项目结构
+pipeline/1_raw/
+pipeline/2_cleaned/
+
+# 兼容 v2 存量项目
+intermediate/raw_data/
+intermediate/processed/cleaned/
+
+# 敏感文件
+*.local.env
+*.credentials.json
+*.pem
+*.key
+
+# 临时文件
+*.tmp
+*.log
+*.cache
+.DS_Store
+
+# 保留目录结构
+!**/.gitkeep

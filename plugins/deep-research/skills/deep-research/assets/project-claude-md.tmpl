@@ -1,0 +1,49 @@
+# {TOPIC_NAME} 研究配置
+
+## 项目信息
+- **研究主题**: {TOPIC_NAME}
+- **创建日期**: {DATE}
+- **研究类型**: {web-research | data-extraction}
+- **研究状态**: 初始化
+
+## 框架引用
+> 本项目遵循 deep-research 框架。框架指令见 deep-research skill 的 references/（执行时按需读取）：
+> - 核心原则（含元原则 0 举证责任锚定）：references/principles.md
+> - 管线定义：references/pipeline.md
+> - 适用剧本：references/{PLAYBOOK}.md
+> - 角色定义：见 deep-research 插件的 research-harvester / research-analyst / research-reviewer subagent
+> - 质量门控：references/quality-gates.md
+
+## 根本目标
+> G0 与用户对齐后，primary_job / goal / non_goals / 研究类型 / sign-off 落盘到：
+> `intake/requirements/research-goal.md`
+>
+> 这是全程唯一价值基准。G3 证伪审计据此做 cite 回链检查——任何评判判据
+> 必须能 cite research-goal.md 的小节标题/原句，cite 不上即判据无效。
+
+## 研究目标
+[待定义 —— 详见 intake/requirements/research-goal.md]
+
+## 研究范围
+[待定义]
+
+## 特殊配置
+### 脱敏豁免清单
+[如无特殊豁免，留空]
+
+### 自定义信息源
+[如无自定义源，使用 playbook 默认源列表]
+
+## 研究进度
+- [ ] Sources: 信息源策略确定
+- [ ] G0: 需求正确性 + 根本目标与用户对齐通过（问题陈述 / 解法分离 / 判定权归属 / 最大不确定性 / primary_job + Non-Goals sign-off）
+- [ ] Acquisition: 数据采集完成
+- [ ] G1: 采集充分性通过（选型类研究另过候选集完备性：候选 ≥3 + 饱和判定；harvest.py 项目另过引用校验机械门 `python3 <harvest.py 路径> check <project-dir>`，harvest.py 路径见 deep-research skill 的 SKILL.md 路径发现约定）
+- [ ] Sanitization: 数据脱敏完成
+- [ ] Decomposition: 域拆解完成
+- [ ] G2: 拆解充分性通过
+- [ ] Synthesis: 综合分析完成
+- [ ] G3: 综合充分性通过（含假设审计 双环+KAC / 证伪审计 反驳搜索+cite回链+证伪不可省）
+- [ ] Validation: 5 维度审阅通过
+- [ ] Delivery: 最终报告输出
+- [ ] Landing & Feedback (Stage 8, experimental, 可选): 落地实测后回填 delta 四分类 / Correction Record / 补轨 handoff（仅当结论被真实落地时触发，见 deep-research skill 的 references/pipeline.md Stage 8）

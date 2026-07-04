@@ -1,0 +1,81 @@
+---
+name: deep-research
+description: 结构化深度研究框架，7-Stage 管线 + 角色专业化 subagent + 4 道质量门控，用多模型采集与确定性引用校验保证研究质量。触发场景：深度研究、技术选型调研、行业趋势分析、竞品对比、多模型采集、research pipeline、结构化研究、文献综述、市场调研、可行性分析等；deep research, technical due diligence, market research, competitive analysis, literature review, multi-model research pipeline。当用户要求对某个主题做系统性调研、写研究报告、做技术选型对比、或提到"深度研究"/"调研"/"选型分析"时应主动使用本 skill。
+---
+
+# Deep Research
+
+结构化深度研究框架：7-Stage 管线 + 3 个专业化 subagent（research-harvester / research-analyst / research-reviewer）+ 4 道质量门（G0-G3）。核心设计是**举证责任锚定**——把"给阻力最小的结论加举证责任"作为横切元原则，防止研究结论系统性滑向"维持现状 / 省成本"的懒惰方向。
+
+本文件是路由器，精炼、只做调度决策；细节全部在 `references/`（框架规范）与 `assets/`（模板）。执行任何 Stage 前，先按下表定位该读哪个 reference，不要一次性通读全部。
+
+## 何时读哪个 reference
+
+| 时机 | 读什么 | 路径 |
+|------|--------|------|
+| 每个研究项目启动时 | 核心原则：元原则 0 举证责任锚定 + 独立性/分离性/可追溯性/交叉验证 + 结论演进修正 + 补轨机制 | `references/principles.md` |
+| 执行任何 Stage 前 | 7-Stage 管线定义、G0 需求门、Stage 间契约、Gate 触发条件 | `references/pipeline.md` |
+| 分配工作 / 启动 Task 前 | Task 隔离规则、角色选择表、搜索工具链降级顺序 | `references/context-economics.md` |
+| Gate（G0-G3）评估时 | 三级 verdict、Sufficiency 三态裁决、8 维度 rubric、引用校验机械门 | `references/quality-gates.md` |
+| 确定研究类型后 | playbook 选型决策树 | `references/playbooks-INDEX.md` → `references/web-research.md` / `references/data-extraction.md` |
+| 框架总览 | 框架文件清单与何时读取（对应表） | `references/framework-INDEX.md` |
+
+评分细则、报告模板等落地工件在 `assets/`（见下方模板一节），不在 references/。
+
+## 3 个 subagent 如何调度
+
+框架定义了 3 个专业角色，均已注册为 deep-research 插件的原生 subagent。Lead（主对话）在各 Stage 用 Task 工具以 `deep-research:research-harvester`、`deep-research:research-analyst`、`deep-research:research-reviewer` 的形式 spawn：
+
+- **research-harvester**：Stage 2 Acquisition + Stage 3 Sanitization（同一 Task 内串行，共享文件上下文）。负责多模型采集与脱敏，主路径调用 harvest.py（见下）。
+- **research-analyst**：Stage 4 Decomposition（域拆解）+ Stage 5 Synthesis（与 Lead 协作，跨域综合）。
+- **research-reviewer**：mode=sufficiency 时执行 G1/G2/G3 三道 Sufficiency Gate；mode=review 时执行 Stage 6 Validation 的 5 维度审阅。
+
+G0（需求门）不派 subagent——由 Lead 在主上下文与用户对齐 primary_job/Non-Goals，这是全程唯一引入"模型外信号"的环节。Stage 7 Delivery、Stage 8 Landing（experimental）同样由 Lead 在主上下文执行，不派 subagent。
+
+详细的 Task 隔离判据（何时必须隔离、何时主上下文直接做）见 `references/context-economics.md`。
+
+## harvest.py 路径发现约定（重要）
+
+多模型采集脚本 harvest.py 位于 `${CLAUDE_PLUGIN_ROOT}/scripts/harvest.py`。由于 subagent 正文不展开该变量，Lead 在 spawn research-harvester 前，先用发现命令解析出绝对路径：
+
+```bash
+find ~/.claude/plugins -path '*/deep-research/scripts/harvest.py' 2>/dev/null | head -1
+```
+
+取到的绝对路径写进 harvester 的 Task 指令。harvester 用该路径执行：
+
+```bash
+python3 <路径> run --goal-file <goal-file> --out pipeline/1_raw/
+```
+
+三态 exit code：
+- **exit 3**（`UNAVAILABLE`）：采集不可用，须停止并上报用户裁决，**不自行降级到 legacy 链**。
+- **exit 4**：curl_cffi 依赖未装，须 `pip install curl_cffi` 后重跑。
+
+`harvest.py check <project-dir>` 用于 G1 的引用校验机械门（三态 exit code 0=PASS / 1=FAIL / 2=N/A），细则见 `references/quality-gates.md`。
+
+## 新建研究项目
+
+在**用户当前工作目录**创建项目骨架：
+
+```bash
+${CLAUDE_PLUGIN_ROOT}/scripts/create-research-project.sh "研究主题" --type web-research
+${CLAUDE_PLUGIN_ROOT}/scripts/create-research-project.sh "研究主题" --type data-extraction
+```
+
+脚本会用 `assets/project-claude-md.tmpl`、`assets/project-gitignore.tmpl`、`assets/research-goal.md.tmpl` 等模板初始化项目目录结构（`pipeline/`、`intake/`、`deliverables/`）。
+
+## playbook 选择
+
+按研究类型选 playbook，决策树见 `references/playbooks-INDEX.md`：
+
+- 主要通过公开 Web 信息搜集 → `references/web-research.md`（双语搜索矩阵、信息源黑白名单）
+- 需要从 API/CLI 提取私有数据 → `references/data-extraction.md`（tier 分层采集、脱敏、域并行拆解）
+
+## 模板（assets/）
+
+Gate 评分细则：`assets/review-rubric.md`（5 维度审阅）、`assets/sufficiency-rubric.md`（8 维度充分性，含假设审计/证伪审计）。项目初始化：`assets/project-claude-md.tmpl`、`assets/project-gitignore.tmpl`、`assets/research-goal.md.tmpl`。交付物：`assets/deliverable-matrix.md`、`assets/deliverables-index.md.tmpl`、`assets/fetch-report.md.tmpl`。数据处理：`assets/redact.py.tmpl`。落地回填（experimental）：`assets/landing-feedback.md.tmpl`。完整清单见 `assets/INDEX.md`。
+
+## 依赖前置
+
+harvest.py 主路径依赖：网关 API key（`GATEWAY_API_KEY` 等，用于聚合网关调用 gemini/gpt/claude 三面板）、`agy` CLI（本机检索主力）、可选 `curl_cffi`（本地免费直连 fetch，缺失时降级）。详见插件 README。未满足依赖或经用户显式豁免（写入 `pipeline/verification/legacy-exemption.md`）的项目走 legacy 手工采集链（Gemini CLI → WebSearch → WebFetch）。
