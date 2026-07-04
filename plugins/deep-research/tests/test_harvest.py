@@ -142,6 +142,48 @@ class TestRateLimiter(unittest.TestCase):
         self.assertGreaterEqual(total_span, 4 * 0.02 * 0.6)
 
 
+class TestBuildBackendsFetchInterval(unittest.TestCase):
+    """Defect 2 (rate-limit decoupling): fetch backends must get their own
+    fetch_min_interval_s, not search's -- with a fallback to the search
+    interval so an older config missing the new key doesn't KeyError."""
+
+    def test_fetch_backend_uses_independent_interval_when_key_present(self):
+        config = base_config(
+            search_backends=[{"type": "duckduckgo"}],
+            fetch_backends=[{"type": "urllib-ua"}],
+        )
+        config["limits"]["search_min_interval_s"] = 2.0
+        config["limits"]["fetch_min_interval_s"] = 0.5
+        _, fetch_backends = harvest.build_backends(config)
+        limiter = fetch_backends[0][1]
+        self.assertEqual(limiter._min_interval, 0.5)
+
+    def test_fetch_backend_falls_back_to_search_interval_when_key_absent(self):
+        # Older config with no fetch_min_interval_s key at all -- must not
+        # KeyError, must fall back to the existing search interval so
+        # pre-upgrade behavior is unchanged.
+        config = base_config(
+            search_backends=[{"type": "duckduckgo"}],
+            fetch_backends=[{"type": "urllib-ua"}],
+        )
+        config["limits"]["search_min_interval_s"] = 2.0
+        self.assertNotIn("fetch_min_interval_s", config["limits"])
+        _, fetch_backends = harvest.build_backends(config)
+        limiter = fetch_backends[0][1]
+        self.assertEqual(limiter._min_interval, 2.0)
+
+    def test_search_backend_interval_unaffected_by_fetch_key(self):
+        config = base_config(
+            search_backends=[{"type": "duckduckgo"}],
+            fetch_backends=[{"type": "urllib-ua"}],
+        )
+        config["limits"]["search_min_interval_s"] = 2.0
+        config["limits"]["fetch_min_interval_s"] = 0.5
+        search_backends, _ = harvest.build_backends(config)
+        limiter = search_backends[0][1]
+        self.assertEqual(limiter._min_interval, 2.0)
+
+
 # ---------------------------------------------------------------------------
 # SSRF guard
 # ---------------------------------------------------------------------------
