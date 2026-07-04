@@ -842,6 +842,7 @@ class TestBackendDegradation(unittest.TestCase):
         self._orig_getaddrinfo = socket.getaddrinfo
         self._orig_real = harvest._real_getaddrinfo
         harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
+        harvest.install_ssrf_guard()
 
     def tearDown(self):
         socket.getaddrinfo = self._orig_getaddrinfo
