@@ -82,15 +82,28 @@ def _locate_project_dir(event: dict, message_text: str):
     cwd = event.get("cwd")
     if cwd:
         candidates.append(Path(cwd))
+        try:
+            cwd_resolved = Path(cwd).resolve()
+        except OSError:
+            cwd_resolved = None
         for match in PROJECT_PATH_RE.finditer(message_text):
             rel = match.group(0)
-            # message_text 来自 subagent 输出，不可信：拒绝含 .. 段或绝对
-            # 路径的候选，否则 `projects/../otherproj` 之类会 resolve 到 cwd
-            # 之外，可能核验错项目、放过错误的 GATE_VERDICT PASS。只接受
-            # 老实待在 cwd 下的相对路径。
+            # message_text 来自 subagent 输出，不可信。两道防护：
+            #  1) 语法层：拒绝含 .. 段或绝对路径的候选；
+            #  2) 语义层：resolve 后必须仍在 cwd 围栏内——防 cwd 下存在指向
+            #     外部的 symlink（如 projects 是软链）使 resolve 逃逸到 cwd
+            #     之外，核验错项目、放过错误的 GATE_VERDICT PASS。
             if ".." in Path(rel).parts or Path(rel).is_absolute():
                 continue
-            candidates.append(Path(cwd) / rel)
+            if cwd_resolved is None:
+                continue
+            try:
+                cand_resolved = (Path(cwd) / rel).resolve()
+            except OSError:
+                continue
+            if cand_resolved != cwd_resolved and cwd_resolved not in cand_resolved.parents:
+                continue
+            candidates.append(cand_resolved)
 
     for candidate in candidates:
         try:

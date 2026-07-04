@@ -1,6 +1,6 @@
 {
   "gateway": {
-    "base_url": "https://aapi.tbps.one/v1",
+    "base_url": "https://your-openai-compatible-gateway.example.com/v1",
     "api_key_env": "GATEWAY_API_KEY"
   },
   "panel_models": [

@@ -78,6 +78,20 @@ class TestLocateProjectDir(unittest.TestCase):
         message = "见 projects/../../otherproj/pipeline/verification/x"
         self.assertIsNone(gate_check._locate_project_dir(event, message))
 
+    def test_message_path_via_symlink_escaping_cwd_is_rejected(self):
+        # copilot review on #37: 即便拦了 .. 段，若 cwd 下的 projects 是指向
+        # 外部的 symlink，Path(cwd)/rel 仍会 resolve 到 cwd 之外。语义层围栏
+        # （resolve 后必须仍在 cwd_resolved 下）必须拦住它。
+        outside = self.base / "outside"
+        (outside / "demo" / "pipeline").mkdir(parents=True)
+        workspace = self.base / "ws"
+        workspace.mkdir()
+        # ws/projects -> ../outside （软链逃逸）
+        (workspace / "projects").symlink_to(outside, target_is_directory=True)
+        event = {"cwd": str(workspace)}
+        message = "见 projects/demo/pipeline/verification/x"
+        self.assertIsNone(gate_check._locate_project_dir(event, message))
+
 
 class TestGatePassRegex(unittest.TestCase):
     """copilot review on #25: GATE_PASS_RE was not anchored to a standalone

@@ -41,11 +41,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 # curl_cffi is an optional soft dependency (the "curl-cffi" fetch backend
-# only): the core pipeline stays stdlib-only and degrades cleanly to the
-# next fetch backend when it isn't installed. Never import it at module
-# scope unconditionally -- that would turn a missing optional package into
-# a hard crash for every consumer of this module (including the
-# SubagentStop hook, which imports harvest.py on every turn).
+# only). Soft-import here so a missing package is never a hard crash for
+# consumers of this module (including the SubagentStop hook, which imports
+# harvest.py on every turn). Runtime behavior when it's absent is NOT a
+# silent degrade: if the config declares the "curl-cffi" backend, cmd_run()
+# exits 4 (see _check_curl_cffi_available()); if the config doesn't declare
+# it, curl_cffi is simply never touched. Either way the import itself is safe.
 try:
     from curl_cffi import requests as curl_cffi_requests
     from curl_cffi.const import CurlOpt as CurlCffiOpt
