@@ -91,7 +91,9 @@ def _locate_project_dir(event: dict, message_text: str):
         except OSError:
             continue
         node = resolved
-        for _ in range(_MAX_WALKUP_LEVELS):
+        # 检查起点自身 + 最多向上 _MAX_WALKUP_LEVELS 层父目录（inclusive
+        # 上界，故 range 为 N+1）：cwd 落在 pipeline/1_raw 时能上溯回项目根。
+        for _ in range(_MAX_WALKUP_LEVELS + 1):
             if (node / "pipeline").is_dir():
                 return node
             parent = node.parent

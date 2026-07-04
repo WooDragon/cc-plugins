@@ -3,10 +3,10 @@
 # 深度研究项目初始化脚本 (v3)
 #
 # 用法:
-#   ./create_research_project.sh "研究主题"                       # 交互式选择类型
-#   ./create_research_project.sh "研究主题" --type web-research   # 指定类型
-#   ./create_research_project.sh "研究主题" --type data-extraction
-#   ./create_research_project.sh --help
+#   ./create-research-project.sh "研究主题"                       # 交互式选择类型
+#   ./create-research-project.sh "研究主题" --type web-research   # 指定类型
+#   ./create-research-project.sh "研究主题" --type data-extraction
+#   ./create-research-project.sh --help
 
 set -euo pipefail
 
@@ -26,7 +26,7 @@ VALID_TYPES=("web-research" "data-extraction")
 # ---------------------------------------------------------------------------
 show_help() {
     cat <<'USAGE'
-用法: ./create_research_project.sh "研究主题" [--type <类型>]
+用法: ./create-research-project.sh "研究主题" [--type <类型>]
 
 参数:
   "研究主题"              研究主题名称（必填，第一个非 flag 参数）
@@ -35,8 +35,8 @@ show_help() {
   --help                  显示本帮助信息
 
 示例:
-  ./create_research_project.sh "AI Agent 架构演进"
-  ./create_research_project.sh "供应链数据分析" --type data-extraction
+  ./create-research-project.sh "AI Agent 架构演进"
+  ./create-research-project.sh "供应链数据分析" --type data-extraction
 USAGE
     exit 0
 }

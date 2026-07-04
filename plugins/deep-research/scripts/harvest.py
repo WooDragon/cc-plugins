@@ -7,13 +7,16 @@ and computes consensus labels. All citations are verified by exact substring/
 URL matching against a recorded tool-call journal -- never by LLM judgment.
 
 Stdlib only, with one optional soft dependency: curl_cffi (only used by the
-"curl-cffi" fetch backend; every other code path is pure stdlib). Config
-without a "curl-cffi" fetch backend entry never imports curl_cffi at all; a
-config that declares it but doesn't have it installed makes `run` exit 4
-immediately (see _check_curl_cffi_available()) rather than silently
-degrading -- a missing dependency is a setup error the caller should fix,
-not a fetch failure to route around. See scripts/tests/test_harvest.py for
-behavior coverage.
+"curl-cffi" fetch backend; every other code path is pure stdlib). curl_cffi
+is soft-imported once at module load (try/except ImportError sets
+_HAS_CURL_CFFI); a missing package is therefore never a hard import error for
+consumers of this module (including the SubagentStop hook). At `run` time, a
+config that *declares* the "curl-cffi" backend but can't import the package
+makes `run` exit 4 immediately (see _check_curl_cffi_available()) rather than
+silently degrading -- a missing dependency for a backend you asked for is a
+setup error the caller should fix, not a fetch failure to route around. A
+config without a "curl-cffi" backend entry simply never touches curl_cffi at
+runtime. See tests/test_harvest.py for behavior coverage.
 """
 
 import argparse
