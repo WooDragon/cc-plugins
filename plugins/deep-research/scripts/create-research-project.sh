@@ -119,8 +119,21 @@ fi
 
 # ---------------------------------------------------------------------------
 # 目录名和路径
+#
+# 项目建在用户当前工作目录（$(pwd)）下，因此 DIR_NAME 必须净化为安全 slug：
+# 剥除路径分隔符 '/'、'..' 等，防止 topic="../foo" 或含 '/' 的主题穿越到
+# 非预期路径。净化后为空（如主题全是特殊字符）则报错退出，不静默降级。
 # ---------------------------------------------------------------------------
 DIR_NAME=$(echo "$TOPIC_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
+# 只保留字母/数字/下划线/连字符/CJK，其余（含 / . 空白等）一律替换为下划线，
+# 再压缩连续下划线、去掉首尾下划线。
+DIR_NAME=$(printf '%s' "$DIR_NAME" | sed -E 's#[^[:alnum:]_-]#_#g; s#_+#_#g; s#^_+##; s#_+$##')
+
+if [[ -z "$DIR_NAME" ]]; then
+    echo "错误: 主题名 '$TOPIC_NAME' 无法生成安全目录名（净化后为空），请换一个含字母/数字的主题" >&2
+    exit 1
+fi
+
 PROJECT_DIR="$(pwd)/$DIR_NAME"
 
 if [[ -d "$PROJECT_DIR" ]]; then
@@ -178,6 +191,18 @@ FALLBACK_GITIGNORE
 fi
 
 # ---------------------------------------------------------------------------
+# sed 替换值转义
+#
+# TOPIC_NAME 是用户原始输入，直接插入 sed 替换式的 RHS 会被 sed 特殊字符
+# （分隔符 | @、& 回引用、反斜杠）破坏或注入。统一转义后再用于所有替换。
+# 转义顺序：先反斜杠，再 & 和两种分隔符 | @（一条字符类里 & 自引用即可）。
+# ---------------------------------------------------------------------------
+sed_escape() {
+    printf '%s' "$1" | sed -e 's#[\\&|@]#\\&#g'
+}
+TOPIC_ESC=$(sed_escape "$TOPIC_NAME")
+
+# ---------------------------------------------------------------------------
 # 项目 CLAUDE.md -- 从模板复制并替换占位符
 # ---------------------------------------------------------------------------
 CLAUDE_TMPL="$TEMPLATE_DIR/project-claude-md.tmpl"
@@ -185,7 +210,7 @@ if [[ -f "$CLAUDE_TMPL" ]]; then
     # 注：研究类型占位符 {web-research | data-extraction} 内部含 '|'，
     # 故该条 sed 改用 '@' 作分隔符，避免与占位符内的 '|' 冲突（否则 sed 表达式被截断）。
     sed \
-        -e "s|{TOPIC_NAME}|$TOPIC_NAME|g" \
+        -e "s|{TOPIC_NAME}|$TOPIC_ESC|g" \
         -e "s|{DATE}|$(date '+%Y-%m-%d')|g" \
         -e "s|{PLAYBOOK}|$PROJECT_TYPE|g" \
         -e "s@{web-research | data-extraction}@$PROJECT_TYPE@g" \
@@ -203,7 +228,7 @@ fi
 GOAL_TMPL="$TEMPLATE_DIR/research-goal.md.tmpl"
 GOAL_DEST="$PROJECT_DIR/intake/requirements/research-goal.md"
 if [[ -f "$GOAL_TMPL" ]]; then
-    sed -e "s|{TOPIC_NAME}|$TOPIC_NAME|g" "$GOAL_TMPL" > "$GOAL_DEST"
+    sed -e "s|{TOPIC_NAME}|$TOPIC_ESC|g" "$GOAL_TMPL" > "$GOAL_DEST"
 else
     echo "警告: 未找到 research-goal.md 模板 ($GOAL_TMPL)，跳过" >&2
 fi
