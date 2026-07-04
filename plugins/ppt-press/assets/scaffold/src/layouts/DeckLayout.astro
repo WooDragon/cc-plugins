@@ -1,0 +1,99 @@
+---
+import darkInkClassic from '../shaders/dark-ink-classic.glsl?raw';
+import lightInkClassic from '../shaders/light-ink-classic.glsl?raw';
+import darkIndigo from '../shaders/dark-indigo.glsl?raw';
+import lightIndigo from '../shaders/light-indigo.glsl?raw';
+
+import Nav from '../components/nav/Nav.astro';
+
+import '@/styles/base.css';
+import '@/styles/typography.css';
+import '@/styles/grids.css';
+import '@/styles/components.css';
+import '@/styles/nav.css';
+import '@/styles/responsive.css';
+import '@/styles/animation.css';
+
+interface Props {
+  title: string;
+  theme: 'ink-classic' | 'indigo-porcelain';
+  lang?: string;
+}
+
+const { title, theme, lang = 'zh-CN' } = Astro.props;
+
+const isInkClassic = theme === 'ink-classic';
+const darkShader   = isInkClassic ? darkInkClassic  : darkIndigo;
+const lightShader  = isInkClassic ? lightInkClassic : lightIndigo;
+
+// CSS 变量按主题区分，字体变量共享
+const colorVars = isInkClassic
+  ? '--ink:#0a0a0b;--ink-rgb:10,10,11;--paper:#f1efea;--paper-rgb:241,239,234;--paper-tint:#e8e5de;--ink-tint:#18181a;'
+  : '--ink:#0a1f3d;--ink-rgb:10,31,61;--paper:#f1f3f5;--paper-rgb:241,243,245;--paper-tint:#e4e8ec;--ink-tint:#152a4a;';
+const fontVars = '--mono:"IBM Plex Mono",ui-monospace,monospace;--serif-en:"Playfair Display","Source Serif 4",Georgia,serif;--serif-body-en:"Source Serif 4",Georgia,serif;--serif-zh:"Noto Serif SC",source-han-serif-sc,serif;--sans-zh:"Noto Sans SC",source-han-sans-sc,sans-serif;';
+const rootCss = `:root{${colorVars}${fontVars}}`;
+---
+
+<!DOCTYPE html>
+<html lang={lang}>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="deck-visibility" content="public">
+  <title>{title}</title>
+
+  <!-- 主题 CSS 变量（动态注入，不进入静态 CSS 文件） -->
+  <style set:html={rootCss}></style>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,400;1,700&family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,500;0,8..60,600;1,8..60,400&family=IBM+Plex+Mono:wght@300;400;500;600&family=Noto+Serif+SC:wght@300;400;500;600;700;900&family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+</head>
+
+<body>
+  <!-- WebGL 背景画布 -->
+  <canvas id="bg-dark"  class="bg"></canvas>
+  <canvas id="bg-light" class="bg"></canvas>
+
+  <!-- Shader 源码（由 webgl.ts 在运行时从 DOM 读取） -->
+  <script id="shader-dark"  type="x-shader/x-fragment" set:html={darkShader}></script>
+  <script id="shader-light" type="x-shader/x-fragment" set:html={lightShader}></script>
+
+  <!-- Slide 容器 -->
+  <div id="deck">
+    <slot />
+  </div>
+
+  <!-- 导航点 -->
+  <Nav />
+
+  <!-- 操作提示 -->
+  <div id="hint">← → 翻页 · ESC 索引</div>
+
+  <!-- Lucide 图标库（UMD，全局挂载） -->
+  <script is:inline>
+    (function(){
+      const s = document.createElement('script');
+      s.src = 'https://unpkg.com/lucide@latest/dist/umd/lucide.min.js';
+      s.onload = () => window.lucide?.createIcons();
+      document.head.appendChild(s);
+    })();
+  </script>
+
+  <!-- 主入口：导入并初始化所有模块（Vite 打包） -->
+  <script>
+    import { bootGL }         from '@/scripts/webgl';
+    import { initNavigation } from '@/scripts/navigation';
+    import { initAnimation }  from '@/scripts/animation';
+    import { initOverview }   from '@/scripts/overview';
+
+    const darkCanvas  = document.getElementById('bg-dark')  as HTMLCanvasElement;
+    const lightCanvas = document.getElementById('bg-light') as HTMLCanvasElement;
+
+    bootGL(darkCanvas, lightCanvas);
+    initNavigation();
+    initOverview();
+    await initAnimation();
+  </script>
+</body>
+</html>

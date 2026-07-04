@@ -1,0 +1,25 @@
+---
+import type { HTMLAttributes } from 'astro/types';
+
+interface Props extends HTMLAttributes<'div'> {
+  title: string;
+  desc: string;
+  /** Lucide 图标名称（如 "shield-check"）或自定义 HTML，传 set:html 内联 */
+  icon?: string;
+  /** 数字形式的序号（替代图标） */
+  number?: string;
+}
+
+const { title, desc, icon, number, class: className, ...rest } = Astro.props;
+---
+
+<div {...rest} class:list={['pillar', className]} data-anim>
+  {(icon || number) && (
+    <div class="ic">
+      {icon   ? <Fragment set:html={icon} />   : null}
+      {number ? <span>{number}</span> : null}
+    </div>
+  )}
+  <div class="t">{title}</div>
+  <div class="d">{desc}</div>
+</div>

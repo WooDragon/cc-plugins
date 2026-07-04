@@ -1,0 +1,370 @@
+/*
+ * responsive.css — 所有响应式断点
+ *
+ * 断点约定（参考 CLAUDE.md）：
+ *   max-width: 900px   — 平板以下，网格简化
+ *   max-width: 600px + orientation: portrait  — 手机竖屏，hybrid 单页翻页
+ *   max-width: 400px + orientation: portrait  — 小屏手机额外紧凑
+ *   max-height: 600px + orientation: landscape — 手机横屏紧凑
+ *   max-height: 800px  — 特殊 compact-rows 高度降级
+ *
+ * 竖屏单页契约（CLAUDE.md 铁律）：
+ *   - #deck 使用 display:block + position:fixed，不允许 translate
+ *   - .slide 通过 left CSS 属性横向翻页（.active / .before / .after）
+ *   - .slide 允许 overflow-y:auto（页内滚动），但 window.scrollY 永远为 0
+ */
+
+/* ============ 平板以下（900px）============ */
+@media (max-width: 900px) {
+  .display     { font-size: 16vw; }
+  .display-zh  { font-size: 12vw; }
+  .h1-zh       { font-size: 7vw; }
+  .h-hero      { font-size: 14vw; }
+  .h-xl        { font-size: 9vw; }
+
+  .pipeline    { grid-template-columns: repeat(2, 1fr); }
+  .grid-2-7-5,
+  .grid-2-6-6,
+  .grid-2-8-4  { grid-template-columns: 1fr; }
+  .grid-3      { grid-template-columns: 1fr; }
+  .grid-3-3    { grid-template-columns: 1fr; }
+  .grid-4      { grid-template-columns: 1fr; }
+  .grid-6      { grid-template-columns: repeat(2, 1fr); }
+
+  .rowline     { grid-template-columns: 1fr 2fr; }
+  .rowline .m  { display: none; }
+}
+
+/* ============ compact-rows 高度降级（矮屏） ============ */
+@media (max-height: 800px) {
+  .slide.compact-rows .lead              { margin-bottom: 2vh; }
+  .slide.compact-rows .rowline           { padding: 1.4vh 0; }
+  .slide.compact-rows .rowline .k       { font-size: 1.5vw; }
+  .slide.compact-rows .rowline .v       { font-size: max(13px, 1.05vw); line-height: 1.42; }
+}
+
+/* ============ compact-stats 数字适配 ============ */
+.slide.compact-stats .lead             { margin-bottom: 3vh; }
+.slide.compact-stats .grid-6           { margin-top: 2vh; gap: 2.8vw 3.6vh; padding: 1vh 0; }
+.slide.compact-stats .stat-card .stat-nb   { font-size: 5vw; }
+.slide.compact-stats .stat-card .stat-note { font-size: max(12px, 0.92vw); line-height: 1.4; }
+
+/* ============ 手机竖屏：hybrid 单页翻页 ============ */
+@media (max-width: 600px) and (orientation: portrait) {
+  /* 恢复动效元素可见（竖屏不跑入场动画） */
+  body.motion-ready [data-anim]                                 { opacity: 1 !important; transform: none !important; }
+  body.motion-ready [data-anim="left"],
+  body.motion-ready [data-anim="right"],
+  body.motion-ready [data-anim="line"]                          { transform: none !important; }
+
+  /* 全局锁定 */
+  html, body {
+    overflow: hidden;
+    height: 100%;
+    max-width: 100vw;
+  }
+
+  /* Deck 改为 block 定位（不用 flex translate 翻页） */
+  #deck {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    overflow: hidden;
+    z-index: 10;
+    transform: none !important;
+  }
+
+  /* Slide 用 left CSS 属性横向翻页 */
+  .slide {
+    position: absolute;
+    top: 0;
+    left: 100vw;           /* 默认在屏外右侧（after 状态） */
+    width: 100vw;
+    height: 100vh;
+    flex: 0 0 100vw;
+    padding: 4vh 4vw 10vh 4vw;
+    overflow-x: hidden;
+    overflow-y: auto !important;  /* 页内可滚动 */
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+    touch-action: pan-y;
+    transition: left 0.28s ease, opacity 0.28s ease;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .slide.active {
+    left: 0;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .slide.before { left: -100vw; }
+  .slide.after  { left: 100vw; }
+
+  /* 隐藏原生滚动条 */
+  .slide::-webkit-scrollbar { width: 0; display: none; }
+
+  /* frame 允许自然高度撑开（不设 min-height:0 裁剪） */
+  .frame {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    min-height: min-content;
+    overflow: visible;
+  }
+
+  /* 导航点缩小 */
+  #nav {
+    bottom: 1vh;
+    padding: 3px 6px;
+    gap: 1px;
+    transform: translateX(-50%) scale(0.78);
+    transform-origin: center bottom;
+  }
+
+  #nav .dot {
+    width: 4px;
+    height: 4px;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 6px;
+    background-clip: content-box;
+  }
+
+  #nav .dot.active { width: 10px; }
+
+  /* 隐藏 hint */
+  #hint { display: none; }
+
+  /* 字体缩放 */
+  .h-hero { font-size: 10vw; line-height: 1.05; }
+  .h-xl   { font-size: 7vw;  line-height: 1.1; }
+  .h-sub  { font-size: 4vw; }
+  .h-md   { font-size: 3.5vw; }
+  .lead   { font-size: 3.5vw; line-height: 1.5; }
+  .kicker { font-size: 9px; margin-bottom: 1.5vh; }
+  .meta-row { font-size: 9px; }
+  .chrome { font-size: 9px; }
+  .foot   { font-size: 8px; margin-top: auto; padding-top: 2vh; }
+
+  /* 网格 */
+  .grid-6     { grid-template-columns: repeat(2, 1fr); grid-auto-rows: auto; gap: 2vh 2vw; }
+  .grid-3     { grid-template-columns: 1fr; gap: 2vh; }
+  .grid-4     { grid-template-columns: repeat(2, 1fr); grid-template-rows: auto; gap: 1.5vh; }
+  .grid-2-6-6 { grid-template-columns: 1fr; gap: 2vh; }
+  .grid-3-3   { grid-template-columns: 1fr; gap: 2vh; }
+
+  /* Pipeline */
+  .pipeline         { grid-template-columns: 1fr !important; gap: 1.5vh; }
+  .pipeline-section { margin-top: 2vh; padding-top: 1.5vh; }
+  .step             { padding-top: 1vh; }
+  .step-nb          { font-size: max(9px, 2.5vw); }
+  .step-title       { font-size: max(14px, 3.8vw); }
+  .step-desc        { font-size: max(12px, 3vw); }
+
+  /* Stat card */
+  .stat-card           { padding-top: 1vh; }
+  .stat-card .stat-nb  { font-size: 8vw; }
+  .grid-3 .stat-card .stat-nb { font-size: 7vw; }
+  .grid-4 .stat-card .stat-nb { font-size: 7vw; }  /* override component-level specificity */
+  .grid-6 .stat-card .stat-nb { font-size: 8vw; }  /* override component-level specificity */
+  .stat-card .stat-note { font-size: max(12px, 3vw); }
+
+  /* Feature card */
+  .feature-card       { padding: 1.5vh 2vw; }
+  .feature-card .num  { font-size: max(11px, 3vw); }
+  .feature-card .title { font-size: max(14px, 4vw); }
+  .feature-card .desc { font-size: max(12px, 2.8vw); }
+
+  /* Callout */
+  .callout { padding: 2vh 3vw; font-size: max(13px, 3.5vw); margin-top: 1.5vh; }
+
+  /* Tables */
+  .risk-table      { margin-top: 1.5vh; }
+  .risk-table th   { font-size: max(10px, 2.5vw); padding: 1vh 1vw; }
+  .risk-table td   { font-size: max(11px, 2.5vw); padding: 1vh 1vw; }
+  .risk-tag        { font-size: 7px; padding: 1px 4px; }
+
+  /* Option cards */
+  .option-card          { padding: 2vh 2vw; }
+  .option-card .option-title { font-size: max(14px, 4vw); }
+  .option-card .option-cost  { font-size: max(18px, 6vw); }
+  .option-card .option-desc  { font-size: max(12px, 2.8vw); }
+  .option-card .option-list  { font-size: max(11px, 2.5vw); }
+
+  /* Rowline */
+  .rowline    { grid-template-columns: 1fr 2fr auto; gap: 1.5vw; padding: 1.2vh 0; }
+  .rowline .k { font-size: max(12px, 3vw); }
+  .rowline .v { font-size: max(12px, 3vw); }
+  .rowline .m { font-size: 7px; }
+
+  /* Pillar — 竖屏完全缺失，组件默认 2.4vw ≈ 9px */
+  .pillar .ic     { font-size: max(18px, 5vw); }
+  .pillar .ic svg { width: max(18px, 5vw); height: max(18px, 5vw); }
+  .pillar .t      { font-size: max(16px, 5vw); }
+  .pillar .d      { font-size: max(13px, 3.2vw); }
+}
+
+/* ============ 小屏手机（400px）============ */
+@media (max-width: 400px) and (orientation: portrait) {
+  .slide       { padding: 3vh 3vw 10vh 3vw; }
+  .h-hero      { font-size: 14vw; }
+  .h-xl        { font-size: 10vw; }
+  .lead        { font-size: 4.5vw; }
+  .grid-6      { grid-template-columns: 1fr; }
+  .stat-card .stat-nb { font-size: 12vw; }
+  .grid-4 .stat-card .stat-nb { font-size: 10vw; }  /* override component-level specificity */
+  .grid-6 .stat-card .stat-nb { font-size: 12vw; }  /* override component-level specificity */
+  .step-title  { font-size: max(16px, 5vw); }
+  .step-desc   { font-size: max(14px, 4vw); }
+  .risk-table th,
+  .risk-table td { font-size: 3.5vw; padding: 1vh 0.5vw; }
+}
+
+/* ============ 笔记本/宽屏横屏（601px–900px 高）============ */
+/* vw 字号随宽度增长，在短屏上用 vh 封顶，防止标题吃掉过多高度 */
+/* min-width: 600px 比 orientation: landscape 在桌面浏览器中更可靠 */
+@media (max-height: 900px) and (min-width: 600px) {
+  /* 底部 padding 10vh→5vh，给 frame 多释放 45px，解决内容被 overflow:hidden 裁切 */
+  .slide { padding-bottom: 5vh; }
+
+  .h-xl { font-size: min(6.2vw, 8vh); }
+
+  /* 收紧间距：字号 / kicker 下边距 / grid 内边距/行间距 */
+  /* lead 加 vh 上限：宽屏短屏(如 2040×838)下 1.75vw=35px 失控，封顶约 23px */
+  .lead   { font-size: min(1.75vw, 2.8vh); }
+  .kicker { margin-bottom: 1vh; }
+  /* flex: 0 1 auto — 短屏不扩张（避免吞掉后续内容的空间），但允许收缩 */
+  .grid-6   { flex: 0 1 auto; padding: 1vh 0; gap: 1.5vh 3vw; }
+  .grid-4   { flex: 0 1 auto; gap: 2.5vh 4vw; }
+  .grid-3   { flex: 0 1 auto; gap: 1.5vh 3vw; }
+  .grid-3-3 { flex: 0 1 auto; gap: 1.5vh 2vw; }
+
+  .feature-card             { padding: 1.5vh 1.5vw; gap: 0.8vh; }
+  .feature-card .num        { font-size: min(2.2vw, 2.8vh); }
+  .feature-card .title      { font-size: min(1.6vw, 2.2vh); }
+
+  .option-card               { padding: 1.5vh 1.5vw; gap: 0.8vh; }
+  .option-card .option-cost  { font-size: min(2.5vw, 3.5vh); }
+  .option-card .option-title { font-size: min(1.8vw, 2.5vh); }
+  .option-card .option-desc  { font-size: max(12px, 0.9vw); }
+  .option-card .option-list  { font-size: max(11px, 0.85vw); line-height: 1.5; }
+
+  /* Pipeline 间距收紧 */
+  .pipeline-section                { margin-top: 1vh; padding-top: 1vh; }
+  .pipeline-section:first-of-type  { margin-top: 1vh; padding-top: 0; }
+  .pipeline-label                  { margin-bottom: 1vh; }
+  .step             { padding-top: 1vh; gap: 0.6vh; }
+  .step-desc        { font-size: max(11px, 0.85vw); line-height: 1.4; }
+
+  /* Callout 收紧 */
+  .callout { padding: 2vh 2.4vw; font-size: max(13px, 1vw); line-height: 1.5; }
+
+  /* StatCard 大数字 vh 封顶，防止宽屏短屏上字号吃掉过多高度 */
+  .stat-card .stat-nb        { font-size: min(5.8vw, 7.5vh); }
+  .grid-3 .stat-card .stat-nb { font-size: min(6.8vw, 8.5vh); }
+  .grid-6 .stat-card .stat-nb { font-size: min(4.2vw, 5.5vh); }
+
+  /* risk-table 紧凑：行间距 1.8vh→1.2vh，6行节省约 65px */
+  .risk-table              { margin-top: 2vh; }
+  .risk-table th,
+  .risk-table td           { padding: 1.2vh 1vw; }
+}
+
+/* ============ 手机横屏（max-height: 600px）============ */
+@media (max-height: 600px) and (orientation: landscape) {
+  /* padding-bottom 收紧：原 8vh 在宽屏横屏（如 1020×419）下比 900px 断点的 5vh 还大 */
+  .slide  { padding: 3vh 5vw 4vh 5vw; }
+  .h-hero { font-size: min(8vw, 10vh); }
+  /* h-xl/lead 加 vh 上限，防止宽屏横屏（宽>900px, 高<600px）时 vw 字号失控 */
+  .h-xl   { font-size: min(6vw, 8vh); }
+  .lead   { font-size: min(2.5vw, 2.8vh); }
+  .kicker { margin-bottom: 0.5vh; }
+  .chrome { font-size: 9px; }
+  .foot   { font-size: 8px; }
+
+  /* Grid — 横屏让内容定行高（不再强制平分 frame） */
+  .grid-6   { grid-auto-rows: auto; gap: 1.5vh 2.5vw; }
+  .grid-4   { grid-auto-rows: auto; gap: 1.5vh 3vw; }
+  .grid-3-3 { grid-auto-rows: auto; gap: 1.5vh 2vw; }
+
+  /* StatCard 大数字 vh 封顶 */
+  .stat-card .stat-nb        { font-size: min(4.5vw, 5.5vh); }
+  .grid-3 .stat-card .stat-nb { font-size: min(5vw, 6vh); }
+  .grid-6 .stat-card .stat-nb { font-size: min(3.8vw, 4.8vh); }
+
+  /* Callout 收紧 */
+  .callout { padding: 1.2vh 1.5vw; font-size: max(11px, 0.9vw); line-height: 1.4; }
+
+  /* Feature card 紧凑版 */
+  .feature-card             { padding: 1.2vh 1vw; gap: 0.6vh; }
+  .feature-card .num        { font-size: max(10px, 1.5vw); }
+  .feature-card .title      { font-size: max(12px, 1.2vw); }
+  .feature-card .desc       { font-size: max(11px, 0.85vw); line-height: 1.4; }
+
+  /* Option card 紧凑版 */
+  .option-card               { padding: 1.5vh 1.5vw; gap: 0.8vh; }
+  .option-card .option-cost  { font-size: max(16px, 2vw); }
+  .option-card .option-title { font-size: max(14px, 1.5vw); }
+  .option-card .option-desc  { font-size: max(11px, 0.9vw); }
+  .option-card .option-list  { font-size: max(10px, 0.85vw); }
+
+  /* Pipeline 间距收紧 */
+  .pipeline-section { margin-top: 1vh; padding-top: 0.5vh; }
+  .pipeline-label   { margin-bottom: 0.5vh; }
+  .step             { padding-top: 0.5vh; gap: 0.4vh; }
+
+  /* Heading 外边距归零：419px 高度下浏览器默认外边距（h2≈28px,h3≈23px）代价过高 */
+  .h-xl { margin: 0 0 0.5vh 0; }
+  .h-md { margin: 0; }
+  .lead { margin-top: 0; }
+
+  /* Rowline 行间距收紧：基础 2.2vh → 1vh，节省 ~10px/行 */
+  .rowline { padding: 1vh 0; }
+
+  /* risk-table 进一步收紧：900px 断点 1.2vh 在 419px 高度仍过大 */
+  .risk-table              { margin-top: 0.5vh; }
+  .risk-table th,
+  .risk-table td           { padding: 0.5vh 0.8vw; }
+  .risk-table td           { font-size: max(11px, 0.9vw); line-height: 1.3; }
+
+  /* CSS 变量：覆盖无法用普通选择器穿透的 inline spacing。
+     仅对模板中使用 var() 语法的元素生效，不影响硬编码 inline styles 的其他 slides。
+     --deck-frame-pt:   .frame padding-top (默认 4vh)
+     --deck-lead-mb:    .lead  margin-bottom (默认 3vh)
+     --deck-lead-mt:    .lead  margin-top（标题紧邻正文时，默认 2.4vh）
+     --deck-section-mt: pipeline-section margin-top (默认 3vh) */
+  .slide {
+    --deck-frame-pt:   0.5vh;
+    --deck-lead-mb:    1vh;
+    --deck-lead-mt:    0.8vh;
+    --deck-section-mt: 1vh;
+  }
+}
+
+/* ============ 2K/4K 超宽屏（min-width: 2560px）============ */
+/* vw 字号在 2K+ 视口下随宽度增长（1vw≈25px），但 vh 高度增长慢，
+   导致文字高度撑破 frame。加 min(vw, vh) 封顶使字号随高度而非宽度增长。 */
+@media (min-width: 2560px) {
+  .lead          { font-size: min(1.75vw, 2.4vh); }
+  .h-md          { font-size: min(2.3vw, 2.9vh); }
+  .h-sub         { font-size: min(1.9vw, 2.9vh); }
+  .h2-zh         { font-size: min(3.2vw, 4.5vh); }
+  .rowline .k,
+  .rowline .v    { font-size: min(max(12px, 1.22vw), 1.45vh); }
+  .stat-note     { font-size: min(max(12px, 0.88vw), 1.15vh); }
+  .callout       { padding: 2vh 2.4vw; font-size: min(max(13px, 1vw), 1.3vh); }
+  .risk-table th { font-size: min(max(10px, 1vw), 1.3vh); }
+  .risk-table td { font-size: min(max(11px, 1vw), 1.3vh); }
+  /* risk-table 垂直间距收紧：base 1.8vh 在 2K/4K 高度下撑破 frame（slide 12） */
+  .risk-table              { margin-top: 1.5vh; }
+  .risk-table th,
+  .risk-table td           { padding: 1.4vh 1.2vw; }
+  /* pipeline step 字体封顶（与 .callout/.risk-table 保持一致） */
+  .step-nb    { font-size: min(1.15vw, 1.5vh); }
+  .step-title { font-size: min(1.55vw, 2.2vh); }
+  .step-desc  { font-size: min(max(12px, 0.95vw), 1.3vh); }
+}

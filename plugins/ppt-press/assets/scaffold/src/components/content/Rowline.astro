@@ -1,0 +1,17 @@
+---
+import type { HTMLAttributes } from 'astro/types';
+
+interface Props extends HTMLAttributes<'div'> {
+  k: string;
+  v: string;
+  m?: string;
+}
+
+const { k, v, m, class: className, ...rest } = Astro.props;
+---
+
+<div {...rest} class:list={['rowline', className]} data-anim>
+  <span class="k">{k}</span>
+  <span class="v">{v}</span>
+  {m && <span class="m">{m}</span>}
+</div>

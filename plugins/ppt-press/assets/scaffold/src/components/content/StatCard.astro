@@ -1,0 +1,20 @@
+---
+import type { HTMLAttributes } from 'astro/types';
+
+interface Props extends HTMLAttributes<'div'> {
+  label: string;
+  value: string;
+  unit?: string;
+  note?: string;
+}
+
+const { label, value, unit, note, class: className, ...rest } = Astro.props;
+---
+
+<div {...rest} class:list={['stat-card', className]} data-anim>
+  <div class="stat-label">{label}</div>
+  <div class="stat-nb">
+    {value}{unit && <span class="stat-unit">{unit}</span>}
+  </div>
+  {note && <div class="stat-note">{note}</div>}
+</div>

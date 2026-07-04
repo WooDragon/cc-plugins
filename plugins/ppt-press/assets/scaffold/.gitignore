@@ -1,0 +1,7 @@
+.env
+dist/
+.astro/
+_deploy.zip
+node_modules/
+test-results/
+.agents/

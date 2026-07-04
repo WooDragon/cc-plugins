@@ -7,12 +7,15 @@ description: Generate "editorial magazine × e-ink" horizontal-swipe web present
 
 ## Prerequisites
 
-本 skill 需要在 PPT 框架项目中使用。检查以下标志文件：
+**在执行任何操作前，先运行依赖检查**：
 
-- `astro.config.ts` — Astro 项目配置
-- `src/layouts/DeckLayout.astro` — PPT 核心布局组件
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-deps.sh" --scope create
+```
 
-如果缺失，说明当前目录不是 PPT 框架项目。告知用户需先获取 PPT 框架（联系项目管理员获取，或从模板仓库克隆）。
+如果有 `[FAIL]` 项，按提示的「修复」命令逐一解决后重新运行检查。全部 `[PASS]` 再继续。
+
+如果框架不存在（`astro.config.ts` 缺失），先调用 **ppt-init** skill 初始化项目。
 
 ## 这个 Skill 做什么
 

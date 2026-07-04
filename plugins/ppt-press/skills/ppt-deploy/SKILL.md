@@ -9,9 +9,16 @@ description: Build, test, and deploy PPT decks to AWS Amplify. Handles pre-fligh
 
 ## Prerequisites
 
-- 当前目录是 PPT 框架项目（含 `astro.config.ts` + `scripts/deploy.sh`）
-- Node.js 已安装（`npm` 可用）
-- 部署需要 AWS 凭证（见 Step 3）
+**在执行任何操作前，先运行依赖检查**：
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-deps.sh" --scope deploy
+```
+
+如果有 `[FAIL]` 项，按提示的「修复」命令逐一解决后重新运行检查。全部 `[PASS]` 再继续。
+
+如果框架不存在（`astro.config.ts` 缺失），先调用 **ppt-init** skill 初始化项目。
+如果部署脚本不存在（`scripts/deploy.sh` 缺失），需先通过 ppt-init 的 deploy 配置步骤启用。
 
 ## Step 1 · Pre-flight 构建验证
 

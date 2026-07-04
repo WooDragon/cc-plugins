@@ -1,0 +1,19 @@
+---
+interface Props {
+  theme: 'dark' | 'light';
+  hero?: boolean;
+  animate?: 'cascade' | 'hero' | 'quote' | 'directional' | 'pipeline';
+  class?: string;
+  style?: string;
+}
+
+const { theme, hero = false, animate, class: className, style } = Astro.props;
+---
+
+<section
+  class:list={['slide', theme, hero && 'hero', className]}
+  data-animate={animate}
+  style={style}
+>
+  <slot />
+</section>
