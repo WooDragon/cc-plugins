@@ -51,6 +51,8 @@ Lead 的采集指令，必须包含：
 | 4 | 解读 merged 输出：共识标签、coverage_gaps、blind_spots | 补采裁判指出的 gaps（若有） |
 | 5 | 执行 Sanitization（脱敏落盘到 `pipeline/2_cleaned/`） | 同现行流程 |
 
+**单模型 step 预算耗尽 = 强制收尾，非该模型失败**：每个 panel 模型的 agentic loop 有 `max_steps_per_model` 轮工具预算。预算耗尽时 harvest.py **不丢弃该模型已 fetch 的证据**，而是强制发一次禁用工具的收尾 synthesis 调用，把已采证据收敛成 findings 并走引用机械门校验；只有收尾仍无合法产出才判该模型 `step_limit_no_synthesis` 失败。因此单个模型跑到步数上限通常仍会贡献有效 claims，不必视为异常——真正影响整轮的是存活模型数是否达 quorum（见下 exit 3）。
+
 **exit 3（`verdict: UNAVAILABLE`，多模型采集不可用）时，harvester 必须立即停止并上报 Lead，严禁自行转 legacy 手工采集继续**——不完整调研冒充完整调研比失败更糟。恢复路径见 deep-research skill 的 references/quality-gates.md（引用校验机械门章节）。
 
 **exit 4**（config 声明了 `curl-cffi` fetch 后端但本机未安装 `curl_cffi`）：不是采集失败，是环境未就绪。按 stderr 输出的指引执行 `pip3 install --user curl_cffi` 后原样重跑第 3 步即可，不需要上报 Lead，也不消耗任何 API 调用（检查发生在 harvest.py 触碰状态文件之前）。
