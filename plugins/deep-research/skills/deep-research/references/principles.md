@@ -101,18 +101,9 @@ deliverables/          → 最终交付物（draft/ + final/）
 源1: {URL} (credibility: X, language: zh/en, excerpt: "{逐字摘录}")
 源2: {URL} (credibility: X, language: zh/en, excerpt: "{逐字摘录}")
 一致性: 一致 / 有差异（说明差异点）
-consensus: strong / minority / disputed
 ```
 
-**consensus 标签**（由 `harvest.py` merge 阶段按簇成员数**机械打标**，非人工判断）：
-
-- **strong**：≥2 个独立模型/源支持同一结论簇
-- **minority**：仅 1 个模型/源支持
-- **disputed**：同一簇内存在互相矛盾的结论
-
-**minority 降权规则**：minority / disputed 结论只能以「少数派观点 / 存争议」措辞出现在正文分析中，**不得**直接进入结论与建议章节——除非 Lead 显式提级并记录 Correction Record（复用上方原则 5 机制）。
-
-> **共识 ≠ 正确**：多源重合度只是降权信号，不是真值判据——三源一致可能共享同一上游谣言，单源观点也可能是唯一说对的。[quality-gates.md](./quality-gates.md) G3 证伪审计不因 `consensus: strong` 而放松审查。
+> **共识 ≠ 正确**：多源重合度是参考信号，不是真值判据——三源一致可能共享同一上游谣言，单源观点也可能是唯一说对的。[quality-gates.md](./quality-gates.md) G3 证伪审计不因多源重合而放松审查。
 
 - 中英文信息出现矛盾时，必须在分析中标注并说明可能原因（地域差异、时间差异、翻译失真）
 - 单一信息源引用不得超过 3 次（防止单源偏见）

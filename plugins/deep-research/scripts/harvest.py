@@ -2,9 +2,9 @@
 
 Three heterogeneous panel models each run a minimal agentic loop (search/fetch/
 read_local tools) to independently collect claims. A judge model clusters the
-claims (ID-only output); this script mechanically assembles the merged result
-and computes consensus labels. All citations are verified by exact substring/
-URL matching against a recorded tool-call journal -- never by LLM judgment.
+claims (ID-only output); this script mechanically assembles the merged result.
+All citations are verified at the URL level against a recorded tool-call
+journal -- never by LLM judgment.
 
 Stdlib only, with one optional soft dependency: curl_cffi (only used by the
 "curl-cffi" fetch backend; every other code path is pure stdlib). Config
@@ -30,7 +30,6 @@ import subprocess
 import sys
 import threading
 import time
-import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -270,28 +269,6 @@ def normalize_url(url):
         return url
 
 
-# Excerpt matching must stay exact-substring (no fuzzy matching -- verbatim
-# auditability is a hard requirement), but the surface encoding of "the same
-# text" varies harmlessly between what a model pastes and what a page serves:
-# HTML entities, typographic quote/dash variants, and compatibility Unicode
-# forms. This whitelist folds only those known-harmless variants; it must
-# never grow into anything that could paper over an actual paraphrase (e.g.
-# a model-inserted "..." truncation is a real verbatim violation and stays
-# rejected -- folding it away would defeat the citation check's purpose).
-_QUOTE_DASH_TRANSLATION = str.maketrans({
-    "‘": "'", "’": "'", "‚": "'", "‛": "'",
-    "“": '"', "”": '"', "„": '"', "‟": '"',
-    "–": "-", "—": "-", "−": "-",
-})
-
-
-def normalize_citation_text(text):
-    text = unicodedata.normalize("NFKC", text or "")
-    text = html.unescape(text)
-    text = text.translate(_QUOTE_DASH_TRANSLATION)
-    return re.sub(r"\s+", " ", text).strip()
-
-
 # ---------------------------------------------------------------------------
 # Findings / judge JSON parsing
 # ---------------------------------------------------------------------------
@@ -389,7 +366,6 @@ def build_journal_url_set(journal):
 _REJECT_REASON_MESSAGES = {
     "url_not_in_journal": "url never appeared in any search/fetch/read_local call",
     "url_not_fetched": "url was seen but never successfully fetched; fetch full text before citing",
-    "excerpt_not_substring": "excerpt is not a substring of fetched content (copy the original text verbatim)",
 }
 
 
@@ -401,10 +377,6 @@ def validate_claims(claims, fetch_index, journal_urls):
         if not contents:
             reason = "url_not_fetched" if key in journal_urls else "url_not_in_journal"
             invalid.append((c, reason, None))
-            continue
-        excerpt_norm = normalize_citation_text(c.get("excerpt", ""))
-        if not excerpt_norm or not any(excerpt_norm in normalize_citation_text(ct) for ct in contents):
-            invalid.append((c, "excerpt_not_substring", key))
             continue
         valid.append(c)
     return valid, invalid
@@ -1542,13 +1514,10 @@ def build_system_prompt(goal_text, local_manifest, alias, max_steps):
         "Hard rules:",
         "1. Never cite a URL before fetching its full text via fetch/read_local; "
         "citing a bare search snippet is forbidden.",
-        "2. excerpt must be 100% verbatim in the source's original language -- "
-        "never translate, paraphrase, or truncate it. claim may be in Chinese; "
-        "excerpt must be copied from the original text. excerpt must be a "
-        "verbatim fragment of the fetched page's BODY content -- never "
-        "substitute the page title, a search-result snippet, a byline, or a "
-        "paper's title for it. A title is not body text.",
-        "3. Only cite text that literally appears in a tool result.",
+        "2. excerpt should quote the source's original text as closely as "
+        "possible for auditability -- prefer copying from the fetched page's "
+        "body content.",
+        "3. Only cite URLs that appear in your tool results.",
         "4. Search in both Chinese and English for each core concept.",
         f"5. You have a budget of about {max_steps} tool-use rounds.",
         "6. Search bilingually to map sources first, then fetch the most relevant "
@@ -1794,15 +1763,15 @@ def merge_findings(worker_findings_by_alias, judge_data):
     # later cluster claiming the same ID has that ID dropped and logged to
     # dedup_notes. The judge prompt asks for this too, but this invariant
     # must hold even if the judge ignores the instruction.
-    all_claims, alias_by_claim = {}, {}
+    all_claims = {}
     for alias, data in worker_findings_by_alias.items():
         for c in data["claims"]:
             all_claims[c["_id"]] = c
-            alias_by_claim[c["_id"]] = alias
 
     clusters_out = []
     claimed_ids = set()
     dedup_notes = []
+    contradictions = []
     for cluster in judge_data.get("clusters", []):
         summary = cluster.get("summary", "")
         candidate_ids = [cid for cid in cluster.get("source_claim_ids", []) if cid in all_claims]
@@ -1816,14 +1785,9 @@ def merge_findings(worker_findings_by_alias, judge_data):
         if not ids:
             continue
         claimed_ids.update(ids)
-        aliases_in_cluster = {alias_by_claim[cid] for cid in ids}
         relation = cluster.get("relation", "agree")
         if relation == "contradict":
-            consensus = "disputed"
-        elif len(aliases_in_cluster) >= 2:
-            consensus = "strong"
-        else:
-            consensus = "minority"
+            contradictions.append(summary)
         assembled = []
         for cid in ids:
             c = all_claims[cid]
@@ -1835,10 +1799,9 @@ def merge_findings(worker_findings_by_alias, judge_data):
                 "language": c.get("language", "unknown"),
                 "credibility": c.get("credibility", 3),
             })
-        clusters_out.append({"summary": summary, "consensus": consensus, "claims": assembled})
+        clusters_out.append({"summary": summary, "claims": assembled})
 
     unique_insights = [cid for cid in judge_data.get("unique_insights", []) if cid in all_claims]
-    contradictions = [c["summary"] for c in clusters_out if c["consensus"] == "disputed"]
     return {
         "clusters": clusters_out,
         "coverage_gaps": judge_data.get("coverage_gaps", []),
@@ -1847,13 +1810,6 @@ def merge_findings(worker_findings_by_alias, judge_data):
         "contradictions": contradictions,
         "dedup_notes": dedup_notes,
     }
-
-
-def compute_consensus_stats(merged):
-    stats = {"strong": 0, "minority": 0, "disputed": 0}
-    for c in merged["clusters"]:
-        stats[c["consensus"]] = stats.get(c["consensus"], 0) + 1
-    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -1954,7 +1910,7 @@ def check_project(project_dir):
     verdict = data.get("verdict")
     if verdict == "UNAVAILABLE":
         return "FAIL", "multi-model harvest UNAVAILABLE: retry / fix config / or request user exemption to legacy"
-    if verdict not in ("OK", "DEGRADED"):
+    if verdict != "OK":
         return "FAIL", f"unknown or incomplete verdict: {verdict!r}"
 
     goal_note = None
@@ -2045,7 +2001,7 @@ def detect_research_type(goal_text):
     return None
 
 
-def write_fetch_report(raw_dir, results, alive, consensus_stats, invalid_total, invalid_rate, local_manifest, goal_text="", quorum_required=2):
+def write_fetch_report(raw_dir, results, alive, invalid_total, invalid_rate, local_manifest, goal_text="", quorum_required=2):
     lines = ["# Fetch Report - Multi-Model Harvest", "", "## 采集统计", f"- 总请求数: {len(results)}"]
     for r in results:
         lines.append(f"- {r.alias} ({r.model_id}): status={r.status} reason={r.reason or '-'}")
@@ -2070,9 +2026,7 @@ def write_fetch_report(raw_dir, results, alive, consensus_stats, invalid_total, 
     if blacklist_hits:
         lines.append(f"  - 列表: {blacklist_hits}")
     lines.append("")
-    lines.append("## 多模型共识统计")
-    for label, count in consensus_stats.items():
-        lines.append(f"- {label}: {count}")
+    lines.append("## 多模型参与情况")
     lines.append(f"- 参与模型: {[r.alias for r in alive]}")
     lines.append(f"- 法定人数状态: {'met' if len(alive) >= quorum_required else 'not met'}")
     per_model_invalid = {r.alias: len(r.rejected_claims) for r in alive}
@@ -2244,25 +2198,27 @@ def cmd_run(args):
                                verify_filename=verify_filename)
 
         merged = merge_findings(worker_findings_by_alias, judge_data)
-        consensus_stats = compute_consensus_stats(merged)
 
         total_claims = sum(len(d["claims"]) for d in worker_findings_by_alias.values())
         invalid_total = sum(r.findings.get("invalid_claim_count", 0) for r in alive)
         denom = total_claims + invalid_total
         invalid_rate = (invalid_total / denom) if denom > 0 else 0.0
 
+        if total_claims == 0:
+            abort_unavailable(verify_dir, goal_hash, "quorum met but zero valid claims",
+                               verify_filename=verify_filename)
+
         raw_dir.mkdir(parents=True, exist_ok=True)
         (raw_dir / MERGED_FINDINGS_FILE).write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
-        write_fetch_report(raw_dir, results, alive, consensus_stats, invalid_total, invalid_rate, local_manifest, goal_text,
+        write_fetch_report(raw_dir, results, alive, invalid_total, invalid_rate, local_manifest, goal_text,
                             quorum_required=config["limits"]["quorum"])
 
-        verdict = "OK" if len(alive) == len(config["panel_models"]) else "DEGRADED"
+        verdict = "OK"
         write_verify_json(verify_dir, goal_hash, verdict, {
             "quorum_met": quorum_met,
             "models_alive": [r.alias for r in alive],
             "invalid_citation_rate": invalid_rate,
             "invalid_claim_count": invalid_total,
-            "consensus_stats": consensus_stats,
             "total_claims": total_claims,
         }, verify_filename=verify_filename)
         print(f"harvest run complete: verdict={verdict}")

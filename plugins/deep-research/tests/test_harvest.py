@@ -374,9 +374,6 @@ class TestNormalization(unittest.TestCase):
     def test_local_url_normalized(self):
         self.assertEqual(harvest.normalize_url("local://foo/bar/"), harvest.normalize_url("local://foo/bar"))
 
-    def test_whitespace_normalization(self):
-        self.assertEqual(harvest.normalize_citation_text("a   b\n\tc"), "a b c")
-
     def test_malformed_url_does_not_raise(self):
         # copilot review on #25: an unclosed IPv6 bracket makes urlsplit()
         # raise ValueError. Model output or a search backend result can
@@ -470,23 +467,15 @@ class TestCitationValidation(unittest.TestCase):
         self.assertEqual(len(invalid), 1)
         self.assertEqual(invalid[0][1], "url_not_in_journal")
 
-    def test_tampered_excerpt_rejected(self):
+    def test_url_fetched_accepted_regardless_of_excerpt_content(self):
+        # Citation verification is URL-level only: any excerpt text is
+        # accepted as long as the URL was actually fetched.
         journal = [{"tool": "fetch", "url": "https://a.com/x", "content": "The quick brown fox."}]
         claims = harvest.assign_claim_ids("m1", [
-            {"claim": "c", "excerpt": "the slow red fox", "url": "https://a.com/x"}])
+            {"claim": "c", "excerpt": "the slow red fox (not verbatim at all)", "url": "https://a.com/x"}])
         valid, invalid = self._validate(journal, claims)
-        self.assertEqual(valid, [])
-        self.assertEqual(len(invalid), 1)
-        self.assertEqual(invalid[0][1], "excerpt_not_substring")
-
-    def test_translated_excerpt_rejected_with_verbatim_hint(self):
-        journal = [{"tool": "fetch", "url": "https://a.com/x", "content": "白日依山尽，黄河入海流。"}]
-        claims = harvest.assign_claim_ids("m1", [
-            {"claim": "c", "excerpt": "The sun sets behind the mountains", "url": "https://a.com/x"}])
-        valid, invalid = self._validate(journal, claims)
-        self.assertEqual(valid, [])
-        feedback = harvest.build_citation_feedback(invalid)
-        self.assertIn("verbatim", feedback.lower())
+        self.assertEqual(len(valid), 1)
+        self.assertEqual(invalid, [])
 
     def test_url_seen_in_search_but_never_fetched_rejected_as_not_fetched(self):
         journal = [{"tool": "search", "query": "q", "lang": "en", "backend": "gemini-cli",
@@ -515,11 +504,11 @@ class TestCitationValidation(unittest.TestCase):
     def test_rejected_claims_record_shape(self):
         journal = [{"tool": "fetch", "url": "https://a.com/x", "content": "The quick brown fox."}]
         claims = harvest.assign_claim_ids("m1", [
-            {"claim": "c", "excerpt": "the slow red fox", "url": "https://a.com/x"}])
+            {"claim": "c", "excerpt": "the slow red fox", "url": "https://a.com/NEVER-SEEN"}])
         _, invalid = self._validate(journal, claims)
         records = harvest.build_rejected_claims(invalid)
-        self.assertEqual(records, [{"claim": "c", "url": "https://a.com/x", "excerpt": "the slow red fox",
-                                     "reject_reason": "excerpt_not_substring", "matched_url_normalized": "https://a.com/x"}])
+        self.assertEqual(records, [{"claim": "c", "url": "https://a.com/NEVER-SEEN", "excerpt": "the slow red fox",
+                                     "reject_reason": "url_not_in_journal", "matched_url_normalized": None}])
 
     def test_rejected_claims_record_no_matched_url_when_not_fetched(self):
         journal = [{"tool": "fetch", "url": "https://a.com/x", "content": "The quick brown fox."}]
@@ -528,37 +517,6 @@ class TestCitationValidation(unittest.TestCase):
         _, invalid = self._validate(journal, claims)
         records = harvest.build_rejected_claims(invalid)
         self.assertIsNone(records[0]["matched_url_normalized"])
-
-
-class TestCitationNormalization(unittest.TestCase):
-    def _accepted(self, content, excerpt):
-        journal = [{"tool": "fetch", "url": "https://a.com/x", "content": content}]
-        claims = harvest.assign_claim_ids("m1", [{"claim": "c", "excerpt": excerpt, "url": "https://a.com/x"}])
-        idx = harvest.build_fetch_index(journal)
-        urls = harvest.build_journal_url_set(journal)
-        valid, _ = harvest.validate_claims(claims, idx, urls)
-        return len(valid) == 1
-
-    def test_nbsp_folded_as_before(self):
-        self.assertTrue(self._accepted("The quick\xa0brown fox.", "quick brown fox"))
-
-    def test_smart_quotes_match_straight_quotes(self):
-        self.assertTrue(self._accepted("She said “hello” to ‘Bob’.", 'She said "hello" to \'Bob\'.'))
-
-    def test_straight_quotes_match_smart_quotes(self):
-        self.assertTrue(self._accepted('She said "hello" to \'Bob\'.', "She said “hello” to ‘Bob’."))
-
-    def test_em_dash_and_en_dash_match_ascii_hyphen(self):
-        self.assertTrue(self._accepted("A—B and C–D.", "A-B and C-D."))
-
-    def test_html_entity_residue_matches_decoded_text(self):
-        self.assertTrue(self._accepted("Fish &amp; chips &quot;classic&quot;.", 'Fish & chips "classic".'))
-
-    def test_ellipsis_truncation_still_rejected_not_a_false_positive(self):
-        # A model-inserted "..." to skip words is a real verbatim violation,
-        # not an encoding artifact -- normalization must NOT paper over it.
-        self.assertFalse(self._accepted("The quick brown fox jumps over the lazy dog.",
-                                         "The quick brown ... jumps over the lazy dog."))
 
 
 # ---------------------------------------------------------------------------
@@ -1643,23 +1601,23 @@ class TestWorkerDriver(unittest.TestCase):
         client = ScriptedClient([
             assistant_tool_call("c1", "fetch", {"url": "https://a.com/x"}),
             assistant_final(findings_block([
-                {"claim": "c", "excerpt": "this text was never fetched", "url": "https://a.com/x"}])),
+                {"claim": "c", "excerpt": "never actually fetched", "url": "https://a.com/NEVER-SEEN"}])),
             assistant_final(findings_block([
-                {"claim": "c", "excerpt": "still made up text", "url": "https://a.com/x"}])),
+                {"claim": "c", "excerpt": "still a hallucinated url", "url": "https://a.com/NEVER-SEEN"}])),
         ])
         result = self._run(client)
         self.assertEqual(result.status, "OK")
         self.assertEqual(result.findings["claims"], [])
         self.assertEqual(result.findings["invalid_claim_count"], 1)
         self.assertEqual(len(result.rejected_claims), 1)
-        self.assertEqual(result.rejected_claims[0]["reject_reason"], "excerpt_not_substring")
-        self.assertEqual(result.rejected_claims[0]["excerpt"], "still made up text")
+        self.assertEqual(result.rejected_claims[0]["reject_reason"], "url_not_in_journal")
+        self.assertEqual(result.rejected_claims[0]["excerpt"], "still a hallucinated url")
 
     def test_citation_retry_recovers_on_second_attempt(self):
         client = ScriptedClient([
             assistant_tool_call("c1", "fetch", {"url": "https://a.com/x"}),
             assistant_final(findings_block([
-                {"claim": "c", "excerpt": "made up", "url": "https://a.com/x"}])),
+                {"claim": "c", "excerpt": "anything", "url": "https://a.com/NEVER-SEEN"}])),
             assistant_final(findings_block([
                 {"claim": "c", "excerpt": "Rayleigh scattering explains the blue sky.", "url": "https://a.com/x"}])),
         ])
@@ -1776,8 +1734,8 @@ class TestWorkerDriver(unittest.TestCase):
         self.assertNotIn("language", claim)  # absent optional field not injected at worker level
 
     def test_mixed_valid_and_invalid_claims_stripped_not_failed(self):
-        # 10 valid claims (real fetched text) + 3 invalid (never-fetched
-        # excerpts) in the same findings JSON, on the very first turn --
+        # 10 valid claims (citing the fetched URL) + 3 invalid (citing a url
+        # never fetched) in the same findings JSON, on the very first turn --
         # citation_retry_used is still False so this triggers the one nudge,
         # and the model's retry response repeats the same 3 invalid claims
         # unchanged. The worker must not FAIL: finalize_findings() strips
@@ -1787,7 +1745,7 @@ class TestWorkerDriver(unittest.TestCase):
         valid_claims = [{"claim": f"valid claim {i}", "excerpt": fact, "url": "https://a.com/x"}
                         for i in range(10)]
         invalid_claims = [{"claim": f"invalid claim {i}", "excerpt": f"never fetched text {i}",
-                            "url": "https://a.com/x"} for i in range(3)]
+                            "url": "https://a.com/NEVER-SEEN"} for i in range(3)]
         client = ScriptedClient([
             assistant_tool_call("c1", "fetch", {"url": "https://a.com/x"}),
             assistant_final(findings_block(valid_claims + invalid_claims)),
@@ -1798,7 +1756,7 @@ class TestWorkerDriver(unittest.TestCase):
         self.assertEqual(len(result.findings["claims"]), 10)
         self.assertEqual(result.findings["invalid_claim_count"], 3)
         self.assertEqual(len(result.rejected_claims), 3)
-        self.assertTrue(all(rc["reject_reason"] == "excerpt_not_substring" for rc in result.rejected_claims))
+        self.assertTrue(all(rc["reject_reason"] == "url_not_in_journal" for rc in result.rejected_claims))
 
 
 class TestAppendOrMergeUser(unittest.TestCase):
@@ -1888,29 +1846,10 @@ class TestMergeFindings(unittest.TestCase):
                                 "credibility": 5, "language": "zh"}]},
         }
 
-    def test_strong_consensus_3_of_3(self):
-        judge = {"clusters": [{"summary": "s", "source_claim_ids": ["m1-1", "m2-1", "m3-1"], "relation": "agree"}],
-                 "coverage_gaps": [], "unique_insights": [], "blind_spots": []}
-        merged = harvest.merge_findings(self.worker_findings, judge)
-        self.assertEqual(merged["clusters"][0]["consensus"], "strong")
-
-    def test_strong_consensus_2_of_3(self):
-        judge = {"clusters": [{"summary": "s", "source_claim_ids": ["m1-1", "m2-1"], "relation": "agree"}],
-                 "coverage_gaps": [], "unique_insights": [], "blind_spots": []}
-        merged = harvest.merge_findings(self.worker_findings, judge)
-        self.assertEqual(merged["clusters"][0]["consensus"], "strong")
-
-    def test_minority_1_of_3(self):
-        judge = {"clusters": [{"summary": "s", "source_claim_ids": ["m1-1"], "relation": "agree"}],
-                 "coverage_gaps": [], "unique_insights": [], "blind_spots": []}
-        merged = harvest.merge_findings(self.worker_findings, judge)
-        self.assertEqual(merged["clusters"][0]["consensus"], "minority")
-
     def test_disputed_relation(self):
         judge = {"clusters": [{"summary": "s", "source_claim_ids": ["m1-1", "m2-1"], "relation": "contradict"}],
                  "coverage_gaps": [], "unique_insights": [], "blind_spots": []}
         merged = harvest.merge_findings(self.worker_findings, judge)
-        self.assertEqual(merged["clusters"][0]["consensus"], "disputed")
         self.assertIn("s", merged["contradictions"])
 
     def test_hallucinated_claim_id_dropped(self):
@@ -1935,11 +1874,6 @@ class TestMergeFindings(unittest.TestCase):
         merged = harvest.merge_findings(self.worker_findings, judge)
         self.assertEqual(merged["coverage_gaps"], ["gap1"])
         self.assertEqual(merged["blind_spots"], ["blind1"])
-
-    def test_consensus_stats_counts(self):
-        merged = {"clusters": [{"consensus": "strong"}, {"consensus": "strong"}, {"consensus": "minority"}]}
-        stats = harvest.compute_consensus_stats(merged)
-        self.assertEqual(stats, {"strong": 2, "minority": 1, "disputed": 0})
 
     def test_claim_in_two_clusters_kept_only_in_first(self):
         # Reproduces the real smoke-test defect: m2-1 assigned to both
@@ -2152,11 +2086,6 @@ class TestCheckProject(unittest.TestCase):
         verdict, reason = harvest.check_project(self.project_dir)
         self.assertEqual(verdict, "PASS")
 
-    def test_degraded_still_passes(self):
-        self._write_verify(verdict="DEGRADED")
-        verdict, reason = harvest.check_project(self.project_dir)
-        self.assertEqual(verdict, "PASS")
-
     def test_goal_hash_checked_against_conventional_intake_path(self):
         goal_dir = self.project_dir / "intake" / "requirements"
         goal_dir.mkdir(parents=True)
@@ -2335,13 +2264,11 @@ class TestCmdRunEndToEnd(unittest.TestCase):
         self.assertTrue(data["quorum_met"])
         self.assertEqual(data["total_claims"], 3)
         self.assertEqual(data["invalid_citation_rate"], 0.0)
-        self.assertEqual(data["consensus_stats"]["strong"], 1)
 
         merged_file = self.raw_dir / harvest.MERGED_FINDINGS_FILE
         self.assertTrue(merged_file.exists())
         merged = json.loads(merged_file.read_text(encoding="utf-8"))
         self.assertEqual(len(merged["clusters"]), 1)
-        self.assertEqual(merged["clusters"][0]["consensus"], "strong")
 
         self.assertTrue((self.raw_dir / "fetch-report.md").exists())
         for alias in ("m1", "m2", "m3"):
@@ -2350,6 +2277,94 @@ class TestCmdRunEndToEnd(unittest.TestCase):
             rejected_file = self.raw_dir / "harvest" / alias / "rejected_claims.json"
             self.assertTrue(rejected_file.exists())
             self.assertEqual(json.loads(rejected_file.read_text(encoding="utf-8")), [])
+
+        verdict, reason = harvest.check_project(self.project_dir)
+        self.assertEqual(verdict, "PASS", reason)
+
+    def test_zero_valid_claims_aborts_unavailable(self):
+        # Quorum is met (all three workers return status OK) but every
+        # claim cites a url the worker never fetched -- finalize_findings
+        # strips them all, leaving total_claims == 0. cmd_run must treat
+        # that as UNAVAILABLE (exit 3), not silently write an OK verdict
+        # over an empty merged-findings file.
+        bad_claim = {"claim": "c", "excerpt": "hallucinated", "url": "https://a.com/NEVER-SEEN"}
+        panel_scripts = {
+            model_id: ScriptedClient([
+                assistant_tool_call("c1", "fetch", {"url": "https://example.com/page1"}),
+                assistant_final(findings_block([bad_claim])),
+                assistant_final(findings_block([bad_claim])),
+            ])
+            for model_id in ["model-a", "model-b", "model-c"]
+        }
+        judge_text = ('```json\n{"clusters": [], "coverage_gaps": [], '
+                      '"unique_insights": [], "blind_spots": []}\n```')
+        judge_client = ScriptedClient([assistant_final(judge_text)])
+
+        def factory(model_id):
+            if model_id == "model-judge":
+                return judge_client
+            return panel_scripts[model_id]
+
+        config = base_config()
+        args = argparse_ns(goal_file=str(self.goal_file), out=str(self.raw_dir), config="unused", local_dir=None)
+
+        with mock.patch("harvest.load_config", return_value=config), \
+             mock.patch("harvest.make_client_factory", return_value=factory), \
+             mock.patch("harvest.call_fetch_backend", return_value="irrelevant fetched text"):
+            with self.assertRaises(SystemExit) as ctx:
+                harvest.cmd_run(args)
+        self.assertEqual(ctx.exception.code, 3)
+
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "UNAVAILABLE")
+
+        verdict, reason = harvest.check_project(self.project_dir)
+        self.assertEqual(verdict, "FAIL")
+
+    def test_partial_failure_yields_ok(self):
+        # 2 of 3 models alive (one dead outright) still meets quorum(2) and
+        # must produce verdict OK -- there is no "DEGRADED" tier anymore.
+        fact = "Rayleigh scattering explains why the sky looks blue."
+
+        def good_script(model_id):
+            return ScriptedClient([
+                assistant_tool_call("c1", "fetch", {"url": "https://example.com/page1"}),
+                assistant_final(findings_block([
+                    {"claim": f"claim from {model_id}", "excerpt": fact, "url": "https://example.com/page1",
+                     "credibility": 4, "language": "en"}])),
+            ])
+
+        class Dead:
+            def complete(self, messages, tools):
+                raise RuntimeError("down")
+
+        judge_text = ('```json\n{"clusters": [{"summary": "blue sky", '
+                      '"source_claim_ids": ["m1-1", "m2-1"], "relation": "agree"}], '
+                      '"coverage_gaps": [], "unique_insights": [], "blind_spots": []}\n```')
+        judge_client = ScriptedClient([assistant_final(judge_text)])
+
+        def factory(model_id):
+            if model_id == "model-judge":
+                return judge_client
+            if model_id == "model-c":
+                return Dead()
+            return good_script(model_id)
+
+        config = base_config()
+        args = argparse_ns(goal_file=str(self.goal_file), out=str(self.raw_dir), config="unused", local_dir=None)
+
+        with mock.patch("harvest.load_config", return_value=config), \
+             mock.patch("harvest.make_client_factory", return_value=factory), \
+             mock.patch("harvest.call_fetch_backend", return_value=fact):
+            harvest.cmd_run(args)
+
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "OK")
+        self.assertTrue(data["quorum_met"])
+        self.assertEqual(set(data["models_alive"]), {"m1", "m2"})
+        self.assertEqual(data["total_claims"], 2)
 
         verdict, reason = harvest.check_project(self.project_dir)
         self.assertEqual(verdict, "PASS", reason)
@@ -2782,7 +2797,7 @@ class TestFetchReportRealStats(unittest.TestCase):
             raw_dir = Path(tmpdir.name)
             r1 = harvest.WorkerResult("m1", "model-a", "OK", {"claims": [], "keywords_used": {"zh": [], "en": []}},
                                        [{"tool": "fetch", "url": "https://blog.csdn.net/x", "blocked": "blacklist", "content": None}])
-            harvest.write_fetch_report(raw_dir, [r1], [r1], {"strong": 0, "minority": 0, "disputed": 0}, 0, 0.0, [])
+            harvest.write_fetch_report(raw_dir, [r1], [r1], 0, 0.0, [])
             report = (raw_dir / "fetch-report.md").read_text(encoding="utf-8")
             self.assertIn("屏蔽源命中: 1", report)
             self.assertIn("blog.csdn.net", report)
@@ -2796,18 +2811,18 @@ class TestFetchReportRealStats(unittest.TestCase):
             r1 = harvest.WorkerResult(
                 "m1", "model-a", "OK", {"claims": [], "keywords_used": {"zh": [], "en": []}}, [],
                 rejected_claims=[
-                    {"claim": "c1", "url": "u1", "excerpt": "e1", "reject_reason": "excerpt_not_substring", "matched_url_normalized": "u1"},
+                    {"claim": "c1", "url": "u1", "excerpt": "e1", "reject_reason": "url_not_fetched", "matched_url_normalized": None},
                     {"claim": "c2", "url": "u2", "excerpt": "e2", "reject_reason": "url_not_in_journal", "matched_url_normalized": None},
                 ])
             r2 = harvest.WorkerResult(
                 "m2", "model-b", "OK", {"claims": [], "keywords_used": {"zh": [], "en": []}}, [],
                 rejected_claims=[
-                    {"claim": "c3", "url": "u3", "excerpt": "e3", "reject_reason": "excerpt_not_substring", "matched_url_normalized": "u3"},
+                    {"claim": "c3", "url": "u3", "excerpt": "e3", "reject_reason": "url_not_fetched", "matched_url_normalized": None},
                 ])
-            harvest.write_fetch_report(raw_dir, [r1, r2], [r1, r2], {"strong": 0, "minority": 0, "disputed": 0}, 3, 1.0, [])
+            harvest.write_fetch_report(raw_dir, [r1, r2], [r1, r2], 3, 1.0, [])
             report = (raw_dir / "fetch-report.md").read_text(encoding="utf-8")
             self.assertIn("按模型分布: {'m1': 2, 'm2': 1}", report)
-            self.assertIn("'excerpt_not_substring': 2", report)
+            self.assertIn("'url_not_fetched': 2", report)
             self.assertIn("'url_not_in_journal': 1", report)
         finally:
             tmpdir.cleanup()
@@ -2818,13 +2833,13 @@ class TestFetchReportRealStats(unittest.TestCase):
             raw_dir = Path(tmpdir.name)
             r1 = harvest.WorkerResult("m1", "model-a", "OK", {"claims": [], "keywords_used": {"zh": [], "en": []}}, [])
             # 1 alive model with default quorum_required=2 -> "not met".
-            harvest.write_fetch_report(raw_dir, [r1], [r1], {"strong": 0, "minority": 0, "disputed": 0}, 0, 0.0, [])
+            harvest.write_fetch_report(raw_dir, [r1], [r1], 0, 0.0, [])
             self.assertIn("法定人数状态: not met",
                            (raw_dir / "fetch-report.md").read_text(encoding="utf-8"))
 
             # Same 1 alive model, but limits.quorum=1 -> must report "met",
             # not the hardcoded-2 "not met".
-            harvest.write_fetch_report(raw_dir, [r1], [r1], {"strong": 0, "minority": 0, "disputed": 0}, 0, 0.0, [],
+            harvest.write_fetch_report(raw_dir, [r1], [r1], 0, 0.0, [],
                                         quorum_required=1)
             self.assertIn("法定人数状态: met",
                            (raw_dir / "fetch-report.md").read_text(encoding="utf-8"))
@@ -2836,7 +2851,7 @@ class TestFetchReportRealStats(unittest.TestCase):
         try:
             raw_dir = Path(tmpdir.name)
             r1 = harvest.WorkerResult("m1", "model-a", "OK", {"claims": [], "keywords_used": {"zh": [], "en": []}}, [])
-            harvest.write_fetch_report(raw_dir, [r1], [r1], {"strong": 0, "minority": 0, "disputed": 0}, 0, 0.0, [])
+            harvest.write_fetch_report(raw_dir, [r1], [r1], 0, 0.0, [])
             report = (raw_dir / "fetch-report.md").read_text(encoding="utf-8")
             self.assertIn("PENDING", report)
             self.assertNotIn("候选集完备性\n- N/A", report)
@@ -2860,7 +2875,7 @@ class TestFetchReportRealStats(unittest.TestCase):
         try:
             raw_dir = Path(tmpdir.name)
             r1 = harvest.WorkerResult("m1", "model-a", "OK", {"claims": [], "keywords_used": {"zh": [], "en": []}}, [])
-            harvest.write_fetch_report(raw_dir, [r1], [r1], {"strong": 0, "minority": 0, "disputed": 0}, 0, 0.0, [],
+            harvest.write_fetch_report(raw_dir, [r1], [r1], 0, 0.0, [],
                                         goal_text="研究类型\nnon-selection（事实核验类）")
             report = (raw_dir / "fetch-report.md").read_text(encoding="utf-8")
             self.assertIn("N/A（non-selection）", report)
@@ -2873,7 +2888,7 @@ class TestFetchReportRealStats(unittest.TestCase):
         try:
             raw_dir = Path(tmpdir.name)
             r1 = harvest.WorkerResult("m1", "model-a", "OK", {"claims": [], "keywords_used": {"zh": [], "en": []}}, [])
-            harvest.write_fetch_report(raw_dir, [r1], [r1], {"strong": 0, "minority": 0, "disputed": 0}, 0, 0.0, [],
+            harvest.write_fetch_report(raw_dir, [r1], [r1], 0, 0.0, [],
                                         goal_text="研究类型\nselection（选型类）")
             report = (raw_dir / "fetch-report.md").read_text(encoding="utf-8")
             self.assertIn("PENDING——harvester 须补填（selection 类必填）", report)

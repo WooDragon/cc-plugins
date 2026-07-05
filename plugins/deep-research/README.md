@@ -85,7 +85,7 @@ python3 -m pytest plugins/deep-research/tests/
 
 | Suite | Coverage |
 |-------|----------|
-| `test_harvest.py` | multi-model harvest, citation verification, consensus labels, SSRF guard, exit-code semantics |
+| `test_harvest.py` | multi-model harvest, citation verification, SSRF guard, exit-code semantics |
 | `test_gate_check.py` | SubagentStop gate: PASS-claim verification, project-dir location, fail-open behavior |
 
 ## Version History
