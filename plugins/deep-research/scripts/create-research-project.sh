@@ -119,9 +119,24 @@ fi
 
 # ---------------------------------------------------------------------------
 # 目录名和路径
+#
+# 落点规则：若当前工作目录已是研究存档库根（存在 projects/ 子目录），
+# 项目落进 projects/ 下（独立性原则 principles.md:1「projects/{name}/」）；
+# 否则退回当前工作目录，保持插件对非存档库场景的通用性。
+# 这样「存档库根直接跑脚本却落在根目录」的特殊情况被消除，无需用户记规矩。
 # ---------------------------------------------------------------------------
 DIR_NAME=$(echo "$TOPIC_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
-PROJECT_DIR="$(pwd)/$DIR_NAME"
+
+# 落点：研究项目一律住 projects/{name}/（独立性原则 principles.md:1）。
+# 幂等解析 projects 根——无论 cwd 站在 projects 树的哪一层，都归一到
+# 同一个 projects/，永远追加一次、绝不嵌套（消除「cwd 在哪」这个特殊情况）。
+CWD="$(pwd)"
+case "$CWD" in
+    */projects)   PROJECT_ROOT="$CWD" ;;                          # 正站在 projects/ 里
+    */projects/*) PROJECT_ROOT="${CWD%%/projects/*}/projects" ;;  # 在 projects/ 子树深处，归一到最上层 projects
+    *)            PROJECT_ROOT="$CWD/projects" ;;                  # 其他，总是建 projects/
+esac
+PROJECT_DIR="$PROJECT_ROOT/$DIR_NAME"
 
 if [[ -d "$PROJECT_DIR" ]]; then
     echo "错误: 目录 $PROJECT_DIR 已存在" >&2
