@@ -142,7 +142,7 @@ Lead 的采集指令，必须包含：
 - 候选类别清单: [已识别的候选方案类别]
 - 候选基数: N (selection 类型须 ≥ 3，否则 G1 强制补搜)
 - 饱和轮次记录: [最近 2 轮有无新候选类别；无则 "saturation reached after N rounds"]
-## 多模型共识统计（仅 harvest.py 项目；legacy 链填 N/A）
+## 多模型参与情况（仅 harvest.py 项目；legacy 链填 N/A）
 - 参与模型: [gemini/gpt/claude 存活列表]
 - 法定人数状态: quorum_met (true/false)，未达标时列出缺席模型及原因
 ## 引用校验统计（仅 harvest.py 项目；legacy 链填 N/A）
