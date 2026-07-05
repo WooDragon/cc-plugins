@@ -105,7 +105,6 @@ reviewer（mode=sufficiency）在 G1/G2/G3 三个门使用。维度 1-6 是 1-5 
   - **反驳搜索**：强制回答「如果结论是错的，最可能因为什么」+ 是否已采集足以反驳的证据（Diagnostic Time-out，对抗 Einstellung Effect）。未做 → 不通过。
   - **判据回链（机械门）**：每个评判判据必须能 cite `research-goal.md` 的**具体小节标题或原句文本**（不用行号——行号随编辑漂移会误杀）。cite 不上即判据无效。这是机械裁决，不要求 reviewer 主观重判前提（跳出同模型回音壁）。
   - **证伪不可省 + 对称举证**：结论为「维持现状 / 省成本」时，唯一能证伪当前假设的步骤必须「已做」或「已显式记录豁免理由（确证无法证伪 / 成本不对称）」二选一，**皆无 → 不通过**。现状不享有「默认正确」信用，但回链得上 primary_job 的现状结论不被额外惩罚（防矫枉过正）。
-  - **共识分级逐条处置量化下限（harvest.py 项目）**：`merged-findings.json` 中每条 `minority` / `disputed` 标签的结论，reviewer 必须**逐条**给出处置结论——**采纳提级**（记录 Correction Record）/ **维持降权**（保留「少数派观点/存争议」措辞）/ **驳回**（不采信），并各附一句理由。未逐条处置 → 此项不通过（FAIL）。这是把「质性检查无下限」的缺口补成量化门槛：minority/disputed 数量再多，也不能被笼统一句「已核实」带过。
 
 详解见 [principles.md](./principles.md) 元原则 0。
 
@@ -166,7 +165,7 @@ GATE_VERDICT: G<N> PASS|FAIL|RECYCLE
 
 引用率门槛是**双条件与**：被拒 claim 数 ≥ 2 **且** INVALID 引用率 > 5% 才判 FAIL——真实冒烟中出现过小样本下单条孤立被拒（已过一次重试、已被剔除出最终产物）把整锅判 FAIL 的假阳性，门槛本意是拦系统性造假，不是拦单条噪声。被拒 claim 的具体内容和拒绝原因见 `harvest/<alias>/rejected_claims.json`。
 
-DEGRADED（法定人数 2/3，即三模型中一路失败但 ≥quorum 存活）不算 FAIL，但 reviewer 须在报告中标注哪一路模型缺席及原因。
+法定人数达标但存在缺席模型（quorum_met = true，非全员存活）不算 FAIL，但 reviewer 须在报告中标注哪一路模型缺席及原因。
 
 机械门与 Sufficiency 评分是**与**关系：机械门 FAIL 直接阻塞，不进入评分；机械门 PASS/N/A 后仍须过既有覆盖度/时效性/可信度/双语平衡评分。
 
