@@ -56,7 +56,7 @@ python3 <路径> run --goal-file <goal-file> --out pipeline/1_raw/
 
 ## 新建研究项目
 
-在**用户当前工作目录**创建项目骨架：
+创建项目骨架。研究项目一律落在 `projects/{name}/`（独立性原则）。脚本幂等解析 `projects/` 根：无论当前工作目录站在 `projects/` 树的哪一层（存档库根 / `projects/` 内 / 某项目子目录深处），都归一到同一个 `projects/`，只追加一次、绝不嵌套；不在 `projects/` 树内时则在当前工作目录下建 `projects/`。
 
 ```bash
 ${CLAUDE_PLUGIN_ROOT}/scripts/create-research-project.sh "研究主题" --type web-research
