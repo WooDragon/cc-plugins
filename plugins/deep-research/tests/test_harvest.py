@@ -2424,8 +2424,8 @@ class TestSupplementaryRunIsolation(unittest.TestCase):
     def tearDown(self):
         self.tmpdir.cleanup()
 
-    def _run(self, raw_dir, project_dir_arg):
-        kwargs = dict(goal_file=str(self.goal_file), out=str(raw_dir), config="unused", local_dir=None)
+    def _run(self, raw_dir, project_dir_arg, goal_file_arg=None):
+        kwargs = dict(goal_file=str(goal_file_arg or self.goal_file), out=str(raw_dir), config="unused", local_dir=None)
         if project_dir_arg is not None:
             kwargs["project_dir"] = str(project_dir_arg)
         args = argparse_ns(**kwargs)
@@ -2538,6 +2538,65 @@ class TestSupplementaryRunIsolation(unittest.TestCase):
         self.assertTrue(verify_file.exists())
         track_glob = list((self.project_dir / "pipeline" / "verification").glob("track_*.json"))
         self.assertEqual(track_glob, [])
+
+    def test_supplementary_run_accepts_own_goal_file_and_anchors_its_hash(self):
+        # Framework principle 6: a project is 1 primary track + N supplementary
+        # tracks, each a deep-dive into a DIFFERENT sub-question (its own goal
+        # text), each independently gated. A supplementary run must therefore
+        # accept its own goal-file (distinct from the canonical
+        # research-goal.md) and anchor goal_file_sha256 to THAT file -- the
+        # audit trail stays honest because it records the text the panel
+        # actually ran on, just not the canonical one. The canonical hard
+        # check is a primary-track rule only.
+        import hashlib
+        track_goal = self.project_dir / "intake" / "requirements" / "supplement-goal-brand.md"
+        track_goal.write_text("does brand tuning differ for astigmatism?", encoding="utf-8")
+
+        supplementary_raw_dir = self.project_dir / "pipeline" / "1_raw" / "track_brand"
+        code = self._run(supplementary_raw_dir, self.project_dir, goal_file_arg=track_goal)
+        self.assertEqual(code, 3)  # past goal resolution, aborted later on quorum -- NOT exit 1
+
+        # Its own track state file anchors the supplementary goal-file's hash,
+        # never the canonical research-goal.md's.
+        verify_dir = self.project_dir / "pipeline" / "verification"
+        track_file = verify_dir / harvest.track_verify_filename(supplementary_raw_dir)
+        self.assertTrue(track_file.exists())
+        data = json.loads(track_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["goal_file_sha256"], hashlib.sha256(track_goal.read_bytes()).hexdigest())
+        self.assertNotEqual(data["goal_file_sha256"], hashlib.sha256(self.goal_file.read_bytes()).hexdigest())
+
+    def test_supplementary_goal_file_outside_project_still_aborts(self):
+        # The canonical relaxation is scoped: a supplementary run may use its
+        # own goal-file, but that file must still live inside the project
+        # (so the audit trail anchors to a project-tracked artifact, not some
+        # arbitrary path on disk). A goal-file outside project_dir aborts
+        # before any state write -- same audit-integrity guarantee as the
+        # primary-track canonical check.
+        stray_goal = Path(self.tmpdir.name) / "outside-project.md"
+        stray_goal.write_text("stray goal text", encoding="utf-8")
+
+        supplementary_raw_dir = self.project_dir / "pipeline" / "1_raw" / "track_stray"
+        code = self._run(supplementary_raw_dir, self.project_dir, goal_file_arg=stray_goal)
+        self.assertEqual(code, 1)  # rejected before state write
+
+        verify_dir = self.project_dir / "pipeline" / "verification"
+        track_file = verify_dir / harvest.track_verify_filename(supplementary_raw_dir)
+        self.assertFalse(track_file.exists())
+
+    def test_primary_run_still_rejects_noncanonical_goal_file(self):
+        # Regression guard for #25: the canonical hard check must remain
+        # intact on the PRIMARY track (no --project-dir OR --out is the
+        # canonical 1_raw). Relaxing it for supplementary runs must not open
+        # a hole in the primary-track audit guarantee.
+        other_goal = self.project_dir / "intake" / "requirements" / "not-canonical.md"
+        other_goal.write_text("different primary goal text", encoding="utf-8")
+
+        primary_raw_dir = self.project_dir / "pipeline" / "1_raw"
+        code = self._run(primary_raw_dir, self.project_dir, goal_file_arg=other_goal)
+        self.assertEqual(code, 1)  # primary track: non-canonical goal-file still hard-aborts
+
+        verify_file = self.project_dir / "pipeline" / "verification" / harvest.VERIFY_FILE
+        self.assertFalse(verify_file.exists())
 
 
 class TestFetchReportRealStats(unittest.TestCase):

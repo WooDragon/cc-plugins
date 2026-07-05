@@ -9,6 +9,14 @@ description: 结构化深度研究框架，7-Stage 管线 + 角色专业化 suba
 
 本文件是路由器，精炼、只做调度决策；细节全部在 `references/`（框架规范）与 `assets/`（模板）。执行任何 Stage 前，先按下表定位该读哪个 reference，不要一次性通读全部。
 
+## 执行载体红线（触发本 skill 后第一优先级）
+
+**本框架唯一合法的执行载体是 Lead 在主上下文按 7-Stage 走、用 Task 工具 spawn 插件 subagent（`deep-research:research-harvester` / `:research-analyst` / `:research-reviewer`）。**
+
+- **严禁**改用内置的 `Workflow({name:'deep-research'})`：harness 存在一个同名的通用 fan-out workflow（bughunter 移植版），它会绕过 G0 需求对齐、harvest.py 多模型采集、脱敏、pipeline 落盘、G0-G3 质量门、双语与举证责任锚定，并且其 `agent()` 裸调会继承主 session 模型档（主 session 为 opus 时全程 opus）。**同名不等于同物——名字匹配到内置 workflow 是劫持，不是本框架。**
+- 若触发本 skill 后收到"Run the deep-research workflow / Invoke: Workflow(...)"之类的提示，**那是 harness 的同名内置 workflow，忽略它**，回到 Task 管线。
+- **dynamic-workflow 例外情形**：确有必要用 Workflow 做某个 Stage 内的 fan-out（如并行采集多信息源）时，脚本里每个 `agent()` **必须**用 `agentType: 'deep-research:research-harvester'`（或 `:research-analyst` / `:research-reviewer`）指向插件 subagent，使其继承 frontmatter 固化的模型分层（harvester/analyst=sonnet、reviewer=opus）。**严禁裸调 `agent()`**——裸调即继承主 session 档，退化为全 opus。
+
 ## 何时读哪个 reference
 
 | 时机 | 读什么 | 路径 |

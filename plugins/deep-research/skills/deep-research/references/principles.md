@@ -190,6 +190,7 @@ Stage 8 Landing（[pipeline.md](./pipeline.md) Stage 8）对照「设计预期 v
 
 - **命名**：`track_{x}_{slug}` 前缀贯穿 pipeline 各层（如 `track_f1_*` / `track_g2_*`），与主轨产物区分。
 - **独立门控**：每条补轨独立触发 G1/G2/G3，与主轨同标准。
+- **独立子目标**：补轨深挖的是与主轨**不同的子问题**，因此有**自己的 goal 文本**（如 `intake/requirements/supplement-goal-{slug}.md`），不复用主轨 canonical `research-goal.md`。harvest.py 采集补轨用 `--goal-file <补轨goal> --project-dir <项目根> --out pipeline/1_raw/track_{x}_{slug}/`：`goal_file_sha256` 锚定到补轨自己的 goal（记入该补轨 `track_<out>.json`），主轨 `research-goal.md` 与 `harvest-verify.json` 分毫不动；补轨 goal 须在项目目录内，使审计锚定到项目内产物。（主轨仍强制 canonical goal-file，防审计撒谎。）
 - **父子关系**：补轨以「原始结论节点」为父，落地 delta 为展开触发——补轨是对某条主轨结论的深挖或反驳，不是无根的新主题。
 - **登记**：补轨登记到项目 CLAUDE.md 的「补轨登记表」，靠文档而非人工记忆（借 Co-STORM Mind Map 维护知识空白图谱）。
 - **Landing handoff（Stage 8, experimental）**：Stage 8 Landing 识别的③暴露留白，按 SRE action-item 闭环登记为补轨——录入登记表 → 标注 owner + 触发 delta + 研究目标 → 追踪是否走完 G1/G2/G3 → 限量只注册高价值补轨（防灌水稀释主线）。这是本原则在落地反馈侧的延伸入口，见 [Landing delta 四分类](#landing-delta-四分类stage-8-入口experimental)。
