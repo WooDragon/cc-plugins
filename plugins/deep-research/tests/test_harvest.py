@@ -142,6 +142,79 @@ class TestRateLimiter(unittest.TestCase):
         self.assertGreaterEqual(total_span, 4 * 0.02 * 0.6)
 
 
+class TestBuildBackendsFetchInterval(unittest.TestCase):
+    """Defect 2 (rate-limit decoupling): fetch backends must get their own
+    fetch_min_interval_s, not search's -- with a fallback to the search
+    interval so an older config missing the new key doesn't KeyError."""
+
+    def test_fetch_backend_uses_independent_interval_when_key_present(self):
+        config = base_config(
+            search_backends=[{"type": "duckduckgo"}],
+            fetch_backends=[{"type": "urllib-ua"}],
+        )
+        config["limits"]["search_min_interval_s"] = 2.0
+        config["limits"]["fetch_min_interval_s"] = 0.5
+        _, fetch_backends = harvest.build_backends(config)
+        limiter = fetch_backends[0][1]
+        self.assertEqual(limiter._min_interval, 0.5)
+
+    def test_fetch_backend_falls_back_to_search_interval_when_key_absent(self):
+        # Older config with no fetch_min_interval_s key at all -- must not
+        # KeyError, must fall back to the existing search interval so
+        # pre-upgrade behavior is unchanged.
+        config = base_config(
+            search_backends=[{"type": "duckduckgo"}],
+            fetch_backends=[{"type": "urllib-ua"}],
+        )
+        config["limits"]["search_min_interval_s"] = 2.0
+        self.assertNotIn("fetch_min_interval_s", config["limits"])
+        _, fetch_backends = harvest.build_backends(config)
+        limiter = fetch_backends[0][1]
+        self.assertEqual(limiter._min_interval, 2.0)
+
+    def test_search_backend_interval_unaffected_by_fetch_key(self):
+        config = base_config(
+            search_backends=[{"type": "duckduckgo"}],
+            fetch_backends=[{"type": "urllib-ua"}],
+        )
+        config["limits"]["search_min_interval_s"] = 2.0
+        config["limits"]["fetch_min_interval_s"] = 0.5
+        search_backends, _ = harvest.build_backends(config)
+        limiter = search_backends[0][1]
+        self.assertEqual(limiter._min_interval, 2.0)
+
+
+class TestRunFetchCallsParallel(unittest.TestCase):
+    """Defect 2 (parallel fetch): a raising future must still yield exactly
+    one tool response per tool_call_id, in the original call order -- not
+    the arrival order as_completed() would otherwise produce."""
+
+    def test_parallel_fetch_exception_still_yields_tool_response(self):
+        config = base_config(fetch_backends=[{"type": "urllib-ua"}])
+        journal = []
+        tool_calls = [
+            {"id": "c1", "function": {"name": "fetch", "arguments": json.dumps({"url": "https://a.com/1"})}},
+            {"id": "c2", "function": {"name": "fetch", "arguments": json.dumps({"url": "https://a.com/2"})}},
+            {"id": "c3", "function": {"name": "fetch", "arguments": json.dumps({"url": "https://a.com/3"})}},
+        ]
+
+        def fake_execute(tc, search_backends, fetch_backends, journal, config, local_dir):
+            args = json.loads(tc["function"]["arguments"])
+            if args["url"] == "https://a.com/2":
+                raise RuntimeError("boom")
+            return json.dumps({"content": args["url"]})
+
+        with mock.patch("harvest.execute_tool_call", side_effect=fake_execute):
+            results = harvest._run_fetch_calls_parallel(tool_calls, [], [], journal, config, None)
+
+        self.assertEqual(len(results), 3)
+        self.assertEqual(json.loads(results[0])["content"], "https://a.com/1")
+        error_payload = json.loads(results[1])
+        self.assertIn("error", error_payload)
+        self.assertIn("boom", error_payload["error"])
+        self.assertEqual(json.loads(results[2])["content"], "https://a.com/3")
+
+
 # ---------------------------------------------------------------------------
 # SSRF guard
 # ---------------------------------------------------------------------------
@@ -2323,6 +2396,148 @@ class TestCmdRunGoalFileResolution(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
         verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
         self.assertFalse(verify_file.exists())
+
+
+class TestSupplementaryRunIsolation(unittest.TestCase):
+    """Defect 3: --project-dir re-anchoring + supplementary (backfill) run
+    isolation. A supplementary run's --out is not the canonical
+    pipeline/1_raw -- it must never write to, or clean up, the primary
+    track's VERIFY_FILE/LEGACY_EXEMPTION_FILE."""
+
+    class Dead:
+        """client.complete() raises -> run_worker catches it as FAILED for
+        every model -> alive=[] -> quorum not met -> abort_unavailable, the
+        same early-exit path TestCmdRunGoalFileResolution already relies on
+        to observe state-file writes without a real model call."""
+        def complete(self, messages, tools):
+            raise RuntimeError("down")
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.project_dir = Path(self.tmpdir.name) / "project"
+        goal_dir = self.project_dir / "intake" / "requirements"
+        goal_dir.mkdir(parents=True)
+        self.goal_file = goal_dir / harvest.GOAL_FILE_NAME
+        self.goal_file.write_text("why is the sky blue?", encoding="utf-8")
+        self.config = base_config()
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _run(self, raw_dir, project_dir_arg):
+        kwargs = dict(goal_file=str(self.goal_file), out=str(raw_dir), config="unused", local_dir=None)
+        if project_dir_arg is not None:
+            kwargs["project_dir"] = str(project_dir_arg)
+        args = argparse_ns(**kwargs)
+        with mock.patch("harvest.load_config", return_value=self.config), \
+             mock.patch("harvest.make_client_factory", return_value=lambda model_id: self.Dead()):
+            with self.assertRaises(SystemExit) as ctx:
+                harvest.cmd_run(args)
+        return ctx.exception.code
+
+    def test_project_dir_reanchors_verify_dir(self):
+        # --out deliberately nested outside the pipeline/1_raw convention --
+        # the legacy reverse-derivation (raw_dir.parent.parent) would anchor
+        # verify_dir under project_dir/custom/nested/verification, which is
+        # wrong. With --project-dir given explicitly, verify_dir must land
+        # at project_dir/pipeline/verification regardless of where --out
+        # physically sits.
+        raw_dir = self.project_dir / "custom" / "nested" / "out"
+        code = self._run(raw_dir, self.project_dir)
+        self.assertEqual(code, 3)  # past goal resolution, aborted on quorum
+
+        wrong_verify_dir = self.project_dir / "custom" / "nested" / "verification"
+        self.assertFalse(wrong_verify_dir.exists())
+
+        # raw_dir != project_dir/pipeline/1_raw -> supplementary -> its own
+        # track_<name>.json under the correctly-anchored verify_dir.
+        correct_verify_dir = self.project_dir / "pipeline" / "verification"
+        track_file = correct_verify_dir / harvest.track_verify_filename(raw_dir)
+        self.assertTrue(track_file.exists())
+
+    def test_supplementary_run_does_not_clobber_main_verify(self):
+        # Primary track already has a recorded gate verdict from a prior
+        # real run -- the supplementary backfill run below must leave it
+        # byte-for-byte untouched.
+        primary_raw_dir = self.project_dir / "pipeline" / "1_raw"
+        primary_raw_dir.mkdir(parents=True)
+        primary_verify_dir = self.project_dir / "pipeline" / "verification"
+        primary_verify_dir.mkdir(parents=True)
+        primary_verify_file = primary_verify_dir / harvest.VERIFY_FILE
+        primary_payload = json.dumps({"verdict": "OK", "goal_file_sha256": "deadbeef"}, ensure_ascii=False)
+        primary_verify_file.write_text(primary_payload, encoding="utf-8")
+
+        supplementary_raw_dir = primary_raw_dir / "track_gap_A"
+        code = self._run(supplementary_raw_dir, self.project_dir)
+        self.assertEqual(code, 3)
+
+        # Primary VERIFY_FILE must be exactly what it was before -- never
+        # overwritten with the supplementary run's own RUNNING/UNAVAILABLE
+        # tombstone.
+        self.assertEqual(primary_verify_file.read_text(encoding="utf-8"), primary_payload)
+
+        # The supplementary run's own state landed in its own track file.
+        track_file = primary_verify_dir / harvest.track_verify_filename(supplementary_raw_dir)
+        self.assertTrue(track_file.exists())
+        track_payload = json.loads(track_file.read_text(encoding="utf-8"))
+        self.assertEqual(track_payload["verdict"], "UNAVAILABLE")
+
+    def test_supplementary_cleanup_never_touches_main_state(self):
+        # Unit-test cleanup_stale_supplementary_state() directly against a
+        # primary track that has real artifacts + a legacy exemption, plus
+        # stale artifacts of its own -- confirms the scoped cleanup only
+        # ever removes its own track file / its own --out subdirectory.
+        primary_raw_dir = self.project_dir / "pipeline" / "1_raw"
+        primary_raw_dir.mkdir(parents=True)
+        verify_dir = self.project_dir / "pipeline" / "verification"
+        verify_dir.mkdir(parents=True)
+
+        primary_verify_file = verify_dir / harvest.VERIFY_FILE
+        primary_verify_file.write_text("{}", encoding="utf-8")
+        primary_exemption_file = verify_dir / harvest.LEGACY_EXEMPTION_FILE
+        primary_exemption_file.write_text("exempt", encoding="utf-8")
+        primary_merged = primary_raw_dir / harvest.MERGED_FINDINGS_FILE
+        primary_merged.write_text("{}", encoding="utf-8")
+        primary_harvest_dir = primary_raw_dir / harvest.HARVEST_SUBDIR
+        primary_harvest_dir.mkdir()
+        (primary_harvest_dir / "marker.txt").write_text("keep me", encoding="utf-8")
+
+        supplementary_raw_dir = primary_raw_dir / "track_gap_A"
+        supplementary_raw_dir.mkdir()
+        verify_filename = harvest.track_verify_filename(supplementary_raw_dir)
+        stale_track_file = verify_dir / verify_filename
+        stale_track_file.write_text('{"verdict": "RUNNING"}', encoding="utf-8")
+        stale_merged = supplementary_raw_dir / harvest.MERGED_FINDINGS_FILE
+        stale_merged.write_text("{}", encoding="utf-8")
+        stale_harvest_dir = supplementary_raw_dir / harvest.HARVEST_SUBDIR
+        stale_harvest_dir.mkdir()
+
+        harvest.cleanup_stale_supplementary_state(verify_dir, supplementary_raw_dir, verify_filename)
+
+        # Own stale state gone.
+        self.assertFalse(stale_track_file.exists())
+        self.assertFalse(stale_merged.exists())
+        self.assertFalse(stale_harvest_dir.exists())
+
+        # Primary state never touched.
+        self.assertTrue(primary_verify_file.exists())
+        self.assertTrue(primary_exemption_file.exists())
+        self.assertTrue(primary_merged.exists())
+        self.assertTrue((primary_harvest_dir / "marker.txt").exists())
+
+    def test_no_project_dir_preserves_legacy_reverse_derivation(self):
+        # No --project-dir at all (attribute absent from the args namespace,
+        # matching every pre-existing caller) -- getattr fallback must keep
+        # the old raw_dir.parent / raw_dir.parent.parent derivation and the
+        # plain (non-track-prefixed) VERIFY_FILE untouched.
+        raw_dir = self.project_dir / "pipeline" / "1_raw"
+        code = self._run(raw_dir, project_dir_arg=None)
+        self.assertEqual(code, 3)
+
+        verify_file = self.project_dir / "pipeline" / "verification" / harvest.VERIFY_FILE
+        self.assertTrue(verify_file.exists())
+        track_glob = list((self.project_dir / "pipeline" / "verification").glob("track_*.json"))
+        self.assertEqual(track_glob, [])
 
 
 class TestFetchReportRealStats(unittest.TestCase):
