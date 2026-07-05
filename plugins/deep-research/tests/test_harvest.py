@@ -893,6 +893,15 @@ class TestResolveGroundingRedirect(unittest.TestCase):
             result = harvest._resolve_grounding_redirect(uri, 5)
         self.assertIsNone(result)
 
+    def test_malformed_uri_returns_none_without_raising(self):
+        # uri is model-controlled grounding output; an unterminated IPv6
+        # literal makes urlsplit raise ValueError -- must be swallowed and
+        # dropped, never propagated to abort the whole backend.
+        with mock.patch("harvest._no_redirect_opener.open") as m:
+            result = harvest._resolve_grounding_redirect("http://[::1", 5)
+        self.assertIsNone(result)
+        m.assert_not_called()
+
 
 class TestGeminiGroundingFallThrough(unittest.TestCase):
     def test_agy_cli_failure_falls_through_to_real_gemini_grounding(self):

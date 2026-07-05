@@ -682,9 +682,18 @@ def _resolve_grounding_redirect(uri, timeout):
     fixed, trusted grounding host -- any other host is rejected before a single
     byte goes out (so this is not an SSRF surface even though the uri
     originates from model output). Returns the real URL, or None (caller drops
-    the chunk) on a non-grounding host, a non-redirect response, or any network
-    error."""
-    if urllib.parse.urlsplit(uri).hostname != _GROUNDING_REDIRECT_HOST:
+    the chunk) on a malformed uri, a non-grounding host, a non-redirect
+    response, or any network error."""
+    try:
+        # uri is model/provider-controlled grounding output; a malformed value
+        # (e.g. an unterminated IPv6 literal) makes urlsplit raise ValueError.
+        # Treat it as a droppable bad chunk -- same guard is_blacklisted() puts
+        # on this exact call -- so one bad uri can't abort the whole backend
+        # and discard every other valid chunk.
+        host = urllib.parse.urlsplit(uri).hostname
+    except ValueError:
+        return None
+    if host != _GROUNDING_REDIRECT_HOST:
         return None
     req = urllib.request.Request(
         uri, headers={"User-Agent": "Mozilla/5.0 (compatible; harvest.py/1.0)"})
