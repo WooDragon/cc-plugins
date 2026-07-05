@@ -823,6 +823,26 @@ class TestGeminiGroundingSearch(unittest.TestCase):
         self.assertEqual(results[0]["title"], "example.com")
         self.assertEqual(results[0]["snippet"], "example.com")
 
+    def test_derives_native_endpoint_and_google_search_payload(self):
+        # Locks the exact code path the PR fixes (the rstrip('/v1') trap):
+        # origin is derived via urlsplit and the /v1 path is dropped, the
+        # native generateContent endpoint is targeted, and the payload carries
+        # the built-in google_search tool. A regression mangling any of these
+        # would otherwise pass the whole suite (other cases only inspect the
+        # parsed result, never what was sent).
+        cfg = base_config()  # gateway.base_url == "https://gw.example.com/v1"
+        chunks = [_grounding_chunk(
+            "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1", "example.com")]
+        with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
+             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)) as post_mock, \
+             mock.patch("harvest._resolve_grounding_redirect", return_value="https://example.com/real"):
+            harvest._search_gemini_grounding({"model": "gemini-3.5-flash"}, "q", 5, cfg)
+        sent_url, sent_payload = post_mock.call_args.args[0], post_mock.call_args.args[1]
+        self.assertEqual(
+            sent_url, "https://gw.example.com/v1beta/models/gemini-3.5-flash:generateContent")
+        self.assertEqual(sent_payload["tools"], [{"google_search": {}}])
+        self.assertEqual(sent_payload["contents"][0]["role"], "user")
+
     def test_missing_grounding_metadata_degrades_with_reason(self):
         cfg = base_config()
         with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
