@@ -1392,7 +1392,10 @@ def build_system_prompt(goal_text, local_manifest, alias, max_steps):
         "citing a bare search snippet is forbidden.",
         "2. excerpt must be 100% verbatim in the source's original language -- "
         "never translate, paraphrase, or truncate it. claim may be in Chinese; "
-        "excerpt must be copied from the original text.",
+        "excerpt must be copied from the original text. excerpt must be a "
+        "verbatim fragment of the fetched page's BODY content -- never "
+        "substitute the page title, a search-result snippet, a byline, or a "
+        "paper's title for it. A title is not body text.",
         "3. Only cite text that literally appears in a tool result.",
         "4. Search in both Chinese and English for each core concept.",
         f"5. You have a budget of about {max_steps} tool-use rounds.",
