@@ -72,6 +72,16 @@ def resolve_goal_file(project_dir):
             return candidate
     return None
 
+
+def _is_within(path, root):
+    """True iff resolved `path` is `root` itself or nested under it. Used to
+    bound a supplementary run's own goal-file to the project tree so its
+    recorded goal_file_sha256 always anchors to a project-tracked artifact,
+    never an arbitrary path on disk."""
+    path = Path(path).resolve()
+    root = Path(root).resolve()
+    return path == root or root in path.parents
+
 TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "search",
@@ -2042,14 +2052,41 @@ def cmd_run(args):
 
     goal_path = Path(args.goal_file).resolve()
     canonical_goal_file = canonical_goal_file.resolve()
-    if goal_path != canonical_goal_file:
-        print(f"error: --goal-file {goal_path} does not match the conventionally-resolved "
-              f"goal file {canonical_goal_file} for this project; pass the canonical path so "
-              "goal_file_sha256 is anchored to the text harvest actually runs on", file=sys.stderr)
-        sys.exit(1)
+    if is_supplementary:
+        # Framework principle 6: one project = 1 primary track + N
+        # supplementary tracks, each a deep-dive into a DIFFERENT sub-question
+        # with its own goal text and independent gate. A backfill run may
+        # therefore run on its own goal-file rather than the canonical
+        # research-goal.md -- goal_file_sha256 anchors to THAT file (recorded
+        # in this track's own track_<out>.json), so the audit trail still
+        # names the exact text the panel ran on, just not the canonical one.
+        # The relaxation is bounded: the supplementary goal-file must exist
+        # and live inside the project tree, so the anchor is always a
+        # project-tracked artifact, never an arbitrary path on disk.
+        if not goal_path.exists():
+            print(f"error: --goal-file {goal_path} does not exist", file=sys.stderr)
+            sys.exit(1)
+        if not _is_within(goal_path, project_dir):
+            print(f"error: supplementary --goal-file {goal_path} is outside the project "
+                  f"directory {project_dir}; a supplementary track's goal file must live "
+                  "inside the project so goal_file_sha256 anchors to a project-tracked "
+                  "artifact", file=sys.stderr)
+            sys.exit(1)
+        run_goal_file = goal_path
+    else:
+        # Primary track: goal-file must be the canonical research-goal.md, or
+        # the panel would run on CLI-supplied text while goal_file_sha256 gets
+        # anchored to a different file -- the audit trail would lie about what
+        # was researched (#25). Unchanged hard check.
+        if goal_path != canonical_goal_file:
+            print(f"error: --goal-file {goal_path} does not match the conventionally-resolved "
+                  f"goal file {canonical_goal_file} for this project; pass the canonical path so "
+                  "goal_file_sha256 is anchored to the text harvest actually runs on", file=sys.stderr)
+            sys.exit(1)
+        run_goal_file = canonical_goal_file
 
-    goal_text = canonical_goal_file.read_text(encoding="utf-8")
-    goal_hash = hashlib.sha256(canonical_goal_file.read_bytes()).hexdigest()
+    goal_text = run_goal_file.read_text(encoding="utf-8")
+    goal_hash = hashlib.sha256(run_goal_file.read_bytes()).hexdigest()
 
     if is_supplementary:
         # Never cleanup_stale_state() here -- that function unconditionally
