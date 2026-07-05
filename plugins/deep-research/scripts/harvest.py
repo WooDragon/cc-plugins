@@ -1752,23 +1752,23 @@ def compute_consensus_stats(merged):
 # Verify.json (single-exit-point writer, tombstones, state cleanup)
 # ---------------------------------------------------------------------------
 
-def write_verify_json(verify_dir, goal_hash, verdict, extra=None):
+def write_verify_json(verify_dir, goal_hash, verdict, extra=None, verify_filename=VERIFY_FILE):
     verify_dir.mkdir(parents=True, exist_ok=True)
     payload = {"verdict": verdict, "goal_file_sha256": goal_hash, "run_timestamp": time.time()}
     if extra:
         payload.update(extra)
-    (verify_dir / VERIFY_FILE).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    (verify_dir / verify_filename).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
 
 
-def write_tombstone(verify_dir, goal_hash):
-    return write_verify_json(verify_dir, goal_hash, "RUNNING")
+def write_tombstone(verify_dir, goal_hash, verify_filename=VERIFY_FILE):
+    return write_verify_json(verify_dir, goal_hash, "RUNNING", verify_filename=verify_filename)
 
 
-def abort_unavailable(verify_dir, goal_hash, reason, extra=None):
+def abort_unavailable(verify_dir, goal_hash, reason, extra=None, verify_filename=VERIFY_FILE):
     payload = dict(extra or {})
     payload["reason"] = reason
-    write_verify_json(verify_dir, goal_hash, "UNAVAILABLE", payload)
+    write_verify_json(verify_dir, goal_hash, "UNAVAILABLE", payload, verify_filename=verify_filename)
     sys.exit(3)
 
 
@@ -1776,10 +1776,40 @@ def cleanup_stale_state(pipeline_dir, verify_dir, raw_dir):
     """Unconditional cleanup before any network request: a failed run must
     never let a hook read last run's stale verify.json / exemption and
     silently pass. The exemption is single-use -- rerunning run() means the
-    user is re-accepting the gate for this round."""
+    user is re-accepting the gate for this round.
+
+    Primary-track only: touches the main VERIFY_FILE/EXEMPTION and the main
+    raw_dir's shared artifacts. A supplementary (backfill) run must never
+    call this -- see cleanup_stale_supplementary_state()."""
     for f in (verify_dir / VERIFY_FILE, verify_dir / LEGACY_EXEMPTION_FILE):
         if f.exists():
             f.unlink()
+    merged_file = raw_dir / MERGED_FINDINGS_FILE
+    if merged_file.exists():
+        merged_file.unlink()
+    harvest_dir = raw_dir / HARVEST_SUBDIR
+    if harvest_dir.exists():
+        shutil.rmtree(harvest_dir)
+
+
+def track_verify_filename(raw_dir):
+    """Supplementary (backfill) runs get their own state file, named after
+    the --out subdirectory they write to, instead of sharing the primary
+    track's VERIFY_FILE -- see cmd_run()'s is_supplementary branch."""
+    return f"track_{raw_dir.name}.json"
+
+
+def cleanup_stale_supplementary_state(verify_dir, raw_dir, verify_filename):
+    """Supplementary-run counterpart of cleanup_stale_state(): scoped
+    strictly to this track's own state file (verify_dir/verify_filename)
+    and its own --out subdirectory (raw_dir). Must never touch the primary
+    track's VERIFY_FILE or LEGACY_EXEMPTION_FILE -- the main gate's
+    verdict is not this run's to clear. A track rerunning itself cleans up
+    only its own prior track file, so backfill runs don't accumulate
+    orphaned track_*.json files across retries."""
+    track_file = verify_dir / verify_filename
+    if track_file.exists():
+        track_file.unlink()
     merged_file = raw_dir / MERGED_FINDINGS_FILE
     if merged_file.exists():
         merged_file.unlink()
@@ -1967,9 +1997,36 @@ def cmd_run(args):
     _check_curl_cffi_available(config)
 
     raw_dir = Path(args.out)
-    pipeline_dir = raw_dir.parent
-    project_dir = pipeline_dir.parent
-    verify_dir = pipeline_dir / "verification"
+    # getattr(...) rather than args.project_dir: keeps this importable by
+    # older test/caller code that builds an args namespace without the new
+    # attribute at all.
+    project_dir_arg = getattr(args, "project_dir", None)
+    if project_dir_arg:
+        # Explicit --project-dir: pipeline_dir/verify_dir are re-anchored to
+        # it directly, never derived from raw_dir. This is what makes a
+        # supplementary run's --out (a subdirectory, e.g.
+        # pipeline/1_raw/track_A) safe -- the old raw_dir.parent/.parent
+        # derivation assumed --out was always exactly ".../pipeline/1_raw"
+        # and silently miscomputed project_dir for anything nested deeper.
+        project_dir = Path(project_dir_arg).resolve()
+        pipeline_dir = project_dir / "pipeline"
+        verify_dir = pipeline_dir / "verification"
+        # Supplementary (backfill) run iff --out isn't the canonical primary
+        # raw dir -- e.g. a subdirectory of it used to re-collect specific
+        # coverage_gaps without disturbing the main track's state.
+        is_supplementary = raw_dir.resolve() != (pipeline_dir / "1_raw").resolve()
+    else:
+        # Unchanged legacy derivation -- zero behavior change for existing
+        # callers that never pass --project-dir.
+        pipeline_dir = raw_dir.parent
+        project_dir = pipeline_dir.parent
+        verify_dir = pipeline_dir / "verification"
+        is_supplementary = False
+
+    # Supplementary runs get their own state file (track_<out-dir-name>.json)
+    # so they never overwrite the primary track's gate verdict; the primary
+    # gate (check_project()) only ever reads VERIFY_FILE.
+    verify_filename = track_verify_filename(raw_dir) if is_supplementary else VERIFY_FILE
 
     # canonical_goal_file (single shared resolver, same one check_project()
     # uses) is the sole source of truth for both the hash and the text that
@@ -1994,8 +2051,15 @@ def cmd_run(args):
     goal_text = canonical_goal_file.read_text(encoding="utf-8")
     goal_hash = hashlib.sha256(canonical_goal_file.read_bytes()).hexdigest()
 
-    cleanup_stale_state(pipeline_dir, verify_dir, raw_dir)
-    write_tombstone(verify_dir, goal_hash)
+    if is_supplementary:
+        # Never cleanup_stale_state() here -- that function unconditionally
+        # unlinks the PRIMARY VERIFY_FILE/EXEMPTION, which would erase the
+        # main track's already-recorded gate verdict. Scoped equivalent
+        # touches only this track's own state file + its own --out dir.
+        cleanup_stale_supplementary_state(verify_dir, raw_dir, verify_filename)
+    else:
+        cleanup_stale_state(pipeline_dir, verify_dir, raw_dir)
+    write_tombstone(verify_dir, goal_hash, verify_filename=verify_filename)
 
     try:
         install_ssrf_guard()
@@ -2032,13 +2096,15 @@ def cmd_run(args):
 
         if not quorum_met:
             abort_unavailable(verify_dir, goal_hash, "quorum not met",
-                               {"quorum_met": False, "models_alive": [r.alias for r in alive]})
+                               {"quorum_met": False, "models_alive": [r.alias for r in alive]},
+                               verify_filename=verify_filename)
 
         worker_findings_by_alias = {r.alias: r.findings for r in alive}
         judge_data, judge_err = run_judge_with_fallback(config, client_factory, worker_findings_by_alias, config["panel_models"])
         if judge_data is None:
             abort_unavailable(verify_dir, goal_hash, f"judge failed: {judge_err}",
-                               {"quorum_met": True, "models_alive": [r.alias for r in alive]})
+                               {"quorum_met": True, "models_alive": [r.alias for r in alive]},
+                               verify_filename=verify_filename)
 
         merged = merge_findings(worker_findings_by_alias, judge_data)
         consensus_stats = compute_consensus_stats(merged)
@@ -2061,12 +2127,12 @@ def cmd_run(args):
             "invalid_claim_count": invalid_total,
             "consensus_stats": consensus_stats,
             "total_claims": total_claims,
-        })
+        }, verify_filename=verify_filename)
         print(f"harvest run complete: verdict={verdict}")
     except SystemExit:
         raise
     except Exception as e:
-        abort_unavailable(verify_dir, goal_hash, f"unexpected error: {e}")
+        abort_unavailable(verify_dir, goal_hash, f"unexpected error: {e}", verify_filename=verify_filename)
 
 
 _VERDICT_EXIT_CODES = {"PASS": 0, "FAIL": 1, "N_A": 2}
@@ -2087,6 +2153,12 @@ def build_arg_parser():
     run_p.add_argument("--out", required=True)
     run_p.add_argument("--config", default=str(Path(__file__).with_name("harvest.config.json")))
     run_p.add_argument("--local-dir", default=None)
+    run_p.add_argument("--project-dir", default=None,
+                        help="Explicit project root; pipeline_dir/verify_dir are anchored to it "
+                             "instead of being derived from --out's parent directories. Required "
+                             "for a supplementary/backfill run where --out is a subdirectory of "
+                             "the primary pipeline/1_raw (otherwise the old raw_dir.parent.parent "
+                             "derivation miscomputes the project root).")
     run_p.set_defaults(func=cmd_run)
 
     check_p = sub.add_parser("check")
