@@ -902,6 +902,16 @@ class TestResolveGroundingRedirect(unittest.TestCase):
         self.assertIsNone(result)
         m.assert_not_called()
 
+    def test_grounding_host_non_redirect_200_returns_none_and_closes(self):
+        # A genuine 200 (short link resolved to nothing citable) -> drop the
+        # chunk (None) and close the response rather than leak it.
+        uri = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1"
+        fake_resp = mock.Mock()
+        with mock.patch("harvest._no_redirect_opener.open", return_value=fake_resp):
+            result = harvest._resolve_grounding_redirect(uri, 5)
+        self.assertIsNone(result)
+        fake_resp.close.assert_called_once()
+
 
 class TestGeminiGroundingFallThrough(unittest.TestCase):
     def test_agy_cli_failure_falls_through_to_real_gemini_grounding(self):
