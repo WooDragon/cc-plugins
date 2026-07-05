@@ -77,7 +77,7 @@ python3 <harvest.py 路径> run --goal-file intake/requirements/research-goal.md
 
 **1. Gemini CLI（主力）**
 ```bash
-gemini -m gemini-2.5-flash -p $'使用Google搜索查找以下问题的最新信息。\n\n规则：\n1. 必须联网搜索，严禁使用内置知识回答\n2. 搜索失败则只返回SEARCH_FAILED\n3. 返回最相关的5-10条结果\n4. 每条格式：标题 | 关键信息（1-2句） | 完整来源URL（必须包含完整路径）\n5. 不要做总结或分析，只返回搜索结果\n6. 去重：同一来源只保留最相关的一条\n7. 排除以下内容农场：CSDN、百度云、腾讯云、华为云、阿里云、火山引擎、稀土掘金\n\n搜索问题：{query}'
+gemini -m gemini-3.5-flash -p $'使用Google搜索查找以下问题的最新信息。\n\n规则：\n1. 必须联网搜索，严禁使用内置知识回答\n2. 搜索失败则只返回SEARCH_FAILED\n3. 返回最相关的5-10条结果\n4. 每条格式：标题 | 关键信息（1-2句） | 完整来源URL（必须包含完整路径）\n5. 不要做总结或分析，只返回搜索结果\n6. 去重：同一来源只保留最相关的一条\n7. 排除以下内容农场：CSDN、百度云、腾讯云、华为云、阿里云、火山引擎、稀土掘金\n\n搜索问题：{query}'
 ```
 
 **2. WebSearch（fallback）**：Gemini CLI 输出包含 `SEARCH_FAILED`、输出为空、或退出码非零时降级使用。

@@ -81,7 +81,7 @@ fetch 后端链同理降级：curl-cffi（本地免费直连，软依赖）→ t
 
 1. **Gemini CLI**（主力）：
    ```bash
-   gemini -m gemini-2.5-flash -p '使用Google搜索查找以下问题的最新信息。
+   gemini -m gemini-3.5-flash -p '使用Google搜索查找以下问题的最新信息。
    规则：必须联网搜索，严禁使用内置知识回答...'
    ```
 2. **WebSearch**（fallback）：当 Gemini CLI 输出包含 `SEARCH_FAILED`、输出为空、或退出码非零时降级
