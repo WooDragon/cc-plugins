@@ -497,7 +497,7 @@ def _http_json_post_with_retry(url, payload, headers, timeout):
 def _search_gemini_cli(cfg, query, timeout):
     try:
         proc = subprocess.run(
-            ["gemini", "-m", cfg.get("model", "gemini-2.5-flash"), "-p", query],
+            ["gemini", "-m", cfg.get("model", "gemini-3.5-flash"), "-p", query],
             capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL, text=True,
         )
     except subprocess.TimeoutExpired:

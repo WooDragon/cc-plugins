@@ -90,6 +90,7 @@ python3 -m pytest plugins/deep-research/tests/
 
 ## Version History
 
+- **v1.1.3** — Model refresh: panel `claude-sonnet-4-6` → `claude-sonnet-5`; fallback `gateway-gemini` search backend `gemini-2.5-flash` → `gemini-3.5-flash` (plus the mirrored default in `harvest.py`, doc examples, and test fixture). The `startswith("claude")` dispatch keeps `claude-sonnet-5` on the Anthropic-native `/messages` path (prompt caching intact).
 - **v1.1.2** — `create-research-project.sh` scaffolds into `projects/` idempotently: a path-segment `case` resolves the single `projects/` root no matter where cwd sits in the tree, so it appends exactly once and never nests. Fixed two stale `framework/*.md` references in `assets/` templates (→ skill `references/`).
 - **v1.0.0** — Initial release: extracted from the standalone research framework v3 into a distributable plugin; 3 roles converted to native subagents; harvest.py + gate_check.py path-decoupled from the framework repo.
 

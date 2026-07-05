@@ -6,7 +6,7 @@
   "panel_models": [
     "gemini-3.5-flash",
     "gpt-5.4",
-    "claude-sonnet-4-6"
+    "claude-sonnet-5"
   ],
   "judge_model": "claude-opus-4-6",
   "search_backends": [
@@ -16,7 +16,7 @@
     },
     {
       "type": "gateway-gemini",
-      "model": "gemini-2.5-flash"
+      "model": "gemini-3.5-flash"
     },
     {
       "type": "tavily",

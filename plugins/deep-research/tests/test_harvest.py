@@ -25,7 +25,7 @@ def base_config(**overrides):
         "gateway": {"base_url": "https://gw.example.com/v1", "api_key_env": "TEST_GATEWAY_KEY"},
         "panel_models": ["model-a", "model-b", "model-c"],
         "judge_model": "model-judge",
-        "search_backends": [{"type": "gemini-cli", "model": "gemini-2.5-flash"}],
+        "search_backends": [{"type": "gemini-cli", "model": "gemini-3.5-flash"}],
         "fetch_backends": [{"type": "urllib-ua"}],
         "local_sources": {"enabled": False, "dir": "intake/local_sources"},
         "limits": {"max_steps_per_model": 6, "call_timeout_s": 5, "wall_clock_s": 60,
