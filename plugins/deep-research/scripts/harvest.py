@@ -82,6 +82,7 @@ def _is_within(path, root):
     root = Path(root).resolve()
     return path == root or root in path.parents
 
+
 TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "search",
