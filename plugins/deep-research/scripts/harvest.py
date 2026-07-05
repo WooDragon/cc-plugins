@@ -73,16 +73,6 @@ def resolve_goal_file(project_dir):
     return None
 
 
-def _is_within(path, root):
-    """True iff resolved `path` is `root` itself or nested under it. Used to
-    bound a supplementary run's own goal-file to the project tree so its
-    recorded goal_file_sha256 always anchors to a project-tracked artifact,
-    never an arbitrary path on disk."""
-    path = Path(path).resolve()
-    root = Path(root).resolve()
-    return path == root or root in path.parents
-
-
 TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "search",
@@ -2067,7 +2057,9 @@ def cmd_run(args):
         if not goal_path.exists():
             print(f"error: --goal-file {goal_path} does not exist", file=sys.stderr)
             sys.exit(1)
-        if not _is_within(goal_path, project_dir):
+        # goal_path and project_dir are both already .resolve()-d above;
+        # reuse the existing sandbox helper rather than a near-duplicate.
+        if not _is_relative_to(goal_path, project_dir):
             print(f"error: supplementary --goal-file {goal_path} is outside the project "
                   f"directory {project_dir}; a supplementary track's goal file must live "
                   "inside the project so goal_file_sha256 anchors to a project-tracked "
