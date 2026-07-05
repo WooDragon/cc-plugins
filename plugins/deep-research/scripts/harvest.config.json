@@ -15,7 +15,7 @@
       "model": "Gemini 3.5 Flash (Low)"
     },
     {
-      "type": "gateway-gemini",
+      "type": "gemini-grounding",
       "model": "gemini-3.5-flash"
     },
     {
