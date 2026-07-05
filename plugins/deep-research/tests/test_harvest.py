@@ -142,6 +142,79 @@ class TestRateLimiter(unittest.TestCase):
         self.assertGreaterEqual(total_span, 4 * 0.02 * 0.6)
 
 
+class TestBuildBackendsFetchInterval(unittest.TestCase):
+    """Defect 2 (rate-limit decoupling): fetch backends must get their own
+    fetch_min_interval_s, not search's -- with a fallback to the search
+    interval so an older config missing the new key doesn't KeyError."""
+
+    def test_fetch_backend_uses_independent_interval_when_key_present(self):
+        config = base_config(
+            search_backends=[{"type": "duckduckgo"}],
+            fetch_backends=[{"type": "urllib-ua"}],
+        )
+        config["limits"]["search_min_interval_s"] = 2.0
+        config["limits"]["fetch_min_interval_s"] = 0.5
+        _, fetch_backends = harvest.build_backends(config)
+        limiter = fetch_backends[0][1]
+        self.assertEqual(limiter._min_interval, 0.5)
+
+    def test_fetch_backend_falls_back_to_search_interval_when_key_absent(self):
+        # Older config with no fetch_min_interval_s key at all -- must not
+        # KeyError, must fall back to the existing search interval so
+        # pre-upgrade behavior is unchanged.
+        config = base_config(
+            search_backends=[{"type": "duckduckgo"}],
+            fetch_backends=[{"type": "urllib-ua"}],
+        )
+        config["limits"]["search_min_interval_s"] = 2.0
+        self.assertNotIn("fetch_min_interval_s", config["limits"])
+        _, fetch_backends = harvest.build_backends(config)
+        limiter = fetch_backends[0][1]
+        self.assertEqual(limiter._min_interval, 2.0)
+
+    def test_search_backend_interval_unaffected_by_fetch_key(self):
+        config = base_config(
+            search_backends=[{"type": "duckduckgo"}],
+            fetch_backends=[{"type": "urllib-ua"}],
+        )
+        config["limits"]["search_min_interval_s"] = 2.0
+        config["limits"]["fetch_min_interval_s"] = 0.5
+        search_backends, _ = harvest.build_backends(config)
+        limiter = search_backends[0][1]
+        self.assertEqual(limiter._min_interval, 2.0)
+
+
+class TestRunFetchCallsParallel(unittest.TestCase):
+    """Defect 2 (parallel fetch): a raising future must still yield exactly
+    one tool response per tool_call_id, in the original call order -- not
+    the arrival order as_completed() would otherwise produce."""
+
+    def test_parallel_fetch_exception_still_yields_tool_response(self):
+        config = base_config(fetch_backends=[{"type": "urllib-ua"}])
+        journal = []
+        tool_calls = [
+            {"id": "c1", "function": {"name": "fetch", "arguments": json.dumps({"url": "https://a.com/1"})}},
+            {"id": "c2", "function": {"name": "fetch", "arguments": json.dumps({"url": "https://a.com/2"})}},
+            {"id": "c3", "function": {"name": "fetch", "arguments": json.dumps({"url": "https://a.com/3"})}},
+        ]
+
+        def fake_execute(tc, search_backends, fetch_backends, journal, config, local_dir):
+            args = json.loads(tc["function"]["arguments"])
+            if args["url"] == "https://a.com/2":
+                raise RuntimeError("boom")
+            return json.dumps({"content": args["url"]})
+
+        with mock.patch("harvest.execute_tool_call", side_effect=fake_execute):
+            results = harvest._run_fetch_calls_parallel(tool_calls, [], [], journal, config, None)
+
+        self.assertEqual(len(results), 3)
+        self.assertEqual(json.loads(results[0])["content"], "https://a.com/1")
+        error_payload = json.loads(results[1])
+        self.assertIn("error", error_payload)
+        self.assertIn("boom", error_payload["error"])
+        self.assertEqual(json.loads(results[2])["content"], "https://a.com/3")
+
+
 # ---------------------------------------------------------------------------
 # SSRF guard
 # ---------------------------------------------------------------------------

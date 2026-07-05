@@ -55,6 +55,7 @@
     "wall_clock_s": 1800,
     "quorum": 2,
     "search_min_interval_s": 2,
+    "fetch_min_interval_s": 0.5,
     "fetch_max_chars": 20000
   },
   "blacklist_domains": [

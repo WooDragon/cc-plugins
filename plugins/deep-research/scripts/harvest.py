@@ -971,6 +971,39 @@ def execute_tool_call(tc, search_backends, fetch_backends, journal, config, loca
     return json.dumps({"error": f"unknown tool {name}"})
 
 
+_PARALLEL_FETCH_MAX_WORKERS = 3
+
+
+def _run_fetch_calls_parallel(tool_calls, search_backends, fetch_backends, journal, config, local_dir):
+    """Only called when every tool_call in this round is a `fetch` and there
+    is more than one -- mixed/search/single rounds stay on the plain
+    sequential path in run_worker. Each call still runs execute_tool_call ->
+    do_fetch in its own pool thread, so the SSRF guard's tool_request_guard
+    (thread-local) and the guarded socket.getaddrinfo() are entered on the
+    same thread that performs the actual DNS resolution -- do_fetch is the
+    parallel unit, the guard is never restructured out of it.
+
+    Returns results in the SAME ORDER as `tool_calls` (by original index),
+    not completion order -- as_completed()'s arrival order would otherwise
+    scramble which result_text pairs with which tool_call_id. A future that
+    raises is not propagated; it is converted to a synthetic tool-error
+    JSON string so every tool_call_id still gets exactly one role:tool
+    message (a missing one is a 400 on most gateways)."""
+    results = [None] * len(tool_calls)
+    with ThreadPoolExecutor(max_workers=min(len(tool_calls), _PARALLEL_FETCH_MAX_WORKERS)) as pool:
+        future_to_index = {
+            pool.submit(execute_tool_call, tc, search_backends, fetch_backends, journal, config, local_dir): i
+            for i, tc in enumerate(tool_calls)
+        }
+        for fut in as_completed(future_to_index):
+            i = future_to_index[fut]
+            try:
+                results[i] = fut.result()
+            except Exception as e:
+                results[i] = json.dumps({"error": f"parallel fetch failed: {e}"})
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Backend registry (global instantiation, shared across worker threads)
 # ---------------------------------------------------------------------------
@@ -978,13 +1011,24 @@ def execute_tool_call(tc, search_backends, fetch_backends, journal, config, loca
 def build_backends(config):
     limiters = {}
 
-    def limiter_for(key):
+    def limiter_for(key, min_interval_s):
         if key not in limiters:
-            limiters[key] = RateLimiter(config["limits"]["search_min_interval_s"])
+            limiters[key] = RateLimiter(min_interval_s)
         return limiters[key]
 
-    search_backends = [(b, limiter_for(f"search:{i}")) for i, b in enumerate(config.get("search_backends", []))]
-    fetch_backends = [(b, limiter_for(f"fetch:{i}")) for i, b in enumerate(config.get("fetch_backends", []))]
+    limits = config["limits"]
+    search_interval = limits["search_min_interval_s"]
+    # fetch previously shared search's interval outright (wrong unit of
+    # concern: search backends are quota-limited external APIs, fetch
+    # backends are mostly our own outbound HTTP). Independent key with a
+    # fallback to the search interval so an older config missing this key
+    # still works exactly as before rather than KeyError-ing.
+    fetch_interval = limits.get("fetch_min_interval_s", search_interval)
+
+    search_backends = [(b, limiter_for(f"search:{i}", search_interval))
+                        for i, b in enumerate(config.get("search_backends", []))]
+    fetch_backends = [(b, limiter_for(f"fetch:{i}", fetch_interval))
+                       for i, b in enumerate(config.get("fetch_backends", []))]
     return search_backends, fetch_backends
 
 
@@ -1505,9 +1549,18 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
             messages.append(message)
             tool_calls = message.get("tool_calls") or []
             if tool_calls:
-                for tc in tool_calls:
-                    result_text = execute_tool_call(tc, search_backends, fetch_backends, journal, config, local_dir)
-                    messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result_text})
+                is_all_fetch = len(tool_calls) > 1 and all(
+                    tc.get("function", {}).get("name") == "fetch" for tc in tool_calls
+                )
+                if is_all_fetch:
+                    results = _run_fetch_calls_parallel(tool_calls, search_backends, fetch_backends,
+                                                          journal, config, local_dir)
+                    for tc, result_text in zip(tool_calls, results):
+                        messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result_text})
+                else:
+                    for tc in tool_calls:
+                        result_text = execute_tool_call(tc, search_backends, fetch_backends, journal, config, local_dir)
+                        messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result_text})
                 continue
 
             content = message.get("content") or ""
