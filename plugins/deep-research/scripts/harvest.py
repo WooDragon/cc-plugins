@@ -638,27 +638,134 @@ def _search_tavily(cfg, query, timeout):
     return results, None
 
 
-def _search_gateway_gemini(cfg, query, timeout, config):
+# Gemini's grounding chunks never carry the real source URL directly -- each
+# web.uri is a Google redirect short link on this fixed host. It is the ONLY
+# host _resolve_grounding_redirect is ever allowed to connect to; anything
+# else (a hallucinated/injected uri like http://169.254.169.254/) is rejected
+# before a byte leaves the process.
+_GROUNDING_REDIRECT_HOST = "vertexaisearch.cloud.google.com"
+_GROUNDING_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+_GROUNDING_REDIRECT_TIMEOUT_S = 10
+
+# Grounding is a real live search, so (unlike the old fake gateway-gemini) the
+# prompt doesn't ask the model to invent URLs -- it just steers the query and
+# mirrors the repo-wide content-farm exclusion (courtesy only; is_blacklisted()
+# in do_search() is the actual enforcement). No SEARCH_FAILED sentinel: whether
+# retrieval happened is read structurally from groundingMetadata, not parsed
+# out of free text.
+_GROUNDING_SEARCH_PROMPT = (
+    "Search the live web for: {query}\n"
+    "Exclude results from content-farm hosts: csdn.net, cloud.baidu.com, "
+    "cloud.tencent.com, huaweicloud.com, aliyun.com, volcengine.com, juejin.cn."
+)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Intercept every 30x so urllib never auto-follows a grounding redirect
+    to its real target. urllib.request.urlopen installs an HTTPRedirectHandler
+    by default that transparently connects to the Location host -- that would
+    defeat the host-allowlist check in _resolve_grounding_redirect entirely
+    (the guard vets the redirect host, not the target). Returning None here
+    turns the 302 into a raised HTTPError whose Location header we read WITHOUT
+    ever connecting to it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_no_redirect_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _resolve_grounding_redirect(uri, timeout):
+    """Resolve a grounding-api-redirect short link to its real landing URL by
+    reading the 302 Location header without following it. Connects ONLY to the
+    fixed, trusted grounding host -- any other host is rejected before a single
+    byte goes out (so this is not an SSRF surface even though the uri
+    originates from model output). Returns the real URL, or None (caller drops
+    the chunk) on a malformed uri, a non-grounding host, a non-redirect
+    response, or any network error."""
+    try:
+        # uri is model/provider-controlled grounding output; a malformed value
+        # (e.g. an unterminated IPv6 literal) makes urlsplit raise ValueError.
+        # Treat it as a droppable bad chunk -- same guard is_blacklisted() puts
+        # on this exact call -- so one bad uri can't abort the whole backend
+        # and discard every other valid chunk.
+        host = urllib.parse.urlsplit(uri).hostname
+    except ValueError:
+        return None
+    if host != _GROUNDING_REDIRECT_HOST:
+        return None
+    req = urllib.request.Request(
+        uri, headers={"User-Agent": "Mozilla/5.0 (compatible; harvest.py/1.0)"})
+    try:
+        # A genuine 200 (no redirect) means the short link resolved to nothing
+        # citable -- close it and drop. The redirect case below is the norm.
+        resp = _no_redirect_opener.open(req, timeout=timeout)
+        resp.close()
+        return None
+    except urllib.error.HTTPError as e:
+        if e.code in _GROUNDING_REDIRECT_STATUSES:
+            return e.headers.get("Location")
+        return None
+    except (urllib.error.URLError, OSError):
+        return None
+
+
+def _search_gemini_grounding(cfg, query, timeout, config):
+    """Real grounded web search via the gateway's Gemini-native
+    generateContent endpoint + built-in google_search tool. Replaces the old
+    fake gateway-gemini backend, which asked an OpenAI-compat /chat/completions
+    to 'list some URLs' and got model-recalled (hallucinated) links with no
+    live retrieval -- and, worse, since do_search stops at the first backend
+    that returns any non-blacklisted URL, that fake result permanently masked
+    the real tavily/duckduckgo backends behind it. Here the model actually
+    searches; grounding chunks carry real (redirect-wrapped) source URLs that
+    we resolve to true landing pages before returning them to the
+    citation-verifiable pipeline."""
     gw = config["gateway"]
     api_key = os.environ.get(gw["api_key_env"], "")
     if not api_key:
-        return None, f"gateway-gemini: {gw.get('api_key_env') or '(no api_key_env configured)'} not set"
-    url = gw["base_url"].rstrip("/") + "/chat/completions"
+        return None, f"gemini-grounding: {gw.get('api_key_env') or '(no api_key_env configured)'} not set"
+    # Native endpoint is <origin>/v1beta/models/<model>:generateContent. Derive
+    # origin via urlsplit -- NOT base_url.rstrip('/v1'), which strips a char
+    # SET not a suffix and would mangle '.../v1' unpredictably. This makes a
+    # base_url of '.../v1', '.../v1/', or a bare origin all resolve correctly.
+    parts = urllib.parse.urlsplit(gw["base_url"])
+    url = f"{parts.scheme}://{parts.netloc}/v1beta/models/{cfg.get('model', '')}:generateContent"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": cfg.get("model", ""), "messages": [
-        {"role": "user", "content": f"Web search and list relevant URLs with brief snippets for: {query}"}]}
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": _GROUNDING_SEARCH_PROMPT.format(query=query)}]}],
+        "tools": [{"google_search": {}}],
+    }
     try:
         data = _http_json_post(url, payload, headers, timeout)
     except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as e:
-        return None, f"gateway-gemini: request failed: {e}"
+        return None, f"gemini-grounding: request failed: {e}"
     try:
-        text = data["choices"][0]["message"]["content"] or ""
+        chunks = data["candidates"][0]["groundingMetadata"]["groundingChunks"]
     except (KeyError, IndexError, TypeError):
-        return None, "gateway-gemini: unexpected response shape"
-    urls = list(dict.fromkeys(re.findall(r'https?://[^\s\)\]\'"<>]+', text)))
-    if not urls:
-        return None, "gateway-gemini: no URLs found in response text"
-    return [{"url": u, "title": "", "snippet": text[:500]} for u in urls], None
+        # No groundingMetadata/chunks -> the model chose not to search
+        # (grounding is model-discretionary, never guaranteed). Degrade to the
+        # next backend rather than mining plain text for URLs.
+        return None, "gemini-grounding: no grounding chunks (model did not search)"
+    redirect_timeout = min(timeout, _GROUNDING_REDIRECT_TIMEOUT_S)
+    results, seen = [], set()
+    for ch in chunks:
+        web = ch.get("web") or {}
+        uri = web.get("uri", "")
+        if not uri:
+            continue
+        real_url = _resolve_grounding_redirect(uri, redirect_timeout)
+        if not real_url or real_url in seen:
+            continue
+        seen.add(real_url)
+        title = web.get("title", "")
+        # snippet = title (usually just the domain); blacklist filtering is
+        # do_search's job, kept out of here to avoid duplicating that concern.
+        results.append({"url": real_url, "title": title, "snippet": title})
+    if not results:
+        return None, "gemini-grounding: no resolvable source URLs in grounding chunks"
+    return results, None
 
 
 def call_search_backend(backend_cfg, limiter, query, lang, config, attempts=None):
@@ -674,8 +781,8 @@ def call_search_backend(backend_cfg, limiter, query, lang, config, attempts=None
             result, reason = _search_tavily(backend_cfg, query, timeout)
         elif btype == "duckduckgo":
             result, reason = _search_duckduckgo(backend_cfg, query, timeout)
-        elif btype == "gateway-gemini":
-            result, reason = _search_gateway_gemini(backend_cfg, query, timeout, config)
+        elif btype == "gemini-grounding":
+            result, reason = _search_gemini_grounding(backend_cfg, query, timeout, config)
         else:
             result, reason = None, f"unknown search backend type: {btype}"
     except Exception as e:

@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -766,12 +767,13 @@ class TestSearchBackendMissingKeySkips(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("not set", reason)
 
-    def test_gateway_gemini_missing_key_returns_none_not_raise(self):
+    def test_gemini_grounding_missing_key_returns_none_not_raise(self):
         cfg = base_config()
         cfg["gateway"]["api_key_env"] = "NONEXISTENT_GATEWAY_KEY_VAR"
-        result, reason = harvest._search_gateway_gemini({"model": "g"}, "q", 5, cfg)
+        result, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
         self.assertIsNone(result)
         self.assertIn("not set", reason)
+        self.assertIn("gemini-grounding", reason)
 
     def test_missing_key_backend_falls_through_to_next_in_do_search(self):
         journal = []
@@ -789,6 +791,165 @@ class TestSearchBackendMissingKeySkips(unittest.TestCase):
         self.assertEqual(len(journal[0]["attempts"]), 1)
         self.assertEqual(journal[0]["attempts"][0]["backend"], "tavily")
         self.assertIn("not set", journal[0]["attempts"][0]["error"])
+
+
+# ---------------------------------------------------------------------------
+# gemini-grounding search backend (real Gemini-native grounding, replaces
+# the old fake gateway-gemini which asked the model to recall/invent URLs)
+# ---------------------------------------------------------------------------
+
+def _grounding_chunk(uri, title):
+    return {"web": {"uri": uri, "title": title}}
+
+
+def _grounding_response(chunks):
+    return {"candidates": [{"content": {}, "groundingMetadata": {"groundingChunks": chunks}}]}
+
+
+class TestGeminiGroundingSearch(unittest.TestCase):
+    def test_resolves_redirect_chunks_to_real_urls(self):
+        cfg = base_config()
+        chunks = [
+            _grounding_chunk("https://vertexaisearch.cloud.google.com/grounding-api-redirect/1", "example.com"),
+            _grounding_chunk("https://vertexaisearch.cloud.google.com/grounding-api-redirect/2", "other.com"),
+        ]
+        with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
+             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)), \
+             mock.patch("harvest._resolve_grounding_redirect",
+                         side_effect=["https://example.com/real", "https://other.com/real"]):
+            results, reason = harvest._search_gemini_grounding({"model": "gemini-3.5-flash"}, "q", 5, cfg)
+        self.assertIsNone(reason)
+        self.assertEqual([r["url"] for r in results], ["https://example.com/real", "https://other.com/real"])
+        self.assertEqual(results[0]["title"], "example.com")
+        self.assertEqual(results[0]["snippet"], "example.com")
+
+    def test_derives_native_endpoint_and_google_search_payload(self):
+        # Locks the exact code path the PR fixes (the rstrip('/v1') trap):
+        # origin is derived via urlsplit and the /v1 path is dropped, the
+        # native generateContent endpoint is targeted, and the payload carries
+        # the built-in google_search tool. A regression mangling any of these
+        # would otherwise pass the whole suite (other cases only inspect the
+        # parsed result, never what was sent).
+        cfg = base_config()  # gateway.base_url == "https://gw.example.com/v1"
+        chunks = [_grounding_chunk(
+            "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1", "example.com")]
+        with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
+             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)) as post_mock, \
+             mock.patch("harvest._resolve_grounding_redirect", return_value="https://example.com/real"):
+            harvest._search_gemini_grounding({"model": "gemini-3.5-flash"}, "q", 5, cfg)
+        sent_url, sent_payload = post_mock.call_args.args[0], post_mock.call_args.args[1]
+        self.assertEqual(
+            sent_url, "https://gw.example.com/v1beta/models/gemini-3.5-flash:generateContent")
+        self.assertEqual(sent_payload["tools"], [{"google_search": {}}])
+        self.assertEqual(sent_payload["contents"][0]["role"], "user")
+
+    def test_missing_grounding_metadata_degrades_with_reason(self):
+        cfg = base_config()
+        with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
+             mock.patch("harvest._http_json_post", return_value={"candidates": [{"content": {}}]}):
+            result, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+        self.assertIsNone(result)
+        self.assertIn("no grounding chunks", reason)
+
+    def test_unresolvable_chunk_skipped_others_kept(self):
+        cfg = base_config()
+        chunks = [
+            _grounding_chunk("https://vertexaisearch.cloud.google.com/grounding-api-redirect/1", "dead.com"),
+            _grounding_chunk("https://vertexaisearch.cloud.google.com/grounding-api-redirect/2", "alive.com"),
+        ]
+        with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
+             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)), \
+             mock.patch("harvest._resolve_grounding_redirect", side_effect=[None, "https://alive.com/real"]):
+            results, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+        self.assertIsNone(reason)
+        self.assertEqual([r["url"] for r in results], ["https://alive.com/real"])
+
+    def test_all_chunks_unresolvable_returns_none_with_reason(self):
+        cfg = base_config()
+        chunks = [_grounding_chunk("https://vertexaisearch.cloud.google.com/grounding-api-redirect/1", "dead.com")]
+        with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
+             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)), \
+             mock.patch("harvest._resolve_grounding_redirect", return_value=None):
+            result, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+        self.assertIsNone(result)
+        self.assertIn("no resolvable source URLs", reason)
+
+    def test_missing_key_returns_none_not_raise(self):
+        cfg = base_config()
+        cfg["gateway"]["api_key_env"] = "NONEXISTENT_GATEWAY_KEY_VAR"
+        with mock.patch("harvest._http_json_post") as m:
+            result, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+        self.assertIsNone(result)
+        self.assertIn("not set", reason)
+        m.assert_not_called()
+
+
+class TestResolveGroundingRedirect(unittest.TestCase):
+    def test_non_grounding_host_rejected_without_any_network_call(self):
+        with mock.patch("harvest._no_redirect_opener.open") as m:
+            result = harvest._resolve_grounding_redirect("http://169.254.169.254/", 5)
+        self.assertIsNone(result)
+        m.assert_not_called()
+
+    def test_localhost_host_rejected_without_any_network_call(self):
+        with mock.patch("harvest._no_redirect_opener.open") as m:
+            result = harvest._resolve_grounding_redirect("http://127.0.0.1/", 5)
+        self.assertIsNone(result)
+        m.assert_not_called()
+
+    def test_grounding_host_redirect_returns_location(self):
+        uri = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1"
+        err = harvest.urllib.error.HTTPError(
+            url=uri, code=302, msg="Found",
+            hdrs={"Location": "https://real.example.com/article"}, fp=io.BytesIO(b""))
+        with mock.patch("harvest._no_redirect_opener.open", side_effect=err):
+            result = harvest._resolve_grounding_redirect(uri, 5)
+        self.assertEqual(result, "https://real.example.com/article")
+
+    def test_grounding_host_network_error_returns_none(self):
+        uri = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1"
+        with mock.patch("harvest._no_redirect_opener.open",
+                         side_effect=harvest.urllib.error.URLError("connection refused")):
+            result = harvest._resolve_grounding_redirect(uri, 5)
+        self.assertIsNone(result)
+
+    def test_malformed_uri_returns_none_without_raising(self):
+        # uri is model-controlled grounding output; an unterminated IPv6
+        # literal makes urlsplit raise ValueError -- must be swallowed and
+        # dropped, never propagated to abort the whole backend.
+        with mock.patch("harvest._no_redirect_opener.open") as m:
+            result = harvest._resolve_grounding_redirect("http://[::1", 5)
+        self.assertIsNone(result)
+        m.assert_not_called()
+
+    def test_grounding_host_non_redirect_200_returns_none_and_closes(self):
+        # A genuine 200 (short link resolved to nothing citable) -> drop the
+        # chunk (None) and close the response rather than leak it.
+        uri = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1"
+        fake_resp = mock.Mock()
+        with mock.patch("harvest._no_redirect_opener.open", return_value=fake_resp):
+            result = harvest._resolve_grounding_redirect(uri, 5)
+        self.assertIsNone(result)
+        fake_resp.close.assert_called_once()
+
+
+class TestGeminiGroundingFallThrough(unittest.TestCase):
+    def test_agy_cli_failure_falls_through_to_real_gemini_grounding(self):
+        # Regression for the fake-gateway-gemini removal: primary backend
+        # failing must land on gemini-grounding's real retrieved results,
+        # not get masked by a fake always-succeeds fallback.
+        journal = []
+        cfg = base_config()
+        backends = [
+            ({"type": "agy-cli", "model": "x"}, harvest.RateLimiter(0)),
+            ({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0)),
+        ]
+        real_results = [{"url": "https://real.example.com/article", "title": "t", "snippet": "s"}]
+        with mock.patch("harvest.call_search_backend", side_effect=[None, real_results]):
+            result = harvest.do_search("q", "en", backends, journal, cfg)
+        data = json.loads(result)
+        self.assertEqual(data["results"][0]["url"], "https://real.example.com/article")
+        self.assertEqual(journal[0]["backend"], "gemini-grounding")
 
 
 # ---------------------------------------------------------------------------
@@ -1268,7 +1429,7 @@ class TestCurlCffiStartupCheck(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # SSRF guard scope narrowing: only urllib-ua's direct, model-steered
 # connection is a real SSRF surface. Backends with a fixed, config-defined
-# destination host (search backends incl. gateway-gemini; tavily-extract;
+# destination host (search backends incl. gemini-grounding; tavily-extract;
 # jina-reader -- the actual fetch of the model's URL happens on *their*
 # servers, not this machine) must never be blocked by the guard, since the
 # user's own gateway/API may legitimately live on an internal network.
@@ -1295,7 +1456,7 @@ class TestSSRFGuardScopeNarrowing(unittest.TestCase):
 
     def test_search_backends_never_enter_guard(self):
         calls = []
-        backends = [({"type": "gateway-gemini", "model": "g"}, harvest.RateLimiter(0))]
+        backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
         with mock.patch("harvest.tool_request_guard", self._spy_guard(calls)), \
              mock.patch("harvest.call_search_backend", return_value=[{"url": "https://a.com", "title": "t", "snippet": "s"}]):
             harvest.do_search("q", "en", backends, [], base_config())
@@ -1344,7 +1505,7 @@ class TestSSRFGuardScopeNarrowing(unittest.TestCase):
         # internally-hosted gateway/API must keep working).
         harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("10.0.0.5", 0))]
         harvest.install_ssrf_guard()
-        backends = [({"type": "gateway-gemini", "model": "g"}, harvest.RateLimiter(0))]
+        backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
         with mock.patch("harvest.call_search_backend", return_value=[{"url": "https://a.com", "title": "t", "snippet": "s"}]):
             result = harvest.do_search("q", "en", backends, [], base_config())
         data = json.loads(result)
