@@ -1393,6 +1393,22 @@ class TestCurlCffiFetch(unittest.TestCase):
         self.assertAlmostEqual(conn + read, 20, places=3)
         self.assertEqual(conn, 5)  # default fetch_connect_timeout_s
 
+    def test_timeout_tuple_small_budget_selects_remaining_minus_epsilon(self):
+        # When remaining < fetch_connect_timeout_s (here remaining=2 vs the
+        # default connect cap of 5), `min(connect_timeout_s, remaining-0.1)`
+        # must pick the second operand -- conn = remaining - 0.1, read =
+        # 0.1. This locks down the epsilon fallback so it can't be
+        # "simplified" to conn = remaining (which would zero out the read
+        # component and reintroduce the libcurl 0ms-means-infinite hang).
+        with mock.patch("harvest.time.monotonic", side_effect=[0.0, 0.0]), \
+             mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, "<p>ok</p>")) as m:
+            self._fetch("https://a.com/x", timeout=2)
+        conn, read = m.call_args.kwargs["timeout"]
+        self.assertAlmostEqual(conn, 1.9, places=3)
+        self.assertAlmostEqual(read, 0.1, places=3)
+        self.assertAlmostEqual(conn + read, 2, places=3)
+
     def test_cross_hop_deadline_exceeded_aborts_before_next_hop(self):
         # First hop resolves within budget and redirects; by the time the
         # second hop would fire, the shared deadline has less than 1s left
