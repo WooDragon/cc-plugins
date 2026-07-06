@@ -132,7 +132,7 @@ class TestMissingSectionFails:
 class TestExternalResourceFails:
     """Self-containment is a hard rule: no <script src="http...">, no
     <link href="http...">. Must FAIL with exit code 1. A content-level
-    <a href="http...```"> citation link must NOT trigger this (that's
+    <a href="http..."> citation link must NOT trigger this (that's
     covered by TestCleanHtmlPasses, which already has such a link)."""
 
     def test_external_script_src_fails(self, tmp_path):

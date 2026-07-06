@@ -22,4 +22,4 @@
 
 - Playbooks: `../references/playbooks-INDEX.md` -- 研究类型剧本
 - Framework: `../references/framework-INDEX.md` -- 管线、质量门控、上下文经济学
-- Agents: 见 deep-research 插件的 research-harvester / research-analyst / research-reviewer subagent
+- Agents: 见 deep-research 插件的 research-harvester / research-analyst / research-reviewer / research-publisher subagent
