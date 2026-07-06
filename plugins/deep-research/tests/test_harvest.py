@@ -724,49 +724,6 @@ class TestDuckDuckGoSearchCurlCffi(unittest.TestCase):
             harvest._search_duckduckgo({"impersonate": "safari"}, "q", 5)
         call_kwargs = mock_curl.get.call_args[1]
         self.assertEqual(call_kwargs["impersonate"], "safari")
-    def _fake_proc(self, stdout="", returncode=0, stderr=""):
-        proc = mock.Mock()
-        proc.returncode = returncode
-        proc.stdout = stdout
-        proc.stderr = stderr
-        return proc
-
-    def test_parses_urls_from_numbered_output(self):
-        stdout = (
-            "1. Example Title | key info here | https://example.com/page\n"
-            "2. Other | more info | https://other.com/x\n"
-        )
-        with mock.patch("harvest.subprocess.run", return_value=self._fake_proc(stdout=stdout)):
-            result, reason = harvest._search_agy_cli({}, "sqlite wal", 5)
-        self.assertIsNone(reason)
-        urls = [r["url"] for r in result]
-        self.assertIn("https://example.com/page", urls)
-        self.assertIn("https://other.com/x", urls)
-
-    def test_search_failed_sentinel_treated_as_failure(self):
-        with mock.patch("harvest.subprocess.run", return_value=self._fake_proc(stdout="SEARCH_FAILED\n")):
-            result, reason = harvest._search_agy_cli({}, "q", 5)
-        self.assertIsNone(result)
-        self.assertIn("SEARCH_FAILED", reason)
-
-    def test_timeout_degrades_with_reason(self):
-        with mock.patch("harvest.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="agy", timeout=5)):
-            result, reason = harvest._search_agy_cli({}, "q", 5)
-        self.assertIsNone(result)
-        self.assertIn("timed out", reason)
-
-    def test_nonzero_exit_degrades_with_reason(self):
-        with mock.patch("harvest.subprocess.run", return_value=self._fake_proc(returncode=1, stderr="boom")):
-            result, reason = harvest._search_agy_cli({}, "q", 5)
-        self.assertIsNone(result)
-        self.assertIn("exited with code 1", reason)
-
-    def test_uses_configured_model_and_devnull_stdin(self):
-        with mock.patch("harvest.subprocess.run", return_value=self._fake_proc(stdout="SEARCH_FAILED")) as m:
-            harvest._search_agy_cli({"model": "custom-model"}, "q", 5)
-        args, kwargs = m.call_args
-        self.assertEqual(args[0][:3], ["agy", "--model", "custom-model"])
-        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
 
 
 class TestSearchBackendMissingKeySkips(unittest.TestCase):
@@ -942,14 +899,14 @@ class TestResolveGroundingRedirect(unittest.TestCase):
 
 
 class TestGeminiGroundingFallThrough(unittest.TestCase):
-    def test_agy_cli_failure_falls_through_to_real_gemini_grounding(self):
+    def test_primary_backend_failure_falls_through_to_real_gemini_grounding(self):
         # Regression for the fake-gateway-gemini removal: primary backend
         # failing must land on gemini-grounding's real retrieved results,
         # not get masked by a fake always-succeeds fallback.
         journal = []
         cfg = base_config()
         backends = [
-            ({"type": "agy-cli", "model": "x"}, harvest.RateLimiter(0)),
+            ({"type": "tavily", "api_key_env": "TAVILY_API_KEY"}, harvest.RateLimiter(0)),
             ({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0)),
         ]
         real_results = [{"url": "https://real.example.com/article", "title": "t", "snippet": "s"}]
@@ -1613,10 +1570,6 @@ class TestSubprocessSafety(unittest.TestCase):
         source = Path(harvest.__file__).read_text(encoding="utf-8")
         self.assertIn("stdin=subprocess.DEVNULL", source)
         self.assertIn('["gemini", "-m"', source)
-
-    def test_agy_cli_uses_list_args_and_devnull_stdin(self):
-        source = Path(harvest.__file__).read_text(encoding="utf-8")
-        self.assertIn('["agy", "--model"', source)
 
     def test_all_urlopen_calls_have_explicit_timeout(self):
         source = Path(harvest.__file__).read_text(encoding="utf-8")
