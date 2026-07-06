@@ -2235,6 +2235,8 @@ def cmd_run_local(args, config):
     cleanup_stale_state(pipeline_dir, verify_dir, raw_dir)
     write_tombstone(verify_dir, goal_hash)
 
+    install_ssrf_guard()
+
     queries = _read_queries_json(args.queries_json)
     search_backends, fetch_backends = build_backends(config)
 

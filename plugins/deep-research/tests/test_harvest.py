@@ -681,7 +681,49 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         self.assertIn("IP-reputation block", reason)
 
 
-class TestAgyCliSearch(unittest.TestCase):
+class TestDuckDuckGoSearchCurlCffi(unittest.TestCase):
+    """Tests for the curl-cffi path of _search_duckduckgo (when _HAS_CURL_CFFI=True)."""
+
+    def test_curl_cffi_success_parses_results(self):
+        fake_resp = mock.Mock()
+        fake_resp.status_code = 200
+        fake_resp.text = _DDG_SAMPLE_HTML
+        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+            mock_curl.get.return_value = fake_resp
+            results, reason = harvest._search_duckduckgo({}, "query", 5)
+        self.assertIsNone(reason)
+        self.assertTrue(len(results) > 0)
+        mock_curl.get.assert_called_once()
+
+    def test_curl_cffi_non_200_returns_error(self):
+        fake_resp = mock.Mock()
+        fake_resp.status_code = 403
+        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+            mock_curl.get.return_value = fake_resp
+            result, reason = harvest._search_duckduckgo({}, "query", 5)
+        self.assertIsNone(result)
+        self.assertIn("HTTP 403", reason)
+
+    def test_curl_cffi_exception_returns_error(self):
+        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+            mock_curl.get.side_effect = RuntimeError("connection reset")
+            result, reason = harvest._search_duckduckgo({}, "query", 5)
+        self.assertIsNone(result)
+        self.assertIn("curl-cffi request failed", reason)
+
+    def test_curl_cffi_uses_impersonate_from_cfg(self):
+        fake_resp = mock.Mock()
+        fake_resp.status_code = 200
+        fake_resp.text = "<html></html>"
+        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+            mock_curl.get.return_value = fake_resp
+            harvest._search_duckduckgo({"impersonate": "safari"}, "q", 5)
+        call_kwargs = mock_curl.get.call_args[1]
+        self.assertEqual(call_kwargs["impersonate"], "safari")
     def _fake_proc(self, stdout="", returncode=0, stderr=""):
         proc = mock.Mock()
         proc.returncode = returncode
