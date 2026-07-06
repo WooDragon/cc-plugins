@@ -1676,22 +1676,25 @@ class TestWorkerDriver(unittest.TestCase):
         self.assertEqual(result.findings["invalid_claim_count"], 0)
 
     def test_forced_synthesis_still_empty_stays_failed(self):
-        # Forced synthesis is the last chance, not another retry loop -- if
-        # it still comes back invalid/empty, the worker fails with a reason
-        # distinct from the old step_limit_exceeded so callers can tell
-        # "never even tried to synthesize" apart from "tried and failed".
+        # Forced synthesis gets exactly one retry (see #68 dual-branch
+        # retry), not an unbounded loop -- if the retry also comes back
+        # invalid, the worker fails with a specific reason so callers can
+        # tell "never even tried to synthesize" apart from "tried and
+        # failed", instead of the old generic step_limit_no_synthesis for
+        # every forced-synthesis failure mode.
         cfg = base_config()
         cfg["limits"]["max_steps_per_model"] = 2
         client = ScriptedClient([
             assistant_tool_call("c1", "fetch", {"url": "https://a.com/1"}),
             assistant_tool_call("c2", "fetch", {"url": "https://a.com/2"}),
             assistant_final("not valid json"),
+            assistant_final("still not valid json"),
         ])
         with mock.patch("harvest.call_fetch_backend", return_value="text"):
             result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
-        self.assertEqual(client.calls, 3)
+        self.assertEqual(client.calls, 4)
         self.assertEqual(result.status, "FAILED")
-        self.assertEqual(result.reason, "step_limit_no_synthesis")
+        self.assertTrue(result.reason.startswith("synthesis_parse_failed:"), result.reason)
 
     def test_forced_synthesis_after_retry_no_consecutive_user(self):
         # If the step budget runs out right after a citation-retry nudge
@@ -3156,9 +3159,12 @@ class TestCompletionRetryAndForcedSynthesisRecovery(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# #63: gemini-grounding search results are also injected into the journal as
-# synthetic fetch entries, so a claim citing a grounding-search URL validates
-# without needing an explicit fetch() tool call.
+# #63/#68: gemini-grounding search results are injected into the journal as
+# "search_grounding" entries (URL the model *saw*, not full text it fetched)
+# -- a claim citing one of these URLs without an explicit fetch() call must
+# fail citation validation (url_not_fetched), not silently pass. This closed
+# a hole where the old "fetch"-typed injection let citations through on
+# nothing more than a domain-name string.
 # ---------------------------------------------------------------------------
 
 class TestGeminiGroundingJournalInjection(unittest.TestCase):
@@ -3168,21 +3174,30 @@ class TestGeminiGroundingJournalInjection(unittest.TestCase):
             {"url": "https://example.com/page2", "title": "", "snippet": ""},
         ]
 
-    def test_search_injects_fetch_entries_with_title_or_url_fallback(self):
+    def test_search_injects_search_grounding_entries_not_fetch(self):
         journal = []
         cfg = base_config()
         backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
         with mock.patch("harvest.call_search_backend", return_value=self._grounding_results()):
             harvest.do_search("q", "en", backends, journal, cfg)
 
-        fetch_entries = [e for e in journal if e.get("tool") == "fetch"]
-        self.assertEqual(len(fetch_entries), 2)
-        self.assertTrue(all(e["backend"] == "grounding" for e in fetch_entries))
-        by_url = {e["url"]: e["content"] for e in fetch_entries}
+        # No "fetch"-typed entries at all from grounding -- they must be
+        # "search_grounding", distinct from a real fetch.
+        self.assertEqual([e for e in journal if e.get("tool") == "fetch"], [])
+        grounding_entries = [e for e in journal if e.get("tool") == "search_grounding"]
+        self.assertEqual(len(grounding_entries), 2)
+        self.assertTrue(all(e["backend"] == "grounding" for e in grounding_entries))
+        self.assertTrue(all(e["content"] is None for e in grounding_entries))
+        by_url = {e["url"]: e["title"] for e in grounding_entries}
         self.assertEqual(by_url["https://example.com/page1"], "Page One")
         self.assertEqual(by_url["https://example.com/page2"], "https://example.com/page2")
 
-    def test_grounding_journal_entries_pass_citation_validation(self):
+    def test_grounding_only_citation_fails_url_not_fetched(self):
+        # This is the bug-fix assertion: citing a grounding URL that was
+        # never actually fetch()'d must be rejected as url_not_fetched (the
+        # model saw it in search, but never retrieved real content) -- not
+        # silently pass, and not the more severe url_not_in_journal (which
+        # would wrongly imply the model never even saw the URL).
         journal = []
         cfg = base_config()
         backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
@@ -3196,8 +3211,153 @@ class TestGeminiGroundingJournalInjection(unittest.TestCase):
         idx = harvest.build_fetch_index(journal)
         urls = harvest.build_journal_url_set(journal)
         valid, invalid = harvest.validate_claims(claims, idx, urls)
-        self.assertEqual(len(valid), 2)
+        self.assertEqual(valid, [])
+        self.assertEqual(len(invalid), 2)
+        self.assertTrue(all(reason == "url_not_fetched" for _c, reason, _matched in invalid))
+
+    def test_grounding_citation_passes_after_explicit_fetch(self):
+        # If the model actually calls fetch() on a grounding-surfaced URL,
+        # the real fetch entry (not the search_grounding one) satisfies
+        # citation validation normally.
+        journal = []
+        cfg = base_config()
+        backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
+        with mock.patch("harvest.call_search_backend", return_value=self._grounding_results()):
+            harvest.do_search("q", "en", backends, journal, cfg)
+        journal.append({"tool": "fetch", "url": "https://example.com/page1",
+                         "backend": "urllib-ua", "content": "Full real page text."})
+
+        claims = harvest.assign_claim_ids("m1", [
+            {"claim": "c1", "excerpt": "Full real page text.", "url": "https://example.com/page1"},
+        ])
+        idx = harvest.build_fetch_index(journal)
+        urls = harvest.build_journal_url_set(journal)
+        valid, invalid = harvest.validate_claims(claims, idx, urls)
+        self.assertEqual(len(valid), 1)
         self.assertEqual(invalid, [])
+
+
+# ---------------------------------------------------------------------------
+# #68: two-layer convergence architecture -- progressive budget nudges in the
+# main loop, and a parse-first dual-branch retry in forced synthesis so a
+# model that keeps returning tool_calls (or malformed JSON) after the step
+# budget is exhausted gets one real chance to converge instead of an
+# immediate, generic step_limit_no_synthesis failure.
+# ---------------------------------------------------------------------------
+
+class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
+    def setUp(self):
+        self.config = base_config()
+        self.config["limits"]["max_steps_per_model"] = 6
+        self.fetch_backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
+        patcher = mock.patch("harvest._ssrf_precheck")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_nudge_injected_at_correct_steps(self):
+        # max_steps=6: tool_calls on every round (steps 0..5), so the loop
+        # never reaches a normal finalize and always exhausts the budget.
+        # remaining = max_steps - (step+1); nudges fire at remaining==3
+        # (after step index 2, i.e. the 3rd tool_calls round) and
+        # remaining==1 (after step index 4, the 5th round).
+        fact = "Rayleigh scattering explains the blue sky."
+        client = ScriptedClient([
+            assistant_tool_call("c1", "fetch", {"url": "https://a.com/1"}),
+            assistant_tool_call("c2", "fetch", {"url": "https://a.com/2"}),
+            assistant_tool_call("c3", "fetch", {"url": "https://a.com/3"}),
+            assistant_tool_call("c4", "fetch", {"url": "https://a.com/4"}),
+            assistant_tool_call("c5", "fetch", {"url": "https://a.com/5"}),
+            assistant_tool_call("c6", "fetch", {"url": "https://a.com/6"}),
+            assistant_final(findings_block([
+                {"claim": "c", "excerpt": fact, "url": "https://a.com/6", "credibility": 4, "language": "en"}])),
+        ])
+        with mock.patch("harvest.call_fetch_backend", return_value=fact):
+            harvest.run_worker("m1", "model-a", client, self.config, [],
+                                self.fetch_backends, "goal", [], None)
+
+        def has_budget_text(call_index, needle):
+            msgs = client.messages_log[call_index]
+            return any(m.get("role") == "user" and needle in (m.get("content") or "")
+                       for m in msgs)
+
+        # Call index 3 is the request sent right after round index 2's
+        # tool_calls were processed (remaining == 3); call index 5 is right
+        # after round index 4 (remaining == 1).
+        self.assertTrue(has_budget_text(3, "[BUDGET] 3 rounds remaining"))
+        self.assertTrue(has_budget_text(5, "[BUDGET] Last chance"))
+        # No nudge text leaks into the very first call (nothing to nudge yet).
+        self.assertFalse(has_budget_text(0, "[BUDGET]"))
+
+    def test_forced_synthesis_extracts_content_ignoring_tool_calls(self):
+        # Forced-synthesis response carries BOTH tool_calls and valid JSON
+        # text content (e.g. a Claude-shaped response with a stray tool_use
+        # block alongside real text) -- the worker must use the text content
+        # and succeed without dispatching the tool_calls.
+        cfg = base_config()
+        cfg["limits"]["max_steps_per_model"] = 2
+        fact = "Rayleigh scattering explains the blue sky."
+        findings_text = findings_block([
+            {"claim": "c", "excerpt": fact, "url": "https://a.com/2", "credibility": 4, "language": "en"}])
+
+        def synthesis_with_stray_tool_call(messages, tools):
+            return {"choices": [{"message": {
+                "role": "assistant", "content": findings_text,
+                "tool_calls": [{"id": "stray", "function": {"name": "search", "arguments": "{}"}}],
+            }}]}
+
+        client = ScriptedClient([
+            assistant_tool_call("c1", "fetch", {"url": "https://a.com/1"}),
+            assistant_tool_call("c2", "fetch", {"url": "https://a.com/2"}),
+            synthesis_with_stray_tool_call,
+        ])
+        with mock.patch("harvest.call_fetch_backend", return_value=fact):
+            result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+        self.assertEqual(client.calls, 3)
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(len(result.findings["claims"]), 1)
+
+    def test_forced_synthesis_retries_on_pure_tool_calls(self):
+        # Forced-synthesis response is pure tool_calls (content=None) --
+        # the worker must retry once with a forward-looking reminder and
+        # succeed if the retry produces valid JSON.
+        cfg = base_config()
+        cfg["limits"]["max_steps_per_model"] = 2
+        fact = "Rayleigh scattering explains the blue sky."
+        client = ScriptedClient([
+            assistant_tool_call("c1", "fetch", {"url": "https://a.com/1"}),
+            assistant_tool_call("c2", "fetch", {"url": "https://a.com/2"}),
+            assistant_tool_call("c3", "search", {"query": "more"}),  # pure tool_calls, no text
+            assistant_final(findings_block([
+                {"claim": "c", "excerpt": fact, "url": "https://a.com/2", "credibility": 4, "language": "en"}])),
+        ])
+        with mock.patch("harvest.call_fetch_backend", return_value=fact):
+            result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+        self.assertEqual(client.calls, cfg["limits"]["max_steps_per_model"] + 2)
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(len(result.findings["claims"]), 1)
+        # Retry prompt must be forward-looking, not reference the dropped response.
+        retry_call_messages = client.messages_log[-1]
+        self.assertTrue(any(
+            m.get("role") == "user" and "Do not use tools" in (m.get("content") or "")
+            for m in retry_call_messages))
+
+    def test_forced_synthesis_parse_failure_returns_descriptive_error(self):
+        # Forced-synthesis response is text but not valid JSON, with no
+        # tool_calls at all -- retry once, still not valid JSON -> FAILED
+        # with a specific, non-generic reason.
+        cfg = base_config()
+        cfg["limits"]["max_steps_per_model"] = 2
+        client = ScriptedClient([
+            assistant_tool_call("c1", "fetch", {"url": "https://a.com/1"}),
+            assistant_tool_call("c2", "fetch", {"url": "https://a.com/2"}),
+            assistant_final("this is not json at all"),
+            assistant_final("still not json"),
+        ])
+        with mock.patch("harvest.call_fetch_backend", return_value="text"):
+            result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+        self.assertEqual(client.calls, 4)
+        self.assertEqual(result.status, "FAILED")
+        self.assertTrue(result.reason.startswith("synthesis_parse_failed:"), result.reason)
 
 
 class argparse_ns:

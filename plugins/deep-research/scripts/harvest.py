@@ -356,7 +356,7 @@ def build_journal_url_set(journal):
         if entry.get("tool") == "search":
             for u in entry.get("urls", []):
                 urls.add(normalize_url(u))
-        elif entry.get("tool") in ("fetch", "read_local"):
+        elif entry.get("tool") in ("fetch", "read_local", "search_grounding"):
             u = entry.get("url")
             if u:
                 urls.add(normalize_url(u))
@@ -784,9 +784,20 @@ def do_search(query, lang, search_backends, journal, config):
                 continue
             if backend_cfg["type"] == "gemini-grounding":
                 for r in filtered:
-                    journal.append({"tool": "fetch", "url": r["url"],
-                                    "backend": "grounding",
-                                    "content": r.get("title") or r["url"]})
+                    # NOT "fetch": grounding gives us a URL the model *saw* in
+                    # search results, not full page text -- content here is
+                    # only a title/domain string. Using a distinct tool type
+                    # keeps build_fetch_index() (which only recognizes
+                    # "fetch"/"read_local") from treating this title string as
+                    # verified full-text content, while build_journal_url_set()
+                    # still recognizes "search_grounding" so a claim citing
+                    # this URL without an explicit fetch() call correctly
+                    # fails as url_not_fetched (real citation retry required)
+                    # rather than url_not_in_journal (worse: implies the model
+                    # never even saw the URL) or silently passing.
+                    journal.append({"tool": "search_grounding", "url": r["url"],
+                                    "backend": "grounding", "content": None,
+                                    "title": r.get("title") or r["url"]})
             journal.append({"tool": "search", "query": query, "lang": lang,
                              "backend": backend_cfg["type"], "urls": [r["url"] for r in filtered],
                              "attempts": attempts})
@@ -1624,7 +1635,7 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
         ]
         parse_retry_used = False
         citation_retry_used = False
-        for _ in range(max_steps):
+        for step in range(max_steps):
             if time.monotonic() > deadline:
                 return WorkerResult(alias, model_id, "FAILED", None, journal, "wall_clock_exceeded")
             try:
@@ -1649,6 +1660,21 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
                     for tc in tool_calls:
                         result_text = execute_tool_call(tc, search_backends, fetch_backends, journal, config, local_dir)
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result_text})
+                # Progressive budget nudges so a model that never spontaneously
+                # converges (e.g. keeps searching/fetching every round) gets an
+                # explicit signal before the hard cutoff. remaining==0 (the
+                # loop's last iteration) is deliberately not a nudge point --
+                # by the time that round's response comes back the loop is
+                # already over, so there is no next turn left for the model to
+                # act on it; that case is covered by the forced-synthesis
+                # phase below instead.
+                remaining = max_steps - (step + 1)
+                if remaining == 3:
+                    append_or_merge_user(messages,
+                        "[BUDGET] 3 rounds remaining. Begin converging — synthesize findings from evidence already fetched.")
+                elif remaining == 1:
+                    append_or_merge_user(messages,
+                        "[BUDGET] Last chance. Output findings JSON on your next turn or data will be lost.")
                 continue
 
             content = message.get("content") or ""
@@ -1695,8 +1721,12 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
         # further tool calls: keeping the tools block identical to every
         # preceding turn's payload lets the gateway's prompt cache match on
         # the unchanged prefix instead of invalidating it over a
-        # tools-block diff. The prompt text is what actually stops the
-        # model from calling a tool, not the schema's absence.
+        # tools-block diff, and Anthropic 400s if tool_use blocks already in
+        # the message history aren't accompanied by a tools definition on
+        # the request. The prompt text is what actually stops the model from
+        # calling a tool, not the schema's absence -- so a model that ignores
+        # the prompt and returns tool_calls anyway is handled below by
+        # looking only at text content, never by re-dispatching those calls.
         try:
             resp = client.complete(messages=messages, tools=TOOL_SCHEMAS)
         except Exception as e:
@@ -1704,11 +1734,34 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
                                 f"synthesis_failed ({type(e).__name__}): {e}")
         message = _extract_message(resp)
         if message is None:
-            return WorkerResult(alias, model_id, "FAILED", None, journal, "step_limit_no_synthesis")
+            return WorkerResult(alias, model_id, "FAILED", None, journal, "synthesis_no_response")
         content = message.get("content") or ""
         data, err = parse_findings_json(content)
         if err:
-            return WorkerResult(alias, model_id, "FAILED", None, journal, "step_limit_no_synthesis")
+            if message.get("tool_calls"):
+                # Model tried to call tools despite the prompt -- drop its
+                # message from history (leaving a dangling tool_use with no
+                # tool_result would 400 on the next call) and retry with a
+                # forward-looking reminder rather than referencing the
+                # discarded response.
+                append_or_merge_user(messages,
+                    "Reminder: output ONLY a JSON code block with your research findings. Do not use tools.")
+            else:
+                # Model produced text but it didn't parse as valid findings
+                # JSON -- keep its message in history (so it can see what it
+                # actually said) and feed back the concrete parse error.
+                messages.append(message)
+                messages.append({"role": "user", "content": f"JSON parse error: {err}. Re-output valid findings JSON."})
+            try:
+                resp = client.complete(messages=messages, tools=TOOL_SCHEMAS)
+            except Exception as e:
+                return WorkerResult(alias, model_id, "FAILED", None, journal,
+                                    f"synthesis_retry_failed ({type(e).__name__}): {e}")
+            message = _extract_message(resp)
+            content = (message.get("content") or "") if message else ""
+            data, err = parse_findings_json(content)
+        if err:
+            return WorkerResult(alias, model_id, "FAILED", None, journal, f"synthesis_parse_failed: {err}")
         return finalize_findings(alias, model_id, data, journal)
     except Exception as e:
         return WorkerResult(alias, model_id, "FAILED", None, journal, f"exception: {e}")
