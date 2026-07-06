@@ -491,46 +491,6 @@ def _search_gemini_cli(cfg, query, timeout):
     return [{"url": u, "title": "", "snippet": text[:500]} for u in urls], None
 
 
-# Shared web-research search prompt convention (repo-wide, see CLAUDE.md
-# web-search skill): force a live search (never answer from training data),
-# a literal SEARCH_FAILED sentinel when nothing is found, one result per
-# line in "title | key info | url" form, and pre-emptive content-farm
-# exclusion (the model-side filter is a courtesy -- is_blacklisted() in
-# do_search() is the actual enforcement).
-_SEARCH_PROMPT_TEMPLATE = (
-    "Search the live web (do not answer from memory or training data) for: {query}\n"
-    "If you cannot find real, current web results, output exactly: SEARCH_FAILED\n"
-    "Otherwise output one result per line, format: <title> | <key info> | <url>\n"
-    "Exclude results from content-farm hosts: csdn.net, cloud.baidu.com, "
-    "cloud.tencent.com, huaweicloud.com, aliyun.com, volcengine.com, juejin.cn."
-)
-
-
-def _search_agy_cli(cfg, query, timeout):
-    prompt = _SEARCH_PROMPT_TEMPLATE.format(query=query)
-    try:
-        proc = subprocess.run(
-            ["agy", "--model", cfg.get("model", "Gemini 3.5 Flash (Low)"), "-p", prompt],
-            capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL, text=True,
-        )
-    except subprocess.TimeoutExpired:
-        return None, "agy-cli: timed out"
-    except OSError as e:
-        return None, f"agy-cli: failed to launch subprocess: {e}"
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip()[:200]
-        return None, f"agy-cli: exited with code {proc.returncode}" + (f": {detail}" if detail else "")
-    text = proc.stdout or ""
-    if not text.strip():
-        return None, "agy-cli: empty output"
-    if "SEARCH_FAILED" in text:
-        return None, "agy-cli: model reported SEARCH_FAILED"
-    urls = list(dict.fromkeys(re.findall(r'https?://[^\s\)\]\'"<>]+', text)))
-    if not urls:
-        return None, "agy-cli: no URLs found in output"
-    return [{"url": u, "title": "", "snippet": text[:500]} for u in urls], None
-
-
 _DDG_ANCHOR_RE = re.compile(r'<a\b([^>]*)>(.*?)</a>', re.IGNORECASE | re.DOTALL)
 _DDG_HREF_RE = re.compile(r'href="([^"]*)"')
 _HTML_TAG_RE = re.compile(r'<[^>]+>')
@@ -762,8 +722,6 @@ def call_search_backend(backend_cfg, limiter, query, lang, config, attempts=None
     try:
         if btype == "gemini-cli":
             result, reason = _search_gemini_cli(backend_cfg, query, timeout)
-        elif btype == "agy-cli":
-            result, reason = _search_agy_cli(backend_cfg, query, timeout)
         elif btype == "tavily":
             result, reason = _search_tavily(backend_cfg, query, timeout)
         elif btype == "duckduckgo":
