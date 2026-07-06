@@ -91,4 +91,4 @@ fetch 后端链同理降级：curl-cffi（本地免费直连，软依赖）→ t
 
 ---
 
-**关联文件**：[pipeline.md](./pipeline.md) · [principles.md](./principles.md) · 角色定义见 deep-research 插件的 research-harvester / research-analyst / research-reviewer subagent
+**关联文件**：[pipeline.md](./pipeline.md) · [principles.md](./principles.md) · 角色定义见 deep-research 插件的 research-harvester / research-analyst / research-reviewer / research-publisher subagent

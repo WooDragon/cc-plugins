@@ -129,4 +129,10 @@
 
 ---
 
-**关联文件**：[pipeline.md](../references/pipeline.md) Stage 7 · [review-rubric.md](./review-rubric.md)
+## HTML 展示报告 (report.html)
+
+`report.html` 是 report.md 的 **VIEW 层**——自包含 HTML 展示视图，不是独立权威。由 `research-publisher` subagent 在 Delivery 定稿后渲染，契约是 `report.html = f(report.md)`：零新事实，只把已有内容映射进 house style 组件（verdict-bar / signal 染色表 / phase-timeline 等）。渲染规则、组件词汇表、内容映射见 [report-html-guide.md](./report-html-guide.md)；模板结构见 [report-shell.html.tmpl](./report-shell.html.tmpl)。渲染后须过 `scripts/verify_report_html.py` 机械门（链接守恒 + 章节守恒 + 自包含）。
+
+---
+
+**关联文件**：[pipeline.md](../references/pipeline.md) Stage 7 · [review-rubric.md](./review-rubric.md) · [report-html-guide.md](./report-html-guide.md)

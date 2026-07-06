@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="{{THEME}}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{TITLE}}</title>
+<style>
+/* ============================================================
+   deep-research house style — report-shell
+   report.html = f(report.md)，零新事实。本文件是渲染层模板，
+   由 research-publisher agent 填充 {{...}} 占位符与 CONTENT。
+   ============================================================ */
+
+@font-face {
+  font-family: 'Display';
+  src: local('SF Pro Display'), local('PingFang SC'), local('Helvetica Neue'), local('Arial');
+  font-weight: 100 900;
+}
+@font-face {
+  font-family: 'Body';
+  src: local('SF Pro Text'), local('PingFang SC'), local('Helvetica Neue'), local('Arial');
+  font-weight: 100 900;
+}
+@font-face {
+  font-family: 'Mono';
+  src: local('SF Mono'), local('Menlo'), local('Consolas'), local('monospace');
+  font-weight: 400 700;
+}
+
+/* --- Theme tokens: midnight (default) --- */
+:root {
+  --bg: #0c0e12;
+  --bg-elevated: #13161c;
+  --bg-surface: #1a1e26;
+  --bg-hover: #222730;
+  --border: #2a2f3a;
+  --border-subtle: #1e222b;
+  --text-primary: #e8eaf0;
+  --text-secondary: #8b90a0;
+  --text-tertiary: #5c6070;
+  --accent: #3b82f6;
+  --accent-dim: #2563eb;
+  --accent-glow: rgba(59, 130, 246, 0.12);
+  --signal-green: #34d399;
+  --signal-amber: #fbbf24;
+  --signal-red: #f87171;
+  --signal-green-dim: rgba(52, 211, 153, 0.15);
+  --signal-amber-dim: rgba(251, 191, 36, 0.15);
+  --signal-red-dim: rgba(248, 113, 113, 0.15);
+}
+/* --- Theme tokens: daylight (light variant, opt-in via data-theme) --- */
+[data-theme="daylight"] {
+  --bg: #fafafa;
+  --bg-elevated: #ffffff;
+  --bg-surface: #f4f5f7;
+  --bg-hover: #eef0f3;
+  --border: #e2e5ea;
+  --border-subtle: #eef0f3;
+  --text-primary: #1a1d24;
+  --text-secondary: #5c6270;
+  --text-tertiary: #9099a8;
+  --accent: #3b82f6;
+  --accent-dim: #2563eb;
+  --accent-glow: rgba(59, 130, 246, 0.10);
+  --signal-green: #059669;
+  --signal-amber: #d97706;
+  --signal-red: #dc2626;
+  --signal-green-dim: rgba(5, 150, 105, 0.12);
+  --signal-amber-dim: rgba(217, 119, 6, 0.12);
+  --signal-red-dim: rgba(220, 38, 38, 0.12);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: 'Body', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+  line-height: 1.7;
+}
+
+.page {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 6rem;
+}
+
+/* --- Hero --- */
+.hero {
+  padding: 4rem 0 3rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 3rem;
+}
+
+.hero-eyebrow {
+  font-family: 'Mono', monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 1.25rem;
+}
+.hero h1 {
+  font-family: 'Display', system-ui, sans-serif;
+  font-size: 2.2rem;
+  font-weight: 600;
+  line-height: 1.25;
+  text-wrap: balance;
+  color: var(--text-primary);
+  margin-bottom: 1rem;
+}
+
+.hero-sub {
+  font-size: 1.05rem;
+  color: var(--text-secondary);
+  max-width: 640px;
+  line-height: 1.75;
+}
+
+.hero-meta {
+  display: flex;
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+  font-family: 'Mono', monospace;
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+  letter-spacing: 0.04em;
+}
+
+/* --- Verdict bar --- */
+.verdict-bar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 3.5rem;
+}
+
+.verdict-cell {
+  background: var(--bg-elevated);
+  padding: 1.25rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.verdict-label {
+  font-family: 'Mono', monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.verdict-value {
+  font-family: 'Display', system-ui, sans-serif;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.verdict-value.green { color: var(--signal-green); }
+.verdict-value.amber { color: var(--signal-amber); }
+
+/* --- Sections --- */
+.section {
+  margin-bottom: 3.5rem;
+}
+
+.section-label {
+  font-family: 'Mono', monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: 0.75rem;
+}
+.section h2 {
+  font-family: 'Display', system-ui, sans-serif;
+  font-size: 1.35rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-wrap: balance;
+  margin-bottom: 1rem;
+  color: var(--text-primary);
+}
+
+.section h3 {
+  font-family: 'Display', system-ui, sans-serif;
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  margin-top: 2rem;
+  color: var(--text-primary);
+}
+
+.section p {
+  color: var(--text-secondary);
+  margin-bottom: 1rem;
+}
+
+.section p strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.section ul, .section ol {
+  color: var(--text-secondary);
+  margin: 0 0 1rem 1.25rem;
+}
+
+.section li {
+  margin-bottom: 0.4rem;
+  line-height: 1.65;
+}
+
+.section a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-dim);
+}
+
+.section a:hover {
+  border-bottom-color: var(--accent);
+}
+
+/* --- Architecture diagram --- */
+.arch-diagram {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2rem;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+}
+
+.arch-diagram pre {
+  font-family: 'Mono', monospace;
+  font-size: 0.78rem;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  white-space: pre;
+}
+
+.arch-diagram pre .hl { color: var(--accent); font-weight: 600; }
+.arch-diagram pre .green { color: var(--signal-green); }
+.arch-diagram pre .amber { color: var(--signal-amber); }
+.arch-diagram pre .dim { color: var(--text-tertiary); }
+
+/* --- Comparison tables --- */
+.table-wrap {
+  overflow-x: auto;
+  margin: 1.5rem 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  font-variant-numeric: tabular-nums;
+}
+thead th {
+  font-family: 'Mono', monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  text-align: left;
+  padding: 0.75rem 1rem;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+tbody td {
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  vertical-align: top;
+}
+
+tbody tr:last-child td { border-bottom: none; }
+
+tbody td:first-child {
+  color: var(--text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+tbody td.good { color: var(--signal-green); }
+tbody td.warn { color: var(--signal-amber); }
+tbody td.bad { color: var(--signal-red); }
+
+tr.rec {
+  background: var(--accent-glow);
+}
+
+tr.rec td:first-child {
+  color: var(--accent);
+}
+
+/* --- Cards --- */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.5rem 0;
+}
+
+.card {
+  background: var(--bg-elevated);
+  padding: 1.25rem 1.5rem;
+}
+
+.card-title {
+  font-family: 'Display', system-ui, sans-serif;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.5rem;
+}
+
+.card p {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 0;
+}
+/* --- Phase timeline --- */
+.phase-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 1.5rem 0;
+}
+
+.phase {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 0;
+  min-height: 0;
+}
+
+.phase-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+}
+
+.phase-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  margin-top: 0.2rem;
+  z-index: 1;
+}
+
+.phase-dot.optional {
+  background: transparent;
+  border: 2px solid var(--text-tertiary);
+}
+
+.phase-line {
+  width: 1px;
+  flex: 1;
+  background: var(--border);
+}
+
+.phase-content {
+  padding: 0 0 2rem 0;
+}
+
+.phase:last-child .phase-line { display: none; }
+.phase:last-child .phase-content { padding-bottom: 0; }
+
+.phase-name {
+  font-family: 'Mono', monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 0.35rem;
+}
+
+.phase-name.optional-label { color: var(--text-tertiary); }
+
+.phase-desc {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+
+.phase-desc strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* --- Callout --- */
+.callout {
+  background: var(--accent-glow);
+  border-left: 3px solid var(--accent);
+  padding: 1rem 1.25rem;
+  margin: 1.5rem 0;
+  border-radius: 0 6px 6px 0;
+}
+
+.callout p {
+  color: var(--text-secondary);
+  margin-bottom: 0;
+  font-size: 0.9rem;
+}
+
+.callout strong {
+  color: var(--text-primary);
+}
+/* --- Pain point list --- */
+.pain-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.5rem 0;
+}
+
+.pain-item {
+  background: var(--bg-elevated);
+  padding: 1rem 1.5rem;
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 1rem;
+  align-items: baseline;
+}
+
+.pain-item .pain-name {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--signal-amber);
+}
+
+.pain-item .pain-desc {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+/* --- Data readiness --- */
+.data-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.5rem 0;
+}
+
+.data-cell {
+  background: var(--bg-elevated);
+  padding: 1rem 1.25rem;
+}
+
+.data-cell .data-name {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.25rem;
+}
+
+.data-cell .data-source {
+  font-family: 'Mono', monospace;
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  margin-bottom: 0.35rem;
+}
+
+.data-cell .data-status {
+  font-family: 'Mono', monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+}
+
+.data-cell .data-status.ready { color: var(--signal-green); }
+.data-cell .data-status.partial { color: var(--signal-amber); }
+.data-cell .data-status.missing { color: var(--signal-red); }
+
+/* --- Tag/badge --- */
+.tag {
+  display: inline-block;
+  font-family: 'Mono', monospace;
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.15em 0.5em;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+
+.tag-green { background: var(--signal-green-dim); color: var(--signal-green); }
+.tag-amber { background: var(--signal-amber-dim); color: var(--signal-amber); }
+.tag-red { background: var(--signal-red-dim); color: var(--signal-red); }
+
+/* --- Responsive --- */
+@media (max-width: 640px) {
+  .hero h1 { font-size: 1.6rem; }
+  .verdict-bar { grid-template-columns: 1fr; }
+  .pain-item { grid-template-columns: 1fr; gap: 0.25rem; }
+  .hero-meta { flex-direction: column; gap: 0.5rem; }
+  .page { padding: 2rem 1rem 4rem; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+  <!-- Hero: 报告标题区。THEME 由 publisher 决定 midnight/daylight，见 report-html-guide.md ③ -->
+  <header class="hero">
+    <div class="hero-eyebrow">{{HERO_EYEBROW}}</div>
+    <h1>{{HERO_H1}}</h1>
+    <p class="hero-sub">{{HERO_SUB}}</p>
+    <div class="hero-meta">{{HERO_META}}</div>
+  </header>
+
+  <!--
+    verdict-bar 用法（执行摘要核心结论，2-3 格）：
+    <div class="verdict-bar">
+      <div class="verdict-cell">
+        <span class="verdict-label">结论</span>
+        <span class="verdict-value green">可行，值得推进</span>
+      </div>
+      <div class="verdict-cell">
+        <span class="verdict-label">推荐方案</span>
+        <span class="verdict-value">方案名称</span>
+      </div>
+    </div>
+    verdict-value 可加 .green（正向）或 .amber（有保留），不加则为中性色。
+  -->
+
+  <!--
+    section 用法（正文默认容器，未匹配任何语义组件的内容落这里）：
+    <section class="section">
+      <div class="section-label">阶段/主题标签</div>
+      <h2>小节标题</h2>
+      <p>正文段落，<strong>加粗关键结论</strong>。</p>
+    </section>
+  -->
+
+  <!--
+    table_wrap + signal 染色表用法（方案对比矩阵）：
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>维度</th><th>方案A</th><th>方案B</th></tr></thead>
+        <tbody>
+          <tr><td>指标</td><td class="good">达标</td><td class="bad">不达标</td></tr>
+          <tr class="rec"><td>推荐方案行</td><td class="good">...</td><td>...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    td 加 .good/.warn/.bad 对应 ✅/⚠️/❌；推荐方案整行加 tr.rec。
+  -->
+
+  <!--
+    card-grid 用法（并列风险/tradeoff/要点，无顺序语义）：
+    <div class="card-grid">
+      <div class="card">
+        <div class="card-title">要点标题</div>
+        <p>要点说明。</p>
+      </div>
+    </div>
+  -->
+
+  <!--
+    callout 用法（关键提示/核心矛盾，强调段）：
+    <div class="callout">
+      <p><strong>核心原因：</strong>说明文字。</p>
+    </div>
+    需要 amber/red 强调时内联覆盖边框色：
+    <div class="callout" style="border-left-color: var(--signal-amber);">
+  -->
+
+  <!--
+    phase-timeline 用法（分阶段路线图/Phase N/短中长期）：
+    <div class="phase-timeline">
+      <div class="phase">
+        <div class="phase-rail"><div class="phase-dot"></div><div class="phase-line"></div></div>
+        <div class="phase-content">
+          <div class="phase-name">Phase 0 · 阶段名</div>
+          <div class="phase-desc">阶段说明，<strong>关键动作加粗</strong>。</div>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="phase-rail"><div class="phase-dot optional"></div></div>
+        <div class="phase-content">
+          <div class="phase-name optional-label">Phase N · 可选阶段</div>
+          <div class="phase-desc">可选阶段说明。</div>
+        </div>
+      </div>
+    </div>
+    最后一个 phase 不需要 phase-line（末尾自动隐藏）；可选阶段用 .optional / .optional-label。
+  -->
+
+  <!--
+    data-grid 用法（数据/维度就绪度盘点）：
+    <div class="data-grid">
+      <div class="data-cell">
+        <div class="data-name">数据项名称</div>
+        <div class="data-source">来源</div>
+        <div class="data-status ready">● 已就绪 · 说明</div>
+      </div>
+    </div>
+    data-status 三态：ready（●已就绪）/ partial（◐部分可得）/ missing（○缺失）。
+  -->
+
+  <!--
+    pain-list 用法（并列问题/盲区清单）：
+    <div class="pain-list">
+      <div class="pain-item">
+        <span class="pain-name">问题名</span>
+        <span class="pain-desc">问题描述。</span>
+      </div>
+    </div>
+  -->
+
+  <!--
+    arch-diagram 用法（ASCII 架构图/流程图，保留原始字符画排版）：
+    <div class="arch-diagram">
+      <pre>
+<span class="hl">关键节点高亮</span>
+<span class="green">正向状态</span>  <span class="amber">警示状态</span>
+<span class="dim">次要说明文字</span>
+</pre>
+    </div>
+  -->
+
+  <!--
+    tag 用法（内联状态标注）：
+    <span class="tag tag-green">推荐</span>
+    <span class="tag tag-amber">现状</span>
+    <span class="tag tag-red">风险</span>
+  -->
+
+  {{CONTENT}}
+
+</div>
+</body>
+</html>

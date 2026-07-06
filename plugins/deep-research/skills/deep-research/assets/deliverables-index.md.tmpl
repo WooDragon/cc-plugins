@@ -12,6 +12,7 @@
 | `report.md` | {主报告主题} | active | PRIMARY | — |
 | `executive_summary.md` | 执行摘要 | active | CURRENT | 配合 report.md 读 |
 | `{slug}.md` | {子主题} | superseded | HISTORICAL | 被 `correction-YYYYMMDD-{slug}.md` 取代 |
+| `report.html` | HTML 展示视图 | active | VIEW | derived from report.md |
 
 ## 字段说明
 
@@ -22,6 +23,7 @@
 - **PRIMARY**：唯一权威入口，读者从此进入。
 - **CURRENT**：有效但非唯一，需配合 PRIMARY 一起读。
 - **HISTORICAL**：已被推翻，保留作推理底稿，不作为当前结论。
+- **VIEW**：展示视图（如 report.html），派生自 PRIMARY，随 PRIMARY 重算，非独立权威，不参与 supersede 链。读者读 PRIMARY 获取权威结论，VIEW 仅作阅读体验增强。
 
 **替代关系**：若被 Correction Record 修正，指向取代它的文档（`correction-YYYYMMDD-{slug}.md`），形成双向链接。
 
