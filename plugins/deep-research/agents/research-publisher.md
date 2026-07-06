@@ -42,13 +42,13 @@ color: cyan
 
 1. 读 `report.md`（+ `executive_summary.md` + `references.md` + 若存在 `INDEX.md`），建立内容与结构的完整认知
 2. 读 `report-shell.html.tmpl` 模板结构 + `report-html-guide.md` 的组件词汇表与内容→组件映射规则
-3. 按映射规则把 markdown 内容渲染进对应组件（结论/推荐方案对应 verdict-bar；方案对比矩阵对应 signal 染色表；分阶段路线图对应 phase-timeline；数据就绪度对应 data-grid；并列风险/要点对应 card-grid；关键提示对应 callout；并列问题清单对应 pain-list；ASCII 架构图对应 arch-diagram；拿不准就用朴素 section + p，不硬套组件）。填充模板占位符：`{{TITLE}}` `{{THEME}}` `{{HERO_EYEBROW}}` `{{HERO_H1}}` `{{HERO_SUB}}` `{{HERO_META}}` `{{CONTENT}}`
+3. **渲染前先判定哪些内容应组件化**（对照 guide §② 的 MUST/SHOULD 分级——N 方案对比矩阵、分层建议/阶段路线图、数据就绪度盘点、并列问题清单命中即强制组件化，不允许退化成 `ul`/`p`）。按映射规则把 markdown 内容渲染进对应组件（结论/推荐方案对应 verdict-bar；方案对比矩阵对应 signal 染色表；分阶段路线图对应 phase-timeline；数据就绪度对应 data-grid；并列风险/要点对应 card-grid；关键提示对应 callout；并列问题清单对应 pain-list；ASCII 架构图对应 arch-diagram；确实不满足任何组件语义才落 fallback 的朴素 section + p）。**禁止把 markdown 段落 1:1 直搬成 `<p>`**——对标 guide §⑥ 的黄金标准范例，渲染密度应向那个方向看齐。填充模板占位符：`{{TITLE}}` `{{THEME}}` `{{HERO_EYEBROW}}` `{{HERO_H1}}` `{{HERO_SUB}}` `{{HERO_META}}` `{{CONTENT}}`
 4. 写出 `deliverables/final/report.html`
 5. **自检（强制）**：调用 verify 脚本自校验（见下「自检机械门」）；不 PASS 则修正后复渲，循环直到 PASS 才算完成
 
 ## 渲染铁律
 
-- **零新事实**：HTML 只能包含 report.md（+ executive_summary.md / references.md）已有信息，不得新增数据、编造示例或"合理推测"补全空白
+- **零新事实**：HTML 只能包含 report.md（+ executive_summary.md / references.md）已有信息，不得新增数据、编造示例或"合理推测"补全空白。**把正文已描述内容重新编码为视觉组件（arch-diagram/染色表/phase-timeline/data-grid/card-grid 等）属于「视觉再表达」，不算新事实**——事实本身不变，只是换了一种视觉结构呈现，这是被鼓励的（详见 report-html-guide.md ④ 的边界界定）
 - **引用链接零丢失**：report.md 中所有 markdown 引用链接必须一个不漏地渲染为可点击超链接
 - **双语术语原样保留**：中英文术语对照渲染时不做增删改写
 - **自包含**：零外部资源，字体用 local() 引用系统字体，CSS 内联在 style 标签中，不引用外部脚本、样式表或图片资源，产出单文件必须能离线打开
