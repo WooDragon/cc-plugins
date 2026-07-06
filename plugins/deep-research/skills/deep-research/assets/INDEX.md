@@ -15,9 +15,11 @@
 | `deliverable-matrix.md` | 报告交付物矩阵 | Lead 在 Delivery Stage 参照，确定最终输出结构 |
 | `deliverables-index.md.tmpl` | 交付物权威关系索引模板 | 多文档 deliverables 必备，声明 PRIMARY/CURRENT/HISTORICAL（见 principles.md 原则 5） |
 | `landing-feedback.md.tmpl` | Stage 8 Landing 回填模板（⚠ experimental） | Lead 在 Stage 8 落地实测后回写，五段结构（落地概览 / 四分类 Delta 表 / delta 分述 / 方法论边界声明 / 权威指针+补轨登记）。待 #11 字面复制验证后转 stable |
+| `report-shell.html.tmpl` | report.html house style 模板（暗色/亮色双主题、零 JS、自包含） | research-publisher agent 渲染 report.md 为 HTML 时填充占位符 |
+| `report-html-guide.md` | HTML 渲染设计规范（组件词汇表、内容→组件映射规则、渲染铁律） | research-publisher agent 渲染时参照，判断内容如何映射到 house style 组件 |
 
 ## 关联
 
 - Playbooks: `../references/playbooks-INDEX.md` -- 研究类型剧本
 - Framework: `../references/framework-INDEX.md` -- 管线、质量门控、上下文经济学
-- Agents: 见 deep-research 插件的 research-harvester / research-analyst / research-reviewer subagent
+- Agents: 见 deep-research 插件的 research-harvester / research-analyst / research-reviewer / research-publisher subagent

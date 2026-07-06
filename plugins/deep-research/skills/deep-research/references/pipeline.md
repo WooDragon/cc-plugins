@@ -12,7 +12,7 @@ Sources → ❰G0❱ → [harvester] Acquisition → ❰G1❱
   → [analyst] Decomposition → ❰G2❱
   → [analyst+Lead] Synthesis → ❰G3❱
   → [reviewer] Validation
-  → [Lead] Delivery
+  → [Lead] Delivery → [publisher] report.html
   ⋯⋯ → [Lead] Landing & Feedback（Stage 8, experimental, 仅落地后触发）
 ```
 
@@ -126,7 +126,9 @@ Lead 参与综合分析中不可委托的连贯思考和战略判断。
 | 执行者 | Lead session |
 | 输入 | 审阅通过的产物 |
 | 输出目录 | `deliverables/final/` |
-| 产物 | report.md + executive_summary.md + 附录 |
+| 产物 | report.md + executive_summary.md + 附录 + report.html（见下 HTML 渲染子步骤） |
+
+**HTML 渲染子步骤**：Delivery 定稿（report.md 等已落盘 `deliverables/final/`）后，Lead spawn `deep-research:research-publisher`（Task subagent），把 report.md 渲染成 `report.html`——自包含 HTML 展示视图（VIEW 层，见 [principles.md](./principles.md) 原则 5），零新事实。publisher 渲染完成后自调 `scripts/verify_report_html.py` 机械门自校验（三态 exit：`0`=PASS/`1`=FAIL/`2`=N/A，校验链接守恒 + 章节守恒 + 自包含），不 PASS 须修正后复渲。
 
 ### Stage 8: Landing & Feedback（Lead 执行，experimental）
 
@@ -165,4 +167,4 @@ Lead 参与综合分析中不可委托的连贯思考和战略判断。
 6. **Gate 阻塞**：G0/G1/G2/G3 未通过时，后续 Stage 禁止启动
 7. **回退权限**：只有 Lead 可以决定 Stage 回退。G3 裁决 RECYCLE 时强制回退到 G0 重校准问题定义（区别于 FAIL 的原阶段补充）
 
-**关联文件**：[principles.md](./principles.md) · [quality-gates.md](./quality-gates.md) · 角色定义见 deep-research 插件的 research-harvester / research-analyst / research-reviewer subagent
+**关联文件**：[principles.md](./principles.md) · [quality-gates.md](./quality-gates.md) · 角色定义见 deep-research 插件的 research-harvester / research-analyst / research-reviewer / research-publisher subagent

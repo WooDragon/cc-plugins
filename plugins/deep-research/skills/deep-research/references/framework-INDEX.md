@@ -19,6 +19,6 @@
 
 | 项 | 说明 |
 |------|------|
-| research-harvester / research-analyst / research-reviewer | 3 个专业角色，已成为 deep-research 插件的原生 subagent（用 Task 工具以 `deep-research:research-harvester` 等 spawn），不再是可链接的文件 |
+| research-harvester / research-analyst / research-reviewer / research-publisher | 4 个专业角色，已成为 deep-research 插件的原生 subagent（用 Task 工具以 `deep-research:research-harvester` 等 spawn），不再是可链接的文件 |
 | [playbooks-INDEX.md](./playbooks-INDEX.md) | 按研究类型的执行手册（提供默认源列表和流程变体） |
 | `../assets/` | 报告模板和项目初始化模板 |
