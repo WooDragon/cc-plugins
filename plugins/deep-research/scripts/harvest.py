@@ -422,9 +422,10 @@ def _http_json_post(url, payload, headers, timeout):
 # degrade-to-next-backend behavior and are not retried here.
 _GATEWAY_RETRY_BACKOFFS_TRANSIENT = (5, 15)  # 429/408/5xx: up to 2 retries
 _GATEWAY_RETRY_BACKOFFS_OTHER_4XX = (5,)     # other 4xx (401/403/404...): 1 retry
+_COMPLETION_RETRY_BACKOFFS = (2, 5, 15, 30)  # 4 retries, 52s total backoff
 
 
-def _http_json_post_with_retry(url, payload, headers, timeout):
+def _http_json_post_with_retry(url, payload, headers, timeout, transient_backoffs=None):
     """Bounded retry around _http_json_post for transient gateway failures.
     Classification is fixed on the first failure's status code and the
     matching backoff schedule is followed to exhaustion -- no lock is held
@@ -447,16 +448,16 @@ def _http_json_post_with_retry(url, payload, headers, timeout):
             status = e.code
             if backoffs is None:
                 transient = status in (429, 408) or 500 <= status < 600
-                backoffs = _GATEWAY_RETRY_BACKOFFS_TRANSIENT if transient else _GATEWAY_RETRY_BACKOFFS_OTHER_4XX
+                backoffs = (transient_backoffs if transient_backoffs is not None else _GATEWAY_RETRY_BACKOFFS_TRANSIENT) if transient else _GATEWAY_RETRY_BACKOFFS_OTHER_4XX
             retries_done = attempt - 1
             if retries_done >= len(backoffs):
                 raise RuntimeError(f"HTTP {status} after {attempt} attempts") from e
             time.sleep(backoffs[retries_done])
-        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+        except (urllib.error.URLError, socket.timeout, TimeoutError, json.JSONDecodeError) as e:
             # No status code (connection refused/reset, DNS failure, read
             # timeout, ...) -- always transient, same schedule as 429/5xx.
             if backoffs is None:
-                backoffs = _GATEWAY_RETRY_BACKOFFS_TRANSIENT
+                backoffs = transient_backoffs if transient_backoffs is not None else _GATEWAY_RETRY_BACKOFFS_TRANSIENT
             retries_done = attempt - 1
             if retries_done >= len(backoffs):
                 raise RuntimeError(f"network error after {attempt} attempts: {e}") from e
@@ -781,6 +782,11 @@ def do_search(query, lang, search_backends, journal, config):
                 # try the next backend instead of returning an empty set.
                 attempts.append({"backend": backend_cfg["type"], "error": "all results filtered by blacklist"})
                 continue
+            if backend_cfg["type"] == "gemini-grounding":
+                for r in filtered:
+                    journal.append({"tool": "fetch", "url": r["url"],
+                                    "backend": "grounding",
+                                    "content": r.get("title") or r["url"]})
             journal.append({"tool": "search", "query": query, "lang": lang,
                              "backend": backend_cfg["type"], "urls": [r["url"] for r in filtered],
                              "attempts": attempts})
@@ -1129,7 +1135,8 @@ class GatewayClient:
         if tools:
             payload["tools"] = tools
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        return _http_json_post_with_retry(url, payload, headers, self.timeout_s)
+        return _http_json_post_with_retry(url, payload, headers, self.timeout_s,
+                                           transient_backoffs=_COMPLETION_RETRY_BACKOFFS)
 
 
 # ---------------------------------------------------------------------------
@@ -1156,7 +1163,7 @@ def _read_http_error_body(e):
         return "<error body unavailable>"
 
 
-def _anthropic_post_with_retry(url, payload, headers, timeout):
+def _anthropic_post_with_retry(url, payload, headers, timeout, transient_backoffs=None):
     """Retry wrapper for the Anthropic /messages endpoint. Unlike the OpenAI
     gateway path, a non-transient 4xx (400/401/403/404) is NOT retried -- a
     malformed request body fails identically on a resend, so we surface the
@@ -1164,7 +1171,7 @@ def _anthropic_post_with_retry(url, payload, headers, timeout):
     network-layer failures follow the transient backoff schedule. HTTPError
     is caught before URLError (its parent) so the status-bearing case isn't
     swallowed."""
-    backoffs = _GATEWAY_RETRY_BACKOFFS_TRANSIENT
+    backoffs = transient_backoffs if transient_backoffs is not None else _GATEWAY_RETRY_BACKOFFS_TRANSIENT
     attempt = 0
     while True:
         attempt += 1
@@ -1179,7 +1186,7 @@ def _anthropic_post_with_retry(url, payload, headers, timeout):
             if attempt - 1 >= len(backoffs):
                 raise RuntimeError(f"Anthropic HTTP {status} after {attempt} attempts: {body}") from e
             time.sleep(backoffs[attempt - 1])
-        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+        except (urllib.error.URLError, socket.timeout, TimeoutError, json.JSONDecodeError) as e:
             if attempt - 1 >= len(backoffs):
                 raise RuntimeError(f"Anthropic network error after {attempt} attempts: {e}") from e
             time.sleep(backoffs[attempt - 1])
@@ -1390,7 +1397,8 @@ class AnthropicGatewayClient:
             "Content-Type": "application/json",
             "anthropic-version": "2023-06-01",
         }
-        resp = _anthropic_post_with_retry(url, payload, headers, self.timeout_s)
+        resp = _anthropic_post_with_retry(url, payload, headers, self.timeout_s,
+                                          transient_backoffs=_COMPLETION_RETRY_BACKOFFS)
         return _anthropic_resp_to_oai(resp)
 
 
@@ -1619,7 +1627,10 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
         for _ in range(max_steps):
             if time.monotonic() > deadline:
                 return WorkerResult(alias, model_id, "FAILED", None, journal, "wall_clock_exceeded")
-            resp = client.complete(messages=messages, tools=TOOL_SCHEMAS)
+            try:
+                resp = client.complete(messages=messages, tools=TOOL_SCHEMAS)
+            except Exception:
+                break
             message = _extract_message(resp)
             if message is None:
                 return WorkerResult(alias, model_id, "FAILED", None, journal, "bad_response")
@@ -1686,7 +1697,11 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
         # the unchanged prefix instead of invalidating it over a
         # tools-block diff. The prompt text is what actually stops the
         # model from calling a tool, not the schema's absence.
-        resp = client.complete(messages=messages, tools=TOOL_SCHEMAS)
+        try:
+            resp = client.complete(messages=messages, tools=TOOL_SCHEMAS)
+        except Exception as e:
+            return WorkerResult(alias, model_id, "FAILED", None, journal,
+                                f"synthesis_failed ({type(e).__name__}): {e}")
         message = _extract_message(resp)
         if message is None:
             return WorkerResult(alias, model_id, "FAILED", None, journal, "step_limit_no_synthesis")
