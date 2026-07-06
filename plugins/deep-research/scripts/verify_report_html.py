@@ -5,9 +5,12 @@ Contract under test: report.html = f(report.md), zero new facts. This script
 cannot verify "zero new facts" (that's semantic, left to Lead's visual review)
 but it CAN mechanically verify the structural half of the contract:
 
-1. Link conservation: every URL in report.md (+ references.md, if present)
+1. Link conservation: every URL in report.md's prose (both [text](url) and
+   bare http(s):// forms; fenced code blocks and inline code spans excluded)
    must survive into report.html's href/src attributes (after HTML-unescaping,
-   since markdown "&" in a URL renders as "&amp;" in HTML).
+   since markdown "&" in a URL renders as "&amp;" in HTML). Scoped to report.md
+   only -- references.md is a separate deliverable the publisher does not
+   render into report.html, so its URLs are NOT in the must-conserve set.
 2. Section conservation: every ## / ### heading in report.md must have its
    text appear somewhere in report.html's rendered text.
 3. Self-containment: no external <link>/<script>/<img> resource loads, no

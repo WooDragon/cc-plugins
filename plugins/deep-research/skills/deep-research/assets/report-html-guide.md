@@ -57,7 +57,7 @@
 ## ④ 硬约束（渲染铁律）
 
 - **自包含**：零外部资源。字体用 `local()`，CSS 全部内联在 `<style>` 中，不引用外部 JS/CSS/图片。产出单个 `.html` 文件必须能离线打开。
-- **引用链接零丢失**：report.md 中所有 `[文字](url)` 形式的引用链接，渲染时全部转成 `<a href="url">文字</a>`，一个不漏。
+- **引用链接零丢失**：report.md 正文中所有链接都要转成 `<a href="url">…</a>`，一个不漏——既包括 `[文字](url)` 形式，也包括**裸 URL**（正文里直接出现的 `https://…`，无 markdown 语法）。机械门对两种形式都校验。例外：fenced code block 与 inline code span 内的 URL 是示例/标识符（如 curl 命令、config 片段），渲染成 `<pre>`/`<code>` 纯文本、**不** linkify，机械门也不校验它们。
 - **双语术语原样保留**：report.md 中的中英文术语对照（如「Contextual Thompson Sampling」）渲染时不做增删改写。
 - **零新事实**：HTML 只能包含 report.md（+ executive_summary.md / references.md）已有的信息。不得新增数据、不得编造示例、不得"合理推测"补全空白。
 - **hero 区同样受「零新事实」约束**：TITLE/EYEBROW/H1/SUB/META 都是 HTML 内容，不是可另取数的"元信息区"。这些字段只能提炼自渲染源本身——report.md 头部（标题、撰写日期、研究类型、执行摘要）、references.md（可数出的来源条数）。严禁从项目 CLAUDE.md、pipeline 中间产物、MEMORY 或任何 report.md 之外的地方取数填进 hero。hero-meta 的每一项都应能在 report.md/executive_summary/references 里 grep 到出处；report.md 头部没有的数字（如候选数）就不放，宁缺毋滥。
