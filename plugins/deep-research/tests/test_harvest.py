@@ -30,7 +30,9 @@ def base_config(**overrides):
         "fetch_backends": [{"type": "urllib-ua"}],
         "local_sources": {"enabled": False, "dir": "intake/local_sources"},
         "limits": {"max_steps_per_model": 6, "call_timeout_s": 5, "wall_clock_s": 60,
-                   "quorum": 2, "search_min_interval_s": 0, "fetch_max_chars": 20000},
+                   "quorum": 2, "search_min_interval_s": 0, "fetch_max_chars": 20000,
+                   "fetch_connect_timeout_s": 5, "fetch_low_speed_bytes_s": 512,
+                   "fetch_low_speed_window_s": 10},
         "blacklist_domains": ["blog.csdn.net", "cloud.baidu.com", "aliyun.com"],
     }
     cfg.update(overrides)
@@ -1367,6 +1369,73 @@ class TestCurlCffiFetch(unittest.TestCase):
         self.assertEqual(content, "clean text")
         m.assert_called_once()
 
+    def test_low_speed_options_set_from_config(self):
+        cfg = base_config()
+        cfg["limits"]["fetch_low_speed_bytes_s"] = 999
+        cfg["limits"]["fetch_low_speed_window_s"] = 7
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, "<p>ok</p>")) as m:
+            self._fetch("https://a.com/x", config=cfg)
+        curl_options = m.call_args.kwargs["curl_options"]
+        self.assertEqual(curl_options[harvest.CurlCffiOpt.LOW_SPEED_LIMIT], 999)
+        self.assertEqual(curl_options[harvest.CurlCffiOpt.LOW_SPEED_TIME], 7)
+
+    def test_timeout_tuple_connect_plus_read_equals_remaining_budget(self):
+        # curl_cffi 0.15.0 sums (connect, read) into CURLOPT_TIMEOUT_MS for
+        # non-stream calls -- so the read component must be
+        # `remaining - connect`, not `remaining`, or the effective total
+        # would be connect + remaining (over budget).
+        with mock.patch("harvest.time.monotonic", side_effect=[0.0, 0.0]), \
+             mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, "<p>ok</p>")) as m:
+            self._fetch("https://a.com/x", timeout=20)
+        conn, read = m.call_args.kwargs["timeout"]
+        self.assertAlmostEqual(conn + read, 20, places=3)
+        self.assertEqual(conn, 5)  # default fetch_connect_timeout_s
+
+    def test_timeout_tuple_small_budget_selects_remaining_minus_epsilon(self):
+        # When remaining < fetch_connect_timeout_s (here remaining=2 vs the
+        # default connect cap of 5), `min(connect_timeout_s, remaining-0.1)`
+        # must pick the second operand -- conn = remaining - 0.1, read =
+        # 0.1. This locks down the epsilon fallback so it can't be
+        # "simplified" to conn = remaining (which would zero out the read
+        # component and reintroduce the libcurl 0ms-means-infinite hang).
+        with mock.patch("harvest.time.monotonic", side_effect=[0.0, 0.0]), \
+             mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, "<p>ok</p>")) as m:
+            self._fetch("https://a.com/x", timeout=2)
+        conn, read = m.call_args.kwargs["timeout"]
+        self.assertAlmostEqual(conn, 1.9, places=3)
+        self.assertAlmostEqual(read, 0.1, places=3)
+        self.assertAlmostEqual(conn + read, 2, places=3)
+
+    def test_cross_hop_deadline_exceeded_aborts_before_next_hop(self):
+        # First hop resolves within budget and redirects; by the time the
+        # second hop would fire, the shared deadline has less than 1s left
+        # -- it must abort there instead of issuing another curl call.
+        with mock.patch("harvest.time.monotonic", side_effect=[0.0, 0.0, 4.5]), \
+             mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(302, location="/next")) as m:
+            result, reason = self._fetch("https://a.com/start", timeout=5)
+        self.assertIsNone(result)
+        self.assertIn("deadline exceeded", reason)
+        m.assert_called_once()
+
+    def test_unmigrated_config_missing_new_limit_keys_still_works(self):
+        # A config predating this change has none of the 3 new limits keys.
+        # .get()+default must keep curl-cffi working rather than KeyError
+        # -> swallowed by call_fetch_backend's broad except into a silent,
+        # permanent "unexpected error".
+        cfg = base_config()
+        cfg["limits"] = {k: v for k, v in cfg["limits"].items()
+                          if k not in ("fetch_connect_timeout_s", "fetch_low_speed_bytes_s",
+                                       "fetch_low_speed_window_s")}
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, "<p>legacy ok</p>")):
+            result, reason = self._fetch("https://a.com/x", config=cfg)
+        self.assertIsNone(reason)
+        self.assertIn("legacy ok", result)
+
 
 class TestCurlCffiStartupCheck(unittest.TestCase):
     """_check_curl_cffi_available() is the fail-fast gate: if the backend is
@@ -1398,6 +1467,90 @@ class TestCurlCffiStartupCheck(unittest.TestCase):
         harvest._HAS_CURL_CFFI = False
         cfg = base_config(fetch_backends=[{"type": "urllib-ua"}])
         harvest._check_curl_cffi_available(cfg)  # must not raise
+
+
+class TestCallFetchBackendPerBackendTimeout(unittest.TestCase):
+    """call_fetch_backend must read a per-backend `timeout_s` override before
+    falling back to the shared call_timeout_s -- raw fetch (curl-cffi/
+    urllib-ua) should be capped fast, while server-side renderers (jina/
+    tavily) get more slack, without a one-size-fits-all timeout misjudging
+    either."""
+
+    def test_backend_with_timeout_s_uses_its_own_value(self):
+        cfg = base_config()
+        with mock.patch("harvest._fetch_curl_cffi", return_value=("text", None)) as m:
+            harvest.call_fetch_backend({"type": "curl-cffi", "timeout_s": 25},
+                                        harvest.RateLimiter(0), "https://a.com/x", cfg)
+        self.assertEqual(m.call_args.args[2], 25)
+
+    def test_jina_backend_with_timeout_s_uses_its_own_value(self):
+        cfg = base_config()
+        with mock.patch("harvest._fetch_jina_reader", return_value=("text", None)) as m:
+            harvest.call_fetch_backend({"type": "jina-reader", "timeout_s": 60},
+                                        harvest.RateLimiter(0), "https://a.com/x", cfg)
+        self.assertEqual(m.call_args.args[2], 60)
+
+    def test_backend_without_timeout_s_falls_back_to_call_timeout_s(self):
+        cfg = base_config()  # call_timeout_s: 5, from base_config()
+        with mock.patch("harvest._fetch_urllib_ua", return_value=("text", None)) as m:
+            harvest.call_fetch_backend({"type": "urllib-ua"},
+                                        harvest.RateLimiter(0), "https://a.com/x", cfg)
+        self.assertEqual(m.call_args.args[2], cfg["limits"]["call_timeout_s"])
+
+
+class TestFetchBackendsRealConfigChain(unittest.TestCase):
+    """The shipped harvest.config.json is the actual chain used in
+    production -- assert its shape directly so a future edit to the file
+    can't silently break the curl-cffi -> jina-reader fallback order or
+    drop the per-backend timeout_s fields these tests exercise elsewhere."""
+
+    def setUp(self):
+        config_path = Path(__file__).resolve().parent.parent / "scripts" / "harvest.config.json"
+        self.config = harvest.load_config(config_path)
+
+    def test_jina_reader_is_first_fallback_after_curl_cffi(self):
+        types = [b["type"] for b in self.config["fetch_backends"]]
+        self.assertEqual(types[0], "curl-cffi")
+        self.assertEqual(types[1], "jina-reader")
+
+    def test_all_backends_declare_timeout_s(self):
+        for backend in self.config["fetch_backends"]:
+            self.assertIn("timeout_s", backend, backend["type"])
+
+    def test_raw_fetch_backends_capped_shorter_than_server_side_renderers(self):
+        by_type = {b["type"]: b["timeout_s"] for b in self.config["fetch_backends"]}
+        self.assertLess(by_type["curl-cffi"], by_type["jina-reader"])
+        self.assertLess(by_type["urllib-ua"], by_type["tavily-extract"])
+
+    def test_new_low_speed_limits_present_with_expected_defaults(self):
+        limits = self.config["limits"]
+        self.assertEqual(limits["fetch_connect_timeout_s"], 5)
+        self.assertEqual(limits["fetch_low_speed_bytes_s"], 512)
+        self.assertEqual(limits["fetch_low_speed_window_s"], 10)
+        self.assertEqual(limits["call_timeout_s"], 180)  # unchanged, still used by LLM/search calls
+
+
+class TestJinaReaderAuthHeader(unittest.TestCase):
+    """_fetch_jina_reader's Authorization header must track JINA_API_KEY
+    presence/absence -- guards against a regression when the fetch chain
+    reorder (variant 2) promotes jina to the first fallback slot."""
+
+    def _fetch(self, env):
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch("harvest.urllib.request.urlopen",
+                         return_value=FakeHTTPResponse(b"page text")) as m:
+            harvest._fetch_jina_reader({"api_key_env": "JINA_API_KEY"}, "https://a.com/x", 5, 20000)
+        return m.call_args.args[0]
+
+    def test_authorization_header_present_when_key_set(self):
+        req = self._fetch({"JINA_API_KEY": "secret-key"})
+        self.assertEqual(req.headers.get("Authorization"), "Bearer secret-key")
+
+    def test_authorization_header_absent_when_key_unset(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JINA_API_KEY", None)
+            req = self._fetch({})
+        self.assertNotIn("Authorization", req.headers)
 
 
 # ---------------------------------------------------------------------------
