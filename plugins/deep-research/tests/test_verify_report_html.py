@@ -362,6 +362,103 @@ Done.
         assert "example.com/docs" in stdout
 
 
+class TestInlineCodeSpanUrlsAreNotMustConserveLinks:
+    """Copilot review round 3: same deadlock as fenced blocks, but for inline
+    code spans (`...`). A URL written as `https://api.example/v1` renders to
+    <code> plain text with no href, so it must not be a must-conserve link."""
+
+    def test_inline_code_url_not_required_prose_link_is(self, tmp_path):
+        md = """# Report
+
+## API
+
+Call the [public docs](https://example.com/docs) endpoint at `https://api.example.com/v1` directly.
+"""
+        # Prose link kept as <a href>; the inline-code URL rendered as <code>
+        # plain text (no href) -- must not be flagged missing.
+        html_content = """<!DOCTYPE html>
+<html><head><title>Report</title><style></style></head>
+<body>
+<section class="section">
+<h2>API</h2>
+<p>Call the <a href="https://example.com/docs">public docs</a> endpoint at <code>https://api.example.com/v1</code> directly.</p>
+</section>
+</body></html>
+"""
+        _write(tmp_path, "report.md", md)
+        _write(tmp_path, "report.html", html_content)
+
+        code, stdout, _ = run_verify(tmp_path)
+
+        assert code == 0, stdout
+        assert "PASS" in stdout
+
+    def test_prose_link_still_required_with_inline_code_url_present(self, tmp_path):
+        # Guardrail: stripping inline code must not weaken detection of a
+        # genuinely dropped prose link.
+        md = """# Report
+
+## API
+
+Call the [public docs](https://example.com/docs) endpoint at `https://api.example.com/v1` directly.
+"""
+        html_content = """<!DOCTYPE html>
+<html><head><title>Report</title><style></style></head>
+<body>
+<section class="section">
+<h2>API</h2>
+<p>Call the public docs endpoint at <code>https://api.example.com/v1</code> directly.</p>
+</section>
+</body></html>
+"""
+        _write(tmp_path, "report.md", md)
+        _write(tmp_path, "report.html", html_content)
+
+        code, stdout, _ = run_verify(tmp_path)
+
+        assert code == 1
+        assert "example.com/docs" in stdout
+
+
+class TestReferencesMdNotInMustConserveSet:
+    """Copilot review round 3 + user decision: link conservation is scoped to
+    report.md ONLY. references.md is an independent deliverable (the full
+    bibliography) the publisher does not render into the HTML, so its URLs
+    must NOT be required to survive -- otherwise every report FAILs
+    unsatisfiably. HTML is strictly f(report.md)."""
+
+    def test_references_only_url_absent_from_html_still_passes(self, tmp_path):
+        md = """# Report
+
+## Overview
+
+See [main source](https://example.com/main) for the core finding.
+"""
+        # references.md has an extra URL that never appears in the HTML.
+        references = """# References
+
+1. https://example.com/main
+2. https://extra.example.com/only-in-references
+"""
+        html_content = """<!DOCTYPE html>
+<html><head><title>Report</title><style></style></head>
+<body>
+<section class="section">
+<h2>Overview</h2>
+<p>See <a href="https://example.com/main">main source</a> for the core finding.</p>
+</section>
+</body></html>
+"""
+        _write(tmp_path, "report.md", md)
+        _write(tmp_path, "references.md", references)
+        _write(tmp_path, "report.html", html_content)
+
+        code, stdout, _ = run_verify(tmp_path)
+
+        assert code == 0, stdout
+        assert "PASS" in stdout
+
+
 class TestNoReportHtmlIsNotApplicable:
     """Before publisher has rendered anything, there's no report.html to
     check -- this is N/A (exit 2), not FAIL. Distinguishing "not done yet"

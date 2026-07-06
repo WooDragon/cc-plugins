@@ -53,6 +53,11 @@ _BARE_URL_RE = re.compile(r"(?<!\]\()https?://[^\s)>\]]+")
 # code (shell comments, etc.) never masquerades as a markdown heading.
 _CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 
+# Inline code span (single backtick pair). Stripped ONLY on the URL-extraction
+# path (not headings): a URL inside `...` renders as <code> plain text with no
+# href, so it must not be counted as a must-conserve link.
+_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
 # ## or ### heading, but not #### or deeper (negative lookahead on the 4th #).
 _HEADING_RE = re.compile(r"^(#{2,3})(?!#)\s+(.+?)\s*$", re.MULTILINE)
 
@@ -106,16 +111,22 @@ def _normalize_url(url: str) -> str:
 def extract_md_urls(text: str) -> set:
     """Extract all URLs referenced from markdown text: link-form and bare.
 
-    Fenced code blocks are stripped first (symmetric with extract_md_headings):
-    a URL inside a ```code block``` -- an example curl command, a repo URL in
-    a config snippet -- is not a citation. Per report-html-guide.md the
-    publisher renders code blocks as arch-diagram/<pre> plain text and MUST
-    NOT linkify their contents, so such URLs never get an href/src in the
-    HTML. Counting them as "must-be-conserved links" would false-positive a
-    correctly rendered report into an unsatisfiable FAIL (a deadlock trap
-    the publisher cannot fix). Only prose-level links must survive.
+    Both fenced code blocks (```...```) AND inline code spans (`...`) are
+    stripped first: a URL inside code -- an example curl command, a repo URL
+    in a config snippet, an API endpoint written as `https://api.example/v1`
+    -- is not a citation. Per report-html-guide.md the publisher renders code
+    as arch-diagram/<pre> or <code> plain text and MUST NOT linkify its
+    contents, so such URLs never get an href/src in the HTML. Counting them
+    as "must-be-conserved links" would false-positive a correctly rendered
+    report into an unsatisfiable FAIL (a deadlock trap the publisher cannot
+    fix). Only prose-level links must survive.
+
+    NOTE: this code-span stripping is intentionally confined to the URL
+    path. extract_md_headings does NOT strip inline code, because a heading
+    like `## 关于 primary_job` needs its identifier text preserved for the
+    _normalize_for_match comparison (see the underscore/em-dash fix).
     """
-    body = strip_code_fences(text)
+    body = _INLINE_CODE_RE.sub(" ", strip_code_fences(text))
     urls = set()
     for m in _MD_LINK_URL_RE.finditer(body):
         urls.add(_normalize_url(m.group(1)))
@@ -239,7 +250,12 @@ def check_report_html(path_arg: str):
     "PASS" / "FAIL" / "N_A". details is a list of human-readable strings
     (empty on PASS/N_A, itemized violations on FAIL).
     """
-    report_md_path, references_md_path, report_html_path = resolve_paths(path_arg)
+    # references.md is intentionally NOT unpacked/used here: the HTML is
+    # strictly f(report.md), and references.md is an independent deliverable
+    # (the full >=20-link bibliography) that the publisher does not render.
+    # Requiring its links to survive into the HTML would be an unsatisfiable
+    # FAIL. Link conservation is scoped to report.md's own links only.
+    report_md_path, _references_md_path, report_html_path = resolve_paths(path_arg)
 
     if report_html_path is None:
         return "N_A", "report.html does not exist yet -- nothing to verify", []
@@ -248,17 +264,16 @@ def check_report_html(path_arg: str):
         return "N_A", "report.md not found alongside report.html -- cannot verify against a primary source", []
 
     md_text = report_md_path.read_text(encoding="utf-8")
-    references_text = references_md_path.read_text(encoding="utf-8") if references_md_path else ""
     html_text = report_html_path.read_text(encoding="utf-8")
 
     details = []
 
-    # 1. Link conservation
-    md_urls = extract_md_urls(md_text) | extract_md_urls(references_text)
+    # 1. Link conservation (scoped to report.md only -- see note above)
+    md_urls = extract_md_urls(md_text)
     html_urls = extract_html_urls(html_text)
     missing_urls = sorted(md_urls - html_urls)
     for url in missing_urls:
-        details.append(f"missing link: {url} (present in report.md/references.md, absent from report.html)")
+        details.append(f"missing link: {url} (present in report.md, absent from report.html)")
 
     # 2. Section conservation (compare on normalized keys so lossless
     #    display-layer typography -- separator swaps, punctuation -- doesn't

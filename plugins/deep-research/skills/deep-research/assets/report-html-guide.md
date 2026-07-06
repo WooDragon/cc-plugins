@@ -61,7 +61,7 @@
 - **双语术语原样保留**：report.md 中的中英文术语对照（如「Contextual Thompson Sampling」）渲染时不做增删改写。
 - **零新事实**：HTML 只能包含 report.md（+ executive_summary.md / references.md）已有的信息。不得新增数据、不得编造示例、不得"合理推测"补全空白。
 - **hero 区同样受「零新事实」约束**：TITLE/EYEBROW/H1/SUB/META 都是 HTML 内容，不是可另取数的"元信息区"。这些字段只能提炼自渲染源本身——report.md 头部（标题、撰写日期、研究类型、执行摘要）、references.md（可数出的来源条数）。严禁从项目 CLAUDE.md、pipeline 中间产物、MEMORY 或任何 report.md 之外的地方取数填进 hero。hero-meta 的每一项都应能在 report.md/executive_summary/references 里 grep 到出处；report.md 头部没有的数字（如候选数）就不放，宁缺毋滥。
-- **Correction Record / 多文档场景如实呈现**：若 report.md 头部有 SUPERSEDED/部分修正声明，或 `deliverables-index.md` 标注了权威关系（PRIMARY/CURRENT/HISTORICAL），HTML 必须用 `.callout` 显著标出「本节已被 Correction Record 修订」。**不得抹平已修正、已下调的结论**——渲染层没有权限替原始判断"美化"。
+- **Correction Record / 多文档场景如实呈现**：若 report.md 头部有 SUPERSEDED/部分修正声明，或 `deliverables/final/INDEX.md`（权威关系索引，模板资产名是 `deliverables-index.md.tmpl`，渲染落盘后即 `INDEX.md`）标注了权威关系（PRIMARY/CURRENT/HISTORICAL/VIEW），HTML 必须用 `.callout` 显著标出「本节已被 Correction Record 修订」。**不得抹平已修正、已下调的结论**——渲染层没有权限替原始判断"美化"。
 
 ---
 
