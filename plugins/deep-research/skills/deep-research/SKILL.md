@@ -43,6 +43,26 @@ G0（需求门）不派 subagent——由 Lead 在主上下文与用户对齐 pr
 
 详细的 Task 隔离判据（何时必须隔离、何时主上下文直接做）见 `references/context-economics.md`。
 
+## 采集模式决策（G0 对齐阶段，spawn harvester 前）
+
+G0 与用户完成 primary_job / Non-Goals 对齐后、进入 Acquisition 前，Lead 须确定采集模式。判定规则：
+
+1. **检测 `GATEWAY_API_KEY`**（或 config 中声明的 `gateway.api_key_env`）是否已配置
+2. 结果分支：
+   - **已配置** → 默认走 panel mode（三模型并行），不问用户
+   - **未配置** → 主动询问用户：
+     > "当前未检测到聚合网关 API key。你可以：
+     > 1. 提供 key（我来帮你配好环境变量）
+     > 2. 使用 `--no-api` 模式（零外部 LLM 消耗，由我直接搜索+分析，质量略低于多模型交叉验证）"
+   - 用户选 1 → Lead 指引用户 export key 或写入 `.env`，确认后走 panel mode
+   - 用户选 2 → Lead 在 spawn harvester 的 Task 指令中加 `--no-api` 标记
+
+**`--no-api` 模式说明**（供 Lead 告知用户）：
+- harvest.py 只负责搜索+抓取，不调 LLM gateway（零 API 成本）
+- 推理由 harvester subagent（Claude Code session）承担
+- 无多模型交叉验证，reviewer 的 G1 Gate 会标注 `mode: "local"`
+- citation verification 仍由确定性代码执行（`verify-local` 子命令）
+
 ## harvest.py 路径发现约定（重要）
 
 多模型采集脚本 harvest.py 位于 `${CLAUDE_PLUGIN_ROOT}/scripts/harvest.py`。由于 subagent 正文不展开该变量，Lead 在 spawn research-harvester 前，先用发现命令解析出绝对路径：
@@ -54,12 +74,18 @@ find ~/.claude/plugins -path '*/deep-research/scripts/harvest.py' 2>/dev/null | 
 取到的绝对路径写进 harvester 的 Task 指令。harvester 用该路径执行：
 
 ```bash
+# Panel mode (默认，需要 GATEWAY_API_KEY)
 python3 <路径> run --goal-file <goal-file> --out pipeline/1_raw/
+
+# Local mode (无 gateway key 时)
+python3 <路径> run --no-api --queries-json <queries.json> --goal-file <goal-file> --out pipeline/1_raw/
 ```
 
 三态 exit code：
-- **exit 3**（`UNAVAILABLE`）：采集不可用，须停止并上报用户裁决，**不自行降级到 legacy 链**。
-- **exit 4**：curl_cffi 依赖未装，须 `pip install curl_cffi` 后重跑。
+- **exit 0**：成功完成
+- **exit 1**：参数错误（如 `--no-api` 缺少 `--queries-json`、queries JSON 格式错误）
+- **exit 3**（`UNAVAILABLE`）：采集不可用（panel mode 法定人数未达标 / local mode 搜索全失败），须停止并上报用户裁决，**不自行降级到 legacy 链**
+- **exit 4**：curl_cffi 依赖未装，须 `pip install curl_cffi` 后重跑
 
 `harvest.py check <project-dir>` 用于 G1 的引用校验机械门（三态 exit code 0=PASS / 1=FAIL / 2=N/A），细则见 `references/quality-gates.md`。
 
@@ -87,4 +113,9 @@ Gate 评分细则：`assets/review-rubric.md`（5 维度审阅）、`assets/suff
 
 ## 依赖前置
 
-harvest.py 主路径依赖：网关 API key（`GATEWAY_API_KEY` 等，用于聚合网关调用 gemini/gpt/claude 三面板）、`agy` CLI（本机检索主力）、可选 `curl_cffi`（本地免费直连 fetch，缺失时降级）。详见插件 README。未满足依赖或经用户显式豁免（写入 `pipeline/verification/legacy-exemption.md`）的项目走 legacy 手工采集链（Gemini CLI → WebSearch → WebFetch）。
+harvest.py 主路径依赖：网关 API key（`GATEWAY_API_KEY` 等，用于聚合网关调用 gemini/gpt/claude 三面板）、`agy` CLI（本机检索主力）、`curl_cffi`（TLS 模拟搜索 + 直连 fetch，未装则 exit 4 阻塞）。详见插件 README。
+
+三种采集模式：
+- **panel mode**（默认）：有 gateway key → 三模型并行 + judge 聚类 + 机械引用校验
+- **`--no-api` local mode**：无 gateway key 或用户选择 → harvest.py 只搜索+抓取，harvester subagent 做推理 + `verify-local` 做确定性引用校验
+- **legacy 手工链**：经用户显式豁免（`pipeline/verification/legacy-exemption.md`）或项目未启用 harvest.py → Gemini CLI / WebSearch / WebFetch
