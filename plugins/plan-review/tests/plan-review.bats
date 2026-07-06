@@ -1895,9 +1895,10 @@ LGTM from Gemini."
   # Assert tokens that ONLY appear in the embedded example, so the old code can't pass.
   [[ "$reason" == *"parallel_with"* ]]
   [[ "$reason" == *"填写规则"* ]]
-  # Counter must be incremented (pre-flight is CONCERNS-equivalent)
+  # Counter must be incremented (TOTAL_ROUNDS only, ATTEMPT stays 0)
   local attempt; attempt=$(get_counter_value)
-  [ "$attempt" -eq 1 ]
+  [ "$attempt" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 1 ]
 }
 
 # 102. plan 含 Task( + 完整 manifest → 进入正常引擎审阅路径
@@ -2002,27 +2003,30 @@ LGTM."
   jq -e '.steps[0].model == "sonnet"' "$dispatch_file" >/dev/null
 }
 
-# 108. pre-flight 反复 deny 至 MAX_ROUNDS → 第 MAX+1 次 valve escalate to user
-@test "manifest: repeated pre-flight denies up to MAX_ROUNDS → valve escalates" {
+# 108. pre-flight 反复 deny → ATTEMPT 始终 0，不触发非 Critical 安全阀
+@test "manifest: repeated pre-flight denies → ATTEMPT stays 0, only TOTAL increments" {
   export REVIEW_MAX_ROUNDS=2
   # No mock engine — pre-flight fires before engine call
   INPUT=$(build_input plan="Use Task( for analysis.")
 
-  # Round 1: ATTEMPT=0 < MAX=2 → pre-flight deny, ATTEMPT→1
+  # Round 1: ATTEMPT stays 0, TOTAL→1
   run_hook
   assert_deny_json
   [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"MISSING DISPATCH MANIFEST"* ]]
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 1 ]
 
-  # Round 2: ATTEMPT=1 < MAX=2 → pre-flight deny, ATTEMPT→2
+  # Round 2: ATTEMPT stays 0, TOTAL→2
   run_hook
   assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 2 ]
 
-  # Round 3: ATTEMPT=2 >= MAX=2 → valve fires before pre-flight → allow (ESCALATED)
+  # Round 3: ATTEMPT=0 < MAX=2 → valve does NOT fire, pre-flight deny again
   run_hook
-  assert_approve_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"ESCALATED"* ]]
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 3 ]
 }
 
 # 109. APPROVE 写入 dispatch 前清理 stale 文件
@@ -2072,7 +2076,8 @@ Step 1: Use Task( for analysis.
   [[ "$reason" == *"parallel_with"* ]]
   [[ "$reason" == *"填写规则"* ]]
   local attempt; attempt=$(get_counter_value)
-  [ "$attempt" -eq 1 ]
+  [ "$attempt" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 1 ]
 }
 
 # 111. mixed manifest (dash + real agent) → passes pre-flight (non-regression)
@@ -2093,8 +2098,8 @@ Step 1: Prepare context. Step 2: Use Task( for heavy lifting.
   assert_ack_approve_json
 }
 
-# 112. all-dash repeated → valve escalates (same pattern as test 108)
-@test "manifest: repeated degenerate denies up to MAX_ROUNDS → valve escalates" {
+# 112. all-dash repeated → ATTEMPT stays 0, only TOTAL increments
+@test "manifest: repeated degenerate denies → ATTEMPT stays 0, only TOTAL increments" {
   export REVIEW_MAX_ROUNDS=2
   local plan_all_dash="## Plan
 Use Task( for work.
@@ -2105,17 +2110,23 @@ Use Task( for work.
 | 1    | -         | -     | -          | -             |"
   INPUT=$(build_input "plan=$plan_all_dash")
 
-  # Round 1: ATTEMPT=0 < MAX=2 → degenerate deny, ATTEMPT→1
+  # Round 1: degenerate deny, ATTEMPT stays 0, TOTAL→1
   run_hook
   assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 1 ]
 
-  # Round 2: ATTEMPT=1 < MAX=2 → degenerate deny, ATTEMPT→2
+  # Round 2: degenerate deny, ATTEMPT stays 0, TOTAL→2
   run_hook
   assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 2 ]
 
-  # Round 3: ATTEMPT=2 >= MAX=2 → valve fires BEFORE degenerate check → allow
+  # Round 3: ATTEMPT=0 < MAX=2 → valve does NOT fire, degenerate deny again
   run_hook
-  assert_approve_json
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 3 ]
 }
 
 # 113. empty manifest (header + separator only, 0 data rows) → degenerate deny
@@ -2273,4 +2284,153 @@ Step 1: Use Task( for isolation.
   run_hook
 
   assert_ack_approve_json
+}
+
+# --- Bug #44: blank-line tolerance in manifest parsing ---
+
+# 118. blank line between heading and table → manifest still parsed
+@test "manifest: blank line between heading and table → passes pre-flight" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+All good."
+  local plan_blank="## Plan
+Step 1: Use Task( for isolation.
+
+## Dispatch Manifest
+
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | worker    | sonnet| -          | -             |"
+  INPUT=$(build_input "plan=$plan_blank")
+  run_hook
+
+  assert_ack_approve_json
+}
+
+# 119. blank line before all-dash table → degenerate deny (not false pass)
+@test "manifest: blank line before all-dash table → degenerate deny" {
+  local plan_blank_dash="## Plan
+Step 1: Use Task( for work.
+
+## Dispatch Manifest
+
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | -         | -     | -          | -             |"
+  INPUT=$(build_input "plan=$plan_blank_dash")
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"DEGENERATE DISPATCH MANIFEST"* ]]
+}
+
+# 120. multiple blank lines between heading and table → still parsed
+@test "manifest: multiple blank lines between heading and table → passes pre-flight" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+OK."
+  local plan_multi="## Plan
+Use Task( for work.
+
+## Dispatch Manifest
+
+
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | worker    | haiku | -          | -             |"
+  INPUT=$(build_input "plan=$plan_multi")
+  run_hook
+
+  assert_ack_approve_json
+}
+
+# 121. blank line AFTER table terminates parsing (existing behavior preserved)
+@test "manifest: blank line after table terminates block" {
+  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+Good."
+  local plan_trail="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | worker    | sonnet| -          | -             |
+
+Some trailing content."
+  INPUT=$(build_input "plan=$plan_trail")
+  run_hook
+
+  assert_ack_approve_json
+}
+
+# 122. manifest heading with no table + next section has table → no bleeding
+@test "manifest: heading with no table + next section has table → chapter boundary stops parsing" {
+  local plan_no_table="## Plan
+Use Task( for analysis.
+
+## Dispatch Manifest
+
+## Other Section
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | worker    | sonnet| -          | -             |"
+  INPUT=$(build_input "plan=$plan_no_table")
+  run_hook
+
+  # Must deny as MISSING (manifest heading present but no table before next ##)
+  # Actually has_manifest matches heading, manifest_has_real_agent finds nothing → DEGENERATE
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"DEGENERATE DISPATCH MANIFEST"* ]]
+}
+
+# --- Bug #71: pre-flight deny NOT consuming ATTEMPT budget ---
+
+# 123. pre-flight deny then fix → engine review starts ATTEMPT from 0
+@test "manifest: pre-flight deny then fix → engine review starts ATTEMPT from 0" {
+  export REVIEW_MAX_ROUNDS=2
+  INPUT=$(build_input plan="Use Task( for analysis.")
+
+  # Pre-flight deny: ATTEMPT stays 0, TOTAL→1
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+
+  # User fixes manifest, engine gives CONCERNS
+  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+Issues found."
+  local fixed_plan="## Plan
+Use Task( for analysis.
+
+## Dispatch Manifest
+| step | agent_type | model | depends_on | parallel_with |
+|------|-----------|-------|------------|---------------|
+| 1    | worker    | sonnet| -          | -             |"
+  INPUT=$(build_input "plan=$fixed_plan")
+  run_hook
+
+  # Engine CONCERNS: ATTEMPT→1, TOTAL→2
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 2 ]
+}
+
+# 124. pre-flight denies hit global safety valve at TOTAL_ROUNDS limit
+@test "manifest: pre-flight denies hit global safety valve at TOTAL_ROUNDS limit" {
+  export REVIEW_MAX_TOTAL_ROUNDS=3
+  INPUT=$(build_input plan="Use Task( for analysis.")
+
+  # 3 pre-flight denies → TOTAL reaches 3
+  run_hook; assert_deny_json; [ "$(get_total_rounds)" -eq 1 ]
+  run_hook; assert_deny_json; [ "$(get_total_rounds)" -eq 2 ]
+  run_hook; assert_deny_json; [ "$(get_total_rounds)" -eq 3 ]
+
+  # Next call: TOTAL=3 >= MAX_TOTAL=3 → global safety valve (HARD STOP deny)
+  run_hook
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"HARD STOP"* ]]
 }

@@ -199,9 +199,10 @@ has_manifest()   { printf '%s' "$1" | grep -qi '^## Dispatch Manifest'; }
 # Returns 0 if at least one manifest data row has a non-dash agent_type.
 manifest_has_real_agent() {
   printf '%s\n' "$1" | awk '
-    /^## Dispatch Manifest/ {in_m=1; next}
+    /^## Dispatch Manifest/ {in_m=1; seen_table=0; next}
     in_m && /^## / {in_m=0}
-    in_m && /^ *$/ {in_m=0}
+    in_m && /^ *\|/ {seen_table=1}
+    in_m && seen_table && /^ *$/ {in_m=0}
     in_m && /^\|/ && !/^\|---/ && !/^\| *[Ss][Tt][Ee][Pp]/ {
       gsub(/^\| *| *\| *$/, ""); n = split($0, f, / *\| */)
       if (n >= 2) { at=f[2]; gsub(/^ +| +$|"/, "", at); if (at != "-" && at != "") found=1 }
@@ -238,9 +239,10 @@ MANIFEST_EOF
 parse_manifest_to_json() {
   local plan="$1" hash="$2"
   printf '%s\n' "$plan" | awk -v hash="$hash" -v now="$(date +%s)" '
-    /^## Dispatch Manifest/ {in_manifest=1; next}
+    /^## Dispatch Manifest/ {in_manifest=1; seen_table=0; next}
     in_manifest && /^## / {in_manifest=0}
-    in_manifest && /^ *$/ {in_manifest=0}
+    in_manifest && /^ *\|/ {seen_table=1}
+    in_manifest && seen_table && /^ *$/ {in_manifest=0}
     in_manifest && /^\|/ && !/^\|---/ && !/^\| *[Ss][Tt][Ee][Pp]/ {
       gsub(/^\| *| *\| *$/, ""); n = split($0, f, / *\| */)
       if (n >= 3) {
@@ -424,12 +426,12 @@ EOF
 fi
 
 # --- Pre-flight manifest check (AFTER non-critical valve, not before) ---
-# Synthetic CONCERNS (Major, NOT Critical): increments ATTEMPT, subject to MAX_ROUNDS.
-# Positioned downstream of valve so repeated denies eventually hit escalate → fail-open.
+# Format correction, NOT negotiation round: increments TOTAL_ROUNDS only.
+# ATTEMPT stays frozen — pre-flight denies do not count toward MAX_ROUNDS.
+# Global safety valve (TOTAL_ROUNDS >= 20) still protects against infinite loops.
 if needs_manifest "$PLAN" && ! has_manifest "$PLAN"; then
   TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
-  ATTEMPT=$((ATTEMPT + 1))
-  echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
+  echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
   log_decision "decision=deny reason=missing-manifest"
   MANIFEST_MSG="## Red Team Pre-flight — MISSING DISPATCH MANIFEST
 
@@ -448,8 +450,7 @@ fi
 # Fires when manifest is present but declares zero real agent steps.
 if needs_manifest "$PLAN" && has_manifest "$PLAN" && ! manifest_has_real_agent "$PLAN"; then
   TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
-  ATTEMPT=$((ATTEMPT + 1))
-  echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
+  echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
   log_decision "decision=deny reason=degenerate-manifest"
   DEGEN_MSG="## Red Team Pre-flight — DEGENERATE DISPATCH MANIFEST
 
