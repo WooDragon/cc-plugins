@@ -160,6 +160,68 @@ Lead 的采集指令，必须包含：
 
 > **候选集完备性**对应 G1 检查（deep-research skill 的 references/quality-gates.md，候选集完备性检查章节）。仅选型类研究（`research-goal.md` 类型 = selection）触发；非选型类一律填 `N/A`——这是显式兜底，避免静态字段与动态触发条件冲突。
 
+## Local Mode（`--no-api`，无 LLM Gateway 环境）
+
+**触发条件**：Lead 的采集指令明确要求 `--no-api` 模式，或 Lead 通知 gateway 不可用。
+
+**前提**：harvest.py 支持 `--no-api --queries-json` 参数（local mode 实现）。
+
+**执行流程**：
+
+| 步骤 | 动作 | 产物/落点 |
+|------|------|----------|
+| 1 | 读 `research-goal.md`，生成 5-8 条双语搜索查询 | 写入临时 `queries.json`（schema: `{"queries": ["q1", "q2", ...]}`） |
+| 2 | 执行 `python3 <harvest.py路径> run --no-api --queries-json queries.json --goal-file <goal-file> --out pipeline/1_raw/` | `pipeline/1_raw/harvest/local/`（journal + fetched pages）、`harvest-local.json`（manifest） |
+| 3 | 读 `harvest-local.json` 获取抓取清单 | — |
+| 4 | 分批读 `harvest/local/fetched/page_*.txt`（每批 ≤5 页，控制上下文） | — |
+| 5 | 提取 claims：`{claim, excerpt, url, credibility, language}` | 写 `harvest/local/claims.json`（flat list，非嵌套结构） |
+| 6 | 执行 `python3 <harvest.py路径> verify-local --claims harvest/local/claims.json --manifest pipeline/1_raw/harvest-local.json --out pipeline/verification/` | `pipeline/verification/harvest-verify.json` + `rejected_claims.json` |
+| 7 | 检查 verify-local exit code：exit 0 → 继续；exit 1 → 上报 Lead | — |
+| 8 | 写 `harvest/local/findings.json`（覆写 placeholder，标准 schema）| `pipeline/1_raw/harvest/local/findings.json` |
+| 9 | 写 `merged-findings.json`（覆写 placeholder，单源 flat clusters）| `pipeline/1_raw/merged-findings.json` |
+| 10 | 执行 Sanitization（同标准流程） | `pipeline/2_cleaned/` |
+
+**claims.json schema**（verify-local 输入）：
+
+```json
+[
+  {"claim": "...", "excerpt": "...", "url": "https://...", "credibility": 3, "language": "zh"},
+  ...
+]
+```
+
+**merged-findings.json 写法**（覆写 placeholder）：
+
+```json
+{
+  "clusters": [{"summary": "...", "claims": [...]}],
+  "coverage_gaps": [...],
+  "unique_insights": [],
+  "blind_spots": [...],
+  "contradictions": [],
+  "dedup_notes": [],
+  "mode": "local"
+}
+```
+
+单源收集无需 judge 聚类，每个 claim 独占一个 cluster。
+
+**退出码处理**：
+
+| exit code | 含义 | harvester 动作 |
+|-----------|------|--------------|
+| 0 | 搜索+抓取成功 | 继续流程（读 fetched pages → 提取 claims） |
+| 1 | 参数错误 / queries 格式错误 | 修正后重试（自行修复 queries.json 格式） |
+| 3 | UNAVAILABLE（搜索/抓取全失败） | **停止并上报 Lead**，同 panel mode exit 3 |
+
+**与 panel mode 的区别**：
+
+- 不调用任何外部 LLM（零 gateway API 消耗）
+- 推理由 harvester 自身（Claude Code session）完成
+- 无多模型交叉验证（单源）；reviewer 的 G1 Sufficiency Gate 会看到 `mode: "local"` 标记
+- citation verification 由 `verify-local` 子命令执行（确定性代码，非 LLM）
+- 脱敏按标准 post-acquisition 流程（local mode 不外发内容到第三方 LLM，无前置脱敏需求）
+
 ---
 
 **关联文件**：deep-research skill 的 references/pipeline.md（Stages 1-3） · references/principles.md（可追溯性） · references/context-economics.md（搜索工具链）

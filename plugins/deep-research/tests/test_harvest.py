@@ -572,6 +572,14 @@ _DDG_SAMPLE_HTML = """
 
 
 class TestDuckDuckGoSearch(unittest.TestCase):
+    def setUp(self):
+        # Force urllib path so HTML-parsing tests stay isolated from curl-cffi.
+        self._patch = mock.patch.object(harvest, "_HAS_CURL_CFFI", False)
+        self._patch.start()
+
+    def tearDown(self):
+        self._patch.stop()
+
     def test_parses_result_links_and_unwraps_uddg_redirect(self):
         with mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
@@ -673,7 +681,49 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         self.assertIn("IP-reputation block", reason)
 
 
-class TestAgyCliSearch(unittest.TestCase):
+class TestDuckDuckGoSearchCurlCffi(unittest.TestCase):
+    """Tests for the curl-cffi path of _search_duckduckgo (when _HAS_CURL_CFFI=True)."""
+
+    def test_curl_cffi_success_parses_results(self):
+        fake_resp = mock.Mock()
+        fake_resp.status_code = 200
+        fake_resp.text = _DDG_SAMPLE_HTML
+        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+            mock_curl.get.return_value = fake_resp
+            results, reason = harvest._search_duckduckgo({}, "query", 5)
+        self.assertIsNone(reason)
+        self.assertTrue(len(results) > 0)
+        mock_curl.get.assert_called_once()
+
+    def test_curl_cffi_non_200_returns_error(self):
+        fake_resp = mock.Mock()
+        fake_resp.status_code = 403
+        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+            mock_curl.get.return_value = fake_resp
+            result, reason = harvest._search_duckduckgo({}, "query", 5)
+        self.assertIsNone(result)
+        self.assertIn("HTTP 403", reason)
+
+    def test_curl_cffi_exception_returns_error(self):
+        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+            mock_curl.get.side_effect = RuntimeError("connection reset")
+            result, reason = harvest._search_duckduckgo({}, "query", 5)
+        self.assertIsNone(result)
+        self.assertIn("curl-cffi request failed", reason)
+
+    def test_curl_cffi_uses_impersonate_from_cfg(self):
+        fake_resp = mock.Mock()
+        fake_resp.status_code = 200
+        fake_resp.text = "<html></html>"
+        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+            mock_curl.get.return_value = fake_resp
+            harvest._search_duckduckgo({"impersonate": "safari"}, "q", 5)
+        call_kwargs = mock_curl.get.call_args[1]
+        self.assertEqual(call_kwargs["impersonate"], "safari")
     def _fake_proc(self, stdout="", returncode=0, stderr=""):
         proc = mock.Mock()
         proc.returncode = returncode
@@ -1170,7 +1220,8 @@ class TestBackendDegradation(unittest.TestCase):
             ({"type": "tavily", "api_key_env": "NONEXISTENT_TAVILY_KEY_VAR"}, harvest.RateLimiter(0)),
             ({"type": "duckduckgo"}, harvest.RateLimiter(0)),
         ]
-        with mock.patch("harvest.urllib.request.urlopen", side_effect=OSError("network down")):
+        with mock.patch.object(harvest, "_HAS_CURL_CFFI", False), \
+             mock.patch("harvest.urllib.request.urlopen", side_effect=OSError("network down")):
             harvest.do_search("q", "en", backends, journal, self.config)
         attempts = journal[0]["attempts"]
         self.assertEqual(len(attempts), 2)
@@ -2237,7 +2288,16 @@ class TestCmdRunEndToEnd(unittest.TestCase):
         self._orig_getaddrinfo = socket.getaddrinfo
         harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
 
+        # cmd_run's new gateway-key gate (--no-api local mode) fires before
+        # any of the normal-mode logic these tests exercise -- fake key
+        # present, same TEST_GATEWAY_KEY name base_config()'s api_key_env
+        # already points at, keeps every existing normal-mode test on the
+        # gated path it always ran.
+        self._env_patch = mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"})
+        self._env_patch.start()
+
     def tearDown(self):
+        self._env_patch.stop()
         harvest._real_getaddrinfo = self._orig_real
         socket.getaddrinfo = self._orig_getaddrinfo
         self.tmpdir.cleanup()
@@ -2523,7 +2583,12 @@ class TestCmdRunGoalFileResolution(unittest.TestCase):
         self.raw_dir = self.pipeline_dir / "1_raw"
         self.raw_dir.mkdir(parents=True)
 
+        # Same gateway-key gate rationale as TestCmdRunEndToEnd.setUp.
+        self._env_patch = mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"})
+        self._env_patch.start()
+
     def tearDown(self):
+        self._env_patch.stop()
         self.tmpdir.cleanup()
 
     def test_no_resolvable_goal_file_aborts_before_any_state_write(self):
@@ -2612,7 +2677,12 @@ class TestSupplementaryRunIsolation(unittest.TestCase):
         self.goal_file.write_text("why is the sky blue?", encoding="utf-8")
         self.config = base_config()
 
+        # Same gateway-key gate rationale as TestCmdRunEndToEnd.setUp.
+        self._env_patch = mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"})
+        self._env_patch.start()
+
     def tearDown(self):
+        self._env_patch.stop()
         self.tmpdir.cleanup()
 
     def _run(self, raw_dir, project_dir_arg, goal_file_arg=None):
@@ -3363,6 +3433,407 @@ class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
 class argparse_ns:
     def __init__(self, **kwargs):
         self.__dict__.update(kwargs)
+
+
+# ---------------------------------------------------------------------------
+# --no-api local mode: dispatch gating in cmd_run
+# ---------------------------------------------------------------------------
+
+class TestCmdRunLocalModeDispatch(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.project_dir = Path(self.tmpdir.name)
+        self.pipeline_dir = self.project_dir / "pipeline"
+        self.raw_dir = self.pipeline_dir / "1_raw"
+        self.raw_dir.mkdir(parents=True)
+        self.goal_file = self.project_dir / harvest.GOAL_FILE_NAME
+        self.goal_file.write_text("why is the sky blue?", encoding="utf-8")
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_no_api_without_queries_json_exits_1(self):
+        config = base_config()
+        args = argparse_ns(goal_file=str(self.goal_file), out=str(self.raw_dir), config="unused",
+                            local_dir=None, no_api=True, queries_json=None)
+        with mock.patch("harvest.load_config", return_value=config):
+            with self.assertRaises(SystemExit) as ctx:
+                harvest.cmd_run(args)
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_missing_gateway_key_without_no_api_exits_3(self):
+        # TEST_GATEWAY_KEY deliberately absent from the environment here --
+        # normal mode with no key and no --no-api must fail fast with a
+        # message pointing at the local-mode escape hatch, before any
+        # cleanup/tombstone/network activity.
+        config = base_config()
+        args = argparse_ns(goal_file=str(self.goal_file), out=str(self.raw_dir), config="unused",
+                            local_dir=None, no_api=False, queries_json=None)
+        with mock.patch.dict(os.environ, {}, clear=False), \
+             mock.patch("harvest.load_config", return_value=config):
+            os.environ.pop("TEST_GATEWAY_KEY", None)
+            with self.assertRaises(SystemExit) as ctx:
+                harvest.cmd_run(args)
+        self.assertEqual(ctx.exception.code, 3)
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        self.assertFalse(verify_file.exists())
+
+    def test_no_api_dispatches_to_local_mode_not_normal_mode(self):
+        # With --no-api set, cmd_run must never touch make_client_factory /
+        # run_panel (the normal-mode LLM path) even when a gateway key is
+        # present -- local mode is a hard fork, not a fallback.
+        config = base_config()
+        queries_file = self.project_dir / "queries.json"
+        queries_file.write_text(json.dumps({"queries": ["why is the sky blue"]}), encoding="utf-8")
+        args = argparse_ns(goal_file=str(self.goal_file), out=str(self.raw_dir), config="unused",
+                            local_dir=None, no_api=True, queries_json=str(queries_file))
+        with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
+             mock.patch("harvest.load_config", return_value=config), \
+             mock.patch("harvest.make_client_factory", side_effect=AssertionError("must not call normal-mode factory")), \
+             mock.patch("harvest.do_search", return_value=json.dumps({"results": [{"url": "https://a.com/1", "title": "t"}]})), \
+             mock.patch("harvest.do_fetch") as mock_do_fetch:
+            def fake_fetch(url, fetch_backends, journal, config):
+                journal.append({"tool": "fetch", "url": url, "backend": "urllib-ua", "content": "fetched body"})
+                return "fetched body"
+            mock_do_fetch.side_effect = fake_fetch
+            harvest.cmd_run(args)
+
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        self.assertTrue(verify_file.exists())
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "LOCAL")
+
+
+# ---------------------------------------------------------------------------
+# cmd_run_local: search + fetch only, no LLM, writes manifest/report/verify
+# ---------------------------------------------------------------------------
+
+class TestCmdRunLocalEndToEnd(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.project_dir = Path(self.tmpdir.name)
+        self.pipeline_dir = self.project_dir / "pipeline"
+        self.raw_dir = self.pipeline_dir / "1_raw"
+        self.raw_dir.mkdir(parents=True)
+        self.goal_file = self.project_dir / harvest.GOAL_FILE_NAME
+        self.goal_file.write_text("why is the sky blue?", encoding="utf-8")
+        self.config = base_config()
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _args(self, queries_json_path):
+        return argparse_ns(goal_file=str(self.goal_file), out=str(self.raw_dir), config="unused",
+                            local_dir=None, no_api=True, queries_json=str(queries_json_path))
+
+    def test_happy_path_writes_manifest_report_and_local_verdict(self):
+        queries_file = self.project_dir / "queries.json"
+        queries_file.write_text(json.dumps({"queries": ["q1", "q2"]}), encoding="utf-8")
+
+        search_results = json.dumps({"results": [
+            {"url": "https://example.com/a", "title": "A"},
+            {"url": "https://example.com/b", "title": "B"},
+        ]})
+
+        def fake_fetch(url, fetch_backends, journal, config):
+            content = f"content for {url}"
+            journal.append({"tool": "fetch", "url": url, "backend": "urllib-ua", "content": content})
+            return content
+
+        with mock.patch("harvest.do_search", return_value=search_results), \
+             mock.patch("harvest.do_fetch", side_effect=fake_fetch):
+            harvest.cmd_run_local(self._args(queries_file), self.config)
+
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        self.assertTrue(verify_file.exists())
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "LOCAL")
+        self.assertEqual(data["pages_fetched"], 2)
+        self.assertEqual(data["queries_executed"], 2)
+
+        manifest_file = self.raw_dir / "harvest-local.json"
+        self.assertTrue(manifest_file.exists())
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["mode"], "local")
+        self.assertEqual(len(manifest["fetched_pages"]), 2)
+        self.assertEqual(manifest["goal_hash"], data["goal_file_sha256"])
+
+        for page in manifest["fetched_pages"]:
+            page_path = self.raw_dir / page["content_path"]
+            self.assertTrue(page_path.exists())
+
+        self.assertTrue((self.raw_dir / "fetch-report.md").exists())
+        self.assertTrue((self.raw_dir / harvest.MERGED_FINDINGS_FILE).exists())
+
+        # check_project must treat a LOCAL verdict as N_A (delegated), not
+        # PASS/FAIL -- gate is deferred to verify-local + caller judgment.
+        verdict, reason = harvest.check_project(self.project_dir)
+        self.assertEqual(verdict, "N_A")
+
+    def test_no_search_results_aborts_unavailable(self):
+        queries_file = self.project_dir / "queries.json"
+        queries_file.write_text(json.dumps({"queries": ["q1"]}), encoding="utf-8")
+        empty_results = json.dumps({"results": []})
+        with mock.patch("harvest.do_search", return_value=empty_results):
+            with self.assertRaises(SystemExit) as ctx:
+                harvest.cmd_run_local(self._args(queries_file), self.config)
+        self.assertEqual(ctx.exception.code, 3)
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "UNAVAILABLE")
+
+    def test_all_fetches_fail_aborts_unavailable(self):
+        queries_file = self.project_dir / "queries.json"
+        queries_file.write_text(json.dumps({"queries": ["q1"]}), encoding="utf-8")
+        search_results = json.dumps({"results": [{"url": "https://example.com/a", "title": "A"}]})
+
+        def fake_fetch_fail(url, fetch_backends, journal, config):
+            journal.append({"tool": "fetch", "url": url, "backend": None, "content": None})
+            return json.dumps({"error": "all fetch backends failed"})
+
+        with mock.patch("harvest.do_search", return_value=search_results), \
+             mock.patch("harvest.do_fetch", side_effect=fake_fetch_fail):
+            with self.assertRaises(SystemExit) as ctx:
+                harvest.cmd_run_local(self._args(queries_file), self.config)
+        self.assertEqual(ctx.exception.code, 3)
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "UNAVAILABLE")
+
+    def test_ranks_urls_by_search_result_frequency(self):
+        # url "b" appears in both query results, "a" only once -- ranked
+        # (and therefore fetch-ordered) output must put "b" first.
+        queries_file = self.project_dir / "queries.json"
+        queries_file.write_text(json.dumps({"queries": ["q1", "q2"]}), encoding="utf-8")
+
+        def fake_search(query, lang, search_backends, journal, config):
+            if query == "q1":
+                return json.dumps({"results": [{"url": "https://x.com/a", "title": "A"},
+                                                 {"url": "https://x.com/b", "title": "B"}]})
+            return json.dumps({"results": [{"url": "https://x.com/b", "title": "B"}]})
+
+        fetch_order = []
+
+        def fake_fetch(url, fetch_backends, journal, config):
+            fetch_order.append(url)
+            journal.append({"tool": "fetch", "url": url, "backend": "urllib-ua", "content": "c"})
+            return "c"
+
+        with mock.patch("harvest.do_search", side_effect=fake_search), \
+             mock.patch("harvest.do_fetch", side_effect=fake_fetch):
+            harvest.cmd_run_local(self._args(queries_file), self.config)
+
+        self.assertEqual(fetch_order[0], "https://x.com/b")
+
+    def test_respects_max_fetch_urls_limit(self):
+        queries_file = self.project_dir / "queries.json"
+        queries_file.write_text(json.dumps({"queries": ["q1"]}), encoding="utf-8")
+        many_results = json.dumps({"results": [
+            {"url": f"https://x.com/{i}", "title": str(i)} for i in range(5)
+        ]})
+        cfg = base_config()
+        cfg["limits"]["max_fetch_urls"] = 2
+
+        fetched = []
+
+        def fake_fetch(url, fetch_backends, journal, config):
+            fetched.append(url)
+            journal.append({"tool": "fetch", "url": url, "backend": "urllib-ua", "content": "c"})
+            return "c"
+
+        with mock.patch("harvest.do_search", return_value=many_results), \
+             mock.patch("harvest.do_fetch", side_effect=fake_fetch):
+            harvest.cmd_run_local(self._args(queries_file), cfg)
+
+        self.assertEqual(len(fetched), 2)
+
+
+# ---------------------------------------------------------------------------
+# _read_queries_json helper
+# ---------------------------------------------------------------------------
+
+class TestReadQueriesJson(unittest.TestCase):
+    def test_missing_file_exits_1(self):
+        with self.assertRaises(SystemExit) as ctx:
+            harvest._read_queries_json("/nonexistent-queries-file-xyz.json")
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_invalid_json_exits_1(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "q.json"
+            p.write_text("not json", encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                harvest._read_queries_json(str(p))
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_missing_queries_key_exits_1(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "q.json"
+            p.write_text(json.dumps({"not_queries": []}), encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                harvest._read_queries_json(str(p))
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_empty_queries_list_exits_1(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "q.json"
+            p.write_text(json.dumps({"queries": []}), encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                harvest._read_queries_json(str(p))
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_valid_file_returns_queries_list(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "q.json"
+            p.write_text(json.dumps({"queries": ["a", "b"]}), encoding="utf-8")
+            self.assertEqual(harvest._read_queries_json(str(p)), ["a", "b"])
+
+    def test_stdin_dash_reads_from_stdin(self):
+        with mock.patch("sys.stdin", io.StringIO(json.dumps({"queries": ["a"]}))):
+            self.assertEqual(harvest._read_queries_json("-"), ["a"])
+
+
+# ---------------------------------------------------------------------------
+# cmd_verify_local: deterministic citation check for caller-supplied claims
+# ---------------------------------------------------------------------------
+
+class TestCmdVerifyLocal(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _write(self, name, data):
+        p = self.dir / name
+        p.write_text(json.dumps(data), encoding="utf-8")
+        return p
+
+    def test_all_claims_valid_yields_ok_and_exit_0(self):
+        manifest_path = self._write("manifest.json", {
+            "goal_hash": "abc123",
+            "fetched_pages": [{"url": "https://example.com/a"}, {"url": "https://example.com/b"}],
+        })
+        claims_path = self._write("claims.json", [
+            {"claim": "c1", "url": "https://example.com/a"},
+            {"claim": "c2", "url": "https://example.com/b"},
+        ])
+        out_dir = self.dir / "out"
+        args = argparse_ns(claims=str(claims_path), manifest=str(manifest_path), out=str(out_dir))
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_verify_local(args)
+        self.assertEqual(ctx.exception.code, 0)
+
+        verify_file = out_dir / harvest.VERIFY_FILE
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "OK")
+        self.assertEqual(data["goal_file_sha256"], "abc123")
+        self.assertEqual(data["total_claims"], 2)
+        self.assertEqual(data["invalid_claim_count"], 0)
+
+        rejected = json.loads((out_dir / "rejected_claims.json").read_text(encoding="utf-8"))
+        self.assertEqual(rejected, [])
+
+    def test_claim_citing_unfetched_url_is_rejected(self):
+        manifest_path = self._write("manifest.json", {
+            "fetched_pages": [{"url": "https://example.com/a"}],
+        })
+        claims_path = self._write("claims.json", [
+            {"claim": "c1", "url": "https://example.com/a"},
+            {"claim": "c2", "url": "https://example.com/never-fetched"},
+        ])
+        out_dir = self.dir / "out"
+        args = argparse_ns(claims=str(claims_path), manifest=str(manifest_path), out=str(out_dir))
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_verify_local(args)
+        # 1/2 invalid == 50% > 5% threshold -> UNAVAILABLE, exit 1.
+        self.assertEqual(ctx.exception.code, 1)
+
+        data = json.loads((out_dir / harvest.VERIFY_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "UNAVAILABLE")
+
+        rejected = json.loads((out_dir / "rejected_claims.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["reject_reason"], "url_not_in_fetched_pages")
+
+    def test_url_normalization_matches_trailing_slash_variants(self):
+        # normalize_url() strips trailing slashes -- a claim citing the
+        # slash-terminated form of a fetched URL must still match.
+        manifest_path = self._write("manifest.json", {
+            "fetched_pages": [{"url": "https://example.com/a/"}],
+        })
+        claims_path = self._write("claims.json", [
+            {"claim": "c1", "url": "https://example.com/a"},
+        ])
+        out_dir = self.dir / "out"
+        args = argparse_ns(claims=str(claims_path), manifest=str(manifest_path), out=str(out_dir))
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_verify_local(args)
+        self.assertEqual(ctx.exception.code, 0)
+
+    def test_zero_claims_yields_unavailable(self):
+        manifest_path = self._write("manifest.json", {"fetched_pages": []})
+        claims_path = self._write("claims.json", [])
+        out_dir = self.dir / "out"
+        args = argparse_ns(claims=str(claims_path), manifest=str(manifest_path), out=str(out_dir))
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_verify_local(args)
+        self.assertEqual(ctx.exception.code, 1)
+        data = json.loads((out_dir / harvest.VERIFY_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "UNAVAILABLE")
+
+    def test_malformed_claim_missing_url_field_exits_1(self):
+        manifest_path = self._write("manifest.json", {"fetched_pages": []})
+        claims_path = self._write("claims.json", [{"claim": "c1"}])
+        out_dir = self.dir / "out"
+        args = argparse_ns(claims=str(claims_path), manifest=str(manifest_path), out=str(out_dir))
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_verify_local(args)
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertFalse((out_dir / harvest.VERIFY_FILE).exists())
+
+    def test_claims_file_not_a_list_exits_1(self):
+        manifest_path = self._write("manifest.json", {"fetched_pages": []})
+        claims_path = self._write("claims.json", {"claims": []})
+        out_dir = self.dir / "out"
+        args = argparse_ns(claims=str(claims_path), manifest=str(manifest_path), out=str(out_dir))
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_verify_local(args)
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_missing_claims_file_exits_1(self):
+        manifest_path = self._write("manifest.json", {"fetched_pages": []})
+        out_dir = self.dir / "out"
+        args = argparse_ns(claims="/nonexistent-claims.json", manifest=str(manifest_path), out=str(out_dir))
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_verify_local(args)
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_missing_manifest_file_exits_1(self):
+        claims_path = self._write("claims.json", [])
+        out_dir = self.dir / "out"
+        args = argparse_ns(claims=str(claims_path), manifest="/nonexistent-manifest.json", out=str(out_dir))
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_verify_local(args)
+        self.assertEqual(ctx.exception.code, 1)
+
+
+# ---------------------------------------------------------------------------
+# check_project: LOCAL verdict handling
+# ---------------------------------------------------------------------------
+
+class TestCheckProjectLocalVerdict(unittest.TestCase):
+    def test_local_verdict_yields_n_a(self):
+        with tempfile.TemporaryDirectory() as d:
+            project_dir = Path(d)
+            verify_dir = project_dir / "pipeline" / "verification"
+            verify_dir.mkdir(parents=True)
+            (verify_dir / harvest.VERIFY_FILE).write_text(
+                json.dumps({"verdict": "LOCAL", "goal_file_sha256": "x"}), encoding="utf-8")
+            verdict, reason = harvest.check_project(project_dir)
+        self.assertEqual(verdict, "N_A")
+        self.assertIn("local mode", reason)
 
 
 if __name__ == "__main__":

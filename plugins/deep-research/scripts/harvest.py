@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -560,20 +561,33 @@ def _ddg_extract_target_url(href):
 
 
 def _search_duckduckgo(cfg, query, timeout):
-    # Zero-key, zero-dependency fallback: html.duckduckgo.com is a fixed,
-    # trusted host -- same SSRF posture as the other search backends.
     url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; harvest.py/1.0)", "Accept-Encoding": "identity"}
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = _maybe_decompress(resp.read(), resp)
-    except (urllib.error.URLError, OSError) as e:
-        return None, f"duckduckgo: request failed: {e}"
-    try:
-        page = raw.decode("utf-8", errors="replace")
-    except Exception as e:
-        return None, f"duckduckgo: failed to decode response body: {e}"
+
+    if _HAS_CURL_CFFI:
+        try:
+            resp = curl_cffi_requests.get(
+                url, impersonate=(cfg or {}).get("impersonate", "chrome"),
+                timeout=timeout, allow_redirects=True,
+            )
+            if resp.status_code != 200:
+                return None, f"duckduckgo: HTTP {resp.status_code}"
+            page = resp.text
+        except Exception as e:
+            return None, f"duckduckgo: curl-cffi request failed: {e}"
+    else:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; harvest.py/1.0)",
+                   "Accept-Encoding": "identity"}
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = _maybe_decompress(resp.read(), resp)
+        except (urllib.error.URLError, OSError) as e:
+            return None, f"duckduckgo: request failed: {e}"
+        try:
+            page = raw.decode("utf-8", errors="replace")
+        except Exception as e:
+            return None, f"duckduckgo: failed to decode response body: {e}"
+
     results = []
     for attrs, inner in _DDG_ANCHOR_RE.findall(page):
         if "result__a" not in attrs:
@@ -1978,6 +1992,8 @@ def check_project(project_dir):
     verdict = data.get("verdict")
     if verdict == "UNAVAILABLE":
         return "FAIL", "multi-model harvest UNAVAILABLE: retry / fix config / or request user exemption to legacy"
+    if verdict == "LOCAL":
+        return "N_A", "local mode: citation verification delegated to caller"
     if verdict != "OK":
         return "FAIL", f"unknown or incomplete verdict: {verdict!r}"
 
@@ -2113,6 +2129,36 @@ def write_fetch_report(raw_dir, results, alive, invalid_total, invalid_rate, loc
     (raw_dir / "fetch-report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_fetch_report_local(raw_dir, queries, fetched_pages, journal, goal_text):
+    """Local-mode counterpart of write_fetch_report(): no panel/judge/
+    citation-verification stats exist yet in this mode (verify-local runs
+    later, out-of-process), so the report only records what search+fetch
+    actually did."""
+    lines = [
+        "# Fetch Report (Local Mode)\n",
+        "## 采集统计",
+        f"- 搜索查询数: {len(queries)}",
+        f"- 成功抓取页面: {len(fetched_pages)}",
+        f"- 总内容字符数: {sum(p['chars'] for p in fetched_pages)}",
+        "",
+        "## 多模型参与情况",
+        "- N/A (local mode, single-agent)",
+        "",
+        "## 引用校验统计",
+        "- delegated to caller (verify-local subcommand)",
+        "",
+        "## 搜索查询",
+    ]
+    for q in queries:
+        lines.append(f"- {q}")
+    lines.append("")
+    lines.append("## 抓取页面")
+    for p in fetched_pages:
+        lines.append(f"- [{p['title'] or p['url']}]({p['url']}) ({p['chars']} chars)")
+
+    (raw_dir / "fetch-report.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -2122,9 +2168,192 @@ def load_config(path):
         return json.load(f)
 
 
+def _read_queries_json(path):
+    """Read and validate queries from a JSON file or stdin ("-") for local
+    mode. The caller (not an LLM panel) supplies the queries directly, so
+    this is the only place that shapes/validates that input."""
+    try:
+        if path == "-":
+            raw = sys.stdin.read()
+        else:
+            raw = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        print(f"error: queries file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"error: cannot read queries file: {e}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"error: invalid JSON in queries file: {e}", file=sys.stderr)
+        sys.exit(1)
+    queries = data.get("queries") if isinstance(data, dict) else None
+    if not isinstance(queries, list) or not queries:
+        print('error: queries file must contain a non-empty list in {"queries": [...]}', file=sys.stderr)
+        sys.exit(1)
+    return queries
+
+
+def cmd_run_local(args, config):
+    """Local mode: search + fetch only, no LLM gateway calls at all -- the
+    caller (e.g. an interactive agent) supplies queries directly and does
+    its own reasoning/citation over the fetched pages. Reuses the same
+    project/goal/state-file plumbing as cmd_run() so check_project() and the
+    on-disk layout stay uniform between the two modes; citation
+    verification is deferred to the separate `verify-local` subcommand
+    since there are no panel-produced claims to verify here."""
+    raw_dir = Path(args.out)
+    project_dir_arg = getattr(args, "project_dir", None)
+    if project_dir_arg:
+        project_dir = Path(project_dir_arg).resolve()
+        pipeline_dir = project_dir / "pipeline"
+        verify_dir = pipeline_dir / "verification"
+    else:
+        pipeline_dir = raw_dir.parent
+        project_dir = pipeline_dir.parent
+        verify_dir = pipeline_dir / "verification"
+
+    canonical_goal_file = resolve_goal_file(project_dir)
+    if canonical_goal_file is None:
+        print(f"error: no goal file found under {project_dir} "
+              f"(checked {GOAL_FILE_CONVENTIONAL_DIR}/{GOAL_FILE_NAME} and {GOAL_FILE_NAME}); "
+              "a goal file is required before running harvest", file=sys.stderr)
+        sys.exit(1)
+
+    goal_path = Path(args.goal_file).resolve()
+    canonical_goal_file = canonical_goal_file.resolve()
+    if goal_path != canonical_goal_file:
+        print(f"error: --goal-file {goal_path} does not match the conventionally-resolved "
+              f"goal file {canonical_goal_file} for this project; pass the canonical path so "
+              "goal_file_sha256 is anchored to the text harvest actually runs on", file=sys.stderr)
+        sys.exit(1)
+
+    goal_text = canonical_goal_file.read_text(encoding="utf-8")
+    goal_hash = hashlib.sha256(canonical_goal_file.read_bytes()).hexdigest()
+
+    cleanup_stale_state(pipeline_dir, verify_dir, raw_dir)
+    write_tombstone(verify_dir, goal_hash)
+
+    install_ssrf_guard()
+
+    queries = _read_queries_json(args.queries_json)
+    search_backends, fetch_backends = build_backends(config)
+
+    journal = []
+    all_urls = []
+    for query in queries:
+        result_json = do_search(query, "auto", search_backends, journal, config)
+        results = json.loads(result_json).get("results", [])
+        for r in results:
+            all_urls.append((r["url"], r.get("title", "")))
+
+    url_counts = Counter(url for url, _ in all_urls)
+    seen = set()
+    ranked = []
+    for url, title in all_urls:
+        if url not in seen:
+            seen.add(url)
+            ranked.append({"url": url, "title": title, "count": url_counts[url]})
+    ranked.sort(key=lambda x: x["count"], reverse=True)
+
+    max_fetch = config.get("limits", {}).get("max_fetch_urls", 15)
+    top_urls = ranked[:max_fetch]
+    if not top_urls:
+        print("error: all searches returned no usable URLs", file=sys.stderr)
+        abort_unavailable(verify_dir, goal_hash, "no usable URLs from search")
+
+    fetched_pages = []
+    harvest_dir = raw_dir / HARVEST_SUBDIR / "local"
+    fetched_dir = harvest_dir / "fetched"
+    fetched_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, item in enumerate(top_urls):
+        # do_fetch returns the raw truncated content string on success, or a
+        # json.dumps({"error": ...}) string on failure -- sniffing the return
+        # value itself is ambiguous (fetched prose can legitimately start
+        # with "{"), so read the journal entry do_fetch just appended
+        # instead; its "content" field uses the same None-on-failure
+        # convention build_fetch_index() already relies on elsewhere.
+        do_fetch(item["url"], fetch_backends, journal, config)
+        content = journal[-1].get("content")
+        if content:
+            page_file = fetched_dir / f"page_{i + 1:03d}.txt"
+            page_file.write_text(content, encoding="utf-8")
+            fetched_pages.append({
+                "url": item["url"],
+                "title": item["title"],
+                "content_path": str(page_file.relative_to(raw_dir)),
+                "chars": len(content),
+            })
+
+    if not fetched_pages:
+        print("error: all fetches failed", file=sys.stderr)
+        abort_unavailable(verify_dir, goal_hash, "all fetches failed")
+
+    harvest_dir.mkdir(parents=True, exist_ok=True)
+
+    with (harvest_dir / "journal_local.jsonl").open("w", encoding="utf-8") as f:
+        for entry in journal:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    (harvest_dir / "findings.json").write_text(
+        json.dumps({"claims": [], "status": "LOCAL_DELEGATE", "mode": "local"}, indent=2),
+        encoding="utf-8")
+
+    manifest = {
+        "mode": "local",
+        "timestamp": time.time(),
+        "goal_hash": goal_hash,
+        "queries": queries,
+        "fetched_pages": fetched_pages,
+        "stats": {
+            "queries_executed": len(queries),
+            "pages_fetched": len(fetched_pages),
+            "total_content_chars": sum(p["chars"] for p in fetched_pages),
+        },
+    }
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    (raw_dir / "harvest-local.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    (raw_dir / MERGED_FINDINGS_FILE).write_text(
+        json.dumps({"clusters": [], "coverage_gaps": [], "mode": "local", "delegate": True},
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+
+    write_fetch_report_local(raw_dir, queries, fetched_pages, journal, goal_text)
+
+    write_verify_json(verify_dir, goal_hash, "LOCAL", {
+        "mode": "local",
+        "pages_fetched": len(fetched_pages),
+        "queries_executed": len(queries),
+    })
+
+    print(f"harvest local mode complete: {len(fetched_pages)} pages fetched")
+
+
 def cmd_run(args):
     config = load_config(args.config)
     _check_curl_cffi_available(config)
+
+    # getattr(...) rather than args.no_api/args.queries_json: same
+    # back-compat rationale as args.project_dir above -- older test/caller
+    # code building an args namespace without these new attributes must
+    # keep working, taking the normal-mode path unchanged.
+    no_api = getattr(args, "no_api", False)
+    queries_json = getattr(args, "queries_json", None)
+    if no_api:
+        if not queries_json:
+            print("error: local mode requires --queries-json", file=sys.stderr)
+            sys.exit(1)
+        cmd_run_local(args, config)
+        return
+    gw_api_key_env = config.get("gateway", {}).get("api_key_env", "")
+    has_gateway_key = bool(os.environ.get(gw_api_key_env, ""))
+    if not has_gateway_key:
+        print("error: Gateway API key missing. To run in local mode, pass "
+              "--no-api --queries-json <file>.", file=sys.stderr)
+        sys.exit(3)
 
     raw_dir = Path(args.out)
     # getattr(...) rather than args.project_dir: keeps this importable by
@@ -2305,6 +2534,97 @@ def cmd_check(args):
     sys.exit(_VERDICT_EXIT_CODES[verdict])
 
 
+def cmd_verify_local(args):
+    """Deterministic citation verification for local-mode claims: no LLM
+    judgment, just a set-membership check of each claim's URL (normalized)
+    against the manifest's fetched_pages -- the same URL-level trust model
+    validate_claims() applies to panel-produced claims, just running
+    out-of-process against caller-supplied claims instead of a journal."""
+    try:
+        claims_raw = Path(args.claims).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        print(f"error: claims file not found: {args.claims}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"error: cannot read claims file: {e}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        claims = json.loads(claims_raw)
+    except json.JSONDecodeError as e:
+        print(f"error: invalid JSON in claims file: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(claims, list):
+        print("error: claims must be a list of objects with 'url' field", file=sys.stderr)
+        sys.exit(1)
+    for i, c in enumerate(claims):
+        if not isinstance(c, dict) or not isinstance(c.get("url"), str):
+            print(f"error: claims[{i}] must be an object with a string 'url' field", file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        manifest_raw = Path(args.manifest).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        print(f"error: manifest file not found: {args.manifest}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as e:
+        print(f"error: cannot read manifest file: {e}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        manifest = json.loads(manifest_raw)
+    except json.JSONDecodeError as e:
+        print(f"error: invalid JSON in manifest file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    fetched_urls = set()
+    for page in manifest.get("fetched_pages", []):
+        url = page.get("url", "")
+        if url:
+            fetched_urls.add(normalize_url(url))
+
+    valid, invalid = [], []
+    for c in claims:
+        normalized = normalize_url(c["url"])
+        if normalized in fetched_urls:
+            valid.append(c)
+        else:
+            invalid.append({"claim": c.get("claim", ""), "url": c["url"],
+                             "reject_reason": "url_not_in_fetched_pages"})
+
+    total = len(valid) + len(invalid)
+    invalid_rate = len(invalid) / total if total > 0 else 0.0
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    (out_dir / "rejected_claims.json").write_text(
+        json.dumps(invalid, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if len(valid) == 0 or invalid_rate > 0.05:
+        verdict = "UNAVAILABLE"
+        reason = f"invalid_rate={invalid_rate:.2%}, valid={len(valid)}, invalid={len(invalid)}"
+    else:
+        verdict = "OK"
+        reason = None
+
+    goal_hash = manifest.get("goal_hash", "")
+    payload = {
+        "mode": "local",
+        "invalid_citation_rate": invalid_rate,
+        "invalid_claim_count": len(invalid),
+        "total_claims": total,
+    }
+    if reason:
+        payload["reason"] = reason
+    write_verify_json(out_dir, goal_hash, verdict, payload)
+
+    if verdict == "OK":
+        print(f"verify-local: PASS (valid={len(valid)}, invalid={len(invalid)}, rate={invalid_rate:.2%})")
+        sys.exit(0)
+    else:
+        print(f"verify-local: FAIL ({reason})", file=sys.stderr)
+        sys.exit(1)
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(prog="harvest.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2320,11 +2640,24 @@ def build_arg_parser():
                              "for a supplementary/backfill run where --out is a subdirectory of "
                              "the primary pipeline/1_raw (otherwise the old raw_dir.parent.parent "
                              "derivation miscomputes the project root).")
+    run_p.add_argument("--no-api", action="store_true",
+                        help="Local mode: search+fetch only via this script's backends, no LLM "
+                             "gateway calls. Requires --queries-json; citation verification is "
+                             "deferred to the separate verify-local subcommand.")
+    run_p.add_argument("--queries-json", default=None,
+                        help="Path to a JSON file (or '-' for stdin) with {\"queries\": [...]}, "
+                             "required when --no-api is set.")
     run_p.set_defaults(func=cmd_run)
 
     check_p = sub.add_parser("check")
     check_p.add_argument("project_dir")
     check_p.set_defaults(func=cmd_check)
+
+    verify_local_p = sub.add_parser("verify-local")
+    verify_local_p.add_argument("--claims", required=True)
+    verify_local_p.add_argument("--manifest", required=True)
+    verify_local_p.add_argument("--out", required=True)
+    verify_local_p.set_defaults(func=cmd_verify_local)
 
     return parser
 
