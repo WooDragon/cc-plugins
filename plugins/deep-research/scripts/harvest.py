@@ -861,10 +861,32 @@ def _fetch_curl_cffi(cfg, url, timeout, max_chars, config):
     # already fail-fast-exits cmd_run() before any fetch happens if this
     # backend is configured but curl_cffi isn't importable, so by the time
     # this function runs, _HAS_CURL_CFFI is guaranteed True.
+    #
+    # `timeout` is the total budget for this call *across all redirect
+    # hops*, not per-hop -- without this, a tarpit (slow-drip response)
+    # combined with a redirect chain could burn hops * timeout wall clock.
+    # `.get(key, default)` (not `config["limits"][key]`) is deliberate:
+    # these three keys are new, and a config that predates them must keep
+    # working with these defaults rather than KeyError -> get swallowed by
+    # call_fetch_backend's broad except into a silent, permanent
+    # "unexpected error" that takes curl-cffi out of rotation for good.
+    limits = config.get("limits", {})
+    connect_timeout_s = limits.get("fetch_connect_timeout_s", 5)
+    low_speed_bytes_s = limits.get("fetch_low_speed_bytes_s", 512)
+    low_speed_window_s = limits.get("fetch_low_speed_window_s", 10)
     blacklist = config.get("blacklist_domains", [])
     impersonate = cfg.get("impersonate", "chrome")
     current_url = url
+    deadline = time.monotonic() + timeout
     for hop in range(_CURL_CFFI_MAX_REDIRECT_HOPS + 1):
+        # < 1, not <= 0: curl_cffi converts seconds to milliseconds via
+        # int(x * 1000), and libcurl treats a 0ms timeout as *no limit*.
+        # A remaining budget inside that sub-millisecond window would
+        # otherwise round down to 0 and silently reopen the hang this
+        # deadline exists to close.
+        remaining = deadline - time.monotonic()
+        if remaining < 1:
+            return None, "curl-cffi: total fetch deadline exceeded across redirects"
         if is_blacklisted(current_url, blacklist):
             return None, f"curl-cffi: redirect target domain blacklisted: {current_url}"
         try:
@@ -872,11 +894,23 @@ def _fetch_curl_cffi(cfg, url, timeout, max_chars, config):
         except (socket.gaierror, OSError) as e:
             return None, f"curl-cffi: DNS resolution failed: {e}"
         pin = f"{host}:{port}:{ip}"
+        # curl_cffi 0.15.0 sets CURLOPT_TIMEOUT_MS = connect + read for a
+        # tuple timeout (it sums the two components, it doesn't treat
+        # `read` as the total) -- so to cap this hop's total at exactly
+        # `remaining`, the read component must be `remaining - conn`, not
+        # `remaining` itself. `- 0.1` keeps a strictly positive read
+        # component even when remaining is barely above the connect cap.
+        conn = min(connect_timeout_s, remaining - 0.1)
         try:
             resp = curl_cffi_requests.get(
-                current_url, timeout=timeout, impersonate=impersonate,
+                current_url, timeout=(conn, remaining - conn), impersonate=impersonate,
                 allow_redirects=False, headers={"Accept-Encoding": "identity"},
-                curl_options={CurlCffiOpt.RESOLVE: [pin], CurlCffiOpt.MAXFILESIZE_LARGE: max_chars * 4},
+                curl_options={
+                    CurlCffiOpt.RESOLVE: [pin],
+                    CurlCffiOpt.MAXFILESIZE_LARGE: max_chars * 4,
+                    CurlCffiOpt.LOW_SPEED_LIMIT: low_speed_bytes_s,
+                    CurlCffiOpt.LOW_SPEED_TIME: low_speed_window_s,
+                },
             )
         except Exception as e:
             return None, f"curl-cffi: request failed: {e}"
@@ -929,7 +963,10 @@ def _fetch_urllib_ua(cfg, url, timeout, max_chars):
 
 def call_fetch_backend(backend_cfg, limiter, url, config, attempts=None):
     limiter.acquire()
-    timeout = config["limits"]["call_timeout_s"]
+    # Per-backend timeout_s override, falling back to the shared
+    # call_timeout_s -- .get() means backends that don't declare timeout_s
+    # (or a config predating this field) keep the old 180s behavior.
+    timeout = backend_cfg.get("timeout_s", config["limits"]["call_timeout_s"])
     max_chars = config["limits"]["fetch_max_chars"]
     btype = backend_cfg["type"]
     try:

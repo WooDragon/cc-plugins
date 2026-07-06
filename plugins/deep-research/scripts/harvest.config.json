@@ -25,18 +25,22 @@
   "fetch_backends": [
     {
       "type": "curl-cffi",
-      "impersonate": "chrome"
-    },
-    {
-      "type": "tavily-extract",
-      "api_key_env": "TAVILY_API_KEY"
+      "impersonate": "chrome",
+      "timeout_s": 25
     },
     {
       "type": "jina-reader",
-      "api_key_env": "JINA_API_KEY"
+      "api_key_env": "JINA_API_KEY",
+      "timeout_s": 60
     },
     {
-      "type": "urllib-ua"
+      "type": "tavily-extract",
+      "api_key_env": "TAVILY_API_KEY",
+      "timeout_s": 60
+    },
+    {
+      "type": "urllib-ua",
+      "timeout_s": 25
     }
   ],
   "local_sources": {
@@ -52,7 +56,10 @@
     "quorum": 2,
     "search_min_interval_s": 2,
     "fetch_min_interval_s": 0.5,
-    "fetch_max_chars": 20000
+    "fetch_max_chars": 20000,
+    "fetch_connect_timeout_s": 5,
+    "fetch_low_speed_bytes_s": 512,
+    "fetch_low_speed_window_s": 10
   },
   "blacklist_domains": [
     "blog.csdn.net",

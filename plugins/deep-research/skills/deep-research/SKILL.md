@@ -56,6 +56,11 @@ G0 与用户完成 primary_job / Non-Goals 对齐后、进入 Acquisition 前，
      > 2. 使用 `--no-api` 模式（零外部 LLM 消耗，由我直接搜索+分析，质量略低于多模型交叉验证）"
    - 用户选 1 → Lead 指引用户 export key 或写入 `.env`，确认后走 panel mode
    - 用户选 2 → Lead 在 spawn harvester 的 Task 指令中加 `--no-api` 标记
+3. **检测 `JINA_API_KEY`**（fetch 兜底链 jina-reader 的可选加速 key）：
+   ```bash
+   [ -n "$JINA_API_KEY" ] && echo set || echo unset
+   ```
+   若 `unset`，向用户提示一句（如"ℹ️ JINA_API_KEY 未配置：fetch 兜底 jina 走免费限流档，速率较低、并发受限；配置后可提速。不阻塞，继续。"），**不阻塞管线，继续 G0**——jina 无 key 也能工作，这只是速率提示，不是需求门。
 
 **`--no-api` 模式说明**（供 Lead 告知用户）：
 - harvest.py 只负责搜索+抓取，不调 LLM gateway（零 API 成本）
