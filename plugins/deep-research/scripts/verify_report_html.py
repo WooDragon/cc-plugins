@@ -104,11 +104,22 @@ def _normalize_url(url: str) -> str:
 
 
 def extract_md_urls(text: str) -> set:
-    """Extract all URLs referenced from markdown text: link-form and bare."""
+    """Extract all URLs referenced from markdown text: link-form and bare.
+
+    Fenced code blocks are stripped first (symmetric with extract_md_headings):
+    a URL inside a ```code block``` -- an example curl command, a repo URL in
+    a config snippet -- is not a citation. Per report-html-guide.md the
+    publisher renders code blocks as arch-diagram/<pre> plain text and MUST
+    NOT linkify their contents, so such URLs never get an href/src in the
+    HTML. Counting them as "must-be-conserved links" would false-positive a
+    correctly rendered report into an unsatisfiable FAIL (a deadlock trap
+    the publisher cannot fix). Only prose-level links must survive.
+    """
+    body = strip_code_fences(text)
     urls = set()
-    for m in _MD_LINK_URL_RE.finditer(text):
+    for m in _MD_LINK_URL_RE.finditer(body):
         urls.add(_normalize_url(m.group(1)))
-    for m in _BARE_URL_RE.finditer(text):
+    for m in _BARE_URL_RE.finditer(body):
         urls.add(_normalize_url(_strip_trailing_punct(m.group(0))))
     return urls
 

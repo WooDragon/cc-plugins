@@ -284,6 +284,84 @@ Dropped.
         assert "被整段删除的章节标题" in stdout
 
 
+class TestCodeFenceUrlsAreNotMustConserveLinks:
+    """Copilot review regression: a URL inside a fenced code block (example
+    curl command, repo URL in a config snippet) is not a citation. The
+    publisher renders code blocks as <pre> plain text and MUST NOT linkify
+    them, so such URLs have no href/src in the HTML. Counting them as
+    must-conserve links would false-positive a correctly rendered report
+    into an unsatisfiable FAIL. Only prose-level links must survive."""
+
+    def test_code_block_url_not_required_prose_link_is(self, tmp_path):
+        md = """# Report
+
+## Setup
+
+Install per the [official guide](https://example.com/docs), then run:
+
+```bash
+curl https://example.com/api/v1/install | sh
+```
+
+Done.
+"""
+        # HTML keeps the prose link as <a href>, but the code-block URL is
+        # rendered as <pre> plain text -- deliberately NOT an <a href>.
+        html_content = """<!DOCTYPE html>
+<html><head><title>Report</title><style></style></head>
+<body>
+<section class="section">
+<h2>Setup</h2>
+<p>Install per the <a href="https://example.com/docs">official guide</a>, then run:</p>
+<div class="arch-diagram"><pre>curl https://example.com/api/v1/install | sh</pre></div>
+<p>Done.</p>
+</section>
+</body></html>
+"""
+        _write(tmp_path, "report.md", md)
+        _write(tmp_path, "report.html", html_content)
+
+        code, stdout, _ = run_verify(tmp_path)
+
+        assert code == 0, stdout
+        assert "PASS" in stdout
+
+    def test_prose_link_still_required_even_with_code_block_present(self, tmp_path):
+        # Guardrail: stripping code fences must not weaken detection of a
+        # genuinely dropped prose link. Same md, but HTML omits the prose
+        # link's <a href> -> must still FAIL and name the missing URL.
+        md = """# Report
+
+## Setup
+
+Install per the [official guide](https://example.com/docs), then run:
+
+```bash
+curl https://example.com/api/v1/install | sh
+```
+
+Done.
+"""
+        html_content = """<!DOCTYPE html>
+<html><head><title>Report</title><style></style></head>
+<body>
+<section class="section">
+<h2>Setup</h2>
+<p>Install per the official guide, then run:</p>
+<div class="arch-diagram"><pre>curl https://example.com/api/v1/install | sh</pre></div>
+<p>Done.</p>
+</section>
+</body></html>
+"""
+        _write(tmp_path, "report.md", md)
+        _write(tmp_path, "report.html", html_content)
+
+        code, stdout, _ = run_verify(tmp_path)
+
+        assert code == 1
+        assert "example.com/docs" in stdout
+
+
 class TestNoReportHtmlIsNotApplicable:
     """Before publisher has rendered anything, there's no report.html to
     check -- this is N/A (exit 2), not FAIL. Distinguishing "not done yet"
