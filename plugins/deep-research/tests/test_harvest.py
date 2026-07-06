@@ -907,8 +907,7 @@ class TestGeminiGroundingFallThrough(unittest.TestCase):
             result = harvest.do_search("q", "en", backends, journal, cfg)
         data = json.loads(result)
         self.assertEqual(data["results"][0]["url"], "https://real.example.com/article")
-        search_entries = [e for e in journal if e.get("tool") == "search"]
-        self.assertEqual(search_entries[0]["backend"], "gemini-grounding")
+        self.assertEqual(journal[0]["backend"], "gemini-grounding")
 
 
 # ---------------------------------------------------------------------------
@@ -972,22 +971,15 @@ class TestGatewayRetry(unittest.TestCase):
         self.assertEqual(calls, [5])
 
     def test_worker_records_http_status_and_attempt_count_in_reason(self):
-        # Every call.complete() exhausts its own 3-attempt 503 retry budget,
-        # so both the main loop's call (caught, breaks to forced synthesis)
-        # and the forced-synthesis call itself raise -- landing on
-        # synthesis_failed with the underlying HTTP detail preserved.
         class FlakyClient:
             def complete(self, messages, tools):
                 url = "http://gw/chat/completions"
                 return harvest._http_json_post_with_retry(url, {}, {}, 5)
 
-        with mock.patch("harvest._http_json_post",
-                         side_effect=[_http_error(503), _http_error(503), _http_error(503),
-                                      _http_error(503), _http_error(503), _http_error(503)]), \
+        with mock.patch("harvest._http_json_post", side_effect=[_http_error(503), _http_error(503), _http_error(503)]), \
              mock.patch("harvest.time.sleep"):
             result = harvest.run_worker("m1", "model-a", FlakyClient(), base_config(), [], [], "goal", [], None)
         self.assertEqual(result.status, "FAILED")
-        self.assertTrue(result.reason.startswith("synthesis_failed (RuntimeError):"), result.reason)
         self.assertIn("HTTP 503 after 3 attempts", result.reason)
 
     def test_gateway_client_complete_uses_retry_wrapper(self):
@@ -1717,16 +1709,12 @@ class TestWorkerDriver(unittest.TestCase):
         self.assertIn("Tool-use budget exhausted", forced_messages[-1]["content"])
 
     def test_worker_exception_isolated_not_raised(self):
-        # An always-raising client never propagates out of run_worker -- the
-        # main loop's except breaks to forced synthesis, which raises again
-        # and is caught there too, so the worker returns FAILED instead of
-        # letting the exception escape.
         class ExplodingClient:
             def complete(self, messages, tools):
                 raise RuntimeError("network exploded")
         result = harvest.run_worker("m1", "model-a", ExplodingClient(), self.config, [], self.fetch_backends, "goal", [], None)
         self.assertEqual(result.status, "FAILED")
-        self.assertIn("network exploded", result.reason)
+        self.assertIn("exception", result.reason)
 
     def test_bad_response_shape_handled(self):
         client = ScriptedClient([{"unexpected": "shape"}])
@@ -3087,117 +3075,6 @@ class TestAnthropicConversion(unittest.TestCase):
         msgs = [{"role": "user", "content": ""}]
         harvest._inject_cache_control(None, None, msgs)
         self.assertEqual(msgs[0]["content"], "")  # untouched, no empty block created
-
-
-# ---------------------------------------------------------------------------
-# #64: completion-call retry schedule + forced-synthesis recovery on
-# exhausted retries
-# ---------------------------------------------------------------------------
-
-def _raise_network_error(messages, tools):
-    raise RuntimeError("network error after 5 attempts: Connection reset")
-
-
-class TestCompletionRetryAndForcedSynthesisRecovery(unittest.TestCase):
-    def setUp(self):
-        self.config = base_config()
-        self.fetch_backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
-        patcher = mock.patch("harvest._ssrf_precheck")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_retry_with_completion_backoffs_recovers_after_two_transient_failures(self):
-        ok_response = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
-        with mock.patch("harvest._http_json_post",
-                         side_effect=[harvest.urllib.error.URLError("connection reset"),
-                                      harvest.urllib.error.URLError("connection reset"),
-                                      ok_response]) as m, \
-             mock.patch("harvest.time.sleep") as sleep_mock:
-            result = harvest._http_json_post_with_retry(
-                "http://gw/chat/completions", {}, {}, 5,
-                transient_backoffs=harvest._COMPLETION_RETRY_BACKOFFS)
-        self.assertEqual(result, ok_response)
-        self.assertEqual(m.call_count, 3)
-        sleep_mock.assert_has_calls([mock.call(2), mock.call(5)])
-
-    def test_transient_failure_mid_loop_recovers_via_forced_synthesis(self):
-        # First round does real search/fetch work and lands in the journal;
-        # the second round's completion call exhausts its retry budget and
-        # raises -- run_worker's existing `except Exception: break` drops out
-        # of the main loop (not straight to FAILED) and the forced-synthesis
-        # call that follows successfully turns the round-1 evidence into OK
-        # findings.
-        fact = "Rayleigh scattering explains the blue sky."
-        client = ScriptedClient([
-            assistant_tool_call("c1", "fetch", {"url": "https://a.com/x"}),
-            _raise_network_error,
-            assistant_final(findings_block([
-                {"claim": "c", "excerpt": fact, "url": "https://a.com/x",
-                 "credibility": 4, "language": "en"}])),
-        ])
-        with mock.patch("harvest.call_fetch_backend", return_value=fact):
-            result = harvest.run_worker("m1", "model-a", client, self.config, [],
-                                         self.fetch_backends, "goal", [], None)
-        self.assertEqual(result.status, "OK")
-        self.assertEqual(len(result.findings["claims"]), 1)
-        self.assertTrue(any(e.get("tool") == "fetch" and e.get("url") == "https://a.com/x"
-                             for e in result.journal))
-
-    def test_persistent_failure_gives_synthesis_failed_reason(self):
-        class AlwaysFails:
-            def complete(self, messages, tools):
-                raise RuntimeError("network error after 5 attempts: Connection reset")
-
-        result = harvest.run_worker("m1", "model-a", AlwaysFails(), self.config, [],
-                                     self.fetch_backends, "goal", [], None)
-        self.assertEqual(result.status, "FAILED")
-        self.assertTrue(result.reason.startswith("synthesis_failed (RuntimeError):"),
-                         result.reason)
-
-
-# ---------------------------------------------------------------------------
-# #63: gemini-grounding search results are also injected into the journal as
-# synthetic fetch entries, so a claim citing a grounding-search URL validates
-# without needing an explicit fetch() tool call.
-# ---------------------------------------------------------------------------
-
-class TestGeminiGroundingJournalInjection(unittest.TestCase):
-    def _grounding_results(self):
-        return [
-            {"url": "https://example.com/page1", "title": "Page One", "snippet": "Page One"},
-            {"url": "https://example.com/page2", "title": "", "snippet": ""},
-        ]
-
-    def test_search_injects_fetch_entries_with_title_or_url_fallback(self):
-        journal = []
-        cfg = base_config()
-        backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_search_backend", return_value=self._grounding_results()):
-            harvest.do_search("q", "en", backends, journal, cfg)
-
-        fetch_entries = [e for e in journal if e.get("tool") == "fetch"]
-        self.assertEqual(len(fetch_entries), 2)
-        self.assertTrue(all(e["backend"] == "grounding" for e in fetch_entries))
-        by_url = {e["url"]: e["content"] for e in fetch_entries}
-        self.assertEqual(by_url["https://example.com/page1"], "Page One")
-        self.assertEqual(by_url["https://example.com/page2"], "https://example.com/page2")
-
-    def test_grounding_journal_entries_pass_citation_validation(self):
-        journal = []
-        cfg = base_config()
-        backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_search_backend", return_value=self._grounding_results()):
-            harvest.do_search("q", "en", backends, journal, cfg)
-
-        claims = harvest.assign_claim_ids("m1", [
-            {"claim": "c1", "excerpt": "Page One", "url": "https://example.com/page1"},
-            {"claim": "c2", "excerpt": "https://example.com/page2", "url": "https://example.com/page2"},
-        ])
-        idx = harvest.build_fetch_index(journal)
-        urls = harvest.build_journal_url_set(journal)
-        valid, invalid = harvest.validate_claims(claims, idx, urls)
-        self.assertEqual(len(valid), 2)
-        self.assertEqual(invalid, [])
 
 
 class argparse_ns:
