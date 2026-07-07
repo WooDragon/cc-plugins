@@ -1453,12 +1453,21 @@ def _anthropic_resp_to_oai(resp):
 
 
 class AnthropicGatewayClient:
-    def __init__(self, base_url, api_key, model_id, timeout_s, max_tokens):
+    def __init__(self, base_url, api_key, model_id, timeout_s, max_tokens, effort=None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_id = model_id
         self.timeout_s = timeout_s
         self.max_tokens = max_tokens
+        # effort=None preserves the exact wire behavior from before this
+        # field existed (no output_config sent at all, provider default
+        # applies -- currently "high"). make_client_factory is the one place
+        # that supplies a non-None value (config-driven, default "medium");
+        # the class itself stays decoupled from that policy choice so it can
+        # be unit-tested with either shape. See ADR-011 (research repo) --
+        # this is a deliberate global default lowering, not "old behavior
+        # preserved for old configs".
+        self.effort = effort
 
     def complete(self, messages, tools):
         system, anth_messages = _oai_messages_to_anthropic(messages)
@@ -1473,6 +1482,8 @@ class AnthropicGatewayClient:
             payload["system"] = system
         if anth_tools is not None:
             payload["tools"] = anth_tools
+        if self.effort is not None:
+            payload["output_config"] = {"effort": self.effort}
         url = self.base_url + "/messages"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -1561,6 +1572,191 @@ def _inject_cache_control(system, tools, messages):
     return system
 
 
+# ---------------------------------------------------------------------------
+# Responses-API client (gpt models only)
+#
+# gpt models get a dedicated path to the gateway's OpenAI Responses endpoint
+# (/responses) instead of /chat/completions. This is a KV-cache optimization,
+# not a capability upgrade: on this gateway (aapi.tbps.one, a new-api/one-api
+# aggregator that routes multiple upstream instances), repeated calls against
+# /chat/completions draw a random instance each time and essentially never
+# reuse a warm prefix cache, while /responses calls -- even called completely
+# statelessly (no previous_response_id, full messages resent every step,
+# exactly matching run_worker's calling pattern) -- land on the same instance
+# often enough to hit a growing prefix cache (see ADR-011 in the research
+# repo for the probe data). This is an *instance-affinity accident of this
+# particular gateway*, not a documented OpenAI Responses feature -- a
+# different gateway/provider must be re-probed before relying on it again.
+# Same complete(messages, tools) -> OpenAI-shaped-dict interface as
+# GatewayClient/AnthropicGatewayClient, so run_worker/judge_clusters/
+# run_judge_with_fallback stay unchanged; all protocol translation is
+# confined to the pure functions below.
+# ---------------------------------------------------------------------------
+
+def _oai_tools_to_responses(tools):
+    """OpenAI function-tool schema -> Responses API tool schema. Responses
+    tools are flat ({"type":"function","name":...,"parameters":...}) unlike
+    chat/completions' nested {"function": {...}} shape. Returns None for no
+    tools (judge path passes tools=None) so the caller omits the field
+    entirely, mirroring _oai_tools_to_anthropic."""
+    if not tools:
+        return None
+    out = []
+    for t in tools:
+        fn = t.get("function", {})
+        out.append({
+            "type": "function",
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+        })
+    return out
+
+
+def _oai_messages_to_responses(messages):
+    """OpenAI chat-messages -> (instructions, input_items) for the Responses
+    API. Mirrors _oai_messages_to_anthropic's role-by-role walk but targets
+    Responses' flat item list instead of Anthropic's nested content blocks.
+
+    - role=system   -> hoisted into `instructions` (concatenated; there is
+      only ever one here in practice).
+    - role=user     -> a message item with an input_text content block.
+    - role=assistant -> a message item carrying any text (output_text block)
+      followed by one function_call item per tool call. function_call
+      `arguments` is passed through as-is: run_worker's outbound tool_calls
+      already carry a JSON *string* (the same value the OpenAI chat-
+      completions wire format uses), which is exactly what a Responses
+      function_call item expects -- no json.loads/json.dumps round-trip
+      needed here (unlike the Anthropic path, whose tool_use.input is a
+      dict).
+    - role=tool     -> a function_call_output item keyed by call_id
+      (run_worker's tool_call_id becomes Responses' call_id).
+
+    Unlike _oai_messages_to_anthropic there is no consecutive-turn merging
+    requirement -- Responses' `input` is a flat item list with no
+    alternating-role constraint, so tool results and user nudges are each
+    emitted as their own item without a merge step."""
+    instructions_parts = []
+    items = []
+    for msg in messages:
+        role = msg.get("role")
+        if role == "system":
+            content = msg.get("content")
+            if isinstance(content, str) and content:
+                instructions_parts.append(content)
+            continue
+        if role == "tool":
+            items.append({
+                "type": "function_call_output",
+                "call_id": msg.get("tool_call_id", ""),
+                "output": msg.get("content", ""),
+            })
+            continue
+        if role == "assistant":
+            text = msg.get("content")
+            if isinstance(text, str) and text:
+                items.append({"role": "assistant", "content": [{"type": "output_text", "text": text}]})
+            for tc in (msg.get("tool_calls") or []):
+                fn = tc.get("function", {})
+                items.append({
+                    "type": "function_call",
+                    "call_id": tc.get("id", ""),
+                    "name": fn.get("name", ""),
+                    "arguments": fn.get("arguments") or "{}",
+                })
+            continue
+        # role == user (or unknown -> treat as user)
+        content = msg.get("content")
+        text = content if isinstance(content, str) else ""
+        if text:
+            items.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
+    instructions = "\n\n".join(instructions_parts) if instructions_parts else None
+    return instructions, items
+
+
+def _responses_resp_to_oai(resp):
+    """Responses API response -> OpenAI chat-completions shape so
+    _extract_message and the run_worker/judge_clusters loops read it
+    unchanged (same contract as _anthropic_resp_to_oai).
+
+    - `output` is a list of items; "message" items carry output_text content
+      blocks (concatenated into `content`), "function_call" items become
+      OpenAI tool_calls. `arguments` on a Responses function_call item is
+      already a JSON string (same wire shape OpenAI chat/completions uses),
+      so it is passed straight through -- no re-serialization, unlike the
+      Anthropic path where tool_use.input is a dict needing json.dumps.
+    - content is a string for a text-only reply (judge / final synthesis
+      rely on a str here); it is None only when the turn is purely
+      function_call, mirroring the Anthropic conversion's contract.
+    - `status` is surfaced as finish_reason for observability (e.g.
+      "incomplete" from a max_output_tokens truncation shows up instead of
+      silently yielding half a JSON blob)."""
+    output = resp.get("output") or []
+    text_parts = []
+    tool_calls = []
+    for item in output:
+        itype = item.get("type")
+        if itype == "message":
+            for blk in item.get("content") or []:
+                if isinstance(blk, dict) and blk.get("type") in ("output_text", "text"):
+                    text_parts.append(blk.get("text", ""))
+        elif itype == "function_call":
+            tool_calls.append({
+                "id": item.get("call_id", ""),
+                "type": "function",
+                "function": {
+                    "name": item.get("name", ""),
+                    "arguments": item.get("arguments") or "{}",
+                },
+            })
+    message = {"role": "assistant"}
+    if tool_calls:
+        message["content"] = "".join(text_parts) if text_parts else None
+        message["tool_calls"] = tool_calls
+    else:
+        message["content"] = "".join(text_parts)
+    return {
+        "choices": [{"message": message, "finish_reason": resp.get("status")}],
+        "usage": resp.get("usage", {}),
+    }
+
+
+class ResponsesGatewayClient:
+    def __init__(self, base_url, api_key, model_id, timeout_s, max_output_tokens):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model_id = model_id
+        self.timeout_s = timeout_s
+        # Mirrors AnthropicGatewayClient's max_tokens: Responses' equivalent
+        # knob is max_output_tokens, and it is mandatory here for the same
+        # reason max_tokens is mandatory on the Anthropic path -- a long
+        # findings/judge JSON silently truncated by an unset/too-small output
+        # cap surfaces as a parse_findings_json failure downstream, not as an
+        # obvious "output was cut off" error. make_client_factory sources
+        # this from the same limits.completion_max_tokens value used by the
+        # Anthropic path (config-level single source of truth for "how big
+        # can a completion be").
+        self.max_output_tokens = max_output_tokens
+
+    def complete(self, messages, tools):
+        instructions, input_items = _oai_messages_to_responses(messages)
+        resp_tools = _oai_tools_to_responses(tools)
+        payload = {
+            "model": self.model_id,
+            "input": input_items,
+            "max_output_tokens": self.max_output_tokens,
+        }
+        if instructions is not None:
+            payload["instructions"] = instructions
+        if resp_tools is not None:
+            payload["tools"] = resp_tools
+        url = self.base_url + "/responses"
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        resp = _http_json_post_with_retry(url, payload, headers, self.timeout_s,
+                                           transient_backoffs=_COMPLETION_RETRY_BACKOFFS)
+        return _responses_resp_to_oai(resp)
+
+
 def make_client_factory(config):
     gw = config["gateway"]
     api_key = os.environ.get(gw["api_key_env"], "")
@@ -1576,17 +1772,45 @@ def make_client_factory(config):
     # OpenAI path never set it. Read from config with a generous default so
     # large findings/judge outputs aren't truncated (truncation would surface
     # as finish_reason=max_tokens and a half-parsed JSON). Same .get()-with-
-    # default back-compat pattern as completion_timeout_s.
+    # default back-compat pattern as completion_timeout_s. Also doubles as
+    # the Responses path's max_output_tokens (same "how big can a completion
+    # be" knob, one config value, see ResponsesGatewayClient).
     max_tokens = config.get("limits", {}).get("completion_max_tokens", 16384)
+    # ADR-011: deliberate global default lowering, not a like-for-like
+    # migration. Before this key existed, AnthropicGatewayClient never sent
+    # output_config at all, so the provider's own default ("high") applied.
+    # Every existing config -- including ones written before this key was
+    # added -- now gets "medium" via this .get() default, because thinking-
+    # heavy "high" effort was identified as the main per-step latency driver
+    # for claude in the panel (see ADR-011's wall-clock investigation). This
+    # is NOT the usual back-compat contract ("old config behaves exactly as
+    # before"); it is an intentional behavior change that happens to reuse
+    # the same .get()-with-default mechanism. Config authors who want the
+    # old "high" back can set limits.claude_effort explicitly.
+    effort = config.get("limits", {}).get("claude_effort", "medium")
+    # Escape hatch for the /responses instance-affinity cache behavior: this
+    # is observed, gateway-specific behavior (see ResponsesGatewayClient's
+    # docstring), not a guaranteed OpenAI feature. If a future gateway/
+    # provider swap makes /responses worse than plain /chat/completions,
+    # config can flip this back to "chat_completions" without a code change
+    # -- gpt* then falls through to the same plain GatewayClient path gemini
+    # already uses, rather than needing a second personality inside
+    # ResponsesGatewayClient itself.
+    gpt_endpoint = config.get("limits", {}).get("gpt_endpoint", "responses")
 
     def factory(model_id):
         # claude models go through the Anthropic-native /messages path so
-        # prompt caching can take effect; everything else (gemini/gpt) stays
-        # on the OpenAI-compatible /chat/completions gateway. Same
-        # complete(messages, tools) interface either way, so run_judge_with_
-        # fallback can freely mix the two client types across its candidates.
+        # prompt caching can take effect; gpt models go through the
+        # Responses path for the same reason (see ResponsesGatewayClient);
+        # everything else (gemini, and gpt when gpt_endpoint is switched
+        # off) stays on the OpenAI-compatible /chat/completions gateway. All
+        # three share the same complete(messages, tools) interface, so
+        # run_judge_with_fallback can freely mix client types across its
+        # candidates.
         if model_id.startswith("claude"):
-            return AnthropicGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens)
+            return AnthropicGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens, effort=effort)
+        if model_id.startswith("gpt") and gpt_endpoint == "responses":
+            return ResponsesGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens)
         return GatewayClient(gw["base_url"], api_key, model_id, timeout)
 
     return factory

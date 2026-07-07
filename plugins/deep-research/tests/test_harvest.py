@@ -3369,6 +3369,338 @@ class TestAnthropicConversion(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# ADR-011: panel three-way KV-cache optimization -- gpt via Responses API,
+# claude effort configuration. Mirrors TestAnthropicConversion's structure
+# for the new Responses protocol conversion pure functions.
+# ---------------------------------------------------------------------------
+
+class TestResponsesConversion(unittest.TestCase):
+    def test_system_hoisted_to_instructions(self):
+        msgs = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "hi"}]
+        instructions, items = harvest._oai_messages_to_responses(msgs)
+        self.assertEqual(instructions, "SYS")
+        self.assertEqual(items, [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}])
+
+    def test_no_system_yields_none_instructions(self):
+        instructions, _items = harvest._oai_messages_to_responses([{"role": "user", "content": "hi"}])
+        self.assertIsNone(instructions)
+
+    def test_plain_assistant_text_becomes_message_item(self):
+        _i, items = harvest._oai_messages_to_responses([{"role": "assistant", "content": "answer"}])
+        self.assertEqual(items, [{"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}])
+
+    def test_assistant_tool_calls_become_function_call_items(self):
+        msgs = [{"role": "assistant", "content": None,
+                 "tool_calls": [{"id": "tc1", "function": {"name": "search",
+                                 "arguments": json.dumps({"query": "中文"})}}]}]
+        _i, items = harvest._oai_messages_to_responses(msgs)
+        self.assertEqual(len(items), 1)  # no empty text item for null content
+        self.assertEqual(items[0]["type"], "function_call")
+        self.assertEqual(items[0]["call_id"], "tc1")
+        self.assertEqual(items[0]["name"], "search")
+        self.assertEqual(json.loads(items[0]["arguments"]), {"query": "中文"})
+
+    def test_assistant_text_plus_single_tool_call(self):
+        msgs = [{"role": "assistant", "content": "thinking",
+                 "tool_calls": [{"id": "t", "function": {"name": "fetch", "arguments": "{}"}}]}]
+        _i, items = harvest._oai_messages_to_responses(msgs)
+        self.assertEqual(items[0], {"role": "assistant", "content": [{"type": "output_text", "text": "thinking"}]})
+        self.assertEqual(items[1]["type"], "function_call")
+
+    def test_assistant_parallel_tool_calls_become_separate_items(self):
+        msgs = [{"role": "assistant", "content": None, "tool_calls": [
+            {"id": "a", "function": {"name": "search", "arguments": json.dumps({"query": "q1"})}},
+            {"id": "b", "function": {"name": "search", "arguments": json.dumps({"query": "q2"})}}]}]
+        _i, items = harvest._oai_messages_to_responses(msgs)
+        self.assertEqual(len(items), 2)
+        self.assertEqual([it["call_id"] for it in items], ["a", "b"])
+        self.assertTrue(all(it["type"] == "function_call" for it in items))
+
+    def test_tool_message_becomes_function_call_output(self):
+        msgs = [{"role": "tool", "tool_call_id": "a", "content": "resA"}]
+        _i, items = harvest._oai_messages_to_responses(msgs)
+        self.assertEqual(items, [{"type": "function_call_output", "call_id": "a", "output": "resA"}])
+
+    def test_parallel_tool_results_become_separate_items_no_merge(self):
+        # Unlike the Anthropic conversion (which must merge consecutive tool
+        # messages into one user turn), Responses' flat input list needs no
+        # such merge -- each tool result is independently addressable by
+        # call_id.
+        msgs = [
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "a", "function": {"name": "search", "arguments": "{}"}},
+                {"id": "b", "function": {"name": "fetch", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "a", "content": "resA"},
+            {"role": "tool", "tool_call_id": "b", "content": "resB"},
+        ]
+        _i, items = harvest._oai_messages_to_responses(msgs)
+        outputs = [it for it in items if it["type"] == "function_call_output"]
+        self.assertEqual(len(outputs), 2)
+        self.assertEqual([o["call_id"] for o in outputs], ["a", "b"])
+        self.assertEqual([o["output"] for o in outputs], ["resA", "resB"])
+
+    def test_empty_user_content_produces_no_item(self):
+        for empty in ("", None):
+            _i, items = harvest._oai_messages_to_responses([{"role": "user", "content": empty}])
+            self.assertEqual(items, [], f"empty user content leaked an item for content={empty!r}")
+
+    def test_tools_none_returns_none(self):
+        self.assertIsNone(harvest._oai_tools_to_responses(None))
+        self.assertIsNone(harvest._oai_tools_to_responses([]))
+
+    def test_tools_converted_to_flat_responses_shape(self):
+        resp_tools = harvest._oai_tools_to_responses(harvest.TOOL_SCHEMAS)
+        self.assertEqual(len(resp_tools), len(harvest.TOOL_SCHEMAS))
+        self.assertEqual(resp_tools[0]["type"], "function")
+        self.assertEqual(resp_tools[0]["name"], "search")
+        self.assertIn("parameters", resp_tools[0])
+        self.assertNotIn("function", resp_tools[0])  # flat, not nested like chat/completions
+
+    def test_outbound_text_only_content_is_string(self):
+        resp = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "hello"}]}],
+                "status": "completed"}
+        oai = harvest._responses_resp_to_oai(resp)
+        msg = oai["choices"][0]["message"]
+        self.assertEqual(msg["content"], "hello")
+        self.assertNotIn("tool_calls", msg)
+        self.assertEqual(oai["choices"][0]["finish_reason"], "completed")
+
+    def test_outbound_function_call_only_content_none(self):
+        resp = {"output": [{"type": "function_call", "call_id": "x", "name": "search",
+                            "arguments": json.dumps({"query": "q"})}], "status": "completed"}
+        msg = harvest._responses_resp_to_oai(resp)["choices"][0]["message"]
+        self.assertIsNone(msg["content"])
+        self.assertEqual(msg["tool_calls"][0]["id"], "x")
+        self.assertEqual(json.loads(msg["tool_calls"][0]["function"]["arguments"]), {"query": "q"})
+
+    def test_outbound_extract_message_compatible(self):
+        resp = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "j"}]}],
+                "status": "completed"}
+        oai = harvest._responses_resp_to_oai(resp)
+        self.assertEqual(harvest._extract_message(oai), oai["choices"][0]["message"])
+
+    def test_roundtrip_single_function_call_idempotent(self):
+        resp = {"output": [{"type": "function_call", "call_id": "rid", "name": "fetch",
+                            "arguments": json.dumps({"url": "http://x", "q": "中文查询"})}],
+                "status": "completed"}
+        msg = harvest._responses_resp_to_oai(resp)["choices"][0]["message"]
+        _i, items = harvest._oai_messages_to_responses([msg])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["call_id"], "rid")
+        self.assertEqual(items[0]["name"], "fetch")
+        self.assertEqual(json.loads(items[0]["arguments"]), {"url": "http://x", "q": "中文查询"})
+
+    def test_roundtrip_parallel_function_calls_idempotent(self):
+        resp = {"output": [
+            {"type": "function_call", "call_id": "r1", "name": "search", "arguments": json.dumps({"query": "a"})},
+            {"type": "function_call", "call_id": "r2", "name": "search", "arguments": json.dumps({"query": "b"})},
+        ], "status": "completed"}
+        msg = harvest._responses_resp_to_oai(resp)["choices"][0]["message"]
+        self.assertEqual(len(msg["tool_calls"]), 2)
+        _i, items = harvest._oai_messages_to_responses([msg])
+        self.assertEqual([it["call_id"] for it in items], ["r1", "r2"])
+
+    def test_roundtrip_tool_result_feedback(self):
+        # Simulate a full round: function_call from the model, then the
+        # worker's tool_call_id-keyed reply, converted to Responses items.
+        resp = {"output": [{"type": "function_call", "call_id": "rid", "name": "fetch",
+                            "arguments": json.dumps({"url": "http://x"})}], "status": "completed"}
+        msg = harvest._responses_resp_to_oai(resp)["choices"][0]["message"]
+        tool_msg = {"role": "tool", "tool_call_id": "rid", "content": "fetched body"}
+        _i, items = harvest._oai_messages_to_responses([msg, tool_msg])
+        self.assertEqual(items[0]["type"], "function_call")
+        self.assertEqual(items[1], {"type": "function_call_output", "call_id": "rid", "output": "fetched body"})
+
+
+class TestResponsesGatewayClient(unittest.TestCase):
+    def test_complete_posts_to_responses_endpoint(self):
+        client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 16384)
+        ok_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
+                       "status": "completed"}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+            result = client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        self.assertEqual(result["choices"][0]["message"]["content"], "hi")
+        url = m.call_args[0][0]
+        self.assertTrue(url.endswith("/responses"))
+
+    def test_complete_sets_max_output_tokens(self):
+        client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 9999)
+        ok_response = {"output": [], "status": "completed"}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+            client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        payload = m.call_args[0][1]
+        self.assertEqual(payload["max_output_tokens"], 9999)
+
+    def test_truncated_output_surfaces_as_incomplete_not_silently_swallowed(self):
+        # plan-review MUST FIX-2: a findings JSON cut off by an output cap
+        # must be *observable* (finish_reason carries "incomplete", the
+        # chopped text is still returned) rather than silently dropped --
+        # parse_findings_json then legitimately fails on the truncated
+        # candidate, same failure mode the Anthropic path already has via
+        # stop_reason="max_tokens".
+        client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 64)
+        truncated_response = {
+            "output": [{"type": "message", "content": [
+                {"type": "output_text", "text": '{"claims": [{"claim": "A", "excerpt": "e", "url": "u'}
+            ]}],
+            "status": "incomplete",
+        }
+        with mock.patch("harvest._http_json_post_with_retry", return_value=truncated_response) as m:
+            result = client.complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        self.assertEqual(m.call_args[0][1]["max_output_tokens"], 64)
+        self.assertEqual(result["choices"][0]["finish_reason"], "incomplete")
+        content = result["choices"][0]["message"]["content"]
+        data, err = harvest.parse_findings_json(content)
+        self.assertIsNone(data)
+        self.assertIsNotNone(err)
+
+    def test_complete_omits_tools_field_when_none(self):
+        # Judge path (judge_clusters) calls complete(messages, tools=None) --
+        # the Responses payload must not carry a tools key at all.
+        client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 16384)
+        ok_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "j"}]}],
+                       "status": "completed"}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+            client.complete(messages=[{"role": "system", "content": "sys"},
+                                       {"role": "user", "content": "judge input"}], tools=None)
+        payload = m.call_args[0][1]
+        self.assertNotIn("tools", payload)
+        self.assertEqual(payload["instructions"], "sys")
+
+    def test_complete_includes_tools_when_present(self):
+        client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 16384)
+        ok_response = {"output": [], "status": "completed"}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+            client.complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        payload = m.call_args[0][1]
+        self.assertEqual(len(payload["tools"]), len(harvest.TOOL_SCHEMAS))
+        self.assertEqual(payload["tools"][0]["type"], "function")
+
+    def test_judge_clusters_end_to_end_with_responses_client(self):
+        # judge_clusters(judge_client, ...) passes tools=None -- exercise the
+        # real call path (not just complete()) to prove the judge's
+        # nothing-but-text round-trip survives a ResponsesGatewayClient.
+        client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 16384)
+        judge_text = '```json\n{"clusters": [{"summary": "s", "source_claim_ids": ["m1-1"], "relation": "agree"}]}\n```'
+        ok_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": judge_text}]}],
+                       "status": "completed"}
+        worker_findings = {"m1": {"claims": [{"_id": "m1-1", "claim": "A", "excerpt": "e", "url": "u"}]}}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+            data, err = harvest.judge_clusters(client, worker_findings)
+        self.assertIsNone(err)
+        self.assertEqual(data["clusters"][0]["source_claim_ids"], ["m1-1"])
+        payload = m.call_args[0][1]
+        self.assertNotIn("tools", payload)
+
+
+class TestAnthropicEffortInjection(unittest.TestCase):
+    def test_effort_none_omits_output_config(self):
+        client = harvest.AnthropicGatewayClient("http://gw", "key", "claude-sonnet-5", 5, 16384, effort=None)
+        ok_response = {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+        with mock.patch("harvest._anthropic_post_with_retry", return_value=ok_response) as m:
+            client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        payload = m.call_args[0][1]
+        self.assertNotIn("output_config", payload)
+
+    def test_effort_medium_injects_output_config(self):
+        client = harvest.AnthropicGatewayClient("http://gw", "key", "claude-sonnet-5", 5, 16384, effort="medium")
+        ok_response = {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+        with mock.patch("harvest._anthropic_post_with_retry", return_value=ok_response) as m:
+            client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        payload = m.call_args[0][1]
+        self.assertEqual(payload["output_config"], {"effort": "medium"})
+
+    def test_effort_high_injects_output_config_high(self):
+        client = harvest.AnthropicGatewayClient("http://gw", "key", "claude-sonnet-5", 5, 16384, effort="high")
+        ok_response = {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
+        with mock.patch("harvest._anthropic_post_with_retry", return_value=ok_response) as m:
+            client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        payload = m.call_args[0][1]
+        self.assertEqual(payload["output_config"], {"effort": "high"})
+
+
+class TestMakeClientFactoryThreeWayDispatch(unittest.TestCase):
+    def setUp(self):
+        self.env_patcher = mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "secret"})
+        self.env_patcher.start()
+        self.addCleanup(self.env_patcher.stop)
+
+    def test_claude_dispatches_to_anthropic_client(self):
+        factory = harvest.make_client_factory(base_config())
+        client = factory("claude-sonnet-5")
+        self.assertIsInstance(client, harvest.AnthropicGatewayClient)
+
+    def test_gpt_dispatches_to_responses_client(self):
+        factory = harvest.make_client_factory(base_config())
+        client = factory("gpt-5.4")
+        self.assertIsInstance(client, harvest.ResponsesGatewayClient)
+
+    def test_gemini_dispatches_to_plain_gateway_client(self):
+        factory = harvest.make_client_factory(base_config())
+        client = factory("gemini-3.5-flash")
+        self.assertIsInstance(client, harvest.GatewayClient)
+        self.assertNotIsInstance(client, harvest.ResponsesGatewayClient)
+
+    def test_claude_effort_defaults_to_medium(self):
+        # No limits.claude_effort key in base_config() at all -- this is the
+        # "old config missing the new key" case ADR-011 calls out as a
+        # deliberate global default *lowering* to medium, not a no-op.
+        factory = harvest.make_client_factory(base_config())
+        client = factory("claude-sonnet-5")
+        self.assertEqual(client.effort, "medium")
+
+    def test_claude_effort_explicit_config_value_respected(self):
+        config = base_config()
+        config["limits"] = dict(config["limits"], claude_effort="high")
+        factory = harvest.make_client_factory(config)
+        client = factory("claude-sonnet-5")
+        self.assertEqual(client.effort, "high")
+
+    def test_responses_client_max_output_tokens_mirrors_completion_max_tokens(self):
+        config = base_config()
+        config["limits"] = dict(config["limits"], completion_max_tokens=12345)
+        factory = harvest.make_client_factory(config)
+        client = factory("gpt-5.4")
+        self.assertEqual(client.max_output_tokens, 12345)
+
+    def test_gpt_endpoint_config_switch_falls_back_to_chat_completions(self):
+        config = base_config()
+        config["limits"] = dict(config["limits"], gpt_endpoint="chat_completions")
+        factory = harvest.make_client_factory(config)
+        client = factory("gpt-5.4")
+        self.assertIsInstance(client, harvest.GatewayClient)
+        self.assertNotIsInstance(client, harvest.ResponsesGatewayClient)
+
+    def test_old_config_missing_all_new_keys_does_not_raise(self):
+        # base_config()'s "limits" dict has neither claude_effort nor
+        # gpt_endpoint -- constructing all three client types must not
+        # KeyError.
+        config = base_config()
+        self.assertNotIn("claude_effort", config["limits"])
+        self.assertNotIn("gpt_endpoint", config["limits"])
+        factory = harvest.make_client_factory(config)
+        factory("claude-sonnet-5")
+        factory("gpt-5.4")
+        factory("gemini-3.5-flash")
+
+    def test_judge_fallback_mixes_responses_client_with_tools_none(self):
+        # run_judge_with_fallback can route a candidate to a gpt model ->
+        # ResponsesGatewayClient with tools=None (judge_clusters never
+        # passes tools) -- exercise that combination through the real
+        # dispatch+call path.
+        config = base_config(judge_model="gpt-5.4", panel_models=["gpt-5.4", "model-b"])
+        factory = harvest.make_client_factory(config)
+        judge_text = '```json\n{"clusters": [{"summary": "s", "source_claim_ids": ["m1-1"], "relation": "agree"}]}\n```'
+        ok_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": judge_text}]}],
+                       "status": "completed"}
+        worker_findings = {"m1": {"claims": [{"_id": "m1-1", "claim": "A", "excerpt": "e", "url": "u"}]}}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response):
+            data, err = harvest.run_judge_with_fallback(config, factory, worker_findings, config["panel_models"])
+        self.assertIsNone(err)
+        self.assertEqual(data["clusters"][0]["source_claim_ids"], ["m1-1"])
+
+
+# ---------------------------------------------------------------------------
 # #64: completion-call retry schedule + forced-synthesis recovery on
 # exhausted retries
 # ---------------------------------------------------------------------------
