@@ -10,10 +10,10 @@
 Sources → ❰G0❱ → [harvester] Acquisition → ❰G1❱
   → [harvester] Sanitization
   → [analyst] Decomposition → ❰G2❱
-  → [analyst+Lead] Synthesis → ❰G3❱
+  → [analyst+Lead(manifest 裁决)] Synthesis → ❰G3❱
   → [reviewer] Validation
-  → [Lead] Delivery → [publisher] report.html
-  ⋯⋯ → [Lead] Landing & Feedback（Stage 8, experimental, 仅落地后触发）
+  → [Lead(spec)+analyst(生成)+reviewer(语义核验)] Delivery → [publisher] report.html
+  ⋯⋯ → [Lead(对比指令)+analyst(执行)] Landing & Feedback（Stage 8, experimental, 仅落地后触发）
 ```
 
 > **G0 需求门**（Sources 后、Acquisition 前）：Lead 与用户对齐问题正确性 + 根本目标，输出 Go / Recycle。区别于 G1/G2/G3 审「执行充分性」，G0 审「问题正确性 + 根本目标对齐」，在源头拦截「解决错问题」。G0 产出 `intake/requirements/research-goal.md`（primary_job + Non-Goals + 用户 sign-off），是举证责任锚定（[principles.md](./principles.md) 元原则 0）的物理入口。定义见 [quality-gates.md](./quality-gates.md)。
@@ -96,11 +96,15 @@ fetch-report 必填字段：tier 分层（T1/T2/T3）、翻页统计、错误汇
 | 项 | 说明 |
 |---|---|
 | 执行者 | research-analyst + Lead session |
-| 输入目录 | `pipeline/3_structured/` + `pipeline/2_cleaned/`（只读） |
+| 输入目录 | `pipeline/3_structured/` + `pipeline/2_cleaned/`（只读，analyst 读取） |
 | 输出目录 | `pipeline/4_extracted/` |
 | 产物 | 洞察报告 + deliverables 草稿 |
 
-Lead 参与综合分析中不可委托的连贯思考和战略判断。
+绝对规则下 Lead 禁读 `pipeline/3_structured`/`2_cleaned` 全文。执行分两轮：
+
+- **第一轮**：analyst 读 `3_structured` 全文，同时产出完整草稿落盘 `deliverables/draft/`，并回传 Lead 一份 **synthesis-manifest**（每条洞察 = `{claim_id, 一句话结论, 支撑文件路径+行号指针, 冲突/取舍待决项}`，schema 见下「Stage 间契约」）。
+- **Lead 裁决**：Lead 只读 manifest（几百 token），不读全文，在此基础上做不可委托的连贯思考和战略判断，产出定向修正指令。
+- **第二轮**：analyst 只读**自己的草稿 + Lead 的定向修正指令**，不重读 `3_structured`（消灭重读，替代 teammate 保温机制），据此改稿。
 
 ### ❰G3❱ Sufficiency Gate: 综合充分性
 
@@ -119,28 +123,36 @@ Lead 参与综合分析中不可委托的连贯思考和战略判断。
 
 5 维度审阅：准确性、完整性、逻辑性、可操作性、可追溯性。verdict 规则见 [quality-gates.md](./quality-gates.md)。
 
-### Stage 7: Delivery（Lead 执行）
+### Stage 7: Delivery（Lead 出 spec + analyst 生成 + reviewer 语义核验）
 
 | 项 | 说明 |
 |---|---|
-| 执行者 | Lead session |
-| 输入 | 审阅通过的产物 |
+| 执行者 | Lead session（出 spec）+ research-analyst（Task subagent，生成落盘）+ research-reviewer（Task subagent，语义核验） |
+| 输入 | 审阅通过的产物 + `pipeline/4_extracted/` |
 | 输出目录 | `deliverables/final/` |
 | 产物 | report.md + executive_summary.md + 附录 + report.html（见下 HTML 渲染子步骤） |
 
-**HTML 渲染子步骤**：Delivery 定稿（report.md 等已落盘 `deliverables/final/`）后，Lead spawn `deep-research:research-publisher`（Task subagent），把 report.md 渲染成 `report.html`——自包含 HTML 展示视图（VIEW 层，见 [principles.md](./principles.md) 原则 5），零新事实。publisher 渲染完成后自调 `scripts/verify_report_html.py` 机械门自校验（三态 exit：`0`=PASS/`1`=FAIL/`2`=N/A，校验链接守恒 + 章节守恒 + 自包含），不 PASS 须修正后复渲。
+绝对规则下 Lead 不读 `4_extracted` 全文、不亲自落盘 final 文档。执行分三步：
 
-### Stage 8: Landing & Feedback（Lead 执行，experimental）
+- **Lead 出 spec**：Lead 产出 **report-spec**（`{报告大纲, 每节裁决要点, 引用指针}`，schema 见下「Stage 间契约」），全在主上下文完成，不含 `4_extracted` 全文。
+- **analyst 生成**：Lead spawn `deep-research:research-analyst`，按 spec + 盘上 `4_extracted` 渲染 `deliverables/final/report.md`、`executive_summary.md`，回传 `{落盘路径, 机械门 receipt}`。Lead 不亲读生成内容。
+- **reviewer 语义核验**：生成落盘后，Lead spawn 轻量 `deep-research:research-reviewer`（mode=review 既有能力）对 report.md/report.html 做 no-new-facts 语义核验，回传 verdict receipt（含 FAIL 分支的问题定位字段，见下「Stage 间契约」receipt schema）。Lead 不亲读审阅报告全文，只据 receipt 裁决。这一步补上「Lead 视觉核验兜底」在绝对规则下的断裂——原先靠 Lead 亲眼看一遍成品的安全网，现由 reviewer 语义核验替代。
+
+**HTML 渲染子步骤**：Delivery 定稿（report.md 等已落盘 `deliverables/final/`）后，Lead spawn `deep-research:research-publisher`（Task subagent），把 report.md 渲染成 `report.html`——自包含 HTML 展示视图（VIEW 层，见 [principles.md](./principles.md) 原则 5），零新事实。publisher 渲染完成后自调 `scripts/verify_report_html.py` 机械门自校验（三态 exit：`0`=PASS/`1`=FAIL/`2`=N/A，校验链接守恒 + 章节守恒 + 自包含），不 PASS 须修正后复渲。report.html 仍归 publisher 生成，不受本 Stage 生成卸载影响。
+
+### Stage 8: Landing & Feedback（Lead 出对比指令 + analyst 执行，experimental）
 
 > ⚠ **EXPERIMENTAL（Stage 8）**：本阶段为 track_h 草案（#11）落地，待 ≥1 真实项目字面复制验证后转 stable。验证通过去标记升 stable；暴露问题走 Correction Record 修正（原则 5）。验证记录见 #11。
 
 | 项 | 说明 |
 |---|---|
-| 执行者 | **Lead session**（落地实测后自评回写，不派 subagent） |
+| 执行者 | **research-analyst**（Task subagent，落地实测后自评回写执行者；归属复用 analyst——已具 Write、已读 deliverables 语义，landing 性质同 Synthesis） |
 | 触发点 | 已交付结论被真实落地、产生「设计预期 vs 落地实际」的 delta 之后（与主管线异步，非每个项目必经） |
-| 输入 | 已交付结论（`deliverables/final/`）+ 落地环境实测反馈 |
+| 输入 | Lead 的 delta 对比指令 + 已交付结论（`deliverables/final/`）+ 落地环境实测反馈 |
 | 输出目录 | `deliverables/final/`（追加，不覆盖原文） |
 | 产物 | landing 回填文档（五段结构，见模板）+ 按需触发的 Correction Record / 补轨 handoff |
+
+绝对规则下 Lead 不读 `deliverables/final/` 全文。Lead 出**对比指令**（落地实测反馈 + 需要对照哪些已交付结论），spawn analyst 执行「读 final + 落地反馈 → 产 delta 对比」。analyst 回传 Lead 一份 **delta receipt**（`{delta 四分类标签, 每 delta 一句话结论, 支撑指针, 触发的下游动作, 落盘路径}`，schema 见下「Stage 间契约」），Lead 只持 receipt 做四分类分流裁决，不亲读回填文档全文。Correction Record、补轨 handoff 均由 analyst 落盘。
 
 **Landing 五段结构**（模板 [landing-feedback.md.tmpl](../assets/landing-feedback.md.tmpl)）：① 落地概览 → ② 设计→实践 Delta 表（四分类，见 [principles.md](./principles.md) 原则 5）→ ③ delta 分述 → ④ 方法论边界声明（n=1 防护）→ ⑤ 权威指针 + 补轨登记。
 
@@ -166,5 +178,17 @@ Lead 参与综合分析中不可委托的连贯思考和战略判断。
 5. **命名一致**：所有 pipeline 产物使用 `YYYYMMDD_HHMMSS_{source}_{description}` 命名；补轨产物加 `track_{x}_` 前缀（见 principles.md 原则 6）
 6. **Gate 阻塞**：G0/G1/G2/G3 未通过时，后续 Stage 禁止启动
 7. **回退权限**：只有 Lead 可以决定 Stage 回退。G3 裁决 RECYCLE 时强制回退到 G0 重校准问题定义（区别于 FAIL 的原阶段补充）
+8. **主 session 只持指针**：Lead（主 session，`agent_id` 为空）对 `pipeline/**` 和 `deliverables/**` 下的文件只允许持有路径指针，禁止读取其内容（Read 工具 + Bash cat 类读取）。所有内容读取/生成/审阅由 subagent 在隔离上下文完成，回传 Lead 的只有 manifest/receipt/spec/delta-receipt（路径 + 结构化裁决摘要），永不含全文。物理焊死靠 PreToolUse `read_guard` hook。详见 [adr-main-session-cost-fix.md](../../../docs/adr-main-session-cost-fix.md)。
+
+### manifest / receipt / spec / delta-receipt 产物定义
+
+上一条契约催生的四类 Lead-subagent 间结构化传递产物，长在现有 PRIMARY/VIEW/派生层概念之上，不是新分层，只是数据流的传递格式约定：
+
+| 产物 | 产生者 → 消费者 | 结构 | 用于哪个 Stage |
+|---|---|---|---|
+| **synthesis-manifest** | analyst → Lead | `{claim_id, 一句话结论, 支撑文件路径+行号指针, 冲突/取舍待决项}`（每条洞察一条，几百 token） | Stage 5 Synthesis 第一轮 |
+| **receipt**（Gate/审阅通用） | reviewer → Lead | `GATE_VERDICT` 独立成行 + 项目路径 + `verdict` + 维度评分表 + 报告路径；FAIL 分支必含 `{问题/幻觉原文摘录, 所在文件+段落指针, 错误原因, 达标所需具体改进}` | G1/G2/G3、Stage 6 Validation、Stage 7 语义核验 |
+| **report-spec** | Lead → analyst（Stage 7 writer） | `{报告大纲, 每节裁决要点, 引用指针}`，全在主上下文产出，不含 `4_extracted` 全文 | Stage 7 Delivery |
+| **delta receipt** | analyst → Lead | `{delta 四分类标签, 每 delta 一句话结论, 支撑指针, 触发的下游动作(Correction Record/补轨 handoff/无), 落盘路径}` | Stage 8 Landing |
 
 **关联文件**：[principles.md](./principles.md) · [quality-gates.md](./quality-gates.md) · 角色定义见 deep-research 插件的 research-harvester / research-analyst / research-reviewer / research-publisher subagent

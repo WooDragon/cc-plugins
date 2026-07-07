@@ -4,6 +4,12 @@
 
 ---
 
+## 唯一绝对规则
+
+> **主 session（`agent_id` 为空）对 `pipeline/**` 和 `deliverables/**` 下的文件，只允许持有路径指针，禁止读取其内容（Read 工具 + Bash cat 类读取）。所有内容读取 / 生成 / 审阅由 subagent 在隔离上下文完成，回传 Lead 的只有 receipt（路径 + 结构化裁决摘要），永不含全文。**
+
+绝对规则 > 软规则：消除所有「这次就读一下」的边界情况。物理焊死靠 PreToolUse `read_guard` hook 按 `agent_id` 空/非空区分主/子 session（fail-open：非 deep-research 项目/拿不到 agent_id/解析异常时放行，不误伤主 session 正常操作）。下表「Task 隔离 vs 主上下文」的划分全部服从此绝对规则——主上下文执行的场景只意味着调度/裁决在主上下文，不意味着 Lead 可读 pipeline/deliverables 全文。
+
 ## Task 隔离 vs 主上下文
 
 ### 必须 Task 隔离的场景
@@ -26,7 +32,9 @@
 | 1-2 次可完成的简单搜索 | 不值得隔离开销 |
 | Lead 的战略决策和综合判断 | 需要完整上下文连贯思考 |
 | Stage 间调度和 Gate 裁决 | 调度逻辑必须在主上下文 |
-| deliverables 最终整合 | 需要跨 Stage 的全局视野 |
+| deliverables 最终整合：Lead 出 spec，生成/整合由 subagent 执行，Lead 只持 receipt | 绝对规则——Lead 禁读 pipeline/deliverables 全文，整合决策与整合执行分离 |
+
+> **补充**：Lead 只持指针 / receipt / manifest，禁读 `pipeline/**`、`deliverables/**` 全文；需要内容时必须派 subagent 读取并提炼回传结构化摘要，不得自行 Read/cat。
 
 ### 反模式（禁止）
 

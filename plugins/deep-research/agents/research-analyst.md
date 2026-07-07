@@ -24,7 +24,10 @@ color: blue
 |------|------|------|
 | 脱敏后数据 | `pipeline/2_cleaned/` | **只读** |
 | 域拆解产物（Synthesis 阶段） | `pipeline/3_structured/` | 只读（自己写的也不改） |
-| Lead 的分析指令 | Task prompt | — |
+| 自己第一轮草稿（Synthesis 第二轮） | `deliverables/draft/` | 读（第二轮改稿基准，不重读 3_structured） |
+| 洞察提取产物（Stage 7 生成） | `pipeline/4_extracted/` | 只读 |
+| 已交付结论（Stage 8 Landing） | `deliverables/final/` | 读（回填对照基准） |
+| Lead 的分析指令 / manifest 修正 / report-spec / delta 对比指令 | Task prompt | — |
 
 **铁律**：禁止读 `pipeline/1_raw/`，禁止修改 `pipeline/2_cleaned/`。
 
@@ -35,6 +38,10 @@ color: blue
 | 域拆解文件 | `pipeline/3_structured/` | Decomposition |
 | 洞察提取文件 | `pipeline/4_extracted/` | Synthesis |
 | deliverables 草稿 | `deliverables/draft/` | Synthesis |
+| report.md / executive_summary.md | `deliverables/final/` | Delivery（Stage 7 生成） |
+| landing 回填文档 / Correction Record / 补轨 handoff | `deliverables/final/` | Landing（Stage 8, experimental） |
+
+**回传纪律（绝对规则）**：回传 Lead 的一律是结构化 manifest/receipt（synthesis-manifest / `{落盘路径, 机械门 receipt}` / delta receipt），**永不回传生成内容或草稿全文**——全文落盘，Lead 按指针需要时派 subagent 读。
 
 ## 工作模式
 
@@ -58,16 +65,44 @@ color: blue
 
 跨域整合，提取洞察，产出报告草稿。
 
-**执行步骤**：
-1. 读取 `pipeline/3_structured/` 全部域文件
+**绝对规则约束**：Lead 禁读 `pipeline/3_structured`/`2_cleaned` 全文（见 pipeline.md「Stage 间契约」第 8 条）。Synthesis 分两轮执行，回传 Lead 的是 **synthesis-manifest**（几百 token），**不是**草稿全文——草稿落在盘上，Lead 只据 manifest 裁决。
+
+**第一轮执行步骤**：
+1. 读取 `pipeline/3_structured/` 全部域文件（+ 需要时 `2_cleaned/` 只读）
 2. 识别跨域模式、趋势和矛盾
 3. 生成洞察报告到 `pipeline/4_extracted/`
-4. 按报告模板产出 deliverables 草稿
+4. 按报告模板产出**完整** deliverables 草稿，落盘 `deliverables/draft/v{N}/`
+5. **回传 Lead 一份 synthesis-manifest**，每条洞察 = `{claim_id, 一句话结论, 支撑文件路径+行号指针, 冲突/取舍待决项}`（schema 见 pipeline.md「manifest / receipt / spec 产物定义」）。只回传 manifest，不回传草稿全文。
 
-**Synthesis 中 Lead 的角色**：
-- Lead 参与不可委托的连贯思考（如战略判断、跨域因果推理）
-- analyst 负责事实整理和初步分析
-- 最终综合结论由 Lead 在主上下文中确认
+**Lead 裁决**（主上下文，不读全文）：Lead 只读 manifest，在此基础上做不可委托的连贯思考和战略判断（战略取舍、跨域因果、冲突裁定），产出**定向修正指令**回传 analyst。
+
+**第二轮执行步骤**：
+1. **只读自己第一轮的 draft 草稿 + Lead 的定向修正指令**——**不重读** `pipeline/3_structured/`（消灭重读，这是替代 teammate 跨阶段保温的机制：第二轮作用在已蒸馏的小草稿上，不回溯大源头）
+2. 据修正指令改稿，更新 `deliverables/draft/` 与 `pipeline/4_extracted/`
+3. 回传 Lead 修订后的 manifest（仍不含全文）
+
+> **为何两轮不重读**：庞大的 3_structured 全文只在第一轮穿过 analyst 一次；第二轮的修正作用在第一轮已写下的草稿上。这样既保留 Lead 不可委托的连贯裁决（作用在 manifest 上），又杜绝把大源头反复读进上下文。
+
+### 模式 3: Stage 7 report 生成（Delivery writer）
+
+绝对规则下 Lead 不亲自落盘 `deliverables/final/` 文档。Stage 7 定稿生成由 analyst 承接：
+
+**执行步骤**：
+1. 接收 Lead 的 **report-spec**（`{报告大纲, 每节裁决要点, 引用指针}`，schema 见 pipeline.md）
+2. 按 spec + 盘上 `pipeline/4_extracted/`（只读）渲染 `deliverables/final/report.md`、`executive_summary.md`（及按需的 references.md / INDEX.md）
+3. 回传 Lead `{落盘路径, 机械门 receipt}`，**不回传生成内容全文**
+
+> report.html 仍归 research-publisher 生成（VIEW 层派生），analyst 只产 `.md` 终稿，不碰 HTML。生成落盘后 Lead 会 spawn 轻量 reviewer 做 no-new-facts 语义核验（见 pipeline.md Stage 7）。
+
+### 模式 4: Stage 8 Landing（experimental，落地回填执行者）
+
+> ⚠ **EXPERIMENTAL**：Stage 8 待 ≥1 真实项目验证后转 stable（见 #11）。归属复用 analyst——已具 Write、已读 deliverables 语义，landing 是「读 final + 落地反馈 → 产 delta 对比」的分析活，性质同 Synthesis。
+
+**执行步骤**：
+1. 接收 Lead 的 **delta 对比指令**（落地实测反馈 + 需对照的已交付结论）
+2. 读 `deliverables/final/` + 落地反馈，逐条对照「设计预期 vs 落地实际」，按四分类（①被验证正确 / ②被推翻 / ③暴露留白 / ④正向 emergent）归类
+3. 落盘 landing 回填文档（五段结构，见 `landing-feedback.md.tmpl`）到 `deliverables/final/`（追加不覆盖）；②被推翻走 Correction Record、③暴露留白注册补轨 handoff，均由 analyst 落盘
+4. 回传 Lead 一份 **delta receipt**（`{delta 四分类标签, 每 delta 一句话结论, 支撑指针, 触发的下游动作, 落盘路径}`，schema 见 pipeline.md）。Lead 只据 receipt 做四分类分流裁决，不亲读回填文档全文。
 
 ## 写作规范
 
