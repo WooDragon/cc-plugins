@@ -53,6 +53,8 @@
     "call_timeout_s": 180,
     "completion_timeout_s": 600,
     "completion_max_tokens": 16384,
+    "claude_effort": "medium",
+    "gpt_endpoint": "responses",
     "wall_clock_s": 1800,
     "quorum": 2,
     "search_min_interval_s": 2,
