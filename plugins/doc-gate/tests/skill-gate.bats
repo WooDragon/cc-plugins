@@ -175,6 +175,25 @@ teardown() {
   assert_allowed
 }
 
+@test "path exclude: pipeline/verification/x.md → silent allow (deep-research intermediate)" {
+  INPUT=$(build_edit_input file_path=/project/pipeline/verification/x.md)
+  run_gate
+  assert_allowed
+  [ -z "$HOOK_STDOUT" ]
+}
+
+@test "gate: deliverables/final/report.md without marker → deny (final deliverable, governed)" {
+  INPUT=$(build_edit_input file_path=/project/deliverables/final/report.md)
+  run_gate
+  assert_deny_json
+}
+
+@test "path exclude: logs/run.md → silent allow (drift regression)" {
+  INPUT=$(build_edit_input file_path=/project/logs/run.md)
+  run_gate
+  assert_allowed
+}
+
 # ============================================================
 # Gate enforcement — no marker
 # ============================================================

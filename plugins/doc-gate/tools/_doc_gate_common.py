@@ -16,8 +16,10 @@ from pathlib import Path
 
 # 扫描时排除的目录（路径部件匹配，非子串）。
 # .claude / logs 为 #23 降噪新增：工具产物、会话日志不应进文档引用图。
+# pipeline 为 deep-research 机器生成中间产物，同样不应进文档引用图；
+# deliverables（最终交付）刻意不在此列——它仍需可被 recall 索引。
 EXCLUDED_DIRS = {'.git', '.agents', 'node_modules', '.venv', 'research',
-                 'docs-graph-tests', '.claude', 'logs'}
+                 'docs-graph-tests', '.claude', 'logs', 'pipeline'}
 
 # orphans 白名单（文件名匹配）：索引 / 入口文件天然无入链，不报孤儿。
 ORPHAN_WHITELIST = {'CLAUDE.md', 'README.md', 'MEMORY.md'}
