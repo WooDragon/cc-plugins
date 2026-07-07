@@ -51,6 +51,23 @@ class TestAgentIdGate(_ProjectFixture):
             self._block("", "Read", {"file_path": str(self.big)})
         )
 
+    def test_none_agent_id_treated_as_main_session_blocked(self):
+        # copilot review: agent_id 缺失(None)不能 fail-open——主 session 的事件本就
+        # 携带空/缺失 agent_id，对 None 放行会让主 session 永远绕过门禁。None 必须
+        # 与主 session 同路径处理：研究项目内 + 受管大文件 → 拦。
+        self.assertTrue(
+            self._block(None, "Read", {"file_path": str(self.big)})
+        )
+
+    def test_none_agent_id_non_research_project_passes_via_path_layer(self):
+        # 真正的 fail-open 在路径层：None agent_id 但非研究项目 → 放行。
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "random.md"
+            f.write_text("x" * 20000)
+            self.assertFalse(
+                read_guard._should_block(None, "Read", {"file_path": str(f)}, d)[0]
+            )
+
     def test_main_session_reads_big_deliverables_file_blocked(self):
         big_deliv = self.proj / "deliverables" / "final" / "report.md"
         big_deliv.write_text("z" * 20000)

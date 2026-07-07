@@ -50,7 +50,8 @@ research 仓 #36/#37 两次实测坐实：deep-research 7-Stage 调研中，**�
   - Read 分支：`tool_input.file_path` 命中 → 拦截。
   - Bash 分支：命令解析出读取意图（`cat|head|tail|less|more|sed|awk`，及 `grep ""` 全量读、`echo "$(<file)"`）且目标指向受管路径 → 拦截。
 - **白名单放行**（小指针文件，主 session 合法持有）：文件名匹配 `research-goal.md`、`*-manifest.*`、`*-receipt.*`、`INDEX.md`、`*.verdict`、`*-verdict.md`；或文件体积 < 阈值（建议 8KB，指针/receipt 量级）。
-- **fail-open 硬约束**（任一成立即放行，never break userspace）：非 deep-research 项目（查不到 pipeline/）、拿不到 `agent_id`、路径解析异常、Bash 命令解析不出明确读大文件意图（不误伤 grep 检索/ls/find/git）。
+- **fail-open 硬约束**（任一成立即放行，never break userspace）：非 deep-research 项目（查不到 pipeline/）、目标非受管路径、命中白名单、路径解析异常、Bash 命令解析不出明确读大文件意图（不误伤 grep 检索/ls/find/git）。**fail-open 落在项目/路径/白名单层，不在 agent_id 层**。
+- **agent_id 语义**（对齐 `pre-edit-write.sh` 的 `.agent_id // ""`）：非空＝subagent→放行；空/None/缺失＝主 session→走路径判定。**不能**把「agent_id 缺失」当技术不确定去 fail-open——主 session 的 PreToolUse 事件本就携带空/缺失 agent_id，若对 None 放行则主 session 永远绕过门禁、绝对规则失效。误判风险的兜底是路径层（即便某 subagent 的 agent_id 丢失被当成主 session，也只在「研究项目内+受管路径+大文件」才拦，带明确 stderr 指引，代价远小于主 session 整体绕过）。
 - **拦截 stderr 指导语**（强制，防盲目重试）：
   ```
   [read_guard] Action blocked: Lead 主 session 禁读 pipeline/deliverables 全文（绝对规则，见 adr-main-session-cost-fix）。

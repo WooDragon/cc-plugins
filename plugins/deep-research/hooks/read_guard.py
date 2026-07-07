@@ -182,8 +182,21 @@ def _extract_bash_read_targets(command: str):
 def _should_block(agent_id, tool_name, tool_input, cwd):
     """核心判定纯函数。返回 (should_block: bool, blocked_path: str|None)。
 
-    任何不确定 → (False, None)（fail-open）。
+    fail-open 保护落在**项目/路径/白名单层**（非研究项目、非受管路径、白名单文件
+    一律放行），不在 agent_id 层——这一点很关键，见下。
+
+    agent_id 语义（对齐 pre-edit-write.sh 的既有判据 `.agent_id // ""`）：
+      - **非空** → 确定是 subagent → 放行。
+      - **空字符串 / None / 缺失** → 视作主 session（Lead 的 PreToolUse 事件本就
+        携带空/缺失 agent_id）→ 继续走路径判定。**不能**把 None 当技术不确定去
+        fail-open——若那样，主 session 的事件（agent_id 恰恰为空/缺失）将永远
+        绕过门禁，绝对规则彻底失效。真正的 fail-open 由后续「非研究项目/非受管
+        路径/白名单」三道路径层放行提供：即便把某个 agent_id 丢失的 subagent 误
+        判为主 session，也只有在「研究项目内 + 受管路径 + 大文件」时才会拦，且带
+        明确 stderr 指引，代价远小于让主 session 整体绕过。
     """
+    # None / 缺失归一化为空字符串，与主 session 同路径处理（见上 docstring）。
+    agent_id = agent_id or ""
     # subagent（agent_id 非空）不受限
     if agent_id:
         return False, None
