@@ -902,6 +902,65 @@ def _strip_html_to_text(raw_html):
 _CURL_CFFI_MAX_REDIRECT_HOPS = 3
 _CURL_CFFI_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
+# curl_cffi impersonates a real browser's TLS/HTTP fingerprint but cannot
+# execute JavaScript -- so when a WAF (Cloudflare/DataDome/PerimeterX/
+# Imperva) serves a JS challenge ("holding page"), curl_cffi gets exactly
+# that holding page back as its final response, not the article. Without
+# this check, that holding page's body (often HTTP 200, sometimes 403/503)
+# is silently stripped-to-text and returned as if it were real page
+# content, poisoning the downstream citation-verification pipeline with
+# challenge-script prose that happens to contain no obvious HTTP error.
+# See issue #81.
+#
+# Markers are deliberately script paths / JS globals / DOM ids / CDN
+# domains -- unique implementation artifacts of the challenge widgets
+# themselves -- rather than human-readable phrases like "checking your
+# browser" or "just a moment". Human phrases appear verbatim in ordinary
+# prose (news articles about Cloudflare outages, blog posts explaining
+# Turnstile, this very code review) and would cause false positives;
+# the literal script/DOM/CDN artifacts below only ever appear when the
+# actual vendor widget markup is present on the page.
+_CHALLENGE_PAGE_MARKERS = (
+    # Cloudflare (challenge-platform script, browser-verification banner,
+    # the cf_chl_opt JS config object, Turnstile widget, _cf_chl JS global)
+    "/cdn-cgi/challenge-platform/",
+    "cf-browser-verification",
+    "_cf_chl_opt",
+    "cf-turnstile",
+    "window._cf_chl",
+    # DataDome (captcha delivery CDN the challenge script loads from)
+    "captcha-delivery.com",
+    # PerimeterX / HUMAN (captcha widget id, JS app-id global)
+    "px-captcha",
+    "window._pxappid",
+    # Imperva / Incapsula (challenge resource endpoint)
+    "_incapsula_resource",
+)
+
+# Challenge/holding pages are minimal (a script tag, a spinner, a couple
+# of divs) -- always tiny, never anywhere near fetch_max_chars territory.
+# Real long-form content that happens to discuss these vendors (e.g. a
+# deep-research task investigating WAF/Turnstile bypass techniques, or an
+# article with an embedded code sample) can legitimately contain these
+# same artifact strings inside tens of KB of genuine prose. This gate lets
+# such long-form pages through unconditionally while still catching even
+# a bloated/verbose challenge page, since real-world challenge HTML has
+# never been observed anywhere close to 100KB.
+_CHALLENGE_MAX_PAGE_CHARS = 100 * 1024
+
+
+def _looks_like_challenge_page(raw_html):
+    # resp.text can be None or "" (empty body, e.g. a HEAD-like 204, or a
+    # decode that yielded nothing) -- guard first, since .lower() on None
+    # would raise AttributeError and take curl-cffi out of rotation via
+    # call_fetch_backend's broad except instead of cleanly degrading.
+    if not raw_html:
+        return False
+    if len(raw_html) >= _CHALLENGE_MAX_PAGE_CHARS:
+        return False
+    lowered = raw_html.lower()
+    return any(marker in lowered for marker in _CHALLENGE_PAGE_MARKERS)
+
 
 def _fetch_curl_cffi(cfg, url, timeout, max_chars, config):
     # libcurl (which curl_cffi wraps via C bindings) does its own DNS
@@ -986,6 +1045,17 @@ def _fetch_curl_cffi(cfg, url, timeout, max_chars, config):
             text = resp.text
         except Exception as e:
             return None, f"curl-cffi: failed to decode response body: {e}"
+        # Gate 1: challenge page first, regardless of status code -- a
+        # Cloudflare/DataDome/etc holding page served with 403/503 must be
+        # reported as a challenge, not swallowed by the generic HTTP-error
+        # gate below (which would lose the actual root cause from
+        # telemetry: "anti-bot challenge" vs. "some 403").
+        if _looks_like_challenge_page(text):
+            return None, "curl-cffi: anti-bot JS challenge page (needs a JS-capable backend)"
+        # Gate 2: an ordinary error page (403/404/5xx, no challenge marker)
+        # is also not article content -- refuse to return its body too.
+        if not (200 <= resp.status_code < 300):
+            return None, f"curl-cffi: HTTP {resp.status_code}"
         return _strip_html_to_text(text), None
     return None, f"curl-cffi: exceeded max redirect hops ({_CURL_CFFI_MAX_REDIRECT_HOPS})"
 

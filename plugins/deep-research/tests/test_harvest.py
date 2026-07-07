@@ -1536,6 +1536,94 @@ class TestCurlCffiFetch(unittest.TestCase):
         self.assertIsNone(reason)
         self.assertIn("legacy ok", result)
 
+    def test_non_2xx_terminal_status_degrades_without_returning_body(self):
+        # No challenge marker in the body -- this is gate 2 (plain HTTP
+        # error), not gate 1. The body text must not leak into the reason.
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(403, "<html>Access Denied</html>")):
+            result, reason = self._fetch("https://a.com/x")
+        self.assertIsNone(result)
+        self.assertIn("HTTP 403", reason)
+        self.assertNotIn("Access Denied", reason)
+
+    def test_cloudflare_challenge_200_degrades(self):
+        body = "<html><body><script src='/cdn-cgi/challenge-platform/h/g'></script></body></html>"
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, body)):
+            result, reason = self._fetch("https://a.com/x")
+        self.assertIsNone(result)
+        self.assertIn("challenge", reason)
+
+    def test_cloudflare_challenge_403_reports_challenge_not_http_error(self):
+        # Locks down gate ordering: challenge detection (gate 1) must fire
+        # before the generic HTTP-status gate (gate 2), even on a 403.
+        body = "<html><body><script src='/cdn-cgi/challenge-platform/h/g'></script></body></html>"
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(403, body)):
+            result, reason = self._fetch("https://a.com/x")
+        self.assertIsNone(result)
+        self.assertIn("challenge", reason)
+        self.assertNotIn("HTTP 403", reason)
+
+    def test_datadome_challenge_degrades(self):
+        body = "<html><body><script src='https://ct.captcha-delivery.com/c.js'></script></body></html>"
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, body)):
+            result, reason = self._fetch("https://a.com/x")
+        self.assertIsNone(result)
+        self.assertIn("challenge", reason)
+
+    def test_perimeterx_challenge_degrades(self):
+        body = "<html><body><div id='px-captcha'></div></body></html>"
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, body)):
+            result, reason = self._fetch("https://a.com/x")
+        self.assertIsNone(result)
+        self.assertIn("challenge", reason)
+
+    def test_imperva_challenge_degrades(self):
+        # Mixed case in the source, verifying marker matching is
+        # case-insensitive.
+        body = "<html><body><div id='_Incapsula_Resource'></div></body></html>"
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, body)):
+            result, reason = self._fetch("https://a.com/x")
+        self.assertIsNone(result)
+        self.assertIn("challenge", reason)
+
+    def test_large_page_with_marker_not_flagged(self):
+        # A long-form article discussing Cloudflare Turnstile (e.g. a
+        # deep-research task investigating WAF bypass techniques) must not
+        # be misdetected as a challenge page just because it mentions
+        # "cf-turnstile" -- the size gate lets anything >= 100KB through.
+        body = "<p>" + "Cloudflare Turnstile 分析。" * 20000 + " cf-turnstile </p>"
+        self.assertGreaterEqual(len(body), 100 * 1024)
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, body)):
+            result, reason = self._fetch("https://a.com/x")
+        self.assertIsNone(reason)
+        self.assertIn("Cloudflare Turnstile", result)
+
+    def test_empty_body_does_not_crash(self):
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, "")):
+            result, reason = self._fetch("https://a.com/x")
+        self.assertIsNone(reason)
+        self.assertEqual(result, "")
+        self.assertFalse(harvest._looks_like_challenge_page(None))
+        self.assertFalse(harvest._looks_like_challenge_page(""))
+
+    def test_small_page_quoting_challenge_prose_not_flagged(self):
+        # Human-readable phrases like "just a moment" or vendor names like
+        # "datadome" appearing in ordinary prose must not trigger a false
+        # positive -- only the literal script/DOM/CDN artifacts do.
+        body = "<p>Just a moment while we discuss the datadome product review.</p>"
+        with mock.patch("harvest.curl_cffi_requests.get",
+                         return_value=FakeCurlResponse(200, body)):
+            result, reason = self._fetch("https://a.com/x")
+        self.assertIsNone(reason)
+        self.assertIn("Just a moment", result)
+
 
 class TestCurlCffiStartupCheck(unittest.TestCase):
     """_check_curl_cffi_available() is the fail-fast gate: if the backend is
