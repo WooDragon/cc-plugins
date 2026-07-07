@@ -43,7 +43,7 @@ pipeline 分层是数据流的唯一合法路径，禁止跳层：
 pipeline/1_raw/        → 原始采集数据（harvester 写入）
 pipeline/2_cleaned/    → 脱敏后数据（harvester 写入，下游只读）
 pipeline/3_structured/ → 域拆解产物（analyst 写入）
-pipeline/4_extracted/  → 洞察提取产物（analyst + Lead 写入）
+pipeline/4_extracted/  → 洞察提取产物（analyst 写入）
 deliverables/          → 最终交付物（draft/ + final/）
 ```
 

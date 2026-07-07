@@ -1,5 +1,5 @@
 {
-  "description": "Deep research G1 gate: mechanically verifies GATE_VERDICT: G1 PASS claims against harvest.py's citation-verification tombstone (fail-open on any technical uncertainty, block only on a genuine business-level FAIL/UNAVAILABLE)",
+  "description": "Deep research hooks: (1) SubagentStop G1 gate — mechanically verifies GATE_VERDICT: G1 PASS claims against harvest.py's citation-verification tombstone; (2) PreToolUse read_guard — enforces the absolute rule that the Lead main session (agent_id empty) may hold only pointers to pipeline/deliverables files, never read their contents (Read + Bash cat-class). Both fail-open on any technical uncertainty (never break userspace).",
   "hooks": {
     "SubagentStop": [
       {
@@ -8,6 +8,18 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/gate_check.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/read_guard.py\"",
             "timeout": 10
           }
         ]

@@ -39,7 +39,7 @@ description: 结构化深度研究框架，7-Stage 管线 + 角色专业化 suba
 - **research-reviewer**：mode=sufficiency 时执行 G1/G2/G3 三道 Sufficiency Gate；mode=review 时执行 Stage 6 Validation 的 5 维度审阅。
 - **research-publisher**：Stage 7 Delivery 末端执行者，Lead 在 Delivery 定稿后 spawn 此 subagent，把 report.md 渲染成自包含 `report.html`（VIEW 层，派生自 report.md，零新事实）。model 继承 frontmatter=sonnet。
 
-G0（需求门）不派 subagent——由 Lead 在主上下文与用户对齐 primary_job/Non-Goals，这是全程唯一引入"模型外信号"的环节。Stage 7 Delivery 主体（report.md/executive_summary.md 等落盘）、Stage 8 Landing（experimental）同样由 Lead 在主上下文执行，不派 subagent；Stage 7 末端的 report.html 渲染是例外，交给 research-publisher。
+G0（需求门）不派 subagent——由 Lead 在主上下文与用户对齐 primary_job/Non-Goals，这是全程唯一引入"模型外信号"的环节。**绝对规则**：Lead（主 session）对 `pipeline/**`、`deliverables/**` 下的文件只允许持有路径指针，禁止读取其内容，物理焊死靠 PreToolUse `read_guard` hook（详见 `references/context-economics.md`）。Stage 7 Delivery 主体（report.md/executive_summary.md 等落盘）不再由 Lead 在主上下文生成——Lead 只出 report-spec（大纲+要点+引用指针），交由 research-analyst 按 spec 生成落盘，生成后再 spawn research-reviewer 做 no-new-facts 语义核验，Lead 只据 receipt 裁决；末端的 report.html 渲染交给 research-publisher。Stage 8 Landing（experimental）同理由 Lead 出对比指令、research-analyst 执行落地回填，Lead 只持 delta receipt。
 
 详细的 Task 隔离判据（何时必须隔离、何时主上下文直接做）见 `references/context-economics.md`。
 

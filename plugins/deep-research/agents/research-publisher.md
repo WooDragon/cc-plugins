@@ -88,7 +88,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/verify_report_html.py <项目 deliverables
 
 三态 exit code：`0`=PASS（自包含 + 链接/章节守恒）/ `1`=FAIL（打印缺失清单，须修正后复渲）/ `2`=N/A（report.html 尚不存在）。
 
-**能力边界（如实声明，不夸大）**：机械门只覆盖**结构性丢失**——链接是否守恒、章节是否守恒、有无违规外部资源引用。它不能校验**语义性捏造**（凭空新增事实、扭曲原文含义），这部分由 Lead 的视觉核验兜底。verify 脚本 PASS 不等于内容零新事实，publisher 自己在渲染时就要守住这条线。
+**能力边界（如实声明，不夸大）**：机械门只覆盖**结构性丢失**——链接是否守恒、章节是否守恒、有无违规外部资源引用。它不能校验**语义性捏造**（凭空新增事实、扭曲原文含义）。绝对规则下 Lead 不再亲读 report.html/report.md 全文，语义核验由 Lead 在生成落盘后 spawn 的轻量 reviewer（mode=review）承担，回传 verdict receipt（见 pipeline.md Stage 7）——这替代了原「Lead 视觉核验兜底」在绝对规则下断裂的安全网。verify 脚本 PASS 不等于内容零新事实，publisher 自己在渲染时就要守住这条线。
 
 ## 主题选择
 
