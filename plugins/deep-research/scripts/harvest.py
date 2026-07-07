@@ -596,12 +596,27 @@ _GROUNDING_REDIRECT_TIMEOUT_S = 10
 
 # Grounding is a real live search, so (unlike the old fake gateway-gemini) the
 # prompt doesn't ask the model to invent URLs -- it just steers the query and
-# mirrors the repo-wide content-farm exclusion (courtesy only; is_blacklisted()
-# in do_search() is the actual enforcement). No SEARCH_FAILED sentinel: whether
-# retrieval happened is read structurally from groundingMetadata, not parsed
-# out of free text.
+# mirrors the repo-wide content-farm exclusion. The exclusion line is a
+# courtesy only -- prompting the model to skip a domain does not stop it
+# appearing in groundingChunks (those are raw retrieval results the prompt
+# text has no control over); is_blacklisted() in do_search() is the actual
+# enforcement. No SEARCH_FAILED sentinel: whether retrieval happened is read
+# structurally from groundingMetadata, not parsed out of free text.
+#
+# The "cite EVERY source ... COMPLETE set ... do not truncate" line is
+# load-bearing, not decoration. Debugging against the raw API showed the
+# model already searches even on a MISS (groundingMetadata/webSearchQueries/
+# 9-15 chunks all present) -- the miss was this prompt only asking to search
+# "the live web" and the model then under-reporting which sources it
+# actually consulted. Adding this sentence took a repeatedly-empty-chunks
+# Chinese query from 0 to 21 chunks and this backend's measured hit rate
+# from ~60% to 100%. Deliberately NOT adding a "you MUST call google_search"
+# hard constraint -- tested too, no measured gain and it adds thinking-token
+# latency.
 _GROUNDING_SEARCH_PROMPT = (
     "Search the live web for: {query}\n"
+    "Cite EVERY source you actually consulted -- return the COMPLETE set of "
+    "source URLs, do not truncate or summarize the list.\n"
     "Exclude results from content-farm hosts: csdn.net, cloud.baidu.com, "
     "cloud.tencent.com, huaweicloud.com, aliyun.com, volcengine.com, juejin.cn."
 )
@@ -684,6 +699,15 @@ def _search_gemini_grounding(cfg, query, timeout, config):
         "contents": [{"role": "user", "parts": [{"text": _GROUNDING_SEARCH_PROMPT.format(query=query)}]}],
         "tools": [{"google_search": {}}],
     }
+    # thinkingBudget is opt-in and back-compat-strict: only add
+    # generationConfig at all when the config explicitly sets it, so a
+    # config predating this key sends byte-for-byte the same payload as
+    # before (no generationConfig with an implicit default sneaking in).
+    # Measured: thinkingBudget=0 does not lower the hit rate (google_search
+    # is a tool call, not something reasoning/thinking gates) and cuts
+    # latency to ~11-16s from the un-budgeted baseline.
+    if "thinking_budget" in cfg:
+        payload["generationConfig"] = {"thinkingConfig": {"thinkingBudget": cfg["thinking_budget"]}}
     try:
         data = _http_json_post(url, payload, headers, timeout)
     except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as e:
@@ -696,13 +720,35 @@ def _search_gemini_grounding(cfg, query, timeout, config):
         # next backend rather than mining plain text for URLs.
         return None, "gemini-grounding: no grounding chunks (model did not search)"
     redirect_timeout = min(timeout, _GROUNDING_REDIRECT_TIMEOUT_S)
+    # Redirect resolution is a network round-trip per chunk with no data
+    # dependency between chunks -- resolving serially measured 18.2s for 16
+    # chunks vs 2.5s in parallel. Same index-preallocate + future-to-index +
+    # as_completed-fills-by-original-index pattern as
+    # _run_fetch_calls_parallel (as_completed only picks scheduling order,
+    # never the order results land in `resolved`) so chunk-submission order
+    # -- which the dedup/citation-mapping below depends on -- survives
+    # regardless of which redirect answers first.
+    resolved = [None] * len(chunks)
+    with ThreadPoolExecutor(max_workers=min(len(chunks), _PARALLEL_FETCH_MAX_WORKERS) or 1) as pool:
+        future_to_index = {
+            pool.submit(_resolve_grounding_redirect, (ch.get("web") or {}).get("uri", ""), redirect_timeout): i
+            for i, ch in enumerate(chunks)
+        }
+        for fut in as_completed(future_to_index):
+            i = future_to_index[fut]
+            try:
+                resolved[i] = fut.result()
+            except Exception:
+                # A single bad uri (malformed/hostile/network blip) must not
+                # take down the whole grounding backend -- drop just this
+                # chunk, same as a normal unresolvable-redirect result.
+                resolved[i] = None
     results, seen = [], set()
-    for ch in chunks:
+    for ch, real_url in zip(chunks, resolved):
         web = ch.get("web") or {}
         uri = web.get("uri", "")
         if not uri:
             continue
-        real_url = _resolve_grounding_redirect(uri, redirect_timeout)
         if not real_url or real_url in seen:
             continue
         seen.add(real_url)

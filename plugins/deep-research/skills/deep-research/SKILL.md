@@ -118,7 +118,7 @@ Gate 评分细则：`assets/review-rubric.md`（5 维度审阅）、`assets/suff
 
 ## 依赖前置
 
-harvest.py 主路径依赖：网关 API key（`GATEWAY_API_KEY` 等，用于聚合网关调用 gemini/gpt/claude 三面板）、`agy` CLI（本机检索主力）、`curl_cffi`（TLS 模拟搜索 + 直连 fetch，未装则 exit 4 阻塞）。详见插件 README。
+harvest.py 主路径依赖：网关 API key（`GATEWAY_API_KEY` 等，用于聚合网关调用 gemini/gpt/claude 三面板，以及主搜索后端 gemini-grounding 经网关直连）、`curl_cffi`（TLS 模拟搜索 + 直连 fetch，未装则 exit 4 阻塞）。搜索后端按序降级 gemini-grounding → tavily → duckduckgo，无本机检索 CLI 依赖。详见插件 README。
 
 三种采集模式：
 - **panel mode**（默认）：有 gateway key → 三模型并行 + judge 聚类 + 机械引用校验

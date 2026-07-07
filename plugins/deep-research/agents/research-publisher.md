@@ -38,13 +38,37 @@ color: cyan
 |------|------|-------|
 | 自包含 HTML 展示报告 | `deliverables/final/report.html` | Stage 7 Delivery |
 
-## 工作模式（渲染流程）
+## 工作模式（两阶段渲染）
 
-1. 读 `report.md`（+ `executive_summary.md` + `references.md` + 若存在 `INDEX.md`），建立内容与结构的完整认知
-2. 读 `report-shell.html.tmpl` 模板结构 + `report-html-guide.md` 的组件词汇表与内容→组件映射规则
-3. **渲染前先判定哪些内容应组件化**（对照 guide §② 的 MUST/SHOULD 分级——N 方案对比矩阵、分层建议/阶段路线图、数据就绪度盘点、并列问题清单命中即强制组件化，不允许退化成 `ul`/`p`）。按映射规则把 markdown 内容渲染进对应组件（结论/推荐方案对应 verdict-bar；方案对比矩阵对应 signal 染色表；分阶段路线图对应 phase-timeline；数据就绪度对应 data-grid；并列风险/要点对应 card-grid；关键提示对应 callout；并列问题清单对应 pain-list；ASCII 架构图对应 arch-diagram；确实不满足任何组件语义才落 fallback 的朴素 section + p）。**禁止把 markdown 段落 1:1 直搬成 `<p>`**——对标 guide §⑥ 的黄金标准范例，渲染密度应向那个方向看齐。填充模板占位符：`{{TITLE}}` `{{THEME}}` `{{HERO_EYEBROW}}` `{{HERO_H1}}` `{{HERO_SUB}}` `{{HERO_META}}` `{{CONTENT}}`
-4. 写出 `deliverables/final/report.html`
-5. **自检（强制）**：调用 verify 脚本自校验（见下「自检机械门」）；不 PASS 则修正后复渲，循环直到 PASS 才算完成
+**价值排序：先是完整的报告，其次美观，最次组件化。完整性是不可退让的底座，组件化是有余力才做的锦上添花。**
+
+### 阶段1 · 完整初稿（不读 report-html-guide.md）
+
+拿到任务直接开干：不预先研究样式、不在"这段该套哪个组件"上打转、减少思考。
+
+1. 读 `report.md`（+ `executive_summary.md` + `references.md` + 若存在 `INDEX.md`）+ `report-shell.html.tmpl` 模板结构
+2. 机械地把全文搬完整：每个 `##`/`###` → 一个 `.section`，段落 → `p`，表格 → `table`，链接 → `a`，ASCII → `pre`。零组件判断
+3. 填充模板占位符：`{{TITLE}}` `{{THEME}}` `{{HERO_EYEBROW}}` `{{HERO_H1}}` `{{HERO_SUB}}` `{{HERO_META}}` `{{CONTENT}}`，写出 `deliverables/final/report.html`
+4. 跑机械门（见下「自检机械门」）。FAIL 就按输出的 details（逐条列 missing section/missing link）针对性补，循环到 PASS
+5. PASS 后，Bash `cp report.html report.stage1.html` 备份这份已验证的完整版——这是阶段2 的保底
+
+### 阶段2 · 视觉优化（此时才读 report-html-guide.md）
+
+阶段1 PASS 后才读 guide 的组件词汇表与内容→组件映射规则。在完整初稿基础上做**增量**升级（对比表染色、并列要点转 card-grid、路线图转 phase-timeline、ASCII 转 arch-diagram）。
+
+- 每轮优化后**重跑机械门**——为美观丢章节立即视为 FAIL
+- 迭代上限 3 轮，到顶即停
+- 3 轮内 PASS：完成，进入收尾
+- 3 轮到顶仍 FAIL：Bash `cp report.stage1.html report.html` 回滚为最终产物（完整但朴素 > 美观但丢章节）
+
+### 收尾
+
+- PASS（阶段1或阶段2达成）：Bash 删除临时文件 `report.stage1.html`，回传 PASS 结论
+- 回滚：Bash 删除临时文件 `report.stage1.html`，如实回传机械门 details 全文 +「未收敛，请 Lead 介入」。**禁止回传空输出**
+
+### 反模式
+
+只有一条铁线，不堆砌：**禁止为视觉效果摘要、删减或改写正文，章节守恒是硬约束。**
 
 ## 渲染铁律
 
@@ -56,7 +80,7 @@ color: cyan
 
 ## 自检机械门
 
-渲染完成后**必须**运行：
+阶段1、阶段2 每轮渲染后**必须**运行：
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT}/scripts/verify_report_html.py <项目 deliverables/final 目录 或 report.html 路径>
