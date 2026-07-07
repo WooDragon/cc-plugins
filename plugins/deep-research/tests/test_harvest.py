@@ -5,6 +5,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.parse
@@ -4039,6 +4040,75 @@ class TestCheckProjectLocalVerdict(unittest.TestCase):
             verdict, reason = harvest.check_project(project_dir)
         self.assertEqual(verdict, "N_A")
         self.assertIn("local mode", reason)
+
+
+# ---------------------------------------------------------------------------
+# _emit: progress reporting (NDJSON to stderr)
+# ---------------------------------------------------------------------------
+
+class TestProgressEmit(unittest.TestCase):
+    def test_emit_produces_valid_ndjson(self):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            harvest._emit("test_event", foo="bar", num=42)
+        line = stderr.getvalue().strip()
+        data = json.loads(line)
+        self.assertEqual(data["event"], "test_event")
+        self.assertEqual(data["foo"], "bar")
+        self.assertEqual(data["num"], 42)
+        self.assertIn("t", data)
+
+    def test_emit_never_raises_on_unserializable(self):
+        class Unserializable:
+            def __str__(self):
+                raise RuntimeError("no repr for you")
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            harvest._emit("bad_event", obj=Unserializable())  # must not raise
+        output = stderr.getvalue()
+        if output.strip():
+            json.loads(output.strip())  # if anything was written, it's valid JSON
+
+    def test_emit_default_str_serializes_exception(self):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            harvest._emit("err", detail=ValueError("boom"))
+        data = json.loads(stderr.getvalue().strip())
+        self.assertIn("boom", data["detail"])
+
+    def test_emit_thread_safety(self):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            def worker(n):
+                for i in range(100):
+                    harvest._emit("concurrent", worker=n, i=i)
+
+            threads = [threading.Thread(target=worker, args=(n,)) for n in range(10)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            lines = stderr.getvalue().splitlines()
+        self.assertEqual(len(lines), 1000)
+        for line in lines:
+            json.loads(line)  # every line must be independently valid JSON
+
+    def test_worker_step_emitted_during_run_worker(self):
+        client = ScriptedClient([
+            assistant_tool_call("c1", "search", {"query": "q"}),
+            assistant_final(findings_block([
+                {"claim": "c", "excerpt": "Rayleigh scattering explains the blue sky.",
+                 "url": "https://a.com/x", "credibility": 4, "language": "en"}])),
+        ])
+        search_backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
+        with mock.patch("harvest.call_search_backend",
+                         return_value=[{"url": "https://a.com/x", "title": "t", "snippet": "s"}]), \
+             mock.patch("harvest.call_fetch_backend",
+                         return_value="Rayleigh scattering explains the blue sky."), \
+             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            harvest.run_worker("m1", "model-a", client, base_config(), search_backends, [],
+                                "goal", [], None)
+        events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+        worker_steps = [e for e in events if e["event"] == "worker_step"]
+        self.assertTrue(worker_steps)
+        self.assertEqual(worker_steps[0]["alias"], "m1")
 
 
 if __name__ == "__main__":

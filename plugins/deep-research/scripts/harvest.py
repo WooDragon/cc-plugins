@@ -109,6 +109,22 @@ JUDGE_SYSTEM_PROMPT = (
 )
 
 
+_progress_lock = threading.Lock()
+
+
+def _emit(event, **kw):
+    """Thread-safe NDJSON progress line to stderr. Never raises."""
+    try:
+        kw["event"] = event
+        kw["t"] = round(time.time(), 1)
+        line = json.dumps(kw, default=str)
+        with _progress_lock:
+            sys.stderr.write(line + "\n")
+            sys.stderr.flush()
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Rate limiting
 # ---------------------------------------------------------------------------
@@ -1703,6 +1719,16 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
             messages.append(message)
             tool_calls = message.get("tool_calls") or []
             if tool_calls:
+                tool_names = ["?"]
+                target = ""
+                try:
+                    tool_names = [tc.get("function", {}).get("name", "?") for tc in tool_calls]
+                    if len(tool_calls) == 1:
+                        a = json.loads(tool_calls[0].get("function", {}).get("arguments", "{}"))
+                        target = str(a.get("query", a.get("url", "")))[:80]
+                except Exception:
+                    pass
+                _emit("worker_step", alias=alias, step=step, tools=tool_names, target=target)
                 is_all_fetch = len(tool_calls) > 1 and all(
                     tc.get("function", {}).get("name") == "fetch" for tc in tool_calls
                 )
@@ -1727,6 +1753,7 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
                 if remaining == 3:
                     append_or_merge_user(messages,
                         "[BUDGET] 3 rounds remaining. Begin converging — synthesize findings from evidence already fetched.")
+                    _emit("worker_converging", alias=alias, remaining=remaining)
                 elif remaining == 1:
                     append_or_merge_user(messages,
                         "[BUDGET] Last chance. Output findings JSON on your next turn or data will be lost.")
@@ -1838,10 +1865,20 @@ def run_panel(config, goal_text, local_manifest, local_dir, client_factory):
         for fut in as_completed(futures):
             alias = futures[fut]
             try:
-                results.append(fut.result())
+                r = fut.result()
+                results.append(r)
             except Exception as e:
-                results.append(WorkerResult(alias, "?", "FAILED", None, [], f"executor_exception: {e}"))
+                r = WorkerResult(alias, "?", "FAILED", None, [], f"executor_exception: {e}")
+                results.append(r)
+            claims_count = 0
+            try:
+                claims = r.findings.get("claims") if isinstance(r.findings, dict) else None
+                claims_count = len(claims) if isinstance(claims, list) else 0
+            except Exception:
+                pass
+            _emit("worker_done", alias=r.alias, model_id=r.model_id, status=r.status, claims=claims_count)
     alive = [r for r in results if r.status == "OK"]
+    _emit("panel_done", alive=[r.alias for r in alive], quorum_met=len(alive) >= quorum)
     return results, alive, len(alive) >= quorum
 
 
@@ -2508,6 +2545,9 @@ def cmd_run(args):
             local_manifest = build_local_manifest(local_dir, config)
 
         client_factory = make_client_factory(config)
+        _emit("run_start", models=config["panel_models"],
+              max_steps=config["limits"]["max_steps_per_model"],
+              wall_clock_s=config["limits"]["wall_clock_s"])
         results, alive, quorum_met = run_panel(config, goal_text, local_manifest, local_dir, client_factory)
 
         harvest_dir = raw_dir / HARVEST_SUBDIR
@@ -2529,7 +2569,10 @@ def cmd_run(args):
                                verify_filename=verify_filename)
 
         worker_findings_by_alias = {r.alias: r.findings for r in alive}
+        _emit("judge_start", model_id=config.get("judge_model") or config["panel_models"][0])
         judge_data, judge_err = run_judge_with_fallback(config, client_factory, worker_findings_by_alias, config["panel_models"])
+        _emit("judge_done", clusters=len(judge_data.get("clusters", [])) if judge_data else 0,
+              err=judge_err)
         if judge_data is None:
             abort_unavailable(verify_dir, goal_hash, f"judge failed: {judge_err}",
                                {"quorum_met": True, "models_alive": [r.alias for r in alive]},
@@ -2559,6 +2602,7 @@ def cmd_run(args):
             "invalid_claim_count": invalid_total,
             "total_claims": total_claims,
         }, verify_filename=verify_filename)
+        _emit("run_done", verdict=verdict, total_claims=total_claims, invalid_rate=round(invalid_rate, 4))
         print(f"harvest run complete: verdict={verdict}")
     except SystemExit:
         raise
