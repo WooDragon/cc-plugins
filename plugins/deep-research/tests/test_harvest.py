@@ -921,6 +921,105 @@ class TestGeminiGroundingFallThrough(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# S1: grounding prompt asks for the complete source set, never a hard
+# "you MUST search" constraint (measured: the completeness line took the
+# hit rate from ~60% to 100%; the hard constraint was tested and dropped --
+# no measured gain, added thinking-token latency).
+# ---------------------------------------------------------------------------
+
+class TestGroundingPromptCompleteness(unittest.TestCase):
+    def test_prompt_demands_complete_source_set(self):
+        prompt = harvest._GROUNDING_SEARCH_PROMPT
+        self.assertIn("COMPLETE set", prompt)
+        self.assertIn("do not truncate", prompt)
+
+    def test_prompt_has_no_hard_must_call_constraint(self):
+        self.assertNotIn("You MUST", harvest._GROUNDING_SEARCH_PROMPT)
+
+
+# ---------------------------------------------------------------------------
+# S2: thinkingBudget is opt-in via backend config ("thinking_budget") and
+# strictly back-compat -- omitting the key must send byte-for-byte the same
+# payload as before (no generationConfig field at all), never a payload with
+# an implicit default value.
+# ---------------------------------------------------------------------------
+
+class TestGroundingThinkingBudget(unittest.TestCase):
+    def _run(self, cfg_overrides):
+        cfg = base_config()
+        chunk = _grounding_chunk(
+            "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1", "example.com")
+        backend_cfg = {"model": "gemini-3.5-flash", **cfg_overrides}
+        with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
+             mock.patch("harvest._http_json_post", return_value=_grounding_response([chunk])) as post_mock, \
+             mock.patch("harvest._resolve_grounding_redirect", return_value="https://example.com/real"):
+            harvest._search_gemini_grounding(backend_cfg, "q", 5, cfg)
+        return post_mock.call_args.args[1]
+
+    def test_thinking_budget_configured_adds_generation_config(self):
+        payload = self._run({"thinking_budget": 0})
+        self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingBudget"], 0)
+
+    def test_thinking_budget_absent_omits_generation_config_entirely(self):
+        # Not "defaults to something" -- the key must be fully absent from
+        # the payload so a pre-upgrade config sends an identical request.
+        payload = self._run({})
+        self.assertNotIn("generationConfig", payload)
+
+
+# ---------------------------------------------------------------------------
+# S3: redirect resolution runs in parallel (measured 18.2s serial -> 2.5s
+# parallel for 16 chunks) but must preserve chunk submission order in the
+# final result set and must not let one raising uri take down the others --
+# mirrors _run_fetch_calls_parallel's index-preallocate +
+# future-to-index + as_completed-fills-by-original-index pattern exactly.
+# ---------------------------------------------------------------------------
+
+class TestGroundingRedirectResolutionParallel(unittest.TestCase):
+    def test_parallel_resolution_preserves_order_dedups_and_skips_exceptions(self):
+        cfg = base_config()
+        uri1 = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1"
+        uri2 = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/2"
+        uri3 = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/3"
+        uri4 = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/4"
+        chunks = [
+            _grounding_chunk(uri1, "a.com"),
+            _grounding_chunk(uri2, "raises.com"),
+            _grounding_chunk(uri3, "b.com"),
+            _grounding_chunk(uri4, "dup-of-a.com"),
+        ]
+
+        # Keyed by uri, not by call order -- as_completed's scheduling order
+        # is not deterministic, so the fake must resolve correctly regardless
+        # of which thread finishes first. uri2 raises to prove a single bad
+        # chunk can't take down the whole backend; uri4 resolves to the same
+        # real URL as uri1 to prove dedup runs on the order-restored array.
+        def fake_resolve(uri, timeout):
+            return {
+                uri1: "https://a.com/real",
+                uri2: RuntimeError("boom"),
+                uri3: "https://b.com/real",
+                uri4: "https://a.com/real",
+            }[uri]
+
+        def fake_resolve_side_effect(uri, timeout):
+            result = fake_resolve(uri, timeout)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
+             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)), \
+             mock.patch("harvest._resolve_grounding_redirect", side_effect=fake_resolve_side_effect):
+            results, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+
+        self.assertIsNone(reason)
+        # chunk2 (exception) dropped, chunk4 (dedup of chunk1's real url)
+        # dropped -- submission order (1, 3) survives untouched.
+        self.assertEqual([r["url"] for r in results], ["https://a.com/real", "https://b.com/real"])
+
+
+# ---------------------------------------------------------------------------
 # gateway chat/completions retry (shared by panel loop and judge)
 # ---------------------------------------------------------------------------
 
