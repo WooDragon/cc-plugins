@@ -17,6 +17,8 @@
 #   SKILL_GATE_DISABLED          — if "1", recall-gate acts independently (no double-deny guard)
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_doc_gate_exclude.sh"
+
 _log() {
   local log_dir="${SKILL_GATE_LOG_DIR:-${REVIEW_LOG_DIR:-$HOME/.claude/logs}}"
   mkdir -p "$log_dir" 2>/dev/null || return
@@ -57,12 +59,7 @@ _main() {
   shopt -u nocasematch
 
   # Phase 6: Path exclusions
-  case "/$FILE_PATH" in
-    */.claude/*|*/.claude-plugin/*|*/.agents/directives/*|*/node_modules/*|*/.git/*|*/logs/*) return ;;
-  esac
-  case "$FILE_PATH" in
-    /tmp/*|/var/tmp/*|/var/folders/*|/private/tmp/*) return ;;
-  esac
+  if doc_gate_is_excluded_path "$FILE_PATH"; then return; fi
 
   GATE_DIR="${SKILL_GATE_DIR:-/tmp/claude-reviews}"
   STALE_MIN="${RECALL_GATE_STALE_MIN:-120}"

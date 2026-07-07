@@ -11,6 +11,8 @@
 #   SKILL_GATE_STALE_MIN        — marker stale threshold minutes (default: 120)
 set -euo pipefail
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_doc_gate_exclude.sh"
+
 _log() {
   local log_dir="${SKILL_GATE_LOG_DIR:-${REVIEW_LOG_DIR:-$HOME/.claude/logs}}"
   mkdir -p "$log_dir" 2>/dev/null || return
@@ -68,14 +70,7 @@ _main() {
   # identity is established it must gate unconditionally, no matter where $HOME
   # lives (a containerized/test HOME under /tmp must not slip through either).
   if [ "$IS_GLOBAL_CLAUDE" != "1" ]; then
-    # Path exclusions (prepend / to handle relative paths uniformly)
-    case "/$FILE_PATH" in
-      */.claude/*|*/.claude-plugin/*|*/.agents/directives/*|*/node_modules/*|*/.git/*) return ;;
-    esac
-    # Temporary directory exclusions (match absolute paths directly)
-    case "$FILE_PATH" in
-      /tmp/*|/var/tmp/*|/var/folders/*|/private/tmp/*) return ;;
-    esac
+    if doc_gate_is_excluded_path "$FILE_PATH"; then return; fi
   fi
 
   # Path sanitization (match skill-marker.sh convention)

@@ -70,9 +70,11 @@ Both gates skip files that shouldn't be governed:
 | Category | Examples |
 |----------|---------|
 | **Basename** | `MEMORY.md`, `SKILL.md`, `CHANGELOG.md`, `LICENSE.md` (case-insensitive) |
-| **Path** | `.claude/*`, `.claude-plugin/*`, `.agents/directives/*`, `node_modules/*`, `.git/*` |
+| **Path** | `.claude/*`, `.claude-plugin/*`, `.agents/directives/*`, `node_modules/*`, `.git/*`, `logs/*`, `pipeline/*` |
 | **Temp dirs** | `/tmp/*`, `/var/tmp/*`, `/var/folders/*`, `/private/tmp/*` |
 | **Non-.md** | Any file not ending in `.md` (case-insensitive) |
+
+`pipeline/*` covers deep-research's machine-generated intermediate artifacts (e.g. `pipeline/verification/*.json`-adjacent notes) — the doc-maintenance workflow doesn't apply to them. `deliverables/*` is intentionally **not** excluded: final research output is prose documentation and stays governed. Both gates share this exclusion list from a single source, `scripts/_doc_gate_exclude.sh` (and its `EXCLUDED_DIRS` mirror in `tools/_doc_gate_common.py` for the recall-gate link graph) — add new exclusions there, not per-script.
 
 **Exception**: `~/.claude/CLAUDE.md` is always gated despite living under `.claude/` — it's the global config with the highest pollution surface.
 
@@ -154,15 +156,18 @@ python3 -m unittest tests/test_recall_gate.py -v
 
 | Suite | Tests | Coverage |
 |-------|-------|----------|
-| `skill-gate.bats` | 54 | Filters, exclusions, gate enforcement, fail-open, CLAUDE.md governance, stale cleanup, e2e |
+| `skill-gate.bats` | 57 | Filters, exclusions, gate enforcement, fail-open, CLAUDE.md governance, stale cleanup, e2e |
 | `skill-marker.bats` | 13 | Tracked/untracked skills, marker creation, namespacing, kill switch |
 | `recall-gate.bats` | 37 | Filters, kill switch, fail-open, markers, double-deny, BM25 integration, orphan, broken outlinks, monorepo root detection, e2e |
+| `exclude.bats` | 8 | Shared `_doc_gate_exclude.sh` predicate — pipeline/logs/tmp/git/node_modules excluded, deliverables/docs/CLAUDE.md governed |
 | `test_recall_gate.py` | 67 | Tokenization, BM25 scoring, link extraction/resolution, corpus building, orphan/broken checks, cmd_gate output, detect_root |
+| `test_exclude.py` | 1 | `build_corpus_and_graph` excludes `pipeline/`, includes `deliverables/` and `docs/` |
 
 ## Version History
 
 See [GitHub Issues](https://github.com/WooDragon/cc-plugins/issues) for detailed change logs:
 
+- **v1.5.0** — Path exclusions collapsed to single source (`_doc_gate_exclude.sh`); added `pipeline/*` exclusion for deep-research intermediate artifacts, `deliverables/*` remains governed
 - **v1.2.1** — Root detection: CLAUDE.md co-occurrence anchor for monorepo support (#22)
 - **v1.2.0** — Recall gate: BM25 lexical recall + link graph triple-dimension gate
 - **v1.0.4** — Deny message discourages env-var bypass
