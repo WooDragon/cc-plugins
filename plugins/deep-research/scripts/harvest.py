@@ -2103,8 +2103,8 @@ def make_client_factory(config):
     # provider swap makes /responses worse than plain /chat/completions,
     # config can flip this back to "chat_completions" without a code change
     # -- gpt* then falls through to the same plain GatewayClient path gemini
-    # already uses, rather than needing a second personality inside
-    # ResponsesGatewayClient itself.
+    # used before GeminiNativeGatewayClient existed, rather than needing a
+    # second personality inside ResponsesGatewayClient itself.
     gpt_endpoint = config.get("limits", {}).get("gpt_endpoint", "responses")
     # Same escape hatch pattern as gpt_endpoint, for the Gemini-native
     # generateContent path (see GeminiNativeGatewayClient's docstring): if
