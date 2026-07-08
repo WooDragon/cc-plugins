@@ -3723,10 +3723,17 @@ class TestMakeClientFactoryThreeWayDispatch(unittest.TestCase):
         client = factory("gpt-5.4")
         self.assertIsInstance(client, harvest.ResponsesGatewayClient)
 
-    def test_gemini_dispatches_to_plain_gateway_client(self):
+    def test_gemini_dispatches_to_gemini_native_client(self):
+        # research#40 / ADR-011 follow-up: gemini now defaults to the
+        # Gemini-native generateContent path (see
+        # TestMakeClientFactoryGeminiDispatch for full coverage of this
+        # dispatch branch, including the chat_completions fallback). This
+        # class's job is only to prove claude/gpt dispatch is unaffected by
+        # that change -- see test_claude_dispatches_to_anthropic_client and
+        # test_gpt_dispatches_to_responses_client above.
         factory = harvest.make_client_factory(base_config())
         client = factory("gemini-3.5-flash")
-        self.assertIsInstance(client, harvest.GatewayClient)
+        self.assertIsInstance(client, harvest.GeminiNativeGatewayClient)
         self.assertNotIsInstance(client, harvest.ResponsesGatewayClient)
 
     def test_claude_effort_defaults_to_medium(self):
@@ -3781,6 +3788,328 @@ class TestMakeClientFactoryThreeWayDispatch(unittest.TestCase):
         judge_text = '```json\n{"clusters": [{"summary": "s", "source_claim_ids": ["m1-1"], "relation": "agree"}]}\n```'
         ok_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": judge_text}]}],
                        "status": "completed"}
+        worker_findings = {"m1": {"claims": [{"_id": "m1-1", "claim": "A", "excerpt": "e", "url": "u"}]}}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response):
+            data, err = harvest.run_judge_with_fallback(config, factory, worker_findings, config["panel_models"])
+        self.assertIsNone(err)
+        self.assertEqual(data["clusters"][0]["source_claim_ids"], ["m1-1"])
+
+
+# ---------------------------------------------------------------------------
+# research#40 / ADR-011 follow-up: gemini via Gemini-native generateContent,
+# mirroring TestAnthropicConversion / TestResponsesConversion's structure for
+# the new Gemini protocol conversion pure functions.
+# ---------------------------------------------------------------------------
+
+class TestGeminiGenerateContentUrl(unittest.TestCase):
+    def test_default_config_base_url(self):
+        url = harvest._gemini_generate_content_url("https://aapi.tbps.one/v1", "gemini-3.5-flash")
+        self.assertEqual(url, "https://aapi.tbps.one/v1beta/models/gemini-3.5-flash:generateContent")
+
+    def test_multi_level_path_prefix_preserved(self):
+        url = harvest._gemini_generate_content_url("https://gateway.corp.com/ai-proxy/v1", "gemini-3.5-flash")
+        self.assertEqual(url, "https://gateway.corp.com/ai-proxy/v1beta/models/gemini-3.5-flash:generateContent")
+
+    def test_no_v1_suffix_not_mis_truncated(self):
+        url = harvest._gemini_generate_content_url("https://gw.example.com", "gemini-3.5-flash")
+        self.assertEqual(url, "https://gw.example.com/v1beta/models/gemini-3.5-flash:generateContent")
+
+    def test_trailing_slash_stripped(self):
+        url = harvest._gemini_generate_content_url("https://aapi.tbps.one/v1/", "gemini-3.5-flash")
+        self.assertEqual(url, "https://aapi.tbps.one/v1beta/models/gemini-3.5-flash:generateContent")
+
+
+class TestGeminiToolsConversion(unittest.TestCase):
+    def test_tools_none_returns_none(self):
+        self.assertIsNone(harvest._oai_tools_to_gemini(None))
+        self.assertIsNone(harvest._oai_tools_to_gemini([]))
+
+    def test_tools_converted_to_function_declarations(self):
+        gemini_tools = harvest._oai_tools_to_gemini(harvest.TOOL_SCHEMAS)
+        self.assertEqual(len(gemini_tools), 1)
+        declarations = gemini_tools[0]["functionDeclarations"]
+        self.assertEqual(len(declarations), len(harvest.TOOL_SCHEMAS))
+        self.assertEqual(declarations[0]["name"], harvest.TOOL_SCHEMAS[0]["function"]["name"])
+        self.assertIn("parameters", declarations[0])
+
+
+class TestGeminiMessagesConversion(unittest.TestCase):
+    def test_system_hoisted_to_system_instruction(self):
+        msgs = [{"role": "system", "content": "SYS"}, {"role": "user", "content": "hi"}]
+        system, contents = harvest._oai_messages_to_gemini(msgs)
+        self.assertEqual(system, {"parts": [{"text": "SYS"}]})
+        self.assertEqual(contents, [{"role": "user", "parts": [{"text": "hi"}]}])
+
+    def test_no_system_yields_none(self):
+        system, _contents = harvest._oai_messages_to_gemini([{"role": "user", "content": "hi"}])
+        self.assertIsNone(system)
+
+    def test_multiple_system_messages_merged_not_overwritten(self):
+        msgs = [
+            {"role": "system", "content": "first rule"},
+            {"role": "system", "content": "second rule"},
+            {"role": "user", "content": "hi"},
+        ]
+        system, _contents = harvest._oai_messages_to_gemini(msgs)
+        self.assertEqual(system, {"parts": [{"text": "first rule\n\nsecond rule"}]})
+
+    def test_assistant_text_plus_function_call(self):
+        msgs = [{"role": "assistant", "content": "thinking",
+                 "tool_calls": [{"id": "t1", "function": {"name": "search",
+                                 "arguments": json.dumps({"query": "q"})}}]}]
+        _s, contents = harvest._oai_messages_to_gemini(msgs)
+        self.assertEqual(contents[0]["role"], "model")
+        parts = contents[0]["parts"]
+        self.assertEqual(parts[0], {"text": "thinking"})
+        self.assertEqual(parts[1]["functionCall"], {"name": "search", "args": {"query": "q"}})
+
+    def test_tool_role_resolves_name_from_prior_assistant_call(self):
+        msgs = [
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "function": {"name": "search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"result": "ok"})},
+        ]
+        _s, contents = harvest._oai_messages_to_gemini(msgs)
+        self.assertEqual(contents[1]["role"], "user")
+        fr = contents[1]["parts"][0]["functionResponse"]
+        self.assertEqual(fr["name"], "search")
+        self.assertEqual(fr["response"], {"result": "ok"})
+
+    def test_tool_content_non_json_wrapped_as_result_string(self):
+        msgs = [
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "function": {"name": "fetch", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "plain text, not json"},
+        ]
+        _s, contents = harvest._oai_messages_to_gemini(msgs)
+        fr = contents[1]["parts"][0]["functionResponse"]
+        self.assertEqual(fr["response"], {"result": "plain text, not json"})
+
+    def test_tool_content_valid_json_non_dict_wrapped_as_result(self):
+        for raw, expected in ((json.dumps([1, 2, 3]), [1, 2, 3]),
+                               (json.dumps(True), True),
+                               (json.dumps(42), 42)):
+            msgs = [
+                {"role": "assistant", "content": None,
+                 "tool_calls": [{"id": "c1", "function": {"name": "fetch", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": raw},
+            ]
+            _s, contents = harvest._oai_messages_to_gemini(msgs)
+            fr = contents[1]["parts"][0]["functionResponse"]
+            self.assertEqual(fr["response"], {"result": expected})
+
+    def test_tool_call_id_not_found_raises(self):
+        msgs = [{"role": "tool", "tool_call_id": "ghost", "content": "{}"}]
+        with self.assertRaises(ValueError):
+            harvest._oai_messages_to_gemini(msgs)
+
+    def test_parallel_tool_calls_each_resolve_correct_name(self):
+        msgs = [
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "a", "function": {"name": "search", "arguments": "{}"}},
+                {"id": "b", "function": {"name": "fetch", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "a", "content": json.dumps({"r": "A"})},
+            {"role": "tool", "tool_call_id": "b", "content": json.dumps({"r": "B"})},
+        ]
+        _s, contents = harvest._oai_messages_to_gemini(msgs)
+        # both tool results collapse into one merged user turn
+        self.assertEqual(len(contents), 2)
+        self.assertEqual(contents[1]["role"], "user")
+        names = [p["functionResponse"]["name"] for p in contents[1]["parts"]]
+        self.assertEqual(names, ["search", "fetch"])
+        responses = [p["functionResponse"]["response"] for p in contents[1]["parts"]]
+        self.assertEqual(responses, [{"r": "A"}, {"r": "B"}])
+
+    def test_user_turn_after_tool_results_merges_not_consecutive(self):
+        msgs = [
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "a", "function": {"name": "search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "a", "content": "{}"},
+            {"role": "user", "content": "nudge"},
+        ]
+        _s, contents = harvest._oai_messages_to_gemini(msgs)
+        user_turns = [c for c in contents if c["role"] == "user"]
+        self.assertEqual(len(user_turns), 1)
+        self.assertEqual(len(user_turns[0]["parts"]), 2)
+
+
+class TestGeminiRespToOai(unittest.TestCase):
+    def test_plain_text_stop_maps_to_stop(self):
+        resp = {"candidates": [{"finishReason": "STOP",
+                                "content": {"parts": [{"text": "hello"}]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        msg = oai["choices"][0]["message"]
+        self.assertEqual(msg["content"], "hello")
+        self.assertIsNone(msg["tool_calls"])
+        self.assertEqual(oai["choices"][0]["finish_reason"], "stop")
+
+    def test_single_function_call_maps_to_tool_calls_ignoring_raw_finish(self):
+        resp = {"candidates": [{"finishReason": "STOP",
+                                "content": {"parts": [{"functionCall": {"name": "search", "args": {"q": "x"}}}]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        msg = oai["choices"][0]["message"]
+        self.assertEqual(len(msg["tool_calls"]), 1)
+        self.assertEqual(msg["tool_calls"][0]["function"]["name"], "search")
+        self.assertEqual(json.loads(msg["tool_calls"][0]["function"]["arguments"]), {"q": "x"})
+        self.assertEqual(oai["choices"][0]["finish_reason"], "tool_calls")
+
+    def test_parallel_function_calls_all_present_with_unique_ids(self):
+        resp = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "search", "args": {"q": "1"}}},
+            {"functionCall": {"name": "fetch", "args": {"url": "u"}}},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        tool_calls = oai["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(len(tool_calls), 2)
+        ids = [tc["id"] for tc in tool_calls]
+        self.assertEqual(len(set(ids)), 2)
+
+    def test_max_tokens_maps_to_length(self):
+        resp = {"candidates": [{"finishReason": "MAX_TOKENS",
+                                "content": {"parts": [{"text": "cut off"}]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        self.assertEqual(oai["choices"][0]["finish_reason"], "length")
+
+    def test_unknown_finish_reason_lowercased_not_forged_to_stop(self):
+        resp = {"candidates": [{"finishReason": "RECITATION",
+                                "content": {"parts": [{"text": "x"}]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        self.assertEqual(oai["choices"][0]["finish_reason"], "recitation")
+
+    def test_candidate_level_safety_block_no_crash_empty_content(self):
+        resp = {"candidates": [{"finishReason": "SAFETY"}]}  # no "content" key
+        oai = harvest._gemini_resp_to_oai(resp)
+        msg = oai["choices"][0]["message"]
+        self.assertEqual(msg["content"], "")
+        self.assertIsNone(msg["tool_calls"])
+
+    def test_prompt_level_block_missing_candidates_key_no_crash(self):
+        resp = {"promptFeedback": {"blockReason": "SAFETY"}}
+        oai = harvest._gemini_resp_to_oai(resp)
+        msg = oai["choices"][0]["message"]
+        self.assertEqual(msg["content"], "")
+        self.assertIsNone(msg["tool_calls"])
+        self.assertEqual(oai["choices"][0]["finish_reason"], "prompt_blocked")
+        self.assertEqual(oai["usage"]["prompt_block_reason"], "SAFETY")
+
+    def test_prompt_level_block_empty_candidates_list_no_crash(self):
+        resp = {"candidates": [], "promptFeedback": {"blockReason": "OTHER"}}
+        oai = harvest._gemini_resp_to_oai(resp)
+        self.assertEqual(oai["choices"][0]["finish_reason"], "prompt_blocked")
+        self.assertEqual(oai["usage"]["prompt_block_reason"], "OTHER")
+
+    def test_tool_call_ids_unique_across_two_calls(self):
+        resp = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "search", "args": {}}}]}}]}
+        oai1 = harvest._gemini_resp_to_oai(resp)
+        oai2 = harvest._gemini_resp_to_oai(resp)
+        id1 = oai1["choices"][0]["message"]["tool_calls"][0]["id"]
+        id2 = oai2["choices"][0]["message"]["tool_calls"][0]["id"]
+        self.assertNotEqual(id1, id2)
+
+    def test_outbound_extract_message_compatible(self):
+        resp = {"candidates": [{"finishReason": "STOP",
+                                "content": {"parts": [{"text": "j"}]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        self.assertEqual(harvest._extract_message(oai), oai["choices"][0]["message"])
+
+
+class TestGeminiNativeGatewayClient(unittest.TestCase):
+    def test_complete_posts_to_generate_content_endpoint(self):
+        client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384)
+        ok_response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "hi"}]}}]}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+            result = client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        self.assertEqual(result["choices"][0]["message"]["content"], "hi")
+        url = m.call_args[0][0]
+        self.assertTrue(url.endswith("/v1beta/models/gemini-3.5-flash:generateContent"))
+
+    def test_complete_sets_max_output_tokens_in_generation_config(self):
+        client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 9999)
+        ok_response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "hi"}]}}]}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+            client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        payload = m.call_args[0][1]
+        self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 9999)
+
+    def test_complete_omits_tools_field_when_none(self):
+        client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384)
+        ok_response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "j"}]}}]}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+            client.complete(messages=[{"role": "system", "content": "sys"},
+                                       {"role": "user", "content": "judge input"}], tools=None)
+        payload = m.call_args[0][1]
+        self.assertNotIn("tools", payload)
+        self.assertEqual(payload["systemInstruction"], {"parts": [{"text": "sys"}]})
+
+    def test_complete_includes_tools_when_present(self):
+        client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384)
+        ok_response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "j"}]}}]}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+            client.complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        payload = m.call_args[0][1]
+        self.assertEqual(len(payload["tools"][0]["functionDeclarations"]), len(harvest.TOOL_SCHEMAS))
+
+    def test_complete_parses_function_call_response(self):
+        client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384)
+        ok_response = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "search", "args": {"query": "x"}}}]}}]}
+        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response):
+            result = client.complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        message = result["choices"][0]["message"]
+        self.assertEqual(message["tool_calls"][0]["function"]["name"], "search")
+        self.assertEqual(result["choices"][0]["finish_reason"], "tool_calls")
+
+
+class TestMakeClientFactoryGeminiDispatch(unittest.TestCase):
+    """Extends TestMakeClientFactoryThreeWayDispatch's dispatch coverage to
+    the fourth (Gemini-native) client type, without touching the existing
+    three-way test class -- claude/gpt dispatch behavior must not regress."""
+
+    def setUp(self):
+        self.env_patcher = mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "secret"})
+        self.env_patcher.start()
+        self.addCleanup(self.env_patcher.stop)
+
+    def test_gemini_native_default_dispatches_to_gemini_native_client(self):
+        factory = harvest.make_client_factory(base_config())
+        client = factory("gemini-3.5-flash")
+        self.assertIsInstance(client, harvest.GeminiNativeGatewayClient)
+
+    def test_gemini_endpoint_chat_completions_falls_back_to_plain_gateway_client(self):
+        config = base_config()
+        config["limits"] = dict(config["limits"], gemini_endpoint="chat_completions")
+        factory = harvest.make_client_factory(config)
+        client = factory("gemini-3.5-flash")
+        self.assertIsInstance(client, harvest.GatewayClient)
+        self.assertNotIsInstance(client, harvest.GeminiNativeGatewayClient)
+
+    def test_old_config_missing_gemini_endpoint_key_defaults_to_native(self):
+        config = base_config()
+        self.assertNotIn("gemini_endpoint", config["limits"])
+        factory = harvest.make_client_factory(config)
+        client = factory("gemini-3.5-flash")
+        self.assertIsInstance(client, harvest.GeminiNativeGatewayClient)
+
+    def test_claude_and_gpt_dispatch_unaffected_by_gemini_endpoint_change(self):
+        config = base_config()
+        config["limits"] = dict(config["limits"], gemini_endpoint="chat_completions")
+        factory = harvest.make_client_factory(config)
+        self.assertIsInstance(factory("claude-sonnet-5"), harvest.AnthropicGatewayClient)
+        self.assertIsInstance(factory("gpt-5.4"), harvest.ResponsesGatewayClient)
+
+    def test_gemini_native_max_output_tokens_mirrors_completion_max_tokens(self):
+        config = base_config()
+        config["limits"] = dict(config["limits"], completion_max_tokens=12345)
+        factory = harvest.make_client_factory(config)
+        client = factory("gemini-3.5-flash")
+        self.assertEqual(client.max_output_tokens, 12345)
+
+    def test_judge_fallback_mixes_gemini_native_client_with_tools_none(self):
+        config = base_config(judge_model="gemini-3.5-flash", panel_models=["gemini-3.5-flash", "model-b"])
+        factory = harvest.make_client_factory(config)
+        judge_text = '```json\n{"clusters": [{"summary": "s", "source_claim_ids": ["m1-1"], "relation": "agree"}]}\n```'
+        ok_response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": judge_text}]}}]}
         worker_findings = {"m1": {"claims": [{"_id": "m1-1", "claim": "A", "excerpt": "e", "url": "u"}]}}
         with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response):
             data, err = harvest.run_judge_with_fallback(config, factory, worker_findings, config["panel_models"])

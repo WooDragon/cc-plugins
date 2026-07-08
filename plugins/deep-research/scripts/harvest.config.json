@@ -55,6 +55,7 @@
     "completion_max_tokens": 16384,
     "claude_effort": "medium",
     "gpt_endpoint": "responses",
+    "gemini_endpoint": "native",
     "wall_clock_s": 1800,
     "quorum": 2,
     "search_min_interval_s": 2,

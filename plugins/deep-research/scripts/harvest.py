@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -1827,6 +1828,244 @@ class ResponsesGatewayClient:
         return _responses_resp_to_oai(resp)
 
 
+# ---------------------------------------------------------------------------
+# Gemini-native client (gemini models only)
+#
+# gemini models get a dedicated path to the gateway's Gemini-native
+# generateContent endpoint (not the OpenAI-compatible /chat/completions used
+# before) so that the gateway's implicit/automatic prefix caching -- the same
+# instance-affinity mechanism ADR-011 identified for gpt's /responses path --
+# has a chance to kick in. No explicit cachedContents are created here; this
+# only switches the wire protocol so a growing, resent-in-full message prefix
+# is *observable* to the gateway's own caching, whatever it turns out to be.
+# Same complete(messages, tools) -> OpenAI-shaped-dict interface as the other
+# two native clients, so run_worker/judge_clusters/run_judge_with_fallback
+# stay unchanged; all protocol translation is confined to the pure functions
+# below.
+# ---------------------------------------------------------------------------
+
+def _gemini_generate_content_url(base_url, model_id):
+    """Derive the Gemini-native generateContent URL from the gateway's
+    OpenAI-compat base_url. Unlike _search_gemini_grounding's urlsplit
+    (scheme://netloc only, which silently drops any path prefix between the
+    origin and '/v1'), this strips only a trailing '/v1' *suffix* so a
+    base_url like 'https://gw.corp.com/ai-proxy/v1' keeps its '/ai-proxy'
+    prefix intact."""
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return f"{base}/v1beta/models/{model_id}:generateContent"
+
+
+def _oai_tools_to_gemini(tools):
+    """OpenAI function-tool schema -> Gemini tool schema (a single entry
+    carrying all function declarations). Returns None for no tools (judge
+    path passes tools=None) so the caller omits the field entirely,
+    mirroring _oai_tools_to_anthropic/_oai_tools_to_responses."""
+    if not tools:
+        return None
+    declarations = []
+    for t in tools:
+        fn = t.get("function", {})
+        declarations.append({
+            "name": fn.get("name", ""),
+            "description": fn.get("description", ""),
+            "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+        })
+    return [{"functionDeclarations": declarations}]
+
+
+def _append_gemini_user_parts(contents, parts):
+    """Append `parts` as a Gemini user turn, merging into a trailing user
+    turn if present. Gemini enforces alternating roles the same way
+    Anthropic does, so a run of consecutive tool results (each becoming a
+    functionResponse part) and any immediately-following user nudge must
+    collapse into one turn rather than producing back-to-back user turns."""
+    if not parts:
+        return
+    if contents and contents[-1]["role"] == "user":
+        contents[-1]["parts"].extend(parts)
+    else:
+        contents.append({"role": "user", "parts": parts})
+
+
+def _gemini_tool_response_payload(content):
+    """Parse an OpenAI tool message's `content` string into the dict Gemini's
+    functionResponse.response requires. content is JSON-decoded when
+    possible; a non-JSON string, or JSON that decodes to a non-dict (list/
+    bool/number), is wrapped as {"result": <value>} so the final payload is
+    always a dict."""
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return {"result": content}
+    if not isinstance(parsed, dict):
+        return {"result": parsed}
+    return parsed
+
+
+def _oai_messages_to_gemini(messages):
+    """OpenAI chat-messages -> (system_instruction, contents) for the Gemini
+    generateContent API. Mirrors _oai_messages_to_anthropic's role-by-role
+    walk but targets Gemini's parts/role shape.
+
+    - role=system    -> hoisted into `system_instruction` (multiple system
+      messages are concatenated with '\\n\\n', never overwritten by a later
+      one). None when there is no system message.
+    - role=assistant -> role "model"; text content becomes a text part,
+      each tool_call becomes a functionCall part.
+    - role=tool      -> OpenAI's tool message carries no function name, but
+      Gemini's functionResponse requires one, so a forward pass records
+      {tool_call_id: function_name} from every assistant tool_call seen so
+      far; a tool message whose tool_call_id has no recorded name means the
+      upstream message sequence itself violates the OpenAI contract, and
+      that is raised explicitly rather than papered over with an empty name.
+    - role=user/other -> role "user", text part.
+
+    Consecutive user-role turns (tool results, and tool results immediately
+    followed by a user nudge) are merged via _append_gemini_user_parts,
+    mirroring _oai_messages_to_anthropic's tool-result collapsing."""
+    system_parts = []
+    contents = []
+    call_id_to_name = {}
+    for msg in messages:
+        role = msg.get("role")
+        if role == "system":
+            content = msg.get("content")
+            if isinstance(content, str) and content:
+                system_parts.append(content)
+            continue
+        if role == "assistant":
+            parts = []
+            text = msg.get("content")
+            if isinstance(text, str) and text:
+                parts.append({"text": text})
+            for tc in (msg.get("tool_calls") or []):
+                fn = tc.get("function", {})
+                name = fn.get("name", "")
+                call_id_to_name[tc.get("id")] = name
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                parts.append({"functionCall": {"name": name, "args": args}})
+            if not parts:
+                parts = [{"text": ""}]
+            contents.append({"role": "model", "parts": parts})
+            continue
+        if role == "tool":
+            call_id = msg.get("tool_call_id")
+            name = call_id_to_name.get(call_id)
+            if name is None:
+                raise ValueError(
+                    f"tool message references unknown tool_call_id={call_id!r} "
+                    "(no matching assistant tool_call seen yet)"
+                )
+            payload = _gemini_tool_response_payload(msg.get("content", ""))
+            _append_gemini_user_parts(contents, [{"functionResponse": {"name": name, "response": payload}}])
+            continue
+        # role == user (or unknown -> treat as user)
+        content = msg.get("content")
+        text = content if isinstance(content, str) else ""
+        if text:
+            _append_gemini_user_parts(contents, [{"text": text}])
+    system_instruction = None
+    if system_parts:
+        system_instruction = {"parts": [{"text": "\n\n".join(system_parts)}]}
+    return system_instruction, contents
+
+
+def _gemini_resp_to_oai(resp):
+    """Gemini generateContent response -> OpenAI chat-completions shape so
+    _extract_message and the run_worker/judge_clusters loops read it
+    unchanged (same contract as _anthropic_resp_to_oai/_responses_resp_to_oai).
+
+    Two layers of safety-interception defense, both must not raise:
+    - prompt-level: an empty/missing `candidates` list (the whole prompt was
+      blocked) is checked *before* any `candidates[0]` indexing. The block
+      reason from promptFeedback is preserved in the returned usage dict
+      (diagnostic only; no consumer reads it today) rather than discarded.
+    - candidate-level: a candidate with finishReason=="SAFETY" or no
+      "content" key (HTTP 200, but nothing to read) degrades to empty
+      content/no tool_calls via .get() chains, never a bare KeyError.
+
+    finish_reason is semantically mapped, not passed through raw: any
+    parsed tool_calls force "tool_calls" (highest priority, regardless of
+    the raw finishReason); otherwise "STOP"->"stop", "MAX_TOKENS"->"length",
+    and any other raw value is lowercased and passed through as-is (never
+    forged into "stop")."""
+    candidates = resp.get("candidates")
+    if not candidates:
+        block_reason = (resp.get("promptFeedback") or {}).get("blockReason")
+        usage = dict(resp.get("usageMetadata") or {})
+        usage["prompt_block_reason"] = block_reason
+        message = {"role": "assistant", "content": "", "tool_calls": None}
+        return {"choices": [{"message": message, "finish_reason": "prompt_blocked"}], "usage": usage}
+
+    candidate = candidates[0]
+    raw_finish = candidate.get("finishReason")
+    content_parts = (candidate.get("content") or {}).get("parts") or []
+    text_parts = []
+    tool_calls = []
+    for part in content_parts:
+        if "text" in part:
+            text_parts.append(part["text"])
+        elif "functionCall" in part:
+            fc = part["functionCall"]
+            tool_calls.append({
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": fc.get("name", ""),
+                    "arguments": json.dumps(fc.get("args", {}), ensure_ascii=False),
+                },
+            })
+    message = {"role": "assistant", "content": "".join(text_parts)}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+        finish_reason = "tool_calls"
+    else:
+        message["tool_calls"] = None
+        if raw_finish == "STOP":
+            finish_reason = "stop"
+        elif raw_finish == "MAX_TOKENS":
+            finish_reason = "length"
+        elif raw_finish:
+            finish_reason = raw_finish.lower()
+        else:
+            finish_reason = None
+    return {
+        "choices": [{"message": message, "finish_reason": finish_reason}],
+        "usage": resp.get("usageMetadata", {}),
+    }
+
+
+class GeminiNativeGatewayClient:
+    def __init__(self, base_url, api_key, model_id, timeout_s, max_output_tokens):
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model_id = model_id
+        self.timeout_s = timeout_s
+        self.max_output_tokens = max_output_tokens
+
+    def complete(self, messages, tools):
+        system_instruction, contents = _oai_messages_to_gemini(messages)
+        gemini_tools = _oai_tools_to_gemini(tools)
+        payload = {
+            "contents": contents,
+            "generationConfig": {"maxOutputTokens": self.max_output_tokens},
+        }
+        if system_instruction is not None:
+            payload["systemInstruction"] = system_instruction
+        if gemini_tools is not None:
+            payload["tools"] = gemini_tools
+        url = _gemini_generate_content_url(self.base_url, self.model_id)
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        resp = _http_json_post_with_retry(url, payload, headers, self.timeout_s,
+                                           transient_backoffs=_COMPLETION_RETRY_BACKOFFS)
+        return _gemini_resp_to_oai(resp)
+
+
 def make_client_factory(config):
     gw = config["gateway"]
     api_key = os.environ.get(gw["api_key_env"], "")
@@ -1867,20 +2106,31 @@ def make_client_factory(config):
     # already uses, rather than needing a second personality inside
     # ResponsesGatewayClient itself.
     gpt_endpoint = config.get("limits", {}).get("gpt_endpoint", "responses")
+    # Same escape hatch pattern as gpt_endpoint, for the Gemini-native
+    # generateContent path (see GeminiNativeGatewayClient's docstring): if
+    # the gateway's implicit prefix caching turns out not to apply to this
+    # protocol either, config can flip back to "chat_completions" without a
+    # code change -- gemini* then falls through to the same plain
+    # GatewayClient path it used before this client existed.
+    gemini_endpoint = config.get("limits", {}).get("gemini_endpoint", "native")
 
     def factory(model_id):
         # claude models go through the Anthropic-native /messages path so
         # prompt caching can take effect; gpt models go through the
         # Responses path for the same reason (see ResponsesGatewayClient);
-        # everything else (gemini, and gpt when gpt_endpoint is switched
-        # off) stays on the OpenAI-compatible /chat/completions gateway. All
-        # three share the same complete(messages, tools) interface, so
+        # gemini models go through the Gemini-native generateContent path for
+        # the same reason (see GeminiNativeGatewayClient); everything else
+        # (and gpt/gemini when their *_endpoint switch is flipped off) stays
+        # on the OpenAI-compatible /chat/completions gateway. All four share
+        # the same complete(messages, tools) interface, so
         # run_judge_with_fallback can freely mix client types across its
         # candidates.
         if model_id.startswith("claude"):
             return AnthropicGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens, effort=effort)
         if model_id.startswith("gpt") and gpt_endpoint == "responses":
             return ResponsesGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens)
+        if model_id.startswith("gemini") and gemini_endpoint == "native":
+            return GeminiNativeGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens)
         return GatewayClient(gw["base_url"], api_key, model_id, timeout)
 
     return factory
