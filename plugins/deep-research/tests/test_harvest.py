@@ -1041,16 +1041,16 @@ def _http_error(code):
 class TestGatewayRetry(unittest.TestCase):
     def test_503_then_503_then_200_recovers(self):
         ok_response = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
-        with mock.patch("harvest._http_json_post", side_effect=[_http_error(503), _http_error(503), ok_response]) as m, \
-             mock.patch("harvest.time.sleep") as sleep_mock:
+        with mock.patch("harvest_clients.base._http_json_post", side_effect=[_http_error(503), _http_error(503), ok_response]) as m, \
+             mock.patch("harvest_clients.base.time.sleep") as sleep_mock:
             result = harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
         self.assertEqual(result, ok_response)
         self.assertEqual(m.call_count, 3)
         sleep_mock.assert_has_calls([mock.call(5), mock.call(15)])
 
     def test_403_persistent_failure_retries_once_then_gives_up(self):
-        with mock.patch("harvest._http_json_post", side_effect=[_http_error(403), _http_error(403)]) as m, \
-             mock.patch("harvest.time.sleep") as sleep_mock:
+        with mock.patch("harvest_clients.base._http_json_post", side_effect=[_http_error(403), _http_error(403)]) as m, \
+             mock.patch("harvest_clients.base.time.sleep") as sleep_mock:
             with self.assertRaises(RuntimeError) as ctx:
                 harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
         self.assertEqual(m.call_count, 2)  # 1 retry -> 2 attempts total
@@ -1059,16 +1059,16 @@ class TestGatewayRetry(unittest.TestCase):
 
     def test_429_backs_off_and_recovers(self):
         ok_response = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
-        with mock.patch("harvest._http_json_post", side_effect=[_http_error(429), ok_response]) as m, \
-             mock.patch("harvest.time.sleep") as sleep_mock:
+        with mock.patch("harvest_clients.base._http_json_post", side_effect=[_http_error(429), ok_response]) as m, \
+             mock.patch("harvest_clients.base.time.sleep") as sleep_mock:
             result = harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
         self.assertEqual(result, ok_response)
         self.assertEqual(m.call_count, 2)
         sleep_mock.assert_called_once_with(5)  # first backoff in the transient schedule
 
     def test_5xx_exhausted_after_three_attempts_raises_with_status_and_count(self):
-        with mock.patch("harvest._http_json_post", side_effect=[_http_error(503), _http_error(503), _http_error(503)]) as m, \
-             mock.patch("harvest.time.sleep"):
+        with mock.patch("harvest_clients.base._http_json_post", side_effect=[_http_error(503), _http_error(503), _http_error(503)]) as m, \
+             mock.patch("harvest_clients.base.time.sleep"):
             with self.assertRaises(RuntimeError) as ctx:
                 harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
         self.assertEqual(m.call_count, 3)
@@ -1083,8 +1083,8 @@ class TestGatewayRetry(unittest.TestCase):
         def fake_sleep(seconds):
             calls.append(seconds)
 
-        with mock.patch("harvest._http_json_post", side_effect=[_http_error(503), {"choices": [{"message": {"content": "ok"}}]}]), \
-             mock.patch("harvest.time.sleep", side_effect=fake_sleep):
+        with mock.patch("harvest_clients.base._http_json_post", side_effect=[_http_error(503), {"choices": [{"message": {"content": "ok"}}]}]), \
+             mock.patch("harvest_clients.base.time.sleep", side_effect=fake_sleep):
             harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
         self.assertEqual(calls, [5])
 
@@ -1098,10 +1098,10 @@ class TestGatewayRetry(unittest.TestCase):
                 url = "http://gw/chat/completions"
                 return harvest._http_json_post_with_retry(url, {}, {}, 5)
 
-        with mock.patch("harvest._http_json_post",
+        with mock.patch("harvest_clients.base._http_json_post",
                          side_effect=[_http_error(503), _http_error(503), _http_error(503),
                                       _http_error(503), _http_error(503), _http_error(503)]), \
-             mock.patch("harvest.time.sleep"):
+             mock.patch("harvest_clients.base.time.sleep"):
             result = harvest.run_worker("m1", "model-a", FlakyClient(), base_config(), [], [], "goal", [], None)
         self.assertEqual(result.status, "FAILED")
         self.assertTrue(result.reason.startswith("synthesis_failed (RuntimeError):"), result.reason)
@@ -1110,7 +1110,7 @@ class TestGatewayRetry(unittest.TestCase):
     def test_gateway_client_complete_uses_retry_wrapper(self):
         client = harvest.GatewayClient("http://gw", "key", "model-x", 5)
         ok_response = {"choices": [{"message": {"content": "hi"}}]}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response) as m:
             result = client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
         self.assertEqual(result, ok_response)
         m.assert_called_once()
@@ -1120,17 +1120,17 @@ class TestGatewayRetry(unittest.TestCase):
         # under the same transient backoff schedule as a 5xx, not raised
         # straight through on the first failure.
         ok_response = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
-        with mock.patch("harvest._http_json_post", side_effect=[socket.timeout("timed out"), ok_response]) as m, \
-             mock.patch("harvest.time.sleep") as sleep_mock:
+        with mock.patch("harvest_clients.base._http_json_post", side_effect=[socket.timeout("timed out"), ok_response]) as m, \
+             mock.patch("harvest_clients.base.time.sleep") as sleep_mock:
             result = harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
         self.assertEqual(result, ok_response)
         self.assertEqual(m.call_count, 2)
         sleep_mock.assert_called_once_with(5)  # first backoff in the transient schedule
 
     def test_socket_timeout_exhausted_raises_runtime_error(self):
-        with mock.patch("harvest._http_json_post",
+        with mock.patch("harvest_clients.base._http_json_post",
                          side_effect=[socket.timeout("t1"), socket.timeout("t2"), socket.timeout("t3")]) as m, \
-             mock.patch("harvest.time.sleep"):
+             mock.patch("harvest_clients.base.time.sleep"):
             with self.assertRaises(RuntimeError) as ctx:
                 harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
         self.assertEqual(m.call_count, 3)
@@ -1140,9 +1140,9 @@ class TestGatewayRetry(unittest.TestCase):
         # urllib.error.URLError (e.g. connection refused / DNS failure) has
         # no .code at all -- must be classified transient, same as timeout.
         ok_response = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
-        with mock.patch("harvest._http_json_post",
+        with mock.patch("harvest_clients.base._http_json_post",
                          side_effect=[harvest.urllib.error.URLError("connection refused"), ok_response]) as m, \
-             mock.patch("harvest.time.sleep") as sleep_mock:
+             mock.patch("harvest_clients.base.time.sleep") as sleep_mock:
             result = harvest._http_json_post_with_retry("http://gw/chat/completions", {}, {}, 5)
         self.assertEqual(result, ok_response)
         self.assertEqual(m.call_count, 2)
@@ -3613,7 +3613,7 @@ class TestResponsesGatewayClient(unittest.TestCase):
         client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 16384)
         ok_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "hi"}]}],
                        "status": "completed"}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response) as m:
             result = client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
         self.assertEqual(result["choices"][0]["message"]["content"], "hi")
         url = m.call_args[0][0]
@@ -3622,7 +3622,7 @@ class TestResponsesGatewayClient(unittest.TestCase):
     def test_complete_sets_max_output_tokens(self):
         client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 9999)
         ok_response = {"output": [], "status": "completed"}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response) as m:
             client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
         payload = m.call_args[0][1]
         self.assertEqual(payload["max_output_tokens"], 9999)
@@ -3641,7 +3641,7 @@ class TestResponsesGatewayClient(unittest.TestCase):
             ]}],
             "status": "incomplete",
         }
-        with mock.patch("harvest._http_json_post_with_retry", return_value=truncated_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=truncated_response) as m:
             result = client.complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
         self.assertEqual(m.call_args[0][1]["max_output_tokens"], 64)
         self.assertEqual(result["choices"][0]["finish_reason"], "incomplete")
@@ -3656,7 +3656,7 @@ class TestResponsesGatewayClient(unittest.TestCase):
         client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 16384)
         ok_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "j"}]}],
                        "status": "completed"}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response) as m:
             client.complete(messages=[{"role": "system", "content": "sys"},
                                        {"role": "user", "content": "judge input"}], tools=None)
         payload = m.call_args[0][1]
@@ -3666,7 +3666,7 @@ class TestResponsesGatewayClient(unittest.TestCase):
     def test_complete_includes_tools_when_present(self):
         client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 16384)
         ok_response = {"output": [], "status": "completed"}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response) as m:
             client.complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
         payload = m.call_args[0][1]
         self.assertEqual(len(payload["tools"]), len(harvest.TOOL_SCHEMAS))
@@ -3681,7 +3681,7 @@ class TestResponsesGatewayClient(unittest.TestCase):
         ok_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": judge_text}]}],
                        "status": "completed"}
         worker_findings = {"m1": {"claims": [{"_id": "m1-1", "claim": "A", "excerpt": "e", "url": "u"}]}}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response) as m:
             data, err = harvest.judge_clusters(client, worker_findings)
         self.assertIsNone(err)
         self.assertEqual(data["clusters"][0]["source_claim_ids"], ["m1-1"])
@@ -3693,7 +3693,7 @@ class TestAnthropicEffortInjection(unittest.TestCase):
     def test_effort_none_omits_output_config(self):
         client = harvest.AnthropicGatewayClient("http://gw", "key", "claude-sonnet-5", 5, 16384, effort=None)
         ok_response = {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
-        with mock.patch("harvest._anthropic_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.anthropic._anthropic_post_with_retry", return_value=ok_response) as m:
             client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
         payload = m.call_args[0][1]
         self.assertNotIn("output_config", payload)
@@ -3701,7 +3701,7 @@ class TestAnthropicEffortInjection(unittest.TestCase):
     def test_effort_medium_injects_output_config(self):
         client = harvest.AnthropicGatewayClient("http://gw", "key", "claude-sonnet-5", 5, 16384, effort="medium")
         ok_response = {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
-        with mock.patch("harvest._anthropic_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.anthropic._anthropic_post_with_retry", return_value=ok_response) as m:
             client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
         payload = m.call_args[0][1]
         self.assertEqual(payload["output_config"], {"effort": "medium"})
@@ -3709,7 +3709,7 @@ class TestAnthropicEffortInjection(unittest.TestCase):
     def test_effort_high_injects_output_config_high(self):
         client = harvest.AnthropicGatewayClient("http://gw", "key", "claude-sonnet-5", 5, 16384, effort="high")
         ok_response = {"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"}
-        with mock.patch("harvest._anthropic_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.anthropic._anthropic_post_with_retry", return_value=ok_response) as m:
             client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
         payload = m.call_args[0][1]
         self.assertEqual(payload["output_config"], {"effort": "high"})
@@ -3797,7 +3797,7 @@ class TestMakeClientFactoryThreeWayDispatch(unittest.TestCase):
         ok_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": judge_text}]}],
                        "status": "completed"}
         worker_findings = {"m1": {"claims": [{"_id": "m1-1", "claim": "A", "excerpt": "e", "url": "u"}]}}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response):
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response):
             data, err = harvest.run_judge_with_fallback(config, factory, worker_findings, config["panel_models"])
         self.assertIsNone(err)
         self.assertEqual(data["clusters"][0]["source_claim_ids"], ["m1-1"])
@@ -4026,7 +4026,7 @@ class TestGeminiNativeGatewayClient(unittest.TestCase):
     def test_complete_posts_to_generate_content_endpoint(self):
         client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384)
         ok_response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "hi"}]}}]}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response) as m:
             result = client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
         self.assertEqual(result["choices"][0]["message"]["content"], "hi")
         url = m.call_args[0][0]
@@ -4035,7 +4035,7 @@ class TestGeminiNativeGatewayClient(unittest.TestCase):
     def test_complete_sets_max_output_tokens_in_generation_config(self):
         client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 9999)
         ok_response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "hi"}]}}]}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response) as m:
             client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
         payload = m.call_args[0][1]
         self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 9999)
@@ -4043,7 +4043,7 @@ class TestGeminiNativeGatewayClient(unittest.TestCase):
     def test_complete_omits_tools_field_when_none(self):
         client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384)
         ok_response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "j"}]}}]}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response) as m:
             client.complete(messages=[{"role": "system", "content": "sys"},
                                        {"role": "user", "content": "judge input"}], tools=None)
         payload = m.call_args[0][1]
@@ -4053,7 +4053,7 @@ class TestGeminiNativeGatewayClient(unittest.TestCase):
     def test_complete_includes_tools_when_present(self):
         client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384)
         ok_response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "j"}]}}]}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response) as m:
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response) as m:
             client.complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
         payload = m.call_args[0][1]
         self.assertEqual(len(payload["tools"][0]["functionDeclarations"]), len(harvest.TOOL_SCHEMAS))
@@ -4062,7 +4062,7 @@ class TestGeminiNativeGatewayClient(unittest.TestCase):
         client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384)
         ok_response = {"candidates": [{"content": {"parts": [
             {"functionCall": {"name": "search", "args": {"query": "x"}}}]}}]}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response):
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response):
             result = client.complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
         message = result["choices"][0]["message"]
         self.assertEqual(message["tool_calls"][0]["function"]["name"], "search")
@@ -4119,7 +4119,7 @@ class TestMakeClientFactoryGeminiDispatch(unittest.TestCase):
         judge_text = '```json\n{"clusters": [{"summary": "s", "source_claim_ids": ["m1-1"], "relation": "agree"}]}\n```'
         ok_response = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": judge_text}]}}]}
         worker_findings = {"m1": {"claims": [{"_id": "m1-1", "claim": "A", "excerpt": "e", "url": "u"}]}}
-        with mock.patch("harvest._http_json_post_with_retry", return_value=ok_response):
+        with mock.patch("harvest_clients.base._http_json_post_with_retry", return_value=ok_response):
             data, err = harvest.run_judge_with_fallback(config, factory, worker_findings, config["panel_models"])
         self.assertIsNone(err)
         self.assertEqual(data["clusters"][0]["source_claim_ids"], ["m1-1"])
@@ -4144,11 +4144,11 @@ class TestCompletionRetryAndForcedSynthesisRecovery(unittest.TestCase):
 
     def test_retry_with_completion_backoffs_recovers_after_two_transient_failures(self):
         ok_response = {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
-        with mock.patch("harvest._http_json_post",
+        with mock.patch("harvest_clients.base._http_json_post",
                          side_effect=[harvest.urllib.error.URLError("connection reset"),
                                       harvest.urllib.error.URLError("connection reset"),
                                       ok_response]) as m, \
-             mock.patch("harvest.time.sleep") as sleep_mock:
+             mock.patch("harvest_clients.base.time.sleep") as sleep_mock:
             result = harvest._http_json_post_with_retry(
                 "http://gw/chat/completions", {}, {}, 5,
                 transient_backoffs=harvest._COMPLETION_RETRY_BACKOFFS)
@@ -4952,7 +4952,7 @@ class TestStreamPost(unittest.TestCase):
     """_http_stream_post's generic SSE wire parsing (provider-agnostic)."""
 
     def _run(self, fake):
-        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+        with mock.patch("harvest_clients.base.urllib.request.urlopen", return_value=fake):
             stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
             resp = next(stream)
             frames = list(stream)
@@ -4994,7 +4994,7 @@ class TestStreamPost(unittest.TestCase):
         err = harvest.urllib.error.HTTPError(
             url="http://gw/stream", code=503, msg="err", hdrs=None,
             fp=io.BytesIO(b"upstream unavailable"))
-        with mock.patch("harvest.urllib.request.urlopen", side_effect=err):
+        with mock.patch("harvest_clients.base.urllib.request.urlopen", side_effect=err):
             stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
             with self.assertRaises(harvest.urllib.error.HTTPError) as ctx:
                 next(stream)
@@ -5005,7 +5005,7 @@ class TestStreamPost(unittest.TestCase):
         # permanent StreamNotSupportedError, never a transient stream failure.
         fake = FakeSSEHTTPResponse(content_type="application/json",
                                    body=b'{"error":"no streaming here"}')
-        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+        with mock.patch("harvest_clients.base.urllib.request.urlopen", return_value=fake):
             stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
             with self.assertRaises(harvest.StreamNotSupportedError):
                 next(stream)
@@ -5034,7 +5034,7 @@ class TestAnthropicStreaming(unittest.TestCase):
             ("message_delta", json.dumps({"delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 7}})),
             ("message_stop", json.dumps({})),
         ]
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
         msg = result["choices"][0]["message"]
         self.assertEqual(msg["content"], "Hello world")
@@ -5055,7 +5055,7 @@ class TestAnthropicStreaming(unittest.TestCase):
             ("message_delta", json.dumps({"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}})),
             ("message_stop", json.dumps({})),
         ]
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
         msg = result["choices"][0]["message"]
         self.assertEqual(msg["content"], "just text")
@@ -5078,7 +5078,7 @@ class TestResponsesStreaming(unittest.TestCase):
             (None, json.dumps({"type": "response.completed",
                                "response": {"status": "completed", "usage": {"input_tokens": 5, "output_tokens": 2}}})),
         ]
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
         msg = result["choices"][0]["message"]
         self.assertEqual(msg["content"], "Hello")
@@ -5100,7 +5100,7 @@ class TestResponsesStreaming(unittest.TestCase):
             (None, json.dumps({"type": "response.completed",
                                "response": {"status": "completed", "usage": {"input_tokens": 4}}})),
         ]
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
         msg = result["choices"][0]["message"]
         self.assertEqual(len(msg["tool_calls"]), 1)
@@ -5130,7 +5130,7 @@ class TestGeminiStreaming(unittest.TestCase):
             (None, json.dumps({"candidates": [{"content": {"parts": [{"text": "."}]}, "finishReason": "STOP"}],
                                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 3}})),
         ]
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
         msg = result["choices"][0]["message"]
         self.assertEqual(msg["content"], "Blue sky.")
@@ -5144,7 +5144,7 @@ class TestGeminiStreaming(unittest.TestCase):
                 {"functionCall": {"name": "search", "args": {"query": "sky"}}}]}, "finishReason": "STOP"}],
                 "usageMetadata": {"promptTokenCount": 8}})),
         ]
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
         msg = result["choices"][0]["message"]
         self.assertEqual(msg["content"], "")
@@ -5170,7 +5170,7 @@ class TestGatewayStreaming(unittest.TestCase):
             (None, json.dumps({"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}]})),
             (None, "[DONE]"),
         ]
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
         msg = result["choices"][0]["message"]
         self.assertEqual(msg["content"], "Hello")
@@ -5186,7 +5186,7 @@ class TestGatewayStreaming(unittest.TestCase):
             (None, json.dumps({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1}})),
             (None, "[DONE]"),
         ]
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
         self.assertEqual(result["choices"][0]["message"]["content"], "hi")
         self.assertEqual(result["usage"], {"prompt_tokens": 5, "completion_tokens": 1})
@@ -5199,7 +5199,7 @@ class TestGatewayStreaming(unittest.TestCase):
                 {"index": 0, "function": {"arguments": ' "https://a.com"}'}}]}, "finish_reason": "tool_calls"}]})),
             (None, "[DONE]"),
         ]
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
         tc = result["choices"][0]["message"]["tool_calls"][0]
         self.assertEqual(tc["id"], "call_1")
@@ -5226,8 +5226,8 @@ class TestStreamWatchdog(unittest.TestCase):
         # and then raises RuntimeError rather than hanging.
         client = harvest.GatewayClient("http://gw", "key", "model-x", 5,
                                        stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_raising(socket.timeout("ttft"))), \
-             mock.patch("harvest.time.sleep") as sleep_mock:
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_raising(socket.timeout("ttft"))), \
+             mock.patch("harvest_clients.base.time.sleep") as sleep_mock:
             with self.assertRaises(RuntimeError):
                 client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
         self.assertEqual(sleep_mock.call_count, len(harvest._COMPLETION_RETRY_BACKOFFS))
@@ -5245,7 +5245,7 @@ class TestStreamWatchdog(unittest.TestCase):
         ]
         client = harvest.GatewayClient("http://gw", "key", "model-x", 5,
                                        stream_enabled=True, ttft_timeout=30, inter_token_timeout=7)
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames, sock=sock)):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames, sock=sock)):
             client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
         self.assertEqual(sock.timeouts, [7])
 
@@ -5260,8 +5260,8 @@ class TestStreamLogicalEnd(unittest.TestCase):
         frames = [(None, json.dumps({"choices": [{"delta": {"content": "partial"}}]}))]
         client = harvest.GatewayClient("http://gw", "key", "model-x", 5,
                                        stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)), \
-             mock.patch("harvest._run_stream_attempt_with_retry", side_effect=_no_retry):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)), \
+             mock.patch("harvest_clients.base._run_stream_attempt_with_retry", side_effect=_no_retry):
             with self.assertRaises(harvest.StreamConnectionLost):
                 client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
 
@@ -5272,8 +5272,8 @@ class TestStreamLogicalEnd(unittest.TestCase):
         ]
         client = harvest.AnthropicGatewayClient("http://gw", "key", "claude-sonnet-5", 5, 16384,
                                                 stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)), \
-             mock.patch("harvest._run_stream_attempt_with_retry", side_effect=_no_retry):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)), \
+             mock.patch("harvest_clients.base._run_stream_attempt_with_retry", side_effect=_no_retry):
             with self.assertRaises(harvest.StreamConnectionLost):
                 client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
 
@@ -5281,8 +5281,8 @@ class TestStreamLogicalEnd(unittest.TestCase):
         frames = [(None, json.dumps({"type": "response.output_text.delta", "delta": "hi"}))]
         client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 16384,
                                                 stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)), \
-             mock.patch("harvest._run_stream_attempt_with_retry", side_effect=_no_retry):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)), \
+             mock.patch("harvest_clients.base._run_stream_attempt_with_retry", side_effect=_no_retry):
             with self.assertRaises(harvest.StreamConnectionLost):
                 client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
 
@@ -5291,8 +5291,8 @@ class TestStreamLogicalEnd(unittest.TestCase):
                                      "usageMetadata": {"promptTokenCount": 3}}))]
         client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384,
                                                    stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)), \
-             mock.patch("harvest._run_stream_attempt_with_retry", side_effect=_no_retry):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)), \
+             mock.patch("harvest_clients.base._run_stream_attempt_with_retry", side_effect=_no_retry):
             with self.assertRaises(harvest.StreamConnectionLost):
                 client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
 
@@ -5311,7 +5311,7 @@ class TestStreamRetry(unittest.TestCase):
                 raise harvest.StreamConnectionLost("dropped")
             return {"ok": True}
 
-        with mock.patch("harvest.time.sleep") as sleep_mock:
+        with mock.patch("harvest_clients.base.time.sleep") as sleep_mock:
             result = harvest._run_stream_attempt_with_retry(attempt_fn)
         self.assertEqual(result, {"ok": True})
         self.assertEqual(len(attempts), 2)
@@ -5325,7 +5325,7 @@ class TestStreamRetry(unittest.TestCase):
             attempts.append(1)
             raise harvest.StreamNotSupportedError("plain json body, not SSE")
 
-        with mock.patch("harvest.time.sleep") as sleep_mock:
+        with mock.patch("harvest_clients.base.time.sleep") as sleep_mock:
             with self.assertRaises(harvest.StreamNotSupportedError):
                 harvest._run_stream_attempt_with_retry(attempt_fn)
         self.assertEqual(len(attempts), 1)
@@ -5374,7 +5374,7 @@ class TestStreamPostEOFAndTimeout(unittest.TestCase):
 
     def test_first_yield_is_the_response_object_itself(self):
         fake = FakeSSEHTTPResponse([b"data: x\n", b"\n"])
-        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+        with mock.patch("harvest_clients.base.urllib.request.urlopen", return_value=fake):
             stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
             resp = next(stream)
         self.assertIs(resp, fake)
@@ -5384,7 +5384,7 @@ class TestStreamPostEOFAndTimeout(unittest.TestCase):
         # sitting in data_lines/event_type must still be yielded, not
         # silently dropped.
         fake = FakeSSEHTTPResponse([b"event: message\n", b"data: partial\n"])
-        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+        with mock.patch("harvest_clients.base.urllib.request.urlopen", return_value=fake):
             stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
             next(stream)
             frames = list(stream)
@@ -5393,7 +5393,7 @@ class TestStreamPostEOFAndTimeout(unittest.TestCase):
     def test_eof_with_no_buffered_content_yields_nothing(self):
         # Clean EOF right after a terminated frame -- no extra empty frame.
         fake = FakeSSEHTTPResponse([b"data: x\n", b"\n"])
-        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+        with mock.patch("harvest_clients.base.urllib.request.urlopen", return_value=fake):
             stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
             next(stream)
             frames = list(stream)
@@ -5404,7 +5404,7 @@ class TestStreamPostEOFAndTimeout(unittest.TestCase):
         # inter-token watchdog firing) is translated to StreamIdleTimeout at
         # the _http_stream_post call site, not left as a bare socket.timeout.
         fake = _RaisingSSEHTTPResponse([b"data: x\n", b"\n"], socket.timeout("idle"))
-        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+        with mock.patch("harvest_clients.base.urllib.request.urlopen", return_value=fake):
             stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
             next(stream)
             self.assertEqual(next(stream), (None, "x"))  # one complete frame, no raise yet
@@ -5417,7 +5417,7 @@ class TestStreamPostEOFAndTimeout(unittest.TestCase):
         # the caller's retry loop treats both as transient regardless of the
         # underlying exception type.
         fake = _RaisingSSEHTTPResponse([], ConnectionResetError("reset"))
-        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+        with mock.patch("harvest_clients.base.urllib.request.urlopen", return_value=fake):
             stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
             next(stream)
             with self.assertRaises(harvest.StreamIdleTimeout):
@@ -5442,8 +5442,8 @@ class TestAnthropicStreamingErrorEvent(unittest.TestCase):
             ("content_block_delta", json.dumps({"index": 0, "delta": {"type": "text_delta", "text": "hi"}})),
             ("error", json.dumps({"type": "error", "error": {"type": "overloaded_error", "message": "boom"}})),
         ]
-        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)), \
-             mock.patch("harvest._run_stream_attempt_with_retry", side_effect=_no_retry):
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)), \
+             mock.patch("harvest_clients.base._run_stream_attempt_with_retry", side_effect=_no_retry):
             with self.assertRaises(harvest.StreamConnectionLost):
                 self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
 
