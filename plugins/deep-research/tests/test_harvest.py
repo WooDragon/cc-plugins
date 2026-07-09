@@ -5134,7 +5134,7 @@ class TestGeminiStreaming(unittest.TestCase):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
         msg = result["choices"][0]["message"]
         self.assertEqual(msg["content"], "Blue sky.")
-        self.assertIsNone(msg["tool_calls"])
+        self.assertNotIn("tool_calls", msg)
         self.assertEqual(result["choices"][0]["finish_reason"], "stop")
         self.assertEqual(result["usage"], {"promptTokenCount": 10, "candidatesTokenCount": 3})
 

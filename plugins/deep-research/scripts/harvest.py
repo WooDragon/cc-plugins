@@ -1603,7 +1603,7 @@ class GatewayClient:
                             slot["id"] = tc["id"]
                         fn = tc.get("function") or {}
                         if fn.get("name"):
-                            slot["function"]["name"] += fn["name"]
+                            slot["function"]["name"] = fn["name"]
                         if fn.get("arguments"):
                             slot["function"]["arguments"] += fn["arguments"]
 
@@ -2294,8 +2294,6 @@ class ResponsesGatewayClient:
     def _complete_streaming(self, messages, tools):
         payload = self._build_payload(messages, tools)
         payload["stream"] = True
-        if self.stream_options:
-            payload["stream_options"] = {"include_usage": True}
         url = self.base_url + "/responses"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
@@ -2701,8 +2699,14 @@ class GeminiNativeGatewayClient:
             if not seen_logical_end:
                 raise StreamConnectionLost("stream ended without a candidate finishReason")
 
+            # Determine finish_reason after all frames consumed (tool_calls
+            # may arrive in frames after finishReason — see ADR-013 review #4).
+            if tool_calls:
+                finish_reason = "tool_calls"
+
             message = {"role": "assistant", "content": "".join(text_parts)}
-            message["tool_calls"] = tool_calls or None
+            if tool_calls:
+                message["tool_calls"] = tool_calls
             return {
                 "choices": [{"message": message, "finish_reason": finish_reason}],
                 "usage": usage,
@@ -2772,7 +2776,7 @@ def make_client_factory(config):
     gpt_stream = config.get("limits", {}).get("gpt_stream", True)
     gemini_stream = config.get("limits", {}).get("gemini_stream", True)
     gateway_stream = config.get("limits", {}).get("gateway_stream", True)
-    gateway_stream_options = config.get("limits", {}).get("gateway_stream_options", True)
+    gateway_stream_options = config.get("limits", {}).get("gateway_stream_options", False)
 
     def factory(model_id):
         # claude models go through the Anthropic-native /messages path so
