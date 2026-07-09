@@ -20,9 +20,11 @@
 #   REVIEW_MAX_TOTAL_ROUNDS=N    — absolute max total rounds (incl. REJECT), default 20
 #   REVIEW_ENGINE=gemini         — review engine: "gemini" (default) or "claude"
 #   CLAUDE_MODEL=opus            — Claude engine model (default: opus)
-#   GEMINI_MODEL=<id>            — Gemini engine model (default: gemini-3.1-pro-preview)
+#   AGY_MODEL=<id>               — agy CLI model (default: Gemini 3.1 Pro (High))
+#   GEMINI_MODEL=<id>            — REST fallback model id (default: gemini-3.1-pro-preview)
 #   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds (default: 595; needs timeout/gtimeout)
 #   REVIEW_REST_TIMEOUT=N        — REST API fallback curl timeout, default 115 (equals HOOK_BUDGET; clamp logic caps actual value to remaining-3)
+#   REVIEW_REST_STALL_TIMEOUT=N  — REST SSE stall watchdog seconds, default 90 (curl --speed-time)
 #   REVIEW_HOOK_BUDGET=N         — hook total time budget, default 595 (600 hook timeout - 5s margin)
 #   REVIEW_RETRY_DELAY=N         — seconds between retries on non-capacity failure (default: 2)
 #   REVIEW_CAPACITY_DELAY=N      — seconds to wait when MODEL_CAPACITY_EXHAUSTED detected (default: 25)
@@ -491,8 +493,9 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
 fi
 
 # --- 4. Compose prompt ---
-# Static instructions: single canonical source for both engines.
-# Claude → --system-prompt (independent KV cache); Gemini → prompt file prefix.
+# Static instructions: single canonical source, injected per-channel (see
+# variant A below): claude → --system-prompt; agy → inline concat; REST →
+# messages[0]. PROMPT_FILE itself carries dynamic content only.
 # Quoted heredoc ('EOF') → body is pure literal: $, backtick, parens, and
 # apostrophe are all safe, no escaping needed. We use `read -r -d ''` rather
 # than `$(cat <<'EOF')`: bash 3.2 (macOS /bin/bash) mis-parses unbalanced
@@ -641,13 +644,14 @@ _cleanup() {
 trap '_cleanup' EXIT
 trap '_cleanup; exit 130' INT TERM HUP
 
-# Engine-specific prefix: Claude → system-prompt channel; Gemini → file prefix
+# Engine-specific system injection: PROMPT_FILE holds dynamic content only,
+# regardless of engine. Each channel injects SYSTEM_INSTRUCTIONS on its own
+# rail: claude → --system-prompt; agy → inline concat; REST → messages[0].
+: > "$PROMPT_FILE"
 if [ "$REVIEW_ENGINE" = "claude" ]; then
   SYSTEM_PROMPT="$SYSTEM_INSTRUCTIONS"
-  : > "$PROMPT_FILE"
 else
   SYSTEM_PROMPT=""
-  printf '%s\n\n' "$SYSTEM_INSTRUCTIONS" > "$PROMPT_FILE"
 fi
 
 # Shared dynamic content: stable → volatile ordering
@@ -682,7 +686,7 @@ if [ "$REVIEW_DRY_RUN" = "1" ]; then
 [DRY-RUN] 审阅调用已跳过。"
 else
   # --- Pre-flight: CLI existence check (permanent failure, no retry) ---
-  ENGINE_CMD="gemini"
+  ENGINE_CMD="agy"
   [ "$REVIEW_ENGINE" != "claude" ] || ENGINE_CMD="claude"
   if ! command -v "$ENGINE_CMD" >/dev/null 2>&1; then
     log_decision "decision=allow reason=engine-not-found engine=$REVIEW_ENGINE"
@@ -693,31 +697,9 @@ else
   if [ "$REVIEW_ENGINE" = "claude" ]; then
     CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
   else
+    # GEMINI_MODEL retained as the REST fallback's model id (OpenAI-compatible payload).
     GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"
-
-    # Isolated Gemini home: disable skills injection (prevents extra 10-30KB system prompt
-    # from ~/.agents/skills/ and ~/.gemini/skills/ from inflating token count and worsening
-    # MODEL_CAPACITY_EXHAUSTED). Auth files are symlinked from real ~/.gemini/ so credentials
-    # stay current without duplication. Settings.json is always regenerated from the real
-    # config + skills:disabled overlay so auth type changes propagate automatically.
-    _HOOK_GEMINI="$HOME/.claude/.gemini-hook-home"
-    if [ ! -d "$_HOOK_GEMINI/.gemini" ]; then
-      mkdir -p "$_HOOK_GEMINI/.gemini"
-      for _f in oauth_creds.json google_accounts.json installation_id \
-                 state.json trustedFolders.json projects.json; do
-        [ -e "$HOME/.gemini/$_f" ] && \
-          ln -sf "$HOME/.gemini/$_f" "$_HOOK_GEMINI/.gemini/$_f" || true
-      done
-    fi
-    # Merge real settings + skills:disabled. jq merge <1ms; picks up auth changes.
-    # Fallback: copy real settings as-is (skills may inject but auth works).
-    if [ -f "$HOME/.gemini/settings.json" ]; then
-      jq '. + {"skills":{"enabled":false}}' "$HOME/.gemini/settings.json" \
-        > "$_HOOK_GEMINI/.gemini/settings.json" 2>/dev/null || \
-        cp "$HOME/.gemini/settings.json" "$_HOOK_GEMINI/.gemini/settings.json"
-    else
-      printf '{"skills":{"enabled":false}}\n' > "$_HOOK_GEMINI/.gemini/settings.json"
-    fi
+    AGY_MODEL="${AGY_MODEL:-Gemini 3.1 Pro (High)}"
   fi
 
   # Portable timeout: timeout (GNU/Homebrew) > gtimeout (coreutils) > none
@@ -728,7 +710,7 @@ else
     TIMEOUT_CMD="gtimeout"
   fi
   # Engine-specific timeout defaults:
-  # - Gemini/Claude: 595s = hook timeout budget, one CLI attempt then REST fallback.
+  # - agy/Claude: 595s = hook timeout budget, one CLI attempt then REST fallback.
   #   Time-budget guard blocks retry (remaining < ENGINE_TIMEOUT), preserving REST budget.
   ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-595}"
 
@@ -801,8 +783,22 @@ else
       wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
       ENGINE_PID=""
     else
-      GEMINI_CLI_HOME="$_HOOK_GEMINI" ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} gemini -m "$GEMINI_MODEL" \
-        < "$PROMPT_FILE" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
+      # agy does not read stdin as a prompt — must pass inline via -p. ANSI-C
+      # quoting ($'\n\n') for a real newline separator; a plain "\n" inside
+      # double quotes is a literal backslash-n, not a newline.
+      FULL_PROMPT="$SYSTEM_INSTRUCTIONS"$'\n\n'"$(cat "$PROMPT_FILE")"
+      # ARG_MAX defense: agy only accepts the prompt as a command-line argument,
+      # so an oversized prompt trips E2BIG. Treat this as a CLI failure and
+      # fall straight through to REST fallback rather than exec'ing a doomed command.
+      AGY_PROMPT_BYTES=${#FULL_PROMPT}
+      if [ "$AGY_PROMPT_BYTES" -gt 256000 ]; then
+        log_decision "agy-skip reason=prompt-too-large bytes=$AGY_PROMPT_BYTES"
+        REVIEW=""
+        _fail_reason="agy: prompt too large (${AGY_PROMPT_BYTES}B > 256000B), skipped to REST"
+        break
+      fi
+      ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} agy --model "$AGY_MODEL" --sandbox --dangerously-skip-permissions \
+        -p "$FULL_PROMPT" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
       ENGINE_PID=$!
       wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
       ENGINE_PID=""
@@ -872,15 +868,23 @@ else
     fi
     echo "plan-review: CLI exhausted, trying REST API fallback..." >&2
     log_decision "rest-start url=${REVIEW_API_URL:+(set)} key=${REVIEW_API_KEY:+(set)}"
-    prompt_content=$(cat "$PROMPT_FILE")
     REQ_FILE=$(mktemp)
+    # --rawfile (not --arg + $(cat ...)) reads PROMPT_FILE directly inside jq,
+    # keeping the large plan body off the command line entirely (no E2BIG risk
+    # on this side). messages[0]=system stays a stable prefix across rounds —
+    # prefix-cacheable by the upstream provider. stream:true enables SSE below.
     jq -n --arg model "${GEMINI_MODEL:-gemini-3.1-pro-preview}" \
           --arg sys "$SYSTEM_INSTRUCTIONS" \
-          --arg prompt "$prompt_content" \
-      '{ model: $model, messages: [{ role: "system", content: $sys }, { role: "user", content: $prompt }], max_tokens: 16000, temperature: 0.1 }' \
+          --rawfile prompt "$PROMPT_FILE" \
+      '{ model: $model, messages: [{ role: "system", content: $sys }, { role: "user", content: $prompt }], max_tokens: 16000, temperature: 0.1, stream: true }' \
       > "$REQ_FILE"
 
     REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-115}"
+    # Stall watchdog: aborts if the stream produces < 1 byte/s for this many
+    # seconds. Set well above legitimate TTFT (time-to-first-token) for
+    # reasoning models, which can sit silent for tens of seconds before the
+    # first SSE chunk arrives — too low a value misfires on a healthy stream.
+    STALL_TIMEOUT="${REVIEW_REST_STALL_TIMEOUT:-90}"
     # Clamp to remaining budget: ensure curl self-terminates before hook
     # timeout SIGTERM, preserving diagnostic log writes after curl completes.
     # 3s margin for jq extraction + log_decision after curl returns.
@@ -889,9 +893,15 @@ else
     (( REST_TIMEOUT < 1 )) && REST_TIMEOUT=1
     # -sS: -s suppresses progress meter, -S re-enables error messages (connection-level errors
     # like "Failed to connect" would be silenced by -s alone, making raw_bytes=0 undiagnosable).
+    # --no-buffer: disable curl's output buffering so SSE chunks land in ENGINE_OUT as they
+    # arrive (only matters for anyone tailing the file live; parsing below still reads it
+    # after wait). --speed-limit/--speed-time: curl's own stall watchdog — abort (exit 28)
+    # if throughput drops below 1 byte/s for STALL_TIMEOUT seconds, independent of the
+    # outer TIMEOUT_CMD wall-clock cap.
     # -w "%{http_code}": write HTTP status to stdout (redirected to ENGINE_STATUS); response
     # body goes to ENGINE_OUT via -o. Read ENGINE_STATUS only AFTER wait completes.
     ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $REST_TIMEOUT} curl -sS \
+      --no-buffer --speed-limit 1 --speed-time "$STALL_TIMEOUT" \
       -X POST "${REVIEW_API_URL}/v1/chat/completions" \
       -H "Content-Type: application/json" \
       -H "Authorization: Bearer ${REVIEW_API_KEY}" \
@@ -900,7 +910,8 @@ else
       -w "%{http_code}" \
       2>>"$LOG_FILE" > "$ENGINE_STATUS" &
     ENGINE_PID=$!
-    wait "$ENGINE_PID" 2>/dev/null || true
+    curl_exit=0
+    wait "$ENGINE_PID" 2>/dev/null || curl_exit=$?
     ENGINE_PID=""
     rm -f "$REQ_FILE"; REQ_FILE=""
 
@@ -910,25 +921,54 @@ else
     rest_http_status=$(cat "$ENGINE_STATUS" 2>/dev/null)
     [ -z "$rest_http_status" ] && rest_http_status="000"
 
-    REVIEW=$(jq -r '.choices[0].message.content // empty' "$ENGINE_OUT" 2>/dev/null || true)
-    raw_bytes=$(wc -c < "$ENGINE_OUT" | tr -d ' ')
-    review_bytes=$(printf '%s' "$REVIEW" | wc -c | tr -d ' ')
-    log_decision "rest-result http=$rest_http_status raw_bytes=$raw_bytes review_bytes=$review_bytes"
-    if [ -z "$REVIEW" ]; then
-      _fail_reason="${_fail_reason:+${_fail_reason}; }REST: http=${rest_http_status} raw_bytes=${raw_bytes}"
-    fi
-
-    # ENGINE_OUT non-empty but REVIEW empty: log error body for diagnosis.
-    # [ -s ] checks file is non-empty (avoids false positive on connection failure).
-    if [ -z "$REVIEW" ] && [ -s "$ENGINE_OUT" ]; then
-      rest_error=$(jq -r '.error.message // empty' "$ENGINE_OUT" 2>/dev/null || true)
-      if [ -n "$rest_error" ]; then
-        log_decision "rest-debug api_error=$(printf '%s' "$rest_error" | head -c 200)"
+    if [ "$curl_exit" = "28" ]; then
+      # Stall watchdog fired — the provider went silent mid-stream. Don't hand
+      # a truncated partial body to the SSE parser; treat as a clean failure.
+      log_decision "rest-stall-timeout curl_exit=28"
+      REVIEW=""
+      _fail_reason="${_fail_reason:+${_fail_reason}; }REST: stall timeout (curl exit 28, no data for ${STALL_TIMEOUT}s)"
+    else
+      # Non-SSE error bypass: a non-2xx status, or a bare JSON object body (error
+      # response, not an SSE stream), must skip the SSE parser — feeding an error
+      # JSON through the "data: " cleaning pipeline silently drops it and yields an
+      # empty REVIEW with no diagnosis.
+      first_char=$(tr -d '[:space:]' < "$ENGINE_OUT" 2>/dev/null | head -c 1)
+      case "$rest_http_status" in
+        2[0-9][0-9]) is_2xx=1 ;;
+        *) is_2xx=0 ;;
+      esac
+      if [ "$is_2xx" = "0" ] || [ "$first_char" = "{" ]; then
+        REVIEW=""
+        # Only emit rest-debug when there is a body to describe. An empty body
+        # (connection-level failure before the HTTP handshake, status 000) has
+        # nothing to diagnose — [ -s ] guards against a bare "body_prefix=" line.
+        if [ -s "$ENGINE_OUT" ]; then
+          rest_error=$(jq -r '.error.message // empty' "$ENGINE_OUT" 2>/dev/null || true)
+          if [ -n "$rest_error" ]; then
+            log_decision "rest-debug api_error=$(printf '%s' "$rest_error" | head -c 200)"
+          else
+            # tr -d '\000-\037': strip control characters to keep log single-line safe
+            log_decision "rest-debug body_prefix=$(head -c 200 "$ENGINE_OUT" | tr -d '\000-\037')"
+          fi
+        fi
       else
-        # tr -d '\000-\037': strip control characters to keep log single-line safe
-        log_decision "rest-debug body_prefix=$(head -c 200 "$ENGINE_OUT" | tr -d '\000-\037')"
+        # SSE cleaning pipeline: strip the "data: " prefix, drop the non-JSON
+        # "[DONE]" terminator (feeding it to jq raw would abort the parse and lose
+        # every chunk after it), join delta.content across chunks.
+        # -rj: raw output, no per-value newline — O(1) memory, no giant array build.
+        # "// empty": role-only first frame / finish_reason-only last frame carry
+        # no content key; without this jq would emit a literal "null" per frame.
+        REVIEW=$(grep '^data: ' "$ENGINE_OUT" | sed 's/^data: //' | grep -v '^\[DONE\]' | jq -rj '.choices[0].delta.content // empty' 2>/dev/null || true)
+      fi
+
+      raw_bytes=$(wc -c < "$ENGINE_OUT" | tr -d ' ')
+      review_bytes=$(printf '%s' "$REVIEW" | wc -c | tr -d ' ')
+      log_decision "rest-result http=$rest_http_status raw_bytes=$raw_bytes review_bytes=$review_bytes"
+      if [ -z "$REVIEW" ]; then
+        _fail_reason="${_fail_reason:+${_fail_reason}; }REST: http=${rest_http_status} raw_bytes=${raw_bytes}"
       fi
     fi
+
     : > "$ENGINE_OUT"
     [ -z "$REVIEW" ] || echo "plan-review: REST API fallback succeeded." >&2
   fi
