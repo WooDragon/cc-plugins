@@ -63,7 +63,14 @@
     "fetch_max_chars": 20000,
     "fetch_connect_timeout_s": 5,
     "fetch_low_speed_bytes_s": 512,
-    "fetch_low_speed_window_s": 10
+    "fetch_low_speed_window_s": 10,
+    "stream_ttft_timeout_s": 300,
+    "stream_inter_token_timeout_s": 90,
+    "anthropic_stream": true,
+    "gpt_stream": true,
+    "gemini_stream": true,
+    "gateway_stream": true,
+    "gateway_stream_options": false
   },
   "blacklist_domains": [
     "blog.csdn.net",

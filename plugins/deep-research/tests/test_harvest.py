@@ -33,7 +33,15 @@ def base_config(**overrides):
         "limits": {"max_steps_per_model": 6, "call_timeout_s": 5, "wall_clock_s": 60,
                    "quorum": 2, "search_min_interval_s": 0, "fetch_max_chars": 20000,
                    "fetch_connect_timeout_s": 5, "fetch_low_speed_bytes_s": 512,
-                   "fetch_low_speed_window_s": 10},
+                   "fetch_low_speed_window_s": 10,
+                   # ADR-013: keep the existing test suite on the deterministic
+                   # non-streaming path (which the existing HTTP-level mocks
+                   # target). Streaming behavior gets its own dedicated test
+                   # classes that construct clients directly with
+                   # stream_enabled=True.
+                   "anthropic_stream": False, "gpt_stream": False,
+                   "gemini_stream": False, "gateway_stream": False,
+                   "gateway_stream_options": False},
         "blacklist_domains": ["blog.csdn.net", "cloud.baidu.com", "aliyun.com"],
     }
     cfg.update(overrides)
@@ -4858,6 +4866,586 @@ class TestProgressEmit(unittest.TestCase):
         worker_steps = [e for e in events if e["event"] == "worker_step"]
         self.assertTrue(worker_steps)
         self.assertEqual(worker_steps[0]["alias"], "m1")
+
+
+# ---------------------------------------------------------------------------
+# SSE streaming (ADR-013): shared fakes + per-provider streaming coverage.
+# The four completion clients call _http_stream_post at a single boundary, so
+# provider-level tests mock that boundary directly with a fake generator that
+# reproduces its contract (yield resp first, then (event_type, data_str)
+# frames). Only TestStreamPost drops down to the urllib.request.urlopen layer,
+# since it exercises _http_stream_post's own SSE parsing.
+# ---------------------------------------------------------------------------
+
+class _RecordingSocket:
+    """Fake raw socket whose settimeout() calls are recorded, so a test can
+    assert the inter-token watchdog tightening fired exactly once."""
+
+    def __init__(self):
+        self.timeouts = []
+
+    def settimeout(self, t):
+        self.timeouts.append(t)
+
+
+class _StreamRespStub:
+    """Stand-in for the HTTPResponse _http_stream_post yields first. Exposes a
+    .sock so _get_raw_socket() finds it via its ('sock',) probe chain (None ->
+    _get_raw_socket returns None and the client skips watchdog tightening)."""
+
+    def __init__(self, sock=None):
+        self.sock = sock
+
+
+def _stream_of(frames, sock=None):
+    """side_effect factory: each invocation returns a fresh generator matching
+    _http_stream_post's contract -- the resp stub first, then one
+    (event_type, data_str) tuple per scripted frame. A factory (not a bare
+    generator) so a retrying client gets a new, un-exhausted stream per
+    attempt."""
+    def factory(*args, **kwargs):
+        def gen():
+            yield _StreamRespStub(sock)
+            for frame in frames:
+                yield frame
+        return gen()
+    return factory
+
+
+def _stream_raising(exc):
+    """side_effect factory whose generator raises `exc` on first next() --
+    simulates a TTFT/connect failure surfacing when the client calls
+    next(stream) to obtain the response object."""
+    def factory(*args, **kwargs):
+        def gen():
+            raise exc
+            yield  # unreachable; marks gen() a generator function
+        return gen()
+    return factory
+
+
+class FakeSSEHTTPResponse:
+    """urlopen()-compatible fake for exercising _http_stream_post directly:
+    a .headers dict (Content-Type lookup), .read(n) for the non-stream body
+    probe, and .readline() draining a scripted list of raw SSE line bytes
+    (b'' signals EOF, as a real HTTPResponse does)."""
+
+    def __init__(self, lines=(), content_type="text/event-stream", body=b""):
+        self._lines = list(lines)
+        self.headers = {"Content-Type": content_type}
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, *args):
+        return self._body
+
+    def readline(self):
+        return self._lines.pop(0) if self._lines else b""
+
+
+class TestStreamPost(unittest.TestCase):
+    """_http_stream_post's generic SSE wire parsing (provider-agnostic)."""
+
+    def _run(self, fake):
+        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+            stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
+            resp = next(stream)
+            frames = list(stream)
+        return resp, frames
+
+    def test_parses_event_and_data_frame(self):
+        fake = FakeSSEHTTPResponse([b"event: message\n", b"data: hello\n", b"\n"])
+        _, frames = self._run(fake)
+        self.assertEqual(frames, [("message", "hello")])
+
+    def test_multiline_data_joined_with_newline(self):
+        # SSE spec: multiple data: lines in one frame are newline-joined.
+        fake = FakeSSEHTTPResponse([b"data: line1\n", b"data: line2\n", b"\n"])
+        _, frames = self._run(fake)
+        self.assertEqual(frames, [(None, "line1\nline2")])
+
+    def test_comment_line_yields_heartbeat_tuple(self):
+        # A bare comment (leading ':') is a heartbeat -> (None, None), and does
+        # not merge into the following frame.
+        fake = FakeSSEHTTPResponse([b": keep-alive\n", b"data: x\n", b"\n"])
+        _, frames = self._run(fake)
+        self.assertEqual(frames, [(None, None), (None, "x")])
+
+    def test_done_sentinel_passes_through_as_data(self):
+        fake = FakeSSEHTTPResponse([b"data: [DONE]\n", b"\n"])
+        _, frames = self._run(fake)
+        self.assertEqual(frames, [(None, "[DONE]")])
+
+    def test_single_leading_space_after_data_colon_stripped(self):
+        # Exactly one space after 'data:' is stripped; a second is preserved.
+        fake = FakeSSEHTTPResponse([b"data:  two-spaces\n", b"\n"])
+        _, frames = self._run(fake)
+        self.assertEqual(frames, [(None, " two-spaces")])
+
+    def test_non_2xx_reraises_httperror_with_body_stashed(self):
+        # A non-2xx open is re-raised as-is (not wrapped) so the caller's retry
+        # loop can classify by status; the body is stashed on stream_error_body
+        # since e.read() is single-shot.
+        err = harvest.urllib.error.HTTPError(
+            url="http://gw/stream", code=503, msg="err", hdrs=None,
+            fp=io.BytesIO(b"upstream unavailable"))
+        with mock.patch("harvest.urllib.request.urlopen", side_effect=err):
+            stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
+            with self.assertRaises(harvest.urllib.error.HTTPError) as ctx:
+                next(stream)
+        self.assertEqual(ctx.exception.stream_error_body, "upstream unavailable")
+
+    def test_non_event_stream_content_type_raises_not_supported(self):
+        # HTTP 200 with a non-SSE Content-Type (a plain JSON error body) is a
+        # permanent StreamNotSupportedError, never a transient stream failure.
+        fake = FakeSSEHTTPResponse(content_type="application/json",
+                                   body=b'{"error":"no streaming here"}')
+        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+            stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
+            with self.assertRaises(harvest.StreamNotSupportedError):
+                next(stream)
+
+
+class TestAnthropicStreaming(unittest.TestCase):
+    """AnthropicGatewayClient._complete_streaming assembles the same
+    OpenAI-shaped dict as the non-streaming _anthropic_resp_to_oai path."""
+
+    def _client(self, sock=None):
+        return harvest.AnthropicGatewayClient(
+            "http://gw", "key", "claude-sonnet-5", 5, 16384,
+            stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
+
+    def test_text_and_tool_call_stream_assembled(self):
+        frames = [
+            ("message_start", json.dumps({"message": {"usage": {"input_tokens": 11}}})),
+            ("content_block_start", json.dumps({"index": 0, "content_block": {"type": "text", "text": ""}})),
+            ("content_block_delta", json.dumps({"index": 0, "delta": {"type": "text_delta", "text": "Hello "}})),
+            ("content_block_delta", json.dumps({"index": 0, "delta": {"type": "text_delta", "text": "world"}})),
+            ("content_block_stop", json.dumps({"index": 0})),
+            ("content_block_start", json.dumps({"index": 1, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "search"}})),
+            ("content_block_delta", json.dumps({"index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"query":'}})),
+            ("content_block_delta", json.dumps({"index": 1, "delta": {"type": "input_json_delta", "partial_json": ' "sky"}'}})),
+            ("content_block_stop", json.dumps({"index": 1})),
+            ("message_delta", json.dumps({"delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 7}})),
+            ("message_stop", json.dumps({})),
+        ]
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        msg = result["choices"][0]["message"]
+        self.assertEqual(msg["content"], "Hello world")
+        self.assertEqual(len(msg["tool_calls"]), 1)
+        tc = msg["tool_calls"][0]
+        self.assertEqual(tc["id"], "toolu_1")
+        self.assertEqual(tc["function"]["name"], "search")
+        self.assertEqual(json.loads(tc["function"]["arguments"]), {"query": "sky"})
+        self.assertEqual(result["choices"][0]["finish_reason"], "tool_use")
+        self.assertEqual(result["usage"], {"input_tokens": 11, "output_tokens": 7})
+
+    def test_text_only_stream_has_no_tool_calls(self):
+        frames = [
+            ("message_start", json.dumps({"message": {"usage": {"input_tokens": 3}}})),
+            ("content_block_start", json.dumps({"index": 0, "content_block": {"type": "text", "text": ""}})),
+            ("content_block_delta", json.dumps({"index": 0, "delta": {"type": "text_delta", "text": "just text"}})),
+            ("content_block_stop", json.dumps({"index": 0})),
+            ("message_delta", json.dumps({"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}})),
+            ("message_stop", json.dumps({})),
+        ]
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        msg = result["choices"][0]["message"]
+        self.assertEqual(msg["content"], "just text")
+        self.assertNotIn("tool_calls", msg)
+        self.assertEqual(result["choices"][0]["finish_reason"], "end_turn")
+
+
+class TestResponsesStreaming(unittest.TestCase):
+    """ResponsesGatewayClient._complete_streaming -> OpenAI-shaped dict."""
+
+    def _client(self, sock=None):
+        return harvest.ResponsesGatewayClient(
+            "http://gw", "key", "gpt-5.4", 5, 16384,
+            stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
+
+    def test_text_delta_stream_assembled(self):
+        frames = [
+            (None, json.dumps({"type": "response.output_text.delta", "delta": "Hel"})),
+            (None, json.dumps({"type": "response.output_text.delta", "delta": "lo"})),
+            (None, json.dumps({"type": "response.completed",
+                               "response": {"status": "completed", "usage": {"input_tokens": 5, "output_tokens": 2}}})),
+        ]
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        msg = result["choices"][0]["message"]
+        self.assertEqual(msg["content"], "Hello")
+        self.assertNotIn("tool_calls", msg)
+        self.assertEqual(result["choices"][0]["finish_reason"], "completed")
+        self.assertEqual(result["usage"], {"input_tokens": 5, "output_tokens": 2})
+
+    def test_function_call_stream_assembled(self):
+        frames = [
+            (None, json.dumps({"type": "response.output_item.added", "output_index": 0,
+                               "item": {"type": "function_call", "call_id": "call_1", "name": "fetch"}})),
+            (None, json.dumps({"type": "response.function_call_arguments.delta", "output_index": 0,
+                               "delta": '{"url":'})),
+            (None, json.dumps({"type": "response.function_call_arguments.delta", "output_index": 0,
+                               "delta": ' "https://a.com"}'})),
+            (None, json.dumps({"type": "response.output_item.done", "output_index": 0,
+                               "item": {"type": "function_call", "call_id": "call_1", "name": "fetch",
+                                        "arguments": '{"url": "https://a.com"}'}})),
+            (None, json.dumps({"type": "response.completed",
+                               "response": {"status": "completed", "usage": {"input_tokens": 4}}})),
+        ]
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        msg = result["choices"][0]["message"]
+        self.assertEqual(len(msg["tool_calls"]), 1)
+        tc = msg["tool_calls"][0]
+        self.assertEqual(tc["id"], "call_1")
+        self.assertEqual(tc["function"]["name"], "fetch")
+        self.assertEqual(json.loads(tc["function"]["arguments"]), {"url": "https://a.com"})
+        self.assertEqual(result["choices"][0]["finish_reason"], "completed")
+
+
+class TestGeminiStreaming(unittest.TestCase):
+    """GeminiNativeGatewayClient._complete_streaming -- each SSE frame is a
+    full generateContent snapshot; parts accumulate, usage is the last frame's
+    usageMetadata, logical end is the candidate finishReason."""
+
+    def _client(self, sock=None):
+        return harvest.GeminiNativeGatewayClient(
+            "https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384,
+            stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
+
+    def test_text_snapshot_frames_assembled(self):
+        frames = [
+            (None, json.dumps({"candidates": [{"content": {"parts": [{"text": "Blue "}]}}],
+                               "usageMetadata": {"promptTokenCount": 10}})),
+            (None, json.dumps({"candidates": [{"content": {"parts": [{"text": "sky"}]}}],
+                               "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2}})),
+            (None, json.dumps({"candidates": [{"content": {"parts": [{"text": "."}]}, "finishReason": "STOP"}],
+                               "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 3}})),
+        ]
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        msg = result["choices"][0]["message"]
+        self.assertEqual(msg["content"], "Blue sky.")
+        self.assertNotIn("tool_calls", msg)
+        self.assertEqual(result["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(result["usage"], {"promptTokenCount": 10, "candidatesTokenCount": 3})
+
+    def test_function_call_snapshot_frames_assembled(self):
+        frames = [
+            (None, json.dumps({"candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "search", "args": {"query": "sky"}}}]}, "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 8}})),
+        ]
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        msg = result["choices"][0]["message"]
+        self.assertEqual(msg["content"], "")
+        self.assertEqual(len(msg["tool_calls"]), 1)
+        tc = msg["tool_calls"][0]
+        self.assertEqual(tc["function"]["name"], "search")
+        self.assertEqual(json.loads(tc["function"]["arguments"]), {"query": "sky"})
+        # A tool call forces finish_reason=tool_calls regardless of raw STOP.
+        self.assertEqual(result["choices"][0]["finish_reason"], "tool_calls")
+
+
+class TestGatewayStreaming(unittest.TestCase):
+    """GatewayClient._complete_streaming (OpenAI chat/completions SSE)."""
+
+    def _client(self, sock=None):
+        return harvest.GatewayClient(
+            "http://gw", "key", "model-x", 5,
+            stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
+
+    def test_content_deltas_then_done_sentinel(self):
+        frames = [
+            (None, json.dumps({"choices": [{"delta": {"content": "Hel"}}]})),
+            (None, json.dumps({"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}]})),
+            (None, "[DONE]"),
+        ]
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        msg = result["choices"][0]["message"]
+        self.assertEqual(msg["content"], "Hello")
+        self.assertNotIn("tool_calls", msg)
+        self.assertEqual(result["choices"][0]["finish_reason"], "stop")
+
+    def test_usage_only_final_chunk_with_empty_choices(self):
+        # stream_options.include_usage yields a trailing choices:[] usage-only
+        # chunk after [DONE]-less finish -- usage must be captured, no crash on
+        # the empty choices list.
+        frames = [
+            (None, json.dumps({"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}]})),
+            (None, json.dumps({"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 1}})),
+            (None, "[DONE]"),
+        ]
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        self.assertEqual(result["choices"][0]["message"]["content"], "hi")
+        self.assertEqual(result["usage"], {"prompt_tokens": 5, "completion_tokens": 1})
+
+    def test_tool_call_delta_fragments_assembled(self):
+        frames = [
+            (None, json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "function": {"name": "fetch", "arguments": '{"url":'}}]}}]})),
+            (None, json.dumps({"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": ' "https://a.com"}'}}]}, "finish_reason": "tool_calls"}]})),
+            (None, "[DONE]"),
+        ]
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        tc = result["choices"][0]["message"]["tool_calls"][0]
+        self.assertEqual(tc["id"], "call_1")
+        self.assertEqual(tc["function"]["name"], "fetch")
+        self.assertEqual(json.loads(tc["function"]["arguments"]), {"url": "https://a.com"})
+
+
+def _no_retry(attempt_fn, backoffs=None):
+    """Passthrough replacement for _run_stream_attempt_with_retry that runs a
+    single attempt so a client's raw streaming exception (StreamConnectionLost
+    etc.) propagates uncaught -- lets a test assert the exact exception the
+    attempt raises instead of the RuntimeError the retry wrapper would wrap it
+    in after exhausting backoffs."""
+    return attempt_fn()
+
+
+class TestStreamWatchdog(unittest.TestCase):
+    """TTFT/inter-token fail-fast watchdog behavior."""
+
+    def test_ttft_timeout_retries_then_raises_runtime_error(self):
+        # A connect/first-frame timeout surfaces as socket.timeout when the
+        # client calls next(stream); it is retryable, so the wrapper follows
+        # the full _COMPLETION_RETRY_BACKOFFS schedule (4 sleeps, 5 attempts)
+        # and then raises RuntimeError rather than hanging.
+        client = harvest.GatewayClient("http://gw", "key", "model-x", 5,
+                                       stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_raising(socket.timeout("ttft"))), \
+             mock.patch("harvest.time.sleep") as sleep_mock:
+            with self.assertRaises(RuntimeError):
+                client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        self.assertEqual(sleep_mock.call_count, len(harvest._COMPLETION_RETRY_BACKOFFS))
+        self.assertEqual([c.args[0] for c in sleep_mock.call_args_list],
+                         list(harvest._COMPLETION_RETRY_BACKOFFS))
+
+    def test_inter_token_tightening_fires_once_after_first_content(self):
+        # Once the first content delta arrives, the client tightens the socket
+        # from the generous TTFT window to inter_token_timeout, exactly once.
+        sock = _RecordingSocket()
+        frames = [
+            (None, json.dumps({"choices": [{"delta": {"content": "a"}}]})),
+            (None, json.dumps({"choices": [{"delta": {"content": "b"}, "finish_reason": "stop"}]})),
+            (None, "[DONE]"),
+        ]
+        client = harvest.GatewayClient("http://gw", "key", "model-x", 5,
+                                       stream_enabled=True, ttft_timeout=30, inter_token_timeout=7)
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames, sock=sock)):
+            client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+        self.assertEqual(sock.timeouts, [7])
+
+
+class TestStreamLogicalEnd(unittest.TestCase):
+    """A stream that ends without its provider-specific logical-end marker must
+    raise StreamConnectionLost (retryable) rather than return a truncated
+    result. _run_stream_attempt_with_retry is stubbed to a single attempt so
+    the raw exception is observable."""
+
+    def test_gateway_missing_done_and_finish_reason(self):
+        frames = [(None, json.dumps({"choices": [{"delta": {"content": "partial"}}]}))]
+        client = harvest.GatewayClient("http://gw", "key", "model-x", 5,
+                                       stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)), \
+             mock.patch("harvest._run_stream_attempt_with_retry", side_effect=_no_retry):
+            with self.assertRaises(harvest.StreamConnectionLost):
+                client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+
+    def test_anthropic_missing_message_stop(self):
+        frames = [
+            ("content_block_start", json.dumps({"index": 0, "content_block": {"type": "text", "text": ""}})),
+            ("content_block_delta", json.dumps({"index": 0, "delta": {"type": "text_delta", "text": "hi"}})),
+        ]
+        client = harvest.AnthropicGatewayClient("http://gw", "key", "claude-sonnet-5", 5, 16384,
+                                                stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)), \
+             mock.patch("harvest._run_stream_attempt_with_retry", side_effect=_no_retry):
+            with self.assertRaises(harvest.StreamConnectionLost):
+                client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+
+    def test_responses_missing_completed(self):
+        frames = [(None, json.dumps({"type": "response.output_text.delta", "delta": "hi"}))]
+        client = harvest.ResponsesGatewayClient("http://gw", "key", "gpt-5.4", 5, 16384,
+                                                stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)), \
+             mock.patch("harvest._run_stream_attempt_with_retry", side_effect=_no_retry):
+            with self.assertRaises(harvest.StreamConnectionLost):
+                client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+
+    def test_gemini_missing_finish_reason(self):
+        frames = [(None, json.dumps({"candidates": [{"content": {"parts": [{"text": "hi"}]}}],
+                                     "usageMetadata": {"promptTokenCount": 3}}))]
+        client = harvest.GeminiNativeGatewayClient("https://gw.example.com/v1", "key", "gemini-3.5-flash", 5, 16384,
+                                                   stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)), \
+             mock.patch("harvest._run_stream_attempt_with_retry", side_effect=_no_retry):
+            with self.assertRaises(harvest.StreamConnectionLost):
+                client.complete(messages=[{"role": "user", "content": "x"}], tools=None)
+
+
+class TestStreamRetry(unittest.TestCase):
+    """_run_stream_attempt_with_retry classification: retryable transient
+    failures are retried under _COMPLETION_RETRY_BACKOFFS; StreamNotSupported
+    propagates immediately without a retry or a sleep."""
+
+    def test_retryable_failure_then_success(self):
+        attempts = []
+
+        def attempt_fn():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise harvest.StreamConnectionLost("dropped")
+            return {"ok": True}
+
+        with mock.patch("harvest.time.sleep") as sleep_mock:
+            result = harvest._run_stream_attempt_with_retry(attempt_fn)
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(attempts), 2)
+        # First retry sleeps the first backoff in the shared schedule.
+        sleep_mock.assert_called_once_with(harvest._COMPLETION_RETRY_BACKOFFS[0])
+
+    def test_stream_not_supported_propagates_without_retry(self):
+        attempts = []
+
+        def attempt_fn():
+            attempts.append(1)
+            raise harvest.StreamNotSupportedError("plain json body, not SSE")
+
+        with mock.patch("harvest.time.sleep") as sleep_mock:
+            with self.assertRaises(harvest.StreamNotSupportedError):
+                harvest._run_stream_attempt_with_retry(attempt_fn)
+        self.assertEqual(len(attempts), 1)
+        sleep_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Supplementary streaming coverage: the fixtures above always terminate a
+# frame with a trailing blank line before EOF, so the "flush a buffered
+# partial frame at EOF" branch and the readline-level socket.timeout ->
+# StreamIdleTimeout translation inside _http_stream_post itself were never
+# exercised by a real (non-mocked-away) call. These classes close that gap
+# without touching any pre-existing test.
+# ---------------------------------------------------------------------------
+
+class _RaisingSSEHTTPResponse:
+    """Like FakeSSEHTTPResponse, but readline() raises `exc` once the
+    scripted lines are exhausted instead of returning b'' (EOF) -- exercises
+    _http_stream_post's own except clause around resp.readline(), rather than
+    a test that mocks _http_stream_post away and injects the exception at the
+    generator boundary."""
+
+    def __init__(self, lines, exc, content_type="text/event-stream"):
+        self._lines = list(lines)
+        self._exc = exc
+        self.headers = {"Content-Type": content_type}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, *args):
+        return b""
+
+    def readline(self):
+        if self._lines:
+            return self._lines.pop(0)
+        raise self._exc
+
+
+class TestStreamPostEOFAndTimeout(unittest.TestCase):
+    """_http_stream_post: EOF-flush of an unterminated frame, and the
+    readline-level socket.timeout -> StreamIdleTimeout translation."""
+
+    def test_first_yield_is_the_response_object_itself(self):
+        fake = FakeSSEHTTPResponse([b"data: x\n", b"\n"])
+        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+            stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
+            resp = next(stream)
+        self.assertIs(resp, fake)
+
+    def test_eof_without_trailing_blank_line_flushes_buffered_frame(self):
+        # No terminating blank line before EOF (b"") -- the partial frame
+        # sitting in data_lines/event_type must still be yielded, not
+        # silently dropped.
+        fake = FakeSSEHTTPResponse([b"event: message\n", b"data: partial\n"])
+        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+            stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
+            next(stream)
+            frames = list(stream)
+        self.assertEqual(frames, [("message", "partial")])
+
+    def test_eof_with_no_buffered_content_yields_nothing(self):
+        # Clean EOF right after a terminated frame -- no extra empty frame.
+        fake = FakeSSEHTTPResponse([b"data: x\n", b"\n"])
+        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+            stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
+            next(stream)
+            frames = list(stream)
+        self.assertEqual(frames, [(None, "x")])
+
+    def test_readline_socket_timeout_raises_stream_idle_timeout(self):
+        # A real socket.timeout surfacing from readline() itself (e.g. the
+        # inter-token watchdog firing) is translated to StreamIdleTimeout at
+        # the _http_stream_post call site, not left as a bare socket.timeout.
+        fake = _RaisingSSEHTTPResponse([b"data: x\n", b"\n"], socket.timeout("idle"))
+        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+            stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
+            next(stream)
+            self.assertEqual(next(stream), (None, "x"))  # one complete frame, no raise yet
+            with self.assertRaises(harvest.StreamIdleTimeout):
+                next(stream)
+
+    def test_readline_connection_reset_raises_stream_idle_timeout(self):
+        # ConnectionResetError is in the same _STREAM_READ_EXCEPTIONS set and
+        # collapses to StreamIdleTimeout exactly like socket.timeout does --
+        # the caller's retry loop treats both as transient regardless of the
+        # underlying exception type.
+        fake = _RaisingSSEHTTPResponse([], ConnectionResetError("reset"))
+        with mock.patch("harvest.urllib.request.urlopen", return_value=fake):
+            stream = harvest._http_stream_post("http://gw/stream", {}, {}, 5)
+            next(stream)
+            with self.assertRaises(harvest.StreamIdleTimeout):
+                next(stream)
+
+
+class TestAnthropicStreamingErrorEvent(unittest.TestCase):
+    """AnthropicGatewayClient._complete_streaming: a mid-stream SSE `error`
+    event is a hard signal from the provider, not a malformed frame -- must
+    raise StreamConnectionLost so the retry wrapper reattempts rather than
+    returning a truncated result."""
+
+    def _client(self):
+        return harvest.AnthropicGatewayClient(
+            "http://gw", "key", "claude-sonnet-5", 5, 16384,
+            stream_enabled=True, ttft_timeout=5, inter_token_timeout=5)
+
+    def test_error_event_mid_stream_raises_stream_connection_lost(self):
+        frames = [
+            ("message_start", json.dumps({"message": {"usage": {"input_tokens": 5}}})),
+            ("content_block_start", json.dumps({"index": 0, "content_block": {"type": "text", "text": ""}})),
+            ("content_block_delta", json.dumps({"index": 0, "delta": {"type": "text_delta", "text": "hi"}})),
+            ("error", json.dumps({"type": "error", "error": {"type": "overloaded_error", "message": "boom"}})),
+        ]
+        with mock.patch("harvest._http_stream_post", side_effect=_stream_of(frames)), \
+             mock.patch("harvest._run_stream_attempt_with_retry", side_effect=_no_retry):
+            with self.assertRaises(harvest.StreamConnectionLost):
+                self._client().complete(messages=[{"role": "user", "content": "x"}], tools=None)
 
 
 if __name__ == "__main__":

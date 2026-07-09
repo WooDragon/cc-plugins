@@ -17,15 +17,18 @@ behavior coverage.
 """
 
 import argparse
+import contextlib
 import gzip
 import hashlib
 import html
+import http.client
 import ipaddress
 import json
 import os
 import re
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -480,6 +483,244 @@ def _http_json_post_with_retry(url, payload, headers, timeout, transient_backoff
             if retries_done >= len(backoffs):
                 raise RuntimeError(f"network error after {attempt} attempts: {e}") from e
             time.sleep(backoffs[retries_done])
+
+
+# ---------------------------------------------------------------------------
+# SSE streaming infrastructure (fail-fast watchdog for completion calls)
+#
+# Pure protocol layer: _http_stream_post knows nothing about any provider's
+# event shapes, only the generic SSE wire format (event:/data:/comment lines
+# terminated by a blank line). Each of the four completion clients' complete()
+# consumes this generator and layers its own provider-specific frame parsing
+# and logical-end detection on top -- see AnthropicGatewayClient.complete /
+# ResponsesGatewayClient.complete / GeminiNativeGatewayClient.complete /
+# GatewayClient.complete.
+# ---------------------------------------------------------------------------
+
+class StreamIdleTimeout(RuntimeError):
+    """Inter-token or TTFT (time-to-first-token) timeout -- transient,
+    retryable under the same backoff schedule as a network-layer failure."""
+
+
+class StreamConnectionLost(RuntimeError):
+    """Mid-stream connection drop (socket reset, truncated read, TLS error)
+    -- transient, retryable."""
+
+
+class StreamNotSupportedError(RuntimeError):
+    """Server returned HTTP 200 but the body is not an SSE stream (e.g. a
+    plain application/json error payload) -- permanent, callers must NOT
+    retry this as a transient stream failure. The escape-hatch config flags
+    (limits.anthropic_stream etc.) exist precisely so an operator can flip
+    back to the non-streaming path if a gateway turns out not to support
+    streaming at all."""
+
+
+def _get_raw_socket(resp):
+    """Best-effort extraction of the underlying socket from an
+    http.client.HTTPResponse so a caller can settimeout() it once streaming
+    is under way (tightening from a generous TTFT timeout to a tighter
+    inter-token timeout). Tries the shapes seen across CPython's http.client/
+    ssl-wrapped-socket implementations; returns None (never raises) if none
+    match, so a caller that can't get a socket degrades to "no watchdog
+    tightening" rather than crashing."""
+    for attr_chain in [('fp', 'raw', '_sock'), ('fp', '_sock'), ('sock',)]:
+        obj = resp
+        for attr in attr_chain:
+            obj = getattr(obj, attr, None)
+            if obj is None:
+                break
+        else:
+            if hasattr(obj, 'settimeout'):
+                return obj
+    return None
+
+
+# Exceptions that can surface from resp.readline()/resp.read() once the
+# connection is open -- collapsed into StreamIdleTimeout at the readline
+# call site (the caller distinguishes idle-timeout from connection-lost by
+# *when* in the frame lifecycle the exception occurred, not by exception
+# type -- both socket.timeout from an inter-token settimeout() and a genuine
+# mid-read connection reset raise through this same set on CPython).
+_STREAM_READ_EXCEPTIONS = (
+    http.client.IncompleteRead, urllib.error.URLError, ConnectionResetError,
+    TimeoutError, socket.timeout, ssl.SSLError,
+)
+
+
+def _http_stream_post(url, payload, headers, initial_timeout):
+    """POST `payload` and yield parsed Server-Sent-Events frames.
+
+    Usage::
+
+        stream = _http_stream_post(url, payload, headers, timeout)
+        resp = next(stream)            # underlying HTTPResponse
+        sock = _get_raw_socket(resp)   # may be None
+        for event_type, data_str in stream:
+            ...
+
+    Yields:
+        - First value: the raw HTTPResponse object, so the caller can obtain
+          the underlying socket via _get_raw_socket() before consuming any
+          frames.
+        - Every value after that: an ``(event_type, data_str)`` tuple, one
+          per complete SSE frame (a run of ``event:``/``data:`` lines
+          terminated by a blank line; multiple ``data:`` lines in one frame
+          are newline-joined per the SSE spec). A bare comment line (leading
+          ``:``) yields ``(None, None)`` immediately as a heartbeat -- it
+          does not participate in frame buffering.
+
+    Raises:
+        urllib.error.HTTPError: the initial connection attempt got a non-2xx
+            response. Re-raised as-is (not wrapped) so a caller's retry loop
+            can classify it exactly like `_http_json_post_with_retry` /
+            `_anthropic_post_with_retry` already do (429/408/5xx transient,
+            other 4xx not) -- the response body is stashed on
+            `e.stream_error_body` (best-effort, mirroring
+            `_read_http_error_body`'s pattern) since `e.read()` can only be
+            called once.
+        StreamNotSupportedError: the connection succeeded (HTTP 200) but the
+            response Content-Type is not text/event-stream (e.g. the gateway
+            fell back to a plain JSON error body) -- permanent, do not retry
+            as a stream failure.
+        StreamConnectionLost: reading the non-SSE response body itself failed
+            at the socket level, or a mid-stream error surfaces at the
+            protocol layer.
+        StreamIdleTimeout: a readline() call raised a socket-level exception
+            while consuming the event stream (covers both "no bytes for N
+            seconds" once the caller has tightened the socket timeout, and a
+            genuine connection drop -- the caller's retry loop treats both as
+            transient either way).
+
+    The whole body runs inside a ``with`` block around the connection-opening
+    call below, so a consumer that stops iterating early (GeneratorExit, e.g.
+    from ``contextlib.closing``) still closes the underlying connection via
+    the context manager's __exit__.
+    """
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=initial_timeout) as resp:
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            if "text/event-stream" not in content_type:
+                try:
+                    body = resp.read(500)
+                except _STREAM_READ_EXCEPTIONS as e:
+                    raise StreamConnectionLost(
+                        f"failed reading non-stream response body "
+                        f"(Content-Type={content_type!r}): {e}"
+                    ) from e
+                body_text = body.decode("utf-8", errors="replace")
+                raise StreamNotSupportedError(
+                    f"expected text/event-stream, got Content-Type={content_type!r}: {body_text}"
+                )
+
+            yield resp
+
+            event_type = None
+            data_lines = []
+            while True:
+                try:
+                    raw_line = resp.readline()
+                except _STREAM_READ_EXCEPTIONS as e:
+                    raise StreamIdleTimeout(f"stream read failed: {e}") from e
+
+                if raw_line == b"":
+                    # EOF -- flush a buffered partial frame (if any), then stop.
+                    if data_lines or event_type is not None:
+                        yield (event_type, "\n".join(data_lines))
+                    return
+
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+
+                if line == "":
+                    # Blank line terminates the current frame (SSE spec) --
+                    # yield unconditionally, even if the frame is empty (a
+                    # stray keepalive blank line); callers already skip
+                    # empty/whitespace-only data_str per the shared
+                    # consumption contract.
+                    yield (event_type, "\n".join(data_lines))
+                    event_type = None
+                    data_lines = []
+                    continue
+
+                if line.startswith(":"):
+                    # Comment/heartbeat line -- does not belong to any frame.
+                    yield (None, None)
+                    continue
+
+                if line.startswith("event:"):
+                    event_type = line[len("event:"):].strip()
+                    continue
+
+                if line.startswith("data:"):
+                    # SSE spec: strip at most one leading space after "data:".
+                    field_value = line[len("data:"):]
+                    if field_value.startswith(" "):
+                        field_value = field_value[1:]
+                    data_lines.append(field_value)
+                    continue
+                # Other SSE fields (id:, retry:) carry no meaning for any of
+                # the four providers this module speaks to -- ignored.
+    except urllib.error.HTTPError as e:
+        # Re-raise (not wrapped in RuntimeError) so the caller's retry loop
+        # can classify by e.code exactly like the non-streaming paths do.
+        # Stash the body since e.read() is single-shot and the caller may
+        # want it for a final error message after retries are exhausted.
+        e.stream_error_body = _read_http_error_body(e)
+        raise
+
+
+# Exceptions a streaming completion attempt can raise that the retry loop
+# below treats as transient (same set specified for all four streaming
+# clients): idle/connection failures at the SSE layer, raw socket-level
+# timeouts (a caller's own settimeout() can raise these directly, not just
+# via _STREAM_READ_EXCEPTIONS inside _http_stream_post), and a malformed
+# frame body (JSONDecodeError) -- one garbled chunk is worth a resend, not a
+# hard failure. urllib.error.HTTPError is handled separately (by status
+# code) rather than blanket-listed here.
+_STREAM_RETRYABLE_EXCEPTIONS = (
+    StreamIdleTimeout, StreamConnectionLost, socket.timeout, TimeoutError,
+    urllib.error.URLError, json.JSONDecodeError, ssl.SSLError,
+)
+
+
+def _run_stream_attempt_with_retry(attempt_fn, backoffs=_COMPLETION_RETRY_BACKOFFS):
+    """Generic bounded-retry wrapper shared by all four streaming complete()
+    paths. `attempt_fn()` performs exactly one full attempt -- open the
+    stream, consume it to completion, assemble and return the OpenAI-shaped
+    result dict -- and this wrapper retries the whole attempt on any
+    transient failure, following the same fixed backoff schedule the
+    non-streaming paths use.
+
+    StreamNotSupportedError is deliberately not caught here: it means the
+    gateway returned HTTP 200 with a non-SSE body (e.g. plain JSON), which no
+    amount of retrying fixes -- it must propagate so the caller can fall back
+    via its escape-hatch config flag (limits.anthropic_stream etc.) instead
+    of being silently swallowed as "just another transient error".
+
+    HTTPError is classified by status like `_http_json_post_with_retry` /
+    `_anthropic_post_with_retry` already do: 429/408/5xx are transient and
+    retried; any other 4xx fails immediately (a malformed request resends
+    identically)."""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return attempt_fn()
+        except urllib.error.HTTPError as e:
+            status = e.code
+            transient = status in (429, 408) or 500 <= status < 600
+            body = getattr(e, "stream_error_body", None) or _read_http_error_body(e)
+            if not transient:
+                raise RuntimeError(f"HTTP {status} opening stream: {body}") from e
+            if attempt - 1 >= len(backoffs):
+                raise RuntimeError(f"HTTP {status} opening stream after {attempt} attempts: {body}") from e
+            time.sleep(backoffs[attempt - 1])
+        except _STREAM_RETRYABLE_EXCEPTIONS as e:
+            if attempt - 1 >= len(backoffs):
+                raise RuntimeError(f"stream failed after {attempt} attempts: {e}") from e
+            time.sleep(backoffs[attempt - 1])
 
 
 # ---------------------------------------------------------------------------
@@ -1276,20 +1517,111 @@ def build_backends(config):
 # ---------------------------------------------------------------------------
 
 class GatewayClient:
-    def __init__(self, base_url, api_key, model_id, timeout_s):
+    def __init__(self, base_url, api_key, model_id, timeout_s,
+                 stream_enabled=False, ttft_timeout=None, inter_token_timeout=None,
+                 stream_options=True):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_id = model_id
         self.timeout_s = timeout_s
+        # Streaming is opt-in (default False) so every existing call site --
+        # tests included -- keeps the exact non-streaming behavior it had
+        # before this parameter existed. make_client_factory is the one place
+        # that turns it on from config (limits.gateway_stream).
+        self.stream_enabled = stream_enabled
+        self.ttft_timeout = ttft_timeout
+        self.inter_token_timeout = inter_token_timeout
+        # Some OpenAI-compatible gateways only emit a final usage-bearing
+        # chunk (choices: []) if stream_options.include_usage is requested;
+        # others reject an unrecognized field outright, hence the escape
+        # hatch (limits.gateway_stream_options) rather than always-on.
+        self.stream_options = stream_options
 
     def complete(self, messages, tools):
+        if not self.stream_enabled:
+            url = self.base_url + "/chat/completions"
+            payload = {"model": self.model_id, "messages": messages}
+            if tools:
+                payload["tools"] = tools
+            headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+            return _http_json_post_with_retry(url, payload, headers, self.timeout_s,
+                                               transient_backoffs=_COMPLETION_RETRY_BACKOFFS)
+        return self._complete_streaming(messages, tools)
+
+    def _complete_streaming(self, messages, tools):
         url = self.base_url + "/chat/completions"
-        payload = {"model": self.model_id, "messages": messages}
+        payload = {"model": self.model_id, "messages": messages, "stream": True}
         if tools:
             payload["tools"] = tools
+        if self.stream_options:
+            payload["stream_options"] = {"include_usage": True}
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        return _http_json_post_with_retry(url, payload, headers, self.timeout_s,
-                                           transient_backoffs=_COMPLETION_RETRY_BACKOFFS)
+
+        def attempt():
+            with contextlib.closing(_http_stream_post(url, payload, headers, self.ttft_timeout)) as stream:
+                resp = next(stream)
+                sock = _get_raw_socket(resp)
+                text_parts = []
+                tool_calls = {}  # index -> {"id","type","function":{"name","arguments"}}
+                finish_reason = None
+                usage = {}
+                seen_done = False
+                tightened = False
+                for _event_type, data_str in stream:
+                    if data_str is None or not data_str.strip():
+                        continue
+                    if data_str == "[DONE]":
+                        seen_done = True
+                        break
+                    chunk = json.loads(data_str)  # JSONDecodeError -> outer retry loop
+                    if chunk.get("error"):
+                        raise StreamConnectionLost(f"error frame mid-stream: {chunk['error']}")
+                    if chunk.get("usage"):
+                        usage = chunk["usage"]
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        # A choices:[] chunk carries only usage (the
+                        # include_usage final chunk) -- nothing else to do.
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta") or {}
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                    has_content = bool(delta.get("content")) or bool(delta.get("tool_calls"))
+                    if has_content and not tightened and sock is not None:
+                        sock.settimeout(self.inter_token_timeout)
+                        tightened = True
+                    if delta.get("content"):
+                        text_parts.append(delta["content"])
+                    for tc in (delta.get("tool_calls") or []):
+                        idx = tc.get("index", 0)
+                        slot = tool_calls.setdefault(idx, {
+                            "id": "", "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        })
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["function"]["name"] = fn["name"]
+                        if fn.get("arguments"):
+                            slot["function"]["arguments"] += fn["arguments"]
+
+            if not seen_done and finish_reason is None:
+                raise StreamConnectionLost("stream ended without [DONE] or a finish_reason")
+
+            message = {"role": "assistant"}
+            if tool_calls:
+                message["content"] = "".join(text_parts) if text_parts else None
+                message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+            else:
+                message["content"] = "".join(text_parts)
+            return {
+                "choices": [{"message": message, "finish_reason": finish_reason}],
+                "usage": usage,
+            }
+
+        return _run_stream_attempt_with_retry(attempt)
 
 
 # ---------------------------------------------------------------------------
@@ -1524,7 +1856,8 @@ def _anthropic_resp_to_oai(resp):
 
 
 class AnthropicGatewayClient:
-    def __init__(self, base_url, api_key, model_id, timeout_s, max_tokens, effort=None):
+    def __init__(self, base_url, api_key, model_id, timeout_s, max_tokens, effort=None,
+                 stream_enabled=False, ttft_timeout=None, inter_token_timeout=None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_id = model_id
@@ -1539,8 +1872,14 @@ class AnthropicGatewayClient:
         # this is a deliberate global default lowering, not "old behavior
         # preserved for old configs".
         self.effort = effort
+        # Streaming opt-in, same contract as GatewayClient's stream_enabled --
+        # default False keeps every existing (positional-args-only) call site
+        # on the old non-streaming behavior untouched.
+        self.stream_enabled = stream_enabled
+        self.ttft_timeout = ttft_timeout
+        self.inter_token_timeout = inter_token_timeout
 
-    def complete(self, messages, tools):
+    def _build_payload(self, messages, tools):
         system, anth_messages = _oai_messages_to_anthropic(messages)
         anth_tools = _oai_tools_to_anthropic(tools)
         system = _inject_cache_control(system, anth_tools, anth_messages)
@@ -1555,6 +1894,15 @@ class AnthropicGatewayClient:
             payload["tools"] = anth_tools
         if self.effort is not None:
             payload["output_config"] = {"effort": self.effort}
+        return payload
+
+    def complete(self, messages, tools):
+        if not self.stream_enabled:
+            return self._complete_blocking(messages, tools)
+        return self._complete_streaming(messages, tools)
+
+    def _complete_blocking(self, messages, tools):
+        payload = self._build_payload(messages, tools)
         url = self.base_url + "/messages"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -1564,6 +1912,99 @@ class AnthropicGatewayClient:
         resp = _anthropic_post_with_retry(url, payload, headers, self.timeout_s,
                                           transient_backoffs=_COMPLETION_RETRY_BACKOFFS)
         return _anthropic_resp_to_oai(resp)
+
+    def _complete_streaming(self, messages, tools):
+        payload = self._build_payload(messages, tools)
+        payload["stream"] = True
+        url = self.base_url + "/messages"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        }
+
+        def attempt():
+            with contextlib.closing(_http_stream_post(url, payload, headers, self.ttft_timeout)) as stream:
+                resp = next(stream)
+                sock = _get_raw_socket(resp)
+                text_parts = []
+                tool_calls = []  # list, in content_block index order
+                current_tool_input_json = {}  # block_index -> accumulated partial_json
+                finish_reason = None
+                usage = {}
+                seen_message_stop = False
+                tightened = False
+                for event_type, data_str in stream:
+                    if data_str is None or not data_str.strip():
+                        continue
+                    chunk = json.loads(data_str)  # JSONDecodeError -> outer retry loop
+                    if event_type == "error":
+                        raise StreamConnectionLost(f"error event mid-stream: {chunk}")
+                    if event_type == "message_start":
+                        msg_usage = (chunk.get("message") or {}).get("usage") or {}
+                        if msg_usage:
+                            usage["input_tokens"] = msg_usage.get("input_tokens")
+                    elif event_type == "content_block_start":
+                        block = chunk.get("content_block") or {}
+                        if block.get("type") == "tool_use":
+                            idx = chunk.get("index", len(tool_calls))
+                            tool_calls.append((idx, {
+                                "id": block.get("id", ""),
+                                "type": "function",
+                                "function": {"name": block.get("name", ""), "arguments": ""},
+                            }))
+                            current_tool_input_json[idx] = ""
+                    elif event_type == "content_block_delta":
+                        delta = chunk.get("delta") or {}
+                        dtype = delta.get("type")
+                        is_content_delta = dtype in ("text_delta", "thinking_delta", "input_json_delta")
+                        if is_content_delta and not tightened and sock is not None:
+                            sock.settimeout(self.inter_token_timeout)
+                            tightened = True
+                        if dtype == "text_delta":
+                            text_parts.append(delta.get("text", ""))
+                        elif dtype == "input_json_delta":
+                            idx = chunk.get("index")
+                            if idx in current_tool_input_json:
+                                current_tool_input_json[idx] += delta.get("partial_json", "")
+                    elif event_type == "message_delta":
+                        delta_usage = chunk.get("usage") or {}
+                        if delta_usage:
+                            usage["output_tokens"] = delta_usage.get("output_tokens")
+                        raw_stop_reason = (chunk.get("delta") or {}).get("stop_reason")
+                        if raw_stop_reason:
+                            finish_reason = raw_stop_reason
+                    elif event_type == "message_stop":
+                        seen_message_stop = True
+
+            if not seen_message_stop:
+                raise StreamConnectionLost("stream ended without a message_stop event")
+
+            # Fold each tool call's accumulated partial_json into its
+            # function.arguments, matching _anthropic_resp_to_oai's
+            # json.dumps(tool_use.input)-as-a-string contract.
+            ordered_tool_calls = []
+            for idx, tc in tool_calls:
+                raw_json = current_tool_input_json.get(idx, "")
+                try:
+                    parsed_input = json.loads(raw_json) if raw_json else {}
+                except json.JSONDecodeError:
+                    parsed_input = {}
+                tc["function"]["arguments"] = json.dumps(parsed_input, ensure_ascii=False)
+                ordered_tool_calls.append(tc)
+
+            message = {"role": "assistant"}
+            if ordered_tool_calls:
+                message["content"] = "".join(text_parts) if text_parts else None
+                message["tool_calls"] = ordered_tool_calls
+            else:
+                message["content"] = "".join(text_parts)
+            return {
+                "choices": [{"message": message, "finish_reason": finish_reason}],
+                "usage": usage,
+            }
+
+        return _run_stream_attempt_with_retry(attempt)
 
 
 _CACHE_CONTROL = {"type": "ephemeral"}
@@ -1793,7 +2234,9 @@ def _responses_resp_to_oai(resp):
 
 
 class ResponsesGatewayClient:
-    def __init__(self, base_url, api_key, model_id, timeout_s, max_output_tokens):
+    def __init__(self, base_url, api_key, model_id, timeout_s, max_output_tokens,
+                 stream_enabled=False, ttft_timeout=None, inter_token_timeout=None,
+                 stream_options=True):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_id = model_id
@@ -1808,8 +2251,20 @@ class ResponsesGatewayClient:
         # Anthropic path (config-level single source of truth for "how big
         # can a completion be").
         self.max_output_tokens = max_output_tokens
+        # Streaming opt-in, same contract as GatewayClient/AnthropicGatewayClient.
+        self.stream_enabled = stream_enabled
+        self.ttft_timeout = ttft_timeout
+        self.inter_token_timeout = inter_token_timeout
+        # Defaults to always-on (unlike GatewayClient's stream_options, which
+        # defaults on but is meant to be flippable per-gateway) -- Responses
+        # needs the final usage-bearing event to populate the returned
+        # dict's "usage" key at all. Exposed as a constructor param anyway
+        # so make_client_factory can wire it to the same
+        # limits.gateway_stream_options escape hatch as GatewayClient, in
+        # case a gateway ever rejects the field outright.
+        self.stream_options = stream_options
 
-    def complete(self, messages, tools):
+    def _build_payload(self, messages, tools):
         instructions, input_items = _oai_messages_to_responses(messages)
         resp_tools = _oai_tools_to_responses(tools)
         payload = {
@@ -1821,11 +2276,96 @@ class ResponsesGatewayClient:
             payload["instructions"] = instructions
         if resp_tools is not None:
             payload["tools"] = resp_tools
+        return payload
+
+    def complete(self, messages, tools):
+        if not self.stream_enabled:
+            return self._complete_blocking(messages, tools)
+        return self._complete_streaming(messages, tools)
+
+    def _complete_blocking(self, messages, tools):
+        payload = self._build_payload(messages, tools)
         url = self.base_url + "/responses"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         resp = _http_json_post_with_retry(url, payload, headers, self.timeout_s,
                                            transient_backoffs=_COMPLETION_RETRY_BACKOFFS)
         return _responses_resp_to_oai(resp)
+
+    def _complete_streaming(self, messages, tools):
+        payload = self._build_payload(messages, tools)
+        payload["stream"] = True
+        url = self.base_url + "/responses"
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+        def attempt():
+            with contextlib.closing(_http_stream_post(url, payload, headers, self.ttft_timeout)) as stream:
+                resp = next(stream)
+                sock = _get_raw_socket(resp)
+                text_parts = []
+                tool_calls = {}  # output_index -> {"id","type","function":{"name","arguments"}}
+                finish_reason = None
+                usage = {}
+                seen_completed = False
+                tightened = False
+                for _event_type, data_str in stream:
+                    if data_str is None or not data_str.strip():
+                        continue
+                    chunk = json.loads(data_str)  # JSONDecodeError -> outer retry loop
+                    ctype = chunk.get("type", "")
+                    if ctype == "error" or chunk.get("error"):
+                        raise StreamConnectionLost(f"error event mid-stream: {chunk}")
+                    if ctype.endswith(".delta") and not tightened and sock is not None:
+                        sock.settimeout(self.inter_token_timeout)
+                        tightened = True
+                    if ctype == "response.output_text.delta":
+                        text_parts.append(chunk.get("delta", ""))
+                    elif ctype in ("response.output_item.added", "response.output_item.done"):
+                        item = chunk.get("item") or {}
+                        if item.get("type") == "function_call":
+                            idx = chunk.get("output_index", len(tool_calls))
+                            slot = tool_calls.setdefault(idx, {
+                                "id": "", "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            })
+                            if item.get("call_id"):
+                                slot["id"] = item["call_id"]
+                            if item.get("name"):
+                                slot["function"]["name"] = item["name"]
+                            if ctype == "response.output_item.done" and item.get("arguments"):
+                                # Consolidated final arguments string, in case
+                                # any function_call_arguments.delta frames
+                                # were missed or coalesced upstream.
+                                slot["function"]["arguments"] = item["arguments"]
+                    elif ctype == "response.function_call_arguments.delta":
+                        idx = chunk.get("output_index")
+                        if idx is not None:
+                            slot = tool_calls.setdefault(idx, {
+                                "id": "", "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            })
+                            slot["function"]["arguments"] += chunk.get("delta", "")
+                    elif ctype in ("response.completed", "response.incomplete"):
+                        seen_completed = True
+                        response_obj = chunk.get("response") or {}
+                        usage = response_obj.get("usage") or {}
+                        finish_reason = response_obj.get("status")
+
+            if not seen_completed:
+                raise StreamConnectionLost("stream ended without a response.completed/incomplete event")
+
+            message = {"role": "assistant"}
+            ordered_tool_calls = [tool_calls[i] for i in sorted(tool_calls)]
+            if ordered_tool_calls:
+                message["content"] = "".join(text_parts) if text_parts else None
+                message["tool_calls"] = ordered_tool_calls
+            else:
+                message["content"] = "".join(text_parts)
+            return {
+                "choices": [{"message": message, "finish_reason": finish_reason}],
+                "usage": usage,
+            }
+
+        return _run_stream_attempt_with_retry(attempt)
 
 
 # ---------------------------------------------------------------------------
@@ -1855,6 +2395,17 @@ def _gemini_generate_content_url(base_url, model_id):
     if base.endswith("/v1"):
         base = base[: -len("/v1")]
     return f"{base}/v1beta/models/{model_id}:generateContent"
+
+
+def _gemini_stream_generate_content_url(base_url, model_id):
+    """Streaming counterpart of _gemini_generate_content_url -- same base-url
+    normalization, but the streamGenerateContent method with alt=sse so the
+    gateway (assumed to speak the standard Gemini REST surface) emits
+    Server-Sent Events instead of a single buffered JSON array."""
+    base = base_url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return f"{base}/v1beta/models/{model_id}:streamGenerateContent?alt=sse"
 
 
 def _oai_tools_to_gemini(tools):
@@ -2041,14 +2592,19 @@ def _gemini_resp_to_oai(resp):
 
 
 class GeminiNativeGatewayClient:
-    def __init__(self, base_url, api_key, model_id, timeout_s, max_output_tokens):
+    def __init__(self, base_url, api_key, model_id, timeout_s, max_output_tokens,
+                 stream_enabled=False, ttft_timeout=None, inter_token_timeout=None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_id = model_id
         self.timeout_s = timeout_s
         self.max_output_tokens = max_output_tokens
+        # Streaming opt-in, same contract as the other three clients.
+        self.stream_enabled = stream_enabled
+        self.ttft_timeout = ttft_timeout
+        self.inter_token_timeout = inter_token_timeout
 
-    def complete(self, messages, tools):
+    def _build_payload(self, messages, tools):
         system_instruction, contents = _oai_messages_to_gemini(messages)
         gemini_tools = _oai_tools_to_gemini(tools)
         payload = {
@@ -2059,11 +2615,104 @@ class GeminiNativeGatewayClient:
             payload["systemInstruction"] = system_instruction
         if gemini_tools is not None:
             payload["tools"] = gemini_tools
+        return payload
+
+    def complete(self, messages, tools):
+        if not self.stream_enabled:
+            return self._complete_blocking(messages, tools)
+        return self._complete_streaming(messages, tools)
+
+    def _complete_blocking(self, messages, tools):
+        payload = self._build_payload(messages, tools)
         url = _gemini_generate_content_url(self.base_url, self.model_id)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         resp = _http_json_post_with_retry(url, payload, headers, self.timeout_s,
                                            transient_backoffs=_COMPLETION_RETRY_BACKOFFS)
         return _gemini_resp_to_oai(resp)
+
+    def _complete_streaming(self, messages, tools):
+        # No "stream": true on the payload -- Gemini switches to SSE purely
+        # via the :streamGenerateContent?alt=sse URL, unlike the other three
+        # providers which flip a payload field on the same endpoint.
+        payload = self._build_payload(messages, tools)
+        url = _gemini_stream_generate_content_url(self.base_url, self.model_id)
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+        def attempt():
+            with contextlib.closing(_http_stream_post(url, payload, headers, self.ttft_timeout)) as stream:
+                resp = next(stream)
+                sock = _get_raw_socket(resp)
+                text_parts = []
+                tool_calls = []
+                usage = {}
+                finish_reason = None
+                prompt_block_reason = None
+                seen_logical_end = False
+                tightened = False
+                for _event_type, data_str in stream:
+                    if data_str is None or not data_str.strip():
+                        continue
+                    # Each SSE data frame is itself a complete
+                    # generateContent-shaped response object (not a delta
+                    # envelope like the other three providers) -- accumulate
+                    # its parts and keep only the latest usageMetadata, which
+                    # the API reports cumulatively.
+                    chunk = json.loads(data_str)  # JSONDecodeError -> outer retry loop
+                    candidates = chunk.get("candidates")
+                    if not candidates:
+                        prompt_block_reason = (chunk.get("promptFeedback") or {}).get("blockReason")
+                        if prompt_block_reason:
+                            raise StreamConnectionLost(f"prompt blocked mid-stream: {prompt_block_reason}")
+                        continue
+                    if chunk.get("usageMetadata"):
+                        usage = chunk["usageMetadata"]
+                    candidate = candidates[0]
+                    content_parts = (candidate.get("content") or {}).get("parts") or []
+                    if content_parts and not tightened and sock is not None:
+                        sock.settimeout(self.inter_token_timeout)
+                        tightened = True
+                    for part in content_parts:
+                        if "text" in part:
+                            text_parts.append(part["text"])
+                        elif "functionCall" in part:
+                            fc = part["functionCall"]
+                            tool_calls.append({
+                                "id": f"call_{uuid.uuid4().hex[:8]}",
+                                "type": "function",
+                                "function": {
+                                    "name": fc.get("name", ""),
+                                    "arguments": json.dumps(fc.get("args", {}), ensure_ascii=False),
+                                },
+                            })
+                    raw_finish = candidate.get("finishReason")
+                    if raw_finish:
+                        seen_logical_end = True
+                        if tool_calls:
+                            finish_reason = "tool_calls"
+                        elif raw_finish == "STOP":
+                            finish_reason = "stop"
+                        elif raw_finish == "MAX_TOKENS":
+                            finish_reason = "length"
+                        else:
+                            finish_reason = raw_finish.lower()
+
+            if not seen_logical_end:
+                raise StreamConnectionLost("stream ended without a candidate finishReason")
+
+            # Determine finish_reason after all frames consumed (tool_calls
+            # may arrive in frames after finishReason — see ADR-013 review #4).
+            if tool_calls:
+                finish_reason = "tool_calls"
+
+            message = {"role": "assistant", "content": "".join(text_parts)}
+            if tool_calls:
+                message["tool_calls"] = tool_calls
+            return {
+                "choices": [{"message": message, "finish_reason": finish_reason}],
+                "usage": usage,
+            }
+
+        return _run_stream_attempt_with_retry(attempt)
 
 
 def make_client_factory(config):
@@ -2113,6 +2762,21 @@ def make_client_factory(config):
     # code change -- gemini* then falls through to the same plain
     # GatewayClient path it used before this client existed.
     gemini_endpoint = config.get("limits", {}).get("gemini_endpoint", "native")
+    # ADR-013: streaming fail-fast watchdog config. ttft (time-to-first-token)
+    # bounds the initial connection + wait-for-first-frame; once any content
+    # delta arrives each client's own settimeout() call tightens to the
+    # (much shorter) inter-token bound, so a stalled-mid-stream gateway is
+    # caught fast instead of hanging for the full ttft window every token.
+    # Same .get()-with-default back-compat pattern as every other key here --
+    # an older config without these keys gets the same defaults declared in
+    # harvest.config.json (streaming on, generous but bounded timeouts).
+    stream_ttft = config.get("limits", {}).get("stream_ttft_timeout_s", 300)
+    stream_inter = config.get("limits", {}).get("stream_inter_token_timeout_s", 90)
+    anthropic_stream = config.get("limits", {}).get("anthropic_stream", True)
+    gpt_stream = config.get("limits", {}).get("gpt_stream", True)
+    gemini_stream = config.get("limits", {}).get("gemini_stream", True)
+    gateway_stream = config.get("limits", {}).get("gateway_stream", True)
+    gateway_stream_options = config.get("limits", {}).get("gateway_stream_options", False)
 
     def factory(model_id):
         # claude models go through the Anthropic-native /messages path so
@@ -2126,12 +2790,21 @@ def make_client_factory(config):
         # run_judge_with_fallback can freely mix client types across its
         # candidates.
         if model_id.startswith("claude"):
-            return AnthropicGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens, effort=effort)
+            return AnthropicGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens, effort=effort,
+                                           stream_enabled=anthropic_stream, ttft_timeout=stream_ttft,
+                                           inter_token_timeout=stream_inter)
         if model_id.startswith("gpt") and gpt_endpoint == "responses":
-            return ResponsesGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens)
+            return ResponsesGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens,
+                                           stream_enabled=gpt_stream, ttft_timeout=stream_ttft,
+                                           inter_token_timeout=stream_inter,
+                                           stream_options=gateway_stream_options)
         if model_id.startswith("gemini") and gemini_endpoint == "native":
-            return GeminiNativeGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens)
-        return GatewayClient(gw["base_url"], api_key, model_id, timeout)
+            return GeminiNativeGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens,
+                                              stream_enabled=gemini_stream, ttft_timeout=stream_ttft,
+                                              inter_token_timeout=stream_inter)
+        return GatewayClient(gw["base_url"], api_key, model_id, timeout,
+                              stream_enabled=gateway_stream, ttft_timeout=stream_ttft,
+                              inter_token_timeout=stream_inter, stream_options=gateway_stream_options)
 
     return factory
 
