@@ -855,7 +855,11 @@ def _fetch_tavily_extract(cfg, url, timeout, max_chars):
 
 def _fetch_jina_reader(cfg, url, timeout, max_chars):
     api_key = os.environ.get(cfg.get("api_key_env", ""), "")
-    headers = {"Accept": "text/plain", "Accept-Encoding": "identity"}
+    # r.jina.ai rejects urllib's default "Python-urllib/3.x" UA with HTTP 403
+    # (independent of the API key -- any non-default UA gets 200). Send the
+    # same UA as _fetch_urllib_ua so this backend isn't silently 403'd.
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; harvest.py/1.0)",
+               "Accept": "text/plain", "Accept-Encoding": "identity"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request("https://r.jina.ai/" + url, headers=headers)
