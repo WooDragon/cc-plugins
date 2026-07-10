@@ -3992,6 +3992,50 @@ class TestGeminiMessagesConversion(unittest.TestCase):
         self.assertEqual(len(user_turns), 1)
         self.assertEqual(len(user_turns[0]["parts"]), 2)
 
+    def test_empty_assistant_turn_yields_nonempty_part_not_empty_text(self):
+        # Regression for #43: a degenerate assistant message -- empty content
+        # AND no tool_calls (a thinking model that spent its whole output
+        # budget on thoughts, or a safety-stripped candidate whose only
+        # product is content="") -- must NOT serialize to {"text": ""}.
+        # Gemini rejects an empty text part as an uninitialized oneof
+        # (contents[N].parts[0].data: required oneof field 'data' must have
+        # one initialized field -> HTTP 400), which crashed the forced-
+        # synthesis retry. The fallback part must carry a non-empty field,
+        # mirroring anthropic's non-empty-content fallback.
+        for empty in ("", None):
+            _s, contents = harvest._oai_messages_to_gemini([{"role": "assistant", "content": empty}])
+            self.assertEqual(len(contents), 1)
+            self.assertEqual(contents[0]["role"], "model")
+            parts = contents[0]["parts"]
+            self.assertEqual(len(parts), 1)
+            self.assertNotEqual(parts[0].get("text"), "",
+                                f"empty content={empty!r} produced an empty text part (rejected by Gemini)")
+            self.assertTrue(parts[0].get("text"), "fallback part must be a non-empty text oneof")
+
+    def test_forced_synthesis_retry_history_produces_no_empty_parts(self):
+        # Scenario reproduction of #43's exact failure: the forced-synthesis
+        # else-branch (harvest.py) keeps a parse-failed assistant message in
+        # history then appends a user reminder. When that assistant message
+        # is empty (content=""), the replayed contents must contain no empty
+        # text part anywhere -- otherwise Gemini 400s on the retry request.
+        messages = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "goal"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "function": {"name": "search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"r": "A"})},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c2", "function": {"name": "search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c2", "content": json.dumps({"r": "B"})},
+            {"role": "assistant", "content": ""},  # forced-synthesis empty attempt
+            {"role": "user", "content": "JSON parse error: ... Re-output valid findings JSON."},
+        ]
+        _s, contents = harvest._oai_messages_to_gemini(messages)
+        for i, c in enumerate(contents):
+            for j, part in enumerate(c["parts"]):
+                self.assertNotEqual(part.get("text"), "",
+                                    f"contents[{i}].parts[{j}] is an empty text oneof: {c}")
+
 
 class TestGeminiRespToOai(unittest.TestCase):
     def test_plain_text_stop_maps_to_stop(self):
