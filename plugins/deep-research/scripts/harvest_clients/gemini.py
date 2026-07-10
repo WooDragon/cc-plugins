@@ -87,7 +87,11 @@ def _oai_messages_to_gemini(messages):
       messages are concatenated with '\\n\\n', never overwritten by a later
       one). None when there is no system message.
     - role=assistant -> role "model"; text content becomes a text part,
-      each tool_call becomes a functionCall part.
+      each tool_call becomes a functionCall part. When the internal
+      tool_call dict carries a `thought_signature` (captured by
+      _gemini_resp_to_oai off the response's sibling `thoughtSignature`
+      key), it is echoed back as a `thoughtSignature` sibling key on the
+      rebuilt part; when absent it is omitted, never fabricated.
     - role=tool      -> OpenAI's tool message carries no function name, but
       Gemini's functionResponse requires one, so a forward pass records
       {tool_call_id: function_name} from every assistant tool_call seen so
@@ -122,7 +126,10 @@ def _oai_messages_to_gemini(messages):
                     args = json.loads(fn.get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                parts.append({"functionCall": {"name": name, "args": args}})
+                part = {"functionCall": {"name": name, "args": args}}
+                if tc.get("thought_signature") is not None:
+                    part["thoughtSignature"] = tc["thought_signature"]
+                parts.append(part)
             if not parts:
                 parts = [{"text": ""}]
             contents.append({"role": "model", "parts": parts})
@@ -167,7 +174,16 @@ def _gemini_resp_to_oai(resp):
     parsed tool_calls force "tool_calls" (highest priority, regardless of
     the raw finishReason); otherwise "STOP"->"stop", "MAX_TOKENS"->"length",
     and any other raw value is lowercased and passed through as-is (never
-    forged into "stop")."""
+    forged into "stop").
+
+    Gemini 3-series thinking models attach an opaque `thoughtSignature` to a
+    `functionCall` part as a sibling key (not a field of functionCall itself).
+    When present it is carried through onto the tool_call dict as
+    `thought_signature` (snake_case, matching this codebase's internal dict
+    convention) so `_oai_messages_to_gemini` can echo it back verbatim on
+    replay. It is per-part optional -- on parallel function calls only the
+    first part may carry a signature -- so absence means the key is omitted
+    entirely, never fabricated as None."""
     candidates = resp.get("candidates")
     if not candidates:
         block_reason = (resp.get("promptFeedback") or {}).get("blockReason")
@@ -186,14 +202,17 @@ def _gemini_resp_to_oai(resp):
             text_parts.append(part["text"])
         elif "functionCall" in part:
             fc = part["functionCall"]
-            tool_calls.append({
+            tc = {
                 "id": f"call_{uuid.uuid4().hex[:8]}",
                 "type": "function",
                 "function": {
                     "name": fc.get("name", ""),
                     "arguments": json.dumps(fc.get("args", {}), ensure_ascii=False),
                 },
-            })
+            }
+            if "thoughtSignature" in part:
+                tc["thought_signature"] = part["thoughtSignature"]
+            tool_calls.append(tc)
     message = {"role": "assistant", "content": "".join(text_parts)}
     if tool_calls:
         message["tool_calls"] = tool_calls
@@ -299,14 +318,17 @@ class GeminiNativeGatewayClient:
                             text_parts.append(part["text"])
                         elif "functionCall" in part:
                             fc = part["functionCall"]
-                            tool_calls.append({
+                            tc = {
                                 "id": f"call_{uuid.uuid4().hex[:8]}",
                                 "type": "function",
                                 "function": {
                                     "name": fc.get("name", ""),
                                     "arguments": json.dumps(fc.get("args", {}), ensure_ascii=False),
                                 },
-                            })
+                            }
+                            if "thoughtSignature" in part:
+                                tc["thought_signature"] = part["thoughtSignature"]
+                            tool_calls.append(tc)
                     raw_finish = candidate.get("finishReason")
                     if raw_finish:
                         seen_logical_end = True

@@ -3871,6 +3871,44 @@ class TestGeminiMessagesConversion(unittest.TestCase):
         self.assertEqual(parts[0], {"text": "thinking"})
         self.assertEqual(parts[1]["functionCall"], {"name": "search", "args": {"query": "q"}})
 
+    def test_assistant_function_call_with_signature_replayed_as_sibling_key(self):
+        msgs = [{"role": "assistant", "content": None,
+                 "tool_calls": [{"id": "t1", "function": {"name": "search",
+                                 "arguments": json.dumps({"query": "q"})},
+                                 "thought_signature": "sig-xyz"}]}]
+        _s, contents = harvest._oai_messages_to_gemini(msgs)
+        part = contents[0]["parts"][0]
+        self.assertEqual(part["functionCall"], {"name": "search", "args": {"query": "q"}})
+        self.assertEqual(part["thoughtSignature"], "sig-xyz")
+
+    def test_assistant_function_call_without_signature_omits_key(self):
+        msgs = [{"role": "assistant", "content": None,
+                 "tool_calls": [{"id": "t1", "function": {"name": "search",
+                                 "arguments": json.dumps({"query": "q"})}}]}]
+        _s, contents = harvest._oai_messages_to_gemini(msgs)
+        part = contents[0]["parts"][0]
+        self.assertNotIn("thoughtSignature", part)
+
+    def test_round_trip_response_to_replay_preserves_signature(self):
+        # Direct regression test for the "position 2" HTTP 400: the signature
+        # must survive raw response -> internal OAI shape -> replayed Gemini
+        # contents unbroken, or turn 2 of a multi-round tool-call conversation
+        # gets rejected server-side.
+        resp = {"candidates": [{"finishReason": "STOP", "content": {"parts": [
+            {"functionCall": {"name": "search", "args": {"q": "x"}}, "thoughtSignature": "sig-roundtrip"},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        assistant_msg = oai["choices"][0]["message"]
+        messages = [
+            assistant_msg,
+            {"role": "tool", "tool_call_id": assistant_msg["tool_calls"][0]["id"],
+             "content": json.dumps({"result": "ok"})},
+        ]
+        _s, contents = harvest._oai_messages_to_gemini(messages)
+        model_turn = next(c for c in contents if c["role"] == "model")
+        fc_part = next(p for p in model_turn["parts"] if "functionCall" in p)
+        self.assertEqual(fc_part["thoughtSignature"], "sig-roundtrip")
+
     def test_tool_role_resolves_name_from_prior_assistant_call(self):
         msgs = [
             {"role": "assistant", "content": None,
@@ -3971,6 +4009,32 @@ class TestGeminiRespToOai(unittest.TestCase):
         self.assertEqual(len(tool_calls), 2)
         ids = [tc["id"] for tc in tool_calls]
         self.assertEqual(len(set(ids)), 2)
+
+    def test_function_call_with_thought_signature_captured(self):
+        resp = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "search", "args": {"q": "x"}}, "thoughtSignature": "sig-abc"},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        tool_calls = oai["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(tool_calls[0]["thought_signature"], "sig-abc")
+
+    def test_function_call_without_thought_signature_key_absent_not_none(self):
+        resp = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "search", "args": {"q": "x"}}},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        tool_calls = oai["choices"][0]["message"]["tool_calls"]
+        self.assertNotIn("thought_signature", tool_calls[0])
+
+    def test_parallel_function_calls_only_first_has_signature(self):
+        resp = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "search", "args": {"q": "1"}}, "thoughtSignature": "sig-1"},
+            {"functionCall": {"name": "fetch", "args": {"url": "u"}}},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        tool_calls = oai["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(tool_calls[0]["thought_signature"], "sig-1")
+        self.assertNotIn("thought_signature", tool_calls[1])
 
     def test_max_tokens_maps_to_length(self):
         resp = {"candidates": [{"finishReason": "MAX_TOKENS",
@@ -5154,6 +5218,18 @@ class TestGeminiStreaming(unittest.TestCase):
         self.assertEqual(json.loads(tc["function"]["arguments"]), {"query": "sky"})
         # A tool call forces finish_reason=tool_calls regardless of raw STOP.
         self.assertEqual(result["choices"][0]["finish_reason"], "tool_calls")
+
+    def test_function_call_streaming_frame_captures_thought_signature(self):
+        frames = [
+            (None, json.dumps({"candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "search", "args": {"query": "sky"}},
+                 "thoughtSignature": "sig-stream"}]}, "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 8}})),
+        ]
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        msg = result["choices"][0]["message"]
+        self.assertEqual(msg["tool_calls"][0]["thought_signature"], "sig-stream")
 
 
 class TestGatewayStreaming(unittest.TestCase):
