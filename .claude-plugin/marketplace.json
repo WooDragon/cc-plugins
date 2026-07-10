@@ -30,7 +30,7 @@
     {
       "name": "doc-gate",
       "description": "Document editing governance — doc-maintenance skill + hard gate + recall advisory",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "author": {
         "name": "WooDragon"
       },
