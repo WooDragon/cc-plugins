@@ -790,7 +790,12 @@ else
       # ARG_MAX defense: agy only accepts the prompt as a command-line argument,
       # so an oversized prompt trips E2BIG. Treat this as a CLI failure and
       # fall straight through to REST fallback rather than exec'ing a doomed command.
-      AGY_PROMPT_BYTES=${#FULL_PROMPT}
+      # Count BYTES, not characters: the ARG_MAX limit is byte-denominated, but
+      # ${#VAR} counts characters under a UTF-8 locale, so a CJK plan (3 bytes/
+      # char) would undercount ~3x and defeat the 256KB guard. `wc -c` counts
+      # bytes regardless of locale — one fork per hook invocation is negligible,
+      # and it sidesteps the LC_ALL=C prefix-assignment locale-leak footgun.
+      AGY_PROMPT_BYTES=$(printf '%s' "$FULL_PROMPT" | wc -c | tr -d ' ')
       if [ "$AGY_PROMPT_BYTES" -gt 256000 ]; then
         log_decision "agy-skip reason=prompt-too-large bytes=$AGY_PROMPT_BYTES"
         REVIEW=""
