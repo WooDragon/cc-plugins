@@ -4050,6 +4050,90 @@ class TestGeminiRespToOai(unittest.TestCase):
         self.assertEqual(tool_calls[0]["thought_signature"], "sig-1")
         self.assertNotIn("thought_signature", tool_calls[1])
 
+    def test_signature_on_detached_thought_part_bound_to_function_call(self):
+        # Robustness: a thinking-state signature delivered on its own part
+        # (no functionCall in that part) must still be bound to the
+        # functionCall's tool_call, not dropped. Guards the streaming layouts
+        # the official docs warn about, exercised here through the shared
+        # collector via the blocking parser.
+        resp = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "search", "args": {"q": "x"}}},
+            {"text": "", "thoughtSignature": "sig-detached"},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        tool_calls = oai["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(tool_calls[0]["thought_signature"], "sig-detached")
+
+    def test_signature_on_standalone_part_no_text_no_fc_bound(self):
+        # A part carrying ONLY thoughtSignature (neither text nor
+        # functionCall) is not silently dropped -- its signature binds to the
+        # functionCall's tool_call.
+        resp = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "search", "args": {"q": "x"}}},
+            {"thoughtSignature": "sig-standalone"},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        tool_calls = oai["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(tool_calls[0]["thought_signature"], "sig-standalone")
+
+    def test_detached_signature_before_function_call_still_bound(self):
+        # Arrival order independence: a detached signature part that appears
+        # BEFORE its functionCall part is still attached (floating sigs are
+        # placed after the whole part walk completes).
+        resp = {"candidates": [{"content": {"parts": [
+            {"thoughtSignature": "sig-early"},
+            {"functionCall": {"name": "search", "args": {"q": "x"}}},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        tool_calls = oai["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(tool_calls[0]["thought_signature"], "sig-early")
+
+    def test_floating_signature_not_assigned_to_parallel_slot_when_first_signed(self):
+        # Gemini 3 contract: within a step only the FIRST functionCall carries
+        # a signature; parallel calls at slots 1..N legitimately have none and
+        # the server rejects a replay that puts a signature there. So when
+        # slot 0 already holds its own sibling signature, a stray detached
+        # signature must be DROPPED, never spilled onto the second call --
+        # doing so would fabricate a signature in the position the contract
+        # forbids.
+        resp = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "search", "args": {"q": "1"}}, "thoughtSignature": "sig-own"},
+            {"functionCall": {"name": "fetch", "args": {"url": "u"}}},
+            {"thoughtSignature": "sig-floating"},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        tool_calls = oai["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(tool_calls[0]["thought_signature"], "sig-own")
+        self.assertNotIn("thought_signature", tool_calls[1])
+
+    def test_floating_signature_binds_only_to_first_call_not_second(self):
+        # Detached signature + two parallel calls, neither with a sibling
+        # signature: the floating signature binds to slot 0 ONLY; slot 1 stays
+        # unsigned per contract.
+        resp = {"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "search", "args": {"q": "1"}}},
+            {"functionCall": {"name": "fetch", "args": {"url": "u"}}},
+            {"thoughtSignature": "sig-floating"},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        tool_calls = oai["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(tool_calls[0]["thought_signature"], "sig-floating")
+        self.assertNotIn("thought_signature", tool_calls[1])
+
+    def test_pure_text_turn_floating_signature_not_surfaced(self):
+        # A pure-text response (no functionCall) whose signature rides a
+        # trailing empty-text part has no tool_call to receive it; the message
+        # is plain text with no tool_calls, and nothing crashes.
+        resp = {"candidates": [{"finishReason": "STOP", "content": {"parts": [
+            {"text": "the answer"},
+            {"text": "", "thoughtSignature": "sig-orphan"},
+        ]}}]}
+        oai = harvest._gemini_resp_to_oai(resp)
+        msg = oai["choices"][0]["message"]
+        self.assertEqual(msg["content"], "the answer")
+        self.assertIsNone(msg["tool_calls"])
+
     def test_max_tokens_maps_to_length(self):
         resp = {"candidates": [{"finishReason": "MAX_TOKENS",
                                 "content": {"parts": [{"text": "cut off"}]}}]}
@@ -5244,6 +5328,87 @@ class TestGeminiStreaming(unittest.TestCase):
             result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
         msg = result["choices"][0]["message"]
         self.assertEqual(msg["tool_calls"][0]["thought_signature"], "sig-stream")
+
+    def test_signature_in_frame_after_function_call_frame_bound(self):
+        # Direct regression for the production "Corrupted thought signature."
+        # 400: streamGenerateContent may deliver the thinking-state signature
+        # on a LATER frame (an empty-text part) than the functionCall frame.
+        # The old per-frame `if text elif functionCall` walk dropped that
+        # part entirely, so the replayed functionCall carried no signature and
+        # was rejected on the next turn. The signature must bind across frames.
+        frames = [
+            (None, json.dumps({"candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "search", "args": {"query": "france"}}}]}}]})),
+            (None, json.dumps({"candidates": [{"content": {"parts": [
+                {"text": "", "thoughtSignature": "sig-late-frame"}]}, "finishReason": "STOP"}],
+                "usageMetadata": {"promptTokenCount": 9}})),
+        ]
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        tcs = result["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(len(tcs), 1)
+        self.assertEqual(tcs[0]["function"]["name"], "search")
+        self.assertEqual(tcs[0]["thought_signature"], "sig-late-frame")
+        self.assertEqual(result["choices"][0]["finish_reason"], "tool_calls")
+
+    def test_signature_on_standalone_part_frame_bound(self):
+        # A frame whose part carries ONLY thoughtSignature (no text, no
+        # functionCall) must not be dropped -- its signature binds to the
+        # earlier functionCall's tool_call.
+        frames = [
+            (None, json.dumps({"candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "search", "args": {"query": "japan"}}}]}}]})),
+            (None, json.dumps({"candidates": [{"content": {"parts": [
+                {"thoughtSignature": "sig-standalone"}]}, "finishReason": "STOP"}]})),
+        ]
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        tcs = result["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(tcs[0]["thought_signature"], "sig-standalone")
+
+    def test_streaming_round_trip_replays_cross_frame_signature(self):
+        # End-to-end guard against the #93-style self-证 gap: the signature
+        # must survive a REAL cross-frame streaming layout -> internal OAI
+        # shape -> replayed Gemini contents, so turn 2 of a multi-round tool
+        # conversation is accepted server-side. Mirrors the blocking
+        # round-trip test but drives the streaming accumulator with a
+        # detached-signature frame the old code would have dropped.
+        frames = [
+            (None, json.dumps({"candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "search", "args": {"q": "x"}}}]}}]})),
+            (None, json.dumps({"candidates": [{"content": {"parts": [
+                {"text": "", "thoughtSignature": "sig-roundtrip-stream"}]}, "finishReason": "STOP"}]})),
+        ]
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        assistant_msg = result["choices"][0]["message"]
+        messages = [
+            assistant_msg,
+            {"role": "tool", "tool_call_id": assistant_msg["tool_calls"][0]["id"],
+             "content": json.dumps({"result": "ok"})},
+        ]
+        _s, contents = harvest._oai_messages_to_gemini(messages)
+        model_turn = next(c for c in contents if c["role"] == "model")
+        fc_part = next(p for p in model_turn["parts"] if "functionCall" in p)
+        self.assertEqual(fc_part["thoughtSignature"], "sig-roundtrip-stream")
+
+    def test_parallel_calls_first_frame_signature_second_frame_none(self):
+        # Parallel calls where only the first carries a signature (Gemini 3
+        # contract) split across frames: first tool_call keeps its signature,
+        # the second legitimately has none -- and no spurious floating
+        # signature is invented for it.
+        frames = [
+            (None, json.dumps({"candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "search", "args": {"q": "1"}}, "thoughtSignature": "sig-first"}]}}]})),
+            (None, json.dumps({"candidates": [{"content": {"parts": [
+                {"functionCall": {"name": "fetch", "args": {"url": "u"}}}]}, "finishReason": "STOP"}]})),
+        ]
+        with mock.patch("harvest_clients.base._http_stream_post", side_effect=_stream_of(frames)):
+            result = self._client().complete(messages=[{"role": "user", "content": "x"}], tools=harvest.TOOL_SCHEMAS)
+        tcs = result["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(len(tcs), 2)
+        self.assertEqual(tcs[0]["thought_signature"], "sig-first")
+        self.assertNotIn("thought_signature", tcs[1])
 
 
 class TestGatewayStreaming(unittest.TestCase):

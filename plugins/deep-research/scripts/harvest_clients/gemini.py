@@ -156,6 +156,80 @@ def _oai_messages_to_gemini(messages):
     return system_instruction, contents
 
 
+def _collect_gemini_parts(parts, text_parts, tool_calls, floating_sigs):
+    """Walk a list of Gemini content parts, accumulating text into
+    `text_parts`, functionCall parts into `tool_calls`, and any orphaned
+    `thoughtSignature` into `floating_sigs`. Shared by the blocking parser
+    (_gemini_resp_to_oai) and the streaming accumulator
+    (_complete_streaming) so both place signatures identically.
+
+    The signature is read INDEPENDENTLY of the text/functionCall branching.
+    Gemini 3 attaches it as a sibling key on the first functionCall part in
+    the aggregated (blocking) case, but a streamGenerateContent response may
+    instead deliver the thinking-state signature on a separate `thought`
+    part or a trailing empty-text part (per the official thought-signatures
+    guidance -- "the model may return the thought signature in a part with an
+    empty text content part"). The old `if "text" ... elif "functionCall"`
+    walk silently dropped any such part, so the signature never reached the
+    tool_call and the replayed functionCall was rejected server-side as a
+    corrupted/absent signature on the next turn. Capturing the signature per
+    part regardless of the part's other keys is what makes streaming behave
+    like the blocking path, which never saw a detached signature because the
+    server had already aggregated it onto the functionCall part.
+
+    A signature that rides its own functionCall part is attached to that
+    tool_call immediately (`sig = None` so it is not also double-counted as
+    floating); a signature with no functionCall in the same part is left in
+    `floating_sigs` for _attach_floating_sigs to place after the full part/
+    frame walk completes."""
+    for part in parts:
+        sig = part.get("thoughtSignature")
+        if "functionCall" in part:
+            fc = part["functionCall"]
+            tc = {
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": fc.get("name", ""),
+                    "arguments": json.dumps(fc.get("args", {}), ensure_ascii=False),
+                },
+            }
+            if sig is not None:
+                tc["thought_signature"] = sig
+                sig = None
+            tool_calls.append(tc)
+        elif "text" in part:
+            text_parts.append(part["text"])
+        if sig is not None:
+            floating_sigs.append(sig)
+
+
+def _attach_floating_sigs(tool_calls, floating_sigs):
+    """Bind a thought signature that arrived detached from its functionCall
+    part back onto the first tool_call -- and ONLY the first.
+
+    The Gemini 3 contract is strict: within one step the signature belongs to
+    the *first* functionCall part; subsequent parallel calls legitimately
+    carry none, and the server rejects a replay that puts a signature on a
+    call that should not have one. So a detached signature (delivered on a
+    separate `thought`/empty-text part, as streamGenerateContent may do) is
+    bound to tool_calls[0] only, and only when tool_calls[0] does not already
+    carry its own sibling signature. It is never spread across slots 1..N in
+    arrival order -- doing so would fabricate a signature in exactly the
+    position the contract forbids.
+
+    This is a no-op in the aggregated/blocking case, where every signature
+    already rode its functionCall part so floating_sigs is empty. Leftover
+    floating signatures (more than one, or one when slot 0 is already signed,
+    or any when there is no functionCall at all -- a pure-text turn) are
+    dropped: the run_worker loop never replays a pure-text turn to continue
+    tool calling, and the contract wants at most one signature on slot 0."""
+    if not floating_sigs or not tool_calls:
+        return
+    if "thought_signature" not in tool_calls[0]:
+        tool_calls[0]["thought_signature"] = floating_sigs[0]
+
+
 def _gemini_resp_to_oai(resp):
     """Gemini generateContent response -> OpenAI chat-completions shape so
     _extract_message and the run_worker/judge_clusters loops read it
@@ -176,14 +250,17 @@ def _gemini_resp_to_oai(resp):
     and any other raw value is lowercased and passed through as-is (never
     forged into "stop").
 
-    Gemini 3-series thinking models attach an opaque `thoughtSignature` to a
-    `functionCall` part as a sibling key (not a field of functionCall itself).
-    When present it is carried through onto the tool_call dict as
-    `thought_signature` (snake_case, matching this codebase's internal dict
-    convention) so `_oai_messages_to_gemini` can echo it back verbatim on
-    replay. It is per-part optional -- on parallel function calls only the
-    first part may carry a signature -- so absence means the key is omitted
-    entirely, never fabricated as None."""
+    Gemini 3-series thinking models attach an opaque `thoughtSignature` that
+    must be echoed back verbatim on replay (as `thought_signature`, snake_case
+    per this codebase's internal dict convention) or the next turn's replayed
+    functionCall is rejected server-side. In the aggregated response the
+    signature rides the first functionCall part as a sibling key; capture is
+    delegated to _collect_gemini_parts / _attach_floating_sigs (shared with
+    the streaming path) so a signature the server ever delivers on a separate
+    part is still bound to its tool_call rather than dropped. It is per-part
+    optional -- on parallel function calls only the first carries a signature
+    -- so absence means the key is omitted entirely, never fabricated as
+    None."""
     candidates = resp.get("candidates")
     if not candidates:
         block_reason = (resp.get("promptFeedback") or {}).get("blockReason")
@@ -197,22 +274,9 @@ def _gemini_resp_to_oai(resp):
     content_parts = (candidate.get("content") or {}).get("parts") or []
     text_parts = []
     tool_calls = []
-    for part in content_parts:
-        if "text" in part:
-            text_parts.append(part["text"])
-        elif "functionCall" in part:
-            fc = part["functionCall"]
-            tc = {
-                "id": f"call_{uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {
-                    "name": fc.get("name", ""),
-                    "arguments": json.dumps(fc.get("args", {}), ensure_ascii=False),
-                },
-            }
-            if "thoughtSignature" in part:
-                tc["thought_signature"] = part["thoughtSignature"]
-            tool_calls.append(tc)
+    floating_sigs = []
+    _collect_gemini_parts(content_parts, text_parts, tool_calls, floating_sigs)
+    _attach_floating_sigs(tool_calls, floating_sigs)
     message = {"role": "assistant", "content": "".join(text_parts)}
     if tool_calls:
         message["tool_calls"] = tool_calls
@@ -286,6 +350,12 @@ class GeminiNativeGatewayClient:
                 sock = _base._get_raw_socket(resp)
                 text_parts = []
                 tool_calls = []
+                # Accumulated across ALL frames, not per-frame: a thinking-
+                # state thoughtSignature can arrive on a `thought`/empty-text
+                # part in a frame after the functionCall part's frame, so
+                # detached signatures are collected stream-wide and bound to
+                # their tool_calls only once every frame has been consumed.
+                floating_sigs = []
                 usage = {}
                 finish_reason = None
                 prompt_block_reason = None
@@ -313,22 +383,7 @@ class GeminiNativeGatewayClient:
                     if content_parts and not tightened and sock is not None:
                         sock.settimeout(self.inter_token_timeout)
                         tightened = True
-                    for part in content_parts:
-                        if "text" in part:
-                            text_parts.append(part["text"])
-                        elif "functionCall" in part:
-                            fc = part["functionCall"]
-                            tc = {
-                                "id": f"call_{uuid.uuid4().hex[:8]}",
-                                "type": "function",
-                                "function": {
-                                    "name": fc.get("name", ""),
-                                    "arguments": json.dumps(fc.get("args", {}), ensure_ascii=False),
-                                },
-                            }
-                            if "thoughtSignature" in part:
-                                tc["thought_signature"] = part["thoughtSignature"]
-                            tool_calls.append(tc)
+                    _collect_gemini_parts(content_parts, text_parts, tool_calls, floating_sigs)
                     raw_finish = candidate.get("finishReason")
                     if raw_finish:
                         seen_logical_end = True
@@ -348,6 +403,11 @@ class GeminiNativeGatewayClient:
             # may arrive in frames after finishReason — see ADR-013 review #4).
             if tool_calls:
                 finish_reason = "tool_calls"
+
+            # Bind any detached signatures to their functionCalls only now,
+            # after the whole stream is consumed -- a signature frame can
+            # follow its functionCall frame.
+            _attach_floating_sigs(tool_calls, floating_sigs)
 
             message = {"role": "assistant", "content": "".join(text_parts)}
             if tool_calls:
