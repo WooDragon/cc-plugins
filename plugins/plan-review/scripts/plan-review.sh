@@ -957,13 +957,24 @@ else
           fi
         fi
       else
-        # SSE cleaning pipeline: strip the "data: " prefix, drop the non-JSON
-        # "[DONE]" terminator (feeding it to jq raw would abort the parse and lose
-        # every chunk after it), join delta.content across chunks.
-        # -rj: raw output, no per-value newline — O(1) memory, no giant array build.
-        # "// empty": role-only first frame / finish_reason-only last frame carry
-        # no content key; without this jq would emit a literal "null" per frame.
-        REVIEW=$(grep '^data: ' "$ENGINE_OUT" | sed 's/^data: //' | grep -v '^\[DONE\]' | jq -rj '.choices[0].delta.content // empty' 2>/dev/null || true)
+        # SSE cleaning pipeline: strip the "data: " prefix, then parse each frame
+        # in isolation and join delta.content across chunks.
+        #   -R  : read each line as a raw string (not pre-parsed JSON), so ONE
+        #         malformed frame cannot abort the whole parse.
+        #   fromjson? : parse the line to JSON, but the trailing "?" swallows a
+        #         parse error on that single line and skips it — a truncated /
+        #         garbled mid-stream frame (transient gateway hiccup) drops just
+        #         itself instead of discarding every chunk after it. The old
+        #         "-rj '.choices...'" form fed the whole stream to jq at once, so
+        #         a single bad frame aborted parsing and SILENTLY truncated the
+        #         review (2>/dev/null || true hid the exit 5) — a partial body can
+        #         carry a stale verdict and wrongly approve. fromjson? also makes
+        #         the non-JSON "[DONE]" terminator a no-op; the explicit grep -v
+        #         below is kept as belt-and-suspenders and to document intent.
+        #   -j  : join output, no per-value newline — O(1) memory, streaming.
+        #   "// empty": role-only first frame / finish_reason-only last frame /
+        #         empty-choices usage tail carry no content key — skip, don't emit "null".
+        REVIEW=$(grep '^data: ' "$ENGINE_OUT" | sed 's/^data: //' | grep -v '^\[DONE\]' | jq -j -R 'fromjson? | .choices[0].delta.content // empty' 2>/dev/null || true)
       fi
 
       raw_bytes=$(wc -c < "$ENGINE_OUT" | tr -d ' ')

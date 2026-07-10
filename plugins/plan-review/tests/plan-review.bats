@@ -1675,6 +1675,50 @@ SCRIPT_EOF
   [[ "$reason" == *"Survived the DONE terminator"* ]]
 }
 
+# 86b-2. Malformed mid-stream frame → isolated (fromjson?), later frames survive
+@test "rest-sse: malformed mid-stream frame does not truncate the review" {
+  create_failing_engine "agy" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  # A truncated/garbled JSON frame sits BETWEEN two good frames. The old whole-
+  # stream `jq -rj '.choices...'` would abort at the bad frame and silently drop
+  # every chunk after it — here that would lose the [Critical] content following
+  # the verdict, risking a stale/misleading review. `jq -R 'fromjson?'` must skip
+  # only the bad frame and keep both good frames intact.
+  cat > "${MOCK_BIN}/curl" << 'SCRIPT_EOF'
+#!/bin/bash
+out_file=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out_file="$2"; shift 2 ;;
+    --speed-limit|--speed-time) shift 2 ;;
+    --no-buffer) shift ;;
+    *)  shift ;;
+  esac
+done
+[ -n "$out_file" ] && cat > "$out_file" << 'BODY'
+data: {"choices":[{"delta":{"content":"<verdict>CONCERNS</verdict>"}}]}
+
+data: {"choices":[{"delta":{"content":"truncated frame
+
+data: {"choices":[{"delta":{"content":"\n[Critical] survived the bad frame"}}]}
+
+data: [DONE]
+BODY
+printf '200'
+SCRIPT_EOF
+  chmod +x "${MOCK_BIN}/curl"
+  INPUT=$(build_input)
+
+  run_hook
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  # Both the verdict AND the post-bad-frame content must survive.
+  [[ "$reason" == *"CONCERNS"* ]]
+  [[ "$reason" == *"survived the bad frame"* ]]
+}
+
 # 86c. curl exit 28 (stall watchdog) → not parsed, fail-deny with stall reason
 @test "rest-sse: curl exit 28 (stall) → fail-deny, not fed to parser" {
   create_failing_engine "agy" 1
