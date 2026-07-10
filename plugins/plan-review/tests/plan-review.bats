@@ -1751,6 +1751,30 @@ SCRIPT_EOF
   assert_log_contains "rest-debug api_error=boom upstream"
 }
 
+# 86d-2. Large SSE body → first_char probe must not SIGPIPE-kill the hook
+@test "rest-sse: large body does not SIGPIPE-crash the first-char probe" {
+  create_failing_engine "agy" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  # A big (~200KB) valid SSE body. The first_char probe `tr <file | head -c 1`
+  # would let head close the pipe after 1 byte while tr streams the whole body →
+  # tr dies with SIGPIPE (141); under set -o pipefail + set -e that killed the
+  # hook mid-fallback, emitting NO decision JSON. The bounded `head -c 100 | tr`
+  # form must survive and still parse the stream to a verdict.
+  local big_content
+  big_content="<verdict>APPROVE</verdict> $(printf 'y%.0s' $(seq 1 200000))"
+  create_mock_curl_sse "$big_content"
+  INPUT=$(build_input)
+
+  # Must NOT crash: a valid JSON decision must be emitted (assert_*_json checks
+  # exit 0 + parseable JSON — a SIGPIPE crash would fail both).
+  run_hook
+  assert_ack_approve_json
+
+  run_hook
+  assert_approve_json
+}
+
 # 86e. Oversized prompt (> 256KB) → skip agy, log agy-skip, fall to REST
 @test "rest-sse: oversized prompt → skip agy, REST fallback used" {
   # A plan body north of 256KB trips the ARG_MAX guard: agy is skipped (its prompt

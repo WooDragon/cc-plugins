@@ -937,7 +937,15 @@ else
       # response, not an SSE stream), must skip the SSE parser — feeding an error
       # JSON through the "data: " cleaning pipeline silently drops it and yields an
       # empty REVIEW with no diagnosis.
-      first_char=$(tr -d '[:space:]' < "$ENGINE_OUT" 2>/dev/null | head -c 1)
+      # SIGPIPE-safe first-char probe: `tr <big-file | head -c 1` lets head close
+      # the pipe after 1 byte while tr is still streaming the whole body, so tr
+      # dies with SIGPIPE (141). Under `set -o pipefail` the pipeline inherits 141
+      # and `set -e` then kills the hook mid-REST-fallback — before any decision
+      # JSON is emitted — on any sizable body (a normal long review response is
+      # enough). Bounding the read with a leading `head -c 100` means no stage
+      # faces an unbounded producer, so nothing gets SIGPIPE; 100 bytes is ample
+      # to find the first non-space char (leading whitespace before '{'/'data:').
+      first_char=$(head -c 100 "$ENGINE_OUT" 2>/dev/null | tr -d '[:space:]' | head -c 1)
       case "$rest_http_status" in
         2[0-9][0-9]) is_2xx=1 ;;
         *) is_2xx=0 ;;
