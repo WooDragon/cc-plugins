@@ -1748,6 +1748,20 @@ class TestJinaReaderAuthHeader(unittest.TestCase):
             req = self._fetch({})
         self.assertNotIn("Authorization", req.headers)
 
+    def test_user_agent_header_present_with_key(self):
+        # r.jina.ai 403s the default "Python-urllib/3.x" UA regardless of the
+        # API key -- the UA must be sent even when authenticated.
+        req = self._fetch({"JINA_API_KEY": "secret-key"})
+        self.assertEqual(req.headers.get("User-agent"),
+                         "Mozilla/5.0 (compatible; harvest.py/1.0)")
+
+    def test_user_agent_header_present_without_key(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("JINA_API_KEY", None)
+            req = self._fetch({})
+        self.assertEqual(req.headers.get("User-agent"),
+                         "Mozilla/5.0 (compatible; harvest.py/1.0)")
+
 
 # ---------------------------------------------------------------------------
 # SSRF guard scope narrowing: only urllib-ua's direct, model-steered
