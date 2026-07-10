@@ -19,7 +19,7 @@ from pathlib import Path
 # pipeline 为 deep-research 机器生成中间产物，同样不应进文档引用图；
 # deliverables（最终交付）刻意不在此列——它仍需可被 recall 索引。
 EXCLUDED_DIRS = {'.git', '.agents', 'node_modules', '.venv', 'research',
-                 'docs-graph-tests', '.claude', 'logs', 'pipeline'}
+                 'docs-graph-tests', '.claude', 'logs', 'pipeline', 'intake'}
 
 # orphans 白名单（文件名匹配）：索引 / 入口文件天然无入链，不报孤儿。
 ORPHAN_WHITELIST = {'CLAUDE.md', 'README.md', 'MEMORY.md'}

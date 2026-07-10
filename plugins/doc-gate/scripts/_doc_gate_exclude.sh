@@ -6,9 +6,10 @@ doc_gate_is_excluded_path() {
   local fp="$1"
   # location 排除（prepend / 统一处理相对路径）
   # pipeline: deep-research 机器生成中间产物，doc-maintenance 工作流不适用。
+  # intake: deep-research G0 需求门产物（research-goal 等），Lead 半自动生成。
   # deliverables 刻意【不】排除——最终交付散文档受治理。
   case "/$fp" in
-    */.claude/*|*/.claude-plugin/*|*/.agents/directives/*|*/node_modules/*|*/.git/*|*/logs/*|*/pipeline/*) return 0 ;;
+    */.claude/*|*/.claude-plugin/*|*/.agents/directives/*|*/node_modules/*|*/.git/*|*/logs/*|*/pipeline/*|*/intake/*) return 0 ;;
   esac
   # 临时目录排除（绝对路径直配）
   case "$fp" in

@@ -182,6 +182,13 @@ teardown() {
   [ -z "$HOOK_STDOUT" ]
 }
 
+@test "path exclude: intake/requirements/research-goal.md → silent allow (deep-research G0)" {
+  INPUT=$(build_edit_input file_path=/project/intake/requirements/research-goal.md)
+  run_gate
+  assert_allowed
+  [ -z "$HOOK_STDOUT" ]
+}
+
 @test "gate: deliverables/final/report.md without marker → deny (final deliverable, governed)" {
   INPUT=$(build_edit_input file_path=/project/deliverables/final/report.md)
   run_gate
