@@ -163,16 +163,25 @@ MOCK_EOF
 #   - writes <response_body> to the file specified by -o flag (curl -o behavior)
 #   - prints http_status to stdout (simulating curl -w "%{http_code}" behavior)
 #   http_status defaults to "200".
+#   NOTE: writes the body VERBATIM (raw JSON, first char '{'). Post-SSE-migration
+#   the production script treats a body whose first non-space char is '{' as a
+#   non-SSE error object (error bypass), so this generator is now used for the
+#   ERROR-path tests only. For success responses that must parse as an SSE
+#   stream, use create_mock_curl_sse.
 create_mock_curl() {
   local body="$1"
   local status="${2:-200}"
   cat > "${MOCK_BIN}/curl" << MOCK_EOF
 #!/bin/bash
-# Parse -o flag to find output file
+# Parse -o flag to find output file. Consume curl's streaming flags (added by
+# the SSE migration) so their VALUES are not mistaken for positional args:
+#   --no-buffer (no value); --speed-limit N / --speed-time N (one value each).
 out_file=""
 while [ \$# -gt 0 ]; do
   case "\$1" in
     -o) out_file="\$2"; shift 2 ;;
+    --speed-limit|--speed-time) shift 2 ;;
+    --no-buffer) shift ;;
     *)  shift ;;
   esac
 done
@@ -183,6 +192,67 @@ BODY
 fi
 # Simulate curl -w "%{http_code}": write status to stdout (no trailing newline)
 printf '%s' "${status}"
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/curl"
+}
+
+# create_mock_curl_sse <content> [http_status]
+#   Creates a mock curl that emits an OpenAI-compatible SSE stream carrying
+#   <content> as the assistant message, mirroring the real endpoint the
+#   production script now parses (data: {delta} frames + a data: [DONE]
+#   terminator). Used for REST SUCCESS-path tests. <content> is JSON-escaped
+#   via jq so embedded newlines/quotes survive into a single delta frame.
+#   http_status defaults to "200".
+create_mock_curl_sse() {
+  local content="$1"
+  local status="${2:-200}"
+  # Build the SSE body: one content delta frame + the [DONE] terminator.
+  # jq -c produces the escaped JSON object; prefix "data: " per SSE framing.
+  local frame
+  frame=$(jq -nc --arg c "$content" '{choices:[{delta:{content:$c}}]}')
+  local sse_body
+  sse_body="data: ${frame}
+
+data: [DONE]
+"
+  cat > "${MOCK_BIN}/curl" << MOCK_EOF
+#!/bin/bash
+out_file=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out_file="\$2"; shift 2 ;;
+    --speed-limit|--speed-time) shift 2 ;;
+    --no-buffer) shift ;;
+    *)  shift ;;
+  esac
+done
+if [ -n "\$out_file" ]; then
+  cat > "\$out_file" << 'BODY'
+${sse_body}
+BODY
+fi
+printf '%s' "${status}"
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/curl"
+}
+
+# create_stalling_curl
+#   Creates a mock curl that exits 28 (CURLE_OPERATION_TIMEDOUT) — simulates the
+#   --speed-time stall watchdog firing mid-stream. Writes nothing to -o.
+create_stalling_curl() {
+  cat > "${MOCK_BIN}/curl" << 'MOCK_EOF'
+#!/bin/bash
+out_file=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out_file="$2"; shift 2 ;;
+    --speed-limit|--speed-time) shift 2 ;;
+    --no-buffer) shift ;;
+    *)  shift ;;
+  esac
+done
+# Stall watchdog fired: no body, curl aborts with exit 28.
+exit 28
 MOCK_EOF
   chmod +x "${MOCK_BIN}/curl"
 }

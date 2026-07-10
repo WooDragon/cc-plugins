@@ -76,7 +76,8 @@ plugins/
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `REVIEW_ENGINE` | `gemini` | 审阅引擎：`gemini` 或 `claude` |
+| `REVIEW_ENGINE` | `gemini` | 审阅引擎：`gemini`（底层走 agy CLI）或 `claude` |
+| `AGY_MODEL` | `Gemini 3.1 Pro (High)` | agy CLI 模型名（`REVIEW_ENGINE=gemini` 时生效） |
 | `REVIEW_DISABLED` | `0` | `1` 全局关闭 |
 | `REVIEW_DRY_RUN` | `0` | `1` 跳过引擎调用 |
 | `REVIEW_MAX_ROUNDS` | `3` | 非 Critical 最大磋商轮次（CONCERNS 累计） |
@@ -85,6 +86,7 @@ plugins/
 | `REVIEW_API_URL` | _(空)_ | REST API 降级 base URL（OpenAI 兼容格式，如 `https://proxy.example.com`） |
 | `REVIEW_API_KEY` | _(空)_ | REST API 降级 auth key（Bearer token） |
 | `REVIEW_REST_TIMEOUT` | `115` | REST fallback curl 超时秒数（钳制逻辑自动截断到 remaining-3） |
+| `REVIEW_REST_STALL_TIMEOUT` | `90` | REST SSE 流式停滞看门狗秒数（curl `--speed-time`，覆盖推理模型合法 TTFT 避免误杀） |
 | `REVIEW_HOOK_BUDGET` | `595` | hook 总时间预算秒数（600s hook timeout - 5s 余量），控制 retry loop 和 REST timeout 钳制 |
 | `REVIEW_CAPACITY_DELAY` | `25` | 检测到 MODEL_CAPACITY_EXHAUSTED 后等待秒数（REST 配置时跳过此延迟直接 break） |
 | `REVIEW_ENGINE_DEGRADE_TTL` | `3600` | Gemini 降级状态 TTL 秒数；capacity exhaustion 后后续 hook 在 TTL 内直接跳过 CLI 走 REST |

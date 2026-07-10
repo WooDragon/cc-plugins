@@ -103,7 +103,7 @@ teardown() {
 @test "counter: below max rounds → calls engine" {
   set_counter_value 2 test-session 3
   export REVIEW_MAX_ROUNDS=3
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nAll good."
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>\nAll good."
   INPUT=$(build_input)
   run_hook_to_completion
 
@@ -116,7 +116,7 @@ teardown() {
 
 # 8. Plan from tool_input.plan
 @test "plan: extract from tool_input.plan" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>\nLGTM."
   INPUT=$(build_input plan="My specific plan content")
   run_hook_to_completion
 
@@ -125,7 +125,7 @@ teardown() {
 
 # 9. Plan from fallback file
 @test "plan: fallback to planFilePath when tool_input has no plan" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>\nLGTM."
   local plan_file="${TEST_TEMP_DIR}/session-plan.md"
   printf '%s' "Plan from planFilePath" > "$plan_file"
   INPUT=$(build_input_no_plan "planFilePath=${plan_file}")
@@ -159,7 +159,7 @@ teardown() {
 
 # 10c. planFilePath file exists but plan field empty → reads from file
 @test "plan: planFilePath file exists → reads plan from file" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>\nLGTM."
   local plan_file="${TEST_TEMP_DIR}/my-plan.md"
   printf '%s' "Plan content from file" > "$plan_file"
   INPUT=$(build_input_no_plan "planFilePath=${plan_file}")
@@ -174,7 +174,7 @@ teardown() {
 
 # T1. Whitelisted plan file exists → recover content → normal review (APPROVE)
 @test "transcript: recovers plan from whitelisted file → review proceeds" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>\nLGTM."
   printf '# Recovered plan\nStep 1: do X\n' > "${REVIEW_PLAN_DIR}/recovered.md"
   local transcript
   transcript=$(create_transcript_with_plan_file "${REVIEW_PLAN_DIR}/recovered.md")
@@ -276,7 +276,7 @@ teardown() {
 
 # T9. Regression: tool_input.plan still works (legacy contract unbroken)
 @test "transcript: inline tool_input.plan still reviewed (legacy contract)" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>\nLGTM."
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>\nLGTM."
   INPUT=$(build_input plan="Inline legacy plan")
   run_hook_to_completion
 
@@ -303,16 +303,16 @@ teardown() {
 
 # 12. Engine CLI not in PATH → allow JSON with WARNING
 @test "engine: CLI not found → allow JSON with WARNING" {
-  # Don't create any mock — gemini won't exist in MOCK_BIN
+  # Don't create any mock — agy (default engine binary) won't exist in MOCK_BIN
   INPUT=$(build_input)
 
-  # Temporarily override command lookup: hide real gemini if installed
+  # Temporarily override command lookup: hide real agy if installed
   local clean_path="${MOCK_BIN}"
   local orig_path="$PATH"
 
-  # Build PATH without any directory containing gemini
+  # Build PATH without any directory containing agy
   while IFS=: read -r -d: dir || [ -n "$dir" ]; do
-    if [ -d "$dir" ] && [ ! -x "${dir}/gemini" ]; then
+    if [ -d "$dir" ] && [ ! -x "${dir}/agy" ]; then
       clean_path="${clean_path}:${dir}"
     fi
   done <<< "${orig_path}:"
@@ -330,7 +330,7 @@ teardown() {
 
 # 13. Engine call fails (non-zero exit) — retried then deny with failure reason
 @test "engine: call fails → retry then deny with failure reason" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   INPUT=$(build_input)
   run_hook
 
@@ -343,7 +343,7 @@ teardown() {
 
 # 14. Engine returns empty response — retried then allow JSON with WARNING
 @test "engine: empty response → retry then allow JSON with WARNING" {
-  create_mock_engine "gemini" ""
+  create_mock_engine "agy" ""
   INPUT=$(build_input)
   run_hook
 
@@ -359,7 +359,7 @@ teardown() {
 
 # 15. Standard APPROVE tag → ack-deny then ack-round
 @test "verdict: standard APPROVE → ack-deny then allow" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Plan looks solid."
   INPUT=$(build_input)
 
@@ -374,7 +374,7 @@ Plan looks solid."
 
 # 16. Standard CONCERNS tag
 @test "verdict: standard CONCERNS → deny JSON" {
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 Missing error handling."
   INPUT=$(build_input)
   run_hook
@@ -384,7 +384,7 @@ Missing error handling."
 
 # 17. Standard REJECT tag
 @test "verdict: standard REJECT → deny JSON" {
-  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
 Fundamentally flawed approach."
   INPUT=$(build_input)
   run_hook
@@ -394,7 +394,7 @@ Fundamentally flawed approach."
 
 # 18. Mixed case → normalized
 @test "verdict: mixed case <Verdict>approve</Verdict> → APPROVE" {
-  create_mock_engine "gemini" "<Verdict>approve</Verdict>
+  create_mock_engine "agy" "<Verdict>approve</Verdict>
 Looks fine."
   INPUT=$(build_input)
   run_hook_to_completion
@@ -404,7 +404,7 @@ Looks fine."
 
 # 19. BUG FIX: No verdict tag → fail-closed as CONCERNS (no crash)
 @test "verdict: no verdict tag (BUG FIX) → CONCERNS, deny JSON, no crash" {
-  create_mock_engine "gemini" "This plan has some issues but overall looks decent.
+  create_mock_engine "agy" "This plan has some issues but overall looks decent.
 I would suggest improving error handling."
   INPUT=$(build_input)
   run_hook
@@ -419,7 +419,7 @@ I would suggest improving error handling."
 
 # 20. Verdict tag with whitespace
 @test "verdict: whitespace inside tag → extracted correctly" {
-  create_mock_engine "gemini" "<verdict> CONCERNS </verdict>
+  create_mock_engine "agy" "<verdict> CONCERNS </verdict>
 Needs work."
   INPUT=$(build_input)
   run_hook
@@ -429,7 +429,7 @@ Needs work."
 
 # 21. Verdict typo → fail-closed
 @test "verdict: misspelled verdict → CONCERNS (fail-closed)" {
-  create_mock_engine "gemini" "<verdict>APPROV</verdict>
+  create_mock_engine "agy" "<verdict>APPROV</verdict>
 Almost right."
   INPUT=$(build_input)
   run_hook
@@ -445,7 +445,7 @@ Almost right."
 # 22. APPROVE → ack-round clears counter and marker
 @test "branch: APPROVE → counter and marker cleaned after ack-round" {
   set_counter_value 2 test-session 3
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 All good."
   INPUT=$(build_input)
   run_hook_to_completion
@@ -457,7 +457,7 @@ All good."
 
 # 23. CONCERNS → increment counter (both ATTEMPT and TOTAL)
 @test "branch: CONCERNS → counter incremented" {
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 Issues found."
   INPUT=$(build_input)
   run_hook
@@ -469,7 +469,7 @@ Issues found."
 
 # 24a. Ack-deny JSON structure validation
 @test "branch: APPROVE ack-deny JSON has correct structure" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Plan looks solid."
   INPUT=$(build_input)
   run_hook
@@ -493,7 +493,7 @@ Plan looks solid."
 # 24b. Ack-deny with round info (multi-round APPROVE)
 @test "branch: APPROVE ack-deny after prior rounds includes round info" {
   set_counter_value 2 test-session 4
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 All resolved."
   INPUT=$(build_input)
   run_hook
@@ -507,7 +507,7 @@ All resolved."
 
 # 24c. Deny JSON structure validation
 @test "branch: deny JSON has correct structure" {
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 Critical issues."
   INPUT=$(build_input)
   run_hook
@@ -529,7 +529,7 @@ Critical issues."
 # 25. Full 3-round CONCERNS consultation flow
 @test "flow: 3 rounds CONCERNS then safety valve releases" {
   export REVIEW_MAX_ROUNDS=3
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 Still not good enough."
 
   # Round 1: CONCERNS → deny, attempt=1, total=1
@@ -567,7 +567,7 @@ Still not good enough."
 
 # 29. First call fails, retry succeeds → uses retry result
 @test "retry: first call fails, retry succeeds → uses retry result" {
-  create_flaky_engine "gemini" "<verdict>APPROVE</verdict>
+  create_flaky_engine "agy" "<verdict>APPROVE</verdict>
 Looks good after retry."
   INPUT=$(build_input)
 
@@ -584,7 +584,7 @@ Looks good after retry."
 
 # 30. First call empty, retry returns content → uses retry content
 @test "retry: first call empty, retry returns content → uses retry content" {
-  create_flaky_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_flaky_engine "agy" "<verdict>CONCERNS</verdict>
 Issues found on retry." "empty"
   INPUT=$(build_input)
   run_hook
@@ -616,7 +616,7 @@ Issues found on retry." "empty"
 # 26. Safety valve releases, then new plan enters fresh review cycle
 @test "flow: new cycle starts fresh after safety valve releases" {
   export REVIEW_MAX_ROUNDS=3
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 Not good enough."
   INPUT=$(build_input)
 
@@ -631,7 +631,7 @@ Not good enough."
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
 
   # New plan submitted — engine now approves (simulates fresh review)
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 LGTM after revision."
   INPUT=$(build_input plan="Revised plan v2")
   run_hook_to_completion
@@ -651,7 +651,7 @@ LGTM after revision."
   [ "$(get_counter_value)" -eq 0 ]
 
   # Engine fails → fail-deny, counter must remain untouched
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   run_hook
   assert_deny_json
 
@@ -666,7 +666,7 @@ LGTM after revision."
   INPUT=$(build_input)
 
   # Round 1: normal CONCERNS → attempt=1, total=1
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 Issues found."
   run_hook
   assert_deny_json
@@ -674,14 +674,14 @@ Issues found."
   [ "$(get_total_rounds)" -eq 1 ]
 
   # Round 2: engine crashes → fail-deny, counter must stay at 1:1
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   run_hook
   assert_deny_json
   [ "$(get_counter_value)" -eq 1 ]
   [ "$(get_total_rounds)" -eq 1 ]
 
   # Round 3: engine recovers → CONCERNS, attempt=2, total=2
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 Still has issues."
   run_hook
   assert_deny_json
@@ -728,7 +728,7 @@ Still has issues."
 
 # 34. REJECT → ATTEMPT frozen, TOTAL increments
 @test "severity: REJECT → ATTEMPT frozen, TOTAL increments" {
-  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
 [Critical] Security vulnerability found."
   INPUT=$(build_input)
   run_hook
@@ -740,7 +740,7 @@ Still has issues."
 
 # 35. Multiple REJECT → ATTEMPT stays 0
 @test "severity: multiple REJECT → ATTEMPT stays 0" {
-  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
 [Critical] Still broken."
   INPUT=$(build_input)
 
@@ -768,7 +768,7 @@ Still has issues."
   INPUT=$(build_input)
 
   # Round 1: REJECT → attempt=0, total=1
-  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
 [Critical] Flaw found."
   run_hook
   assert_deny_json
@@ -776,7 +776,7 @@ Still has issues."
   [ "$(get_total_rounds)" -eq 1 ]
 
   # Round 2: CONCERNS → attempt=1, total=2
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 [Major] Needs improvement."
   run_hook
   assert_deny_json
@@ -789,7 +789,7 @@ Still has issues."
   INPUT=$(build_input)
 
   # Round 1: CONCERNS → attempt=1, total=1
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 [Major] Needs work."
   run_hook
   assert_deny_json
@@ -797,7 +797,7 @@ Still has issues."
   [ "$(get_total_rounds)" -eq 1 ]
 
   # Round 2: REJECT → attempt resets to 0, total=2
-  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
 [Critical] New critical issue introduced."
   run_hook
   assert_deny_json
@@ -811,13 +811,13 @@ Still has issues."
   INPUT=$(build_input)
 
   # 2 rounds REJECT → attempt stays 0
-  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
 [Critical] Broken."
   run_hook; assert_deny_json  # total=1, attempt=0
   run_hook; assert_deny_json  # total=2, attempt=0
 
   # 2 rounds CONCERNS → attempt goes 1, 2
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 [Major] Issues."
   run_hook; assert_deny_json  # total=3, attempt=1
   run_hook; assert_deny_json  # total=4, attempt=2
@@ -832,7 +832,7 @@ Still has issues."
 
 # 39. REJECT feedback shows Critical message
 @test "severity: REJECT feedback shows Critical message" {
-  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
 [Critical] Data loss risk."
   INPUT=$(build_input)
   run_hook
@@ -846,7 +846,7 @@ Still has issues."
 
 # 40. CONCERNS feedback shows round countdown
 @test "severity: CONCERNS feedback shows round countdown" {
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 [Major] Needs work."
   INPUT=$(build_input)
   run_hook
@@ -867,7 +867,7 @@ Still has issues."
   INPUT=$(build_input)
 
   # Round 1: REJECT → attempt=0, total=1
-  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
 [Critical] Broken."
   run_hook
   assert_deny_json
@@ -881,7 +881,7 @@ Still has issues."
   [ "$(get_total_rounds)" -eq 2 ]
 
   # Round 3: CONCERNS → attempt=1, total=3
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 [Major] Better but not good enough."
   run_hook
   assert_deny_json
@@ -915,7 +915,7 @@ Still has issues."
   INPUT=$(build_input)
 
   # Round 1: CONCERNS → attempt=1, total=1
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 [Major] Issue A."
   run_hook
   assert_deny_json
@@ -929,7 +929,7 @@ Still has issues."
   [ "$(get_total_rounds)" -eq 2 ]
 
   # Round 3: REJECT → attempt resets to 0, total=3
-  create_mock_engine "gemini" "<verdict>REJECT</verdict>
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
 [Critical] New critical flaw introduced."
   run_hook
   assert_deny_json
@@ -937,7 +937,7 @@ Still has issues."
   [ "$(get_total_rounds)" -eq 3 ]
 
   # Round 4: CONCERNS → attempt=1, total=4
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 [Major] Residual issue."
   run_hook
   assert_deny_json
@@ -972,7 +972,7 @@ Still has issues."
 # 42. Empty counter file → treated as 0:0
 @test "counter: empty counter file → treated as 0:0, no crash" {
   touch "${REVIEW_COUNTER_DIR}/.review-count-test-session"
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 Issues."
   INPUT=$(build_input)
   run_hook
@@ -985,7 +985,7 @@ Issues."
 # 43. Garbage in counter file → reset to 0:0
 @test "counter: garbage in counter file → reset to 0:0, no crash" {
   echo "abc:xyz" > "${REVIEW_COUNTER_DIR}/.review-count-test-session"
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 Issues."
   INPUT=$(build_input)
   run_hook
@@ -998,7 +998,7 @@ Issues."
 # 44. Old single-number format → backward compat
 @test "counter: partial format (old single number) → backward compat" {
   echo "2" > "${REVIEW_COUNTER_DIR}/.review-count-test-session"
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 LGTM."
   INPUT=$(build_input)
   run_hook
@@ -1056,7 +1056,7 @@ LGTM."
   local clean_path="${MOCK_BIN}"
   local orig_path="$PATH"
   while IFS=: read -r -d: dir || [ -n "$dir" ]; do
-    if [ -d "$dir" ] && [ ! -x "${dir}/gemini" ]; then
+    if [ -d "$dir" ] && [ ! -x "${dir}/agy" ]; then
       clean_path="${clean_path}:${dir}"
     fi
   done <<< "${orig_path}:"
@@ -1073,7 +1073,7 @@ LGTM."
 
 # 47. Engine exhausted → deny JSON with failure reason (fail-deny, not fail-open)
 @test "skip: engine exhausted → deny JSON with failure reason" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   INPUT=$(build_input)
   run_hook
 
@@ -1161,7 +1161,7 @@ LGTM."
 
 # 53. Full APPROVE ack-round flow: engine APPROVE → ack-deny → ack-round → allow
 @test "ack-round: full end-to-end APPROVE flow" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Plan is solid."
   INPUT=$(build_input)
 
@@ -1180,7 +1180,7 @@ Plan is solid."
 @test "ack-round: plan changed after approve → re-review triggered" {
   # Marker contains hash of "Old plan content"; INPUT uses a different plan
   create_approve_marker "Old plan content" "test-session"
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict> New plan looks good."
+  create_mock_engine "agy" "<verdict>APPROVE</verdict> New plan looks good."
   INPUT=$(build_input 'plan=Completely different plan')
   run_hook
   # Hash mismatch → marker deleted, full review triggered → engine returns APPROVE → ack-deny
@@ -1279,7 +1279,7 @@ Plan is solid."
 
 # 64. Normal invocation writes ENTRY log with tool and session
 @test "log: entry-point written on normal invocation" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 LGTM."
   INPUT=$(build_input)
   run_hook_to_completion
@@ -1335,7 +1335,7 @@ LGTM."
 # 69. Engine timeout (exit 124) triggers fail-deny via existing retry logic
 @test "timeout: engine timeout triggers fail-deny" {
   # exit 124 = timeout's exit code; both attempts timeout → fail-deny (engines were tried)
-  create_failing_engine "gemini" 124
+  create_failing_engine "agy" 124
   INPUT=$(build_input)
   run_hook
 
@@ -1348,7 +1348,7 @@ LGTM."
 # 70. Custom REVIEW_ENGINE_TIMEOUT does not break normal fast responses
 @test "timeout: REVIEW_ENGINE_TIMEOUT env respected" {
   export REVIEW_ENGINE_TIMEOUT=10
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 All good."
   INPUT=$(build_input)
   run_hook_to_completion
@@ -1392,10 +1392,10 @@ All good."
 
 # 75. CLI fails + API configured → REST succeeds
 @test "rest-fallback: CLI fails + API configured → REST succeeds" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nLooks good via REST."}}]}'
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nLooks good via REST.'
   INPUT=$(build_input)
 
   # Step 1: CLI fails → REST fallback → APPROVE → ack-deny
@@ -1411,7 +1411,7 @@ All good."
 
 # 76. CLI fails + API not configured → fail-deny (engines tried, all failed)
 @test "rest-fallback: CLI fails + API not configured → fail-deny" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   # REVIEW_API_URL and REVIEW_API_KEY unset by common_setup
   INPUT=$(build_input)
   run_hook
@@ -1424,7 +1424,7 @@ All good."
 
 # 77. CLI fails + REST also fails → fail-deny with combined reason
 @test "rest-fallback: CLI fails + REST also fails → fail-deny with reason" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
   create_failing_curl 1
@@ -1439,7 +1439,7 @@ All good."
 
 # 78. CLI succeeds → REST not called
 @test "rest-fallback: CLI succeeds → REST not called" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 All good from CLI."
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
@@ -1455,7 +1455,7 @@ All good from CLI."
 
 # 79. CLI fails + curl not found → fail-deny (REST attempted but failed)
 @test "rest-fallback: curl not found → fail-deny" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
   # Remove curl from PATH by not creating a mock (MOCK_BIN has priority)
@@ -1476,10 +1476,10 @@ EOF
 
 # 80. REST response parsing extracts choices[0].message.content
 @test "rest-fallback: response parsing extracts choices[0].message.content" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  create_mock_curl '{"choices":[{"message":{"content":"<verdict>CONCERNS</verdict>\n[Major] Missing error handling."}}]}'
+  create_mock_curl_sse '<verdict>CONCERNS</verdict>\n[Major] Missing error handling.'
   INPUT=$(build_input)
   run_hook
 
@@ -1495,10 +1495,10 @@ EOF
 
 # 81. Capacity exhausted + REST configured → immediate break, REST succeeds
 @test "rest-fallback: capacity exhausted + REST configured → fast break + REST used" {
-  create_capacity_exhausted_engine "gemini"
+  create_capacity_exhausted_engine "agy"
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nLooks good via REST."}}]}'
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nLooks good via REST.'
   INPUT=$(build_input)
 
   # Step 1: CLI hits capacity → fast break → REST fires → APPROVE → ack-deny
@@ -1515,7 +1515,7 @@ EOF
 
 # 82. Capacity exhausted + no REST configured → retries CLI, second attempt succeeds
 @test "rest-fallback: capacity exhausted + no REST configured → retries CLI" {
-  create_capacity_then_success_engine "gemini" "<verdict>APPROVE</verdict>LGTM on retry."
+  create_capacity_then_success_engine "agy" "<verdict>APPROVE</verdict>LGTM on retry."
   # REVIEW_API_URL / REVIEW_API_KEY unset by common_setup — no fast break
   INPUT=$(build_input)
 
@@ -1536,10 +1536,10 @@ EOF
 
 # 83. rest-result log contains http status field on success
 @test "rest-fallback: rest-result log contains http status field" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nLooks good."}}]}'
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nLooks good.'
   INPUT=$(build_input)
 
   run_hook
@@ -1549,7 +1549,7 @@ EOF
 
 # 84. ENGINE_OUT non-empty with API error body → rest-debug api_error logged
 @test "rest-fallback: api error body → rest-debug api_error logged" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
   # Error response has no .choices → REVIEW empty; has .error.message → api_error branch
@@ -1564,7 +1564,7 @@ EOF
 
 # 85. ENGINE_OUT empty (connection failure) → no rest-debug logged
 @test "rest-fallback: connection failure (empty body) → no rest-debug logged" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
   create_failing_curl 7  # exit 7 = connection refused; curl writes nothing to -o file
@@ -1580,21 +1580,26 @@ EOF
 
 # 86. Non-JSON body with control chars → body_prefix branch strips control chars
 @test "rest-fallback: non-JSON body with control chars → body_prefix filtered in log" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  # Hand-write mock: outputs non-JSON binary content (no .error.message) + status "200"
+  # Hand-write mock: outputs non-JSON binary content (no .error.message) + status "500".
+  # Post-SSE-migration the body_prefix diagnostic lives in the error bypass, reached
+  # via a non-2xx status (or a '{'-leading JSON error body); a bare 200 + non-SSE body
+  # would instead fall through to the SSE parser. 500 routes it to the bypass as intended.
   cat > "${MOCK_BIN}/curl" << 'SCRIPT_EOF'
 #!/bin/bash
 out_file=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out_file="$2"; shift 2 ;;
+    --speed-limit|--speed-time) shift 2 ;;
+    --no-buffer) shift ;;
     *)  shift ;;
   esac
 done
 [ -n "$out_file" ] && printf 'Hello\x01\x02World\x03' > "$out_file"
-printf '200'
+printf '500'
 SCRIPT_EOF
   chmod +x "${MOCK_BIN}/curl"
   INPUT=$(build_input)
@@ -1606,6 +1611,124 @@ SCRIPT_EOF
 }
 
 # =============================================================================
+# REST SSE Streaming (agy migration — v1.1.0)
+# =============================================================================
+
+# 86a. Multi-frame SSE stream → delta.content joined across chunks
+@test "rest-sse: multi-frame stream → delta.content joined" {
+  create_failing_engine "agy" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  # Two content frames ("A" + "BC") + [DONE]; parser must join to "ABC".
+  cat > "${MOCK_BIN}/curl" << 'SCRIPT_EOF'
+#!/bin/bash
+out_file=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out_file="$2"; shift 2 ;;
+    --speed-limit|--speed-time) shift 2 ;;
+    --no-buffer) shift ;;
+    *)  shift ;;
+  esac
+done
+[ -n "$out_file" ] && cat > "$out_file" << 'BODY'
+data: {"choices":[{"delta":{"role":"assistant"}}]}
+
+data: {"choices":[{"delta":{"content":"<verdict>APPROVE"}}]}
+
+data: {"choices":[{"delta":{"content":"</verdict>\nJoined OK"}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+BODY
+printf '200'
+SCRIPT_EOF
+  chmod +x "${MOCK_BIN}/curl"
+  INPUT=$(build_input)
+
+  # Joined content = "<verdict>APPROVE</verdict>\nJoined OK" → APPROVE → ack-deny
+  run_hook
+  assert_ack_approve_json
+  [[ "$HOOK_STDERR" == *"REST API fallback succeeded"* ]]
+
+  run_hook
+  assert_approve_json
+}
+
+# 86b. [DONE] terminator does not abort jq parse (content survives)
+@test "rest-sse: [DONE] terminator does not break jq parse" {
+  create_failing_engine "agy" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  # create_mock_curl_sse emits exactly: data:{delta} + blank + data:[DONE].
+  # The [DONE] line is non-JSON; if it reached jq raw the parse would abort and
+  # drop the content. grep -v '^\[DONE\]' must strip it so CONCERNS survives.
+  create_mock_curl_sse '<verdict>CONCERNS</verdict>
+[Major] Survived the DONE terminator.'
+  INPUT=$(build_input)
+
+  run_hook
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"Survived the DONE terminator"* ]]
+}
+
+# 86c. curl exit 28 (stall watchdog) → not parsed, fail-deny with stall reason
+@test "rest-sse: curl exit 28 (stall) → fail-deny, not fed to parser" {
+  create_failing_engine "agy" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_stalling_curl
+  INPUT=$(build_input)
+
+  run_hook
+  assert_deny_json  # fail-deny: CLI + REST both failed
+  assert_log_contains "rest-stall-timeout curl_exit=28"
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"all review engines failed"* ]]
+}
+
+# 86d. Non-2xx JSON error body → error bypass, .error.message logged (not SSE-parsed)
+@test "rest-sse: non-2xx JSON error body → error bypass, not SSE-parsed" {
+  create_failing_engine "agy" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  # 500 + JSON error object (first char '{') → must hit the error bypass, extract
+  # .error.message, and NOT flow through the "data: " SSE cleaning pipeline.
+  create_mock_curl '{"error":{"message":"boom upstream"}}' "500"
+  INPUT=$(build_input)
+
+  run_hook
+  assert_deny_json
+  assert_log_contains "rest-result http=500"
+  assert_log_contains "rest-debug api_error=boom upstream"
+}
+
+# 86e. Oversized prompt (> 256KB) → skip agy, log agy-skip, fall to REST
+@test "rest-sse: oversized prompt → skip agy, REST fallback used" {
+  # A plan body north of 256KB trips the ARG_MAX guard: agy is skipped (its prompt
+  # can only ride the command line) and REST takes over.
+  local big_plan
+  big_plan="<verdict>marker</verdict> $(printf 'x%.0s' $(seq 1 300000))"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>APPROVE</verdict>
+Approved via REST after agy skip.'
+  INPUT=$(build_input plan="$big_plan")
+
+  run_hook
+  assert_ack_approve_json
+  assert_log_contains "agy-skip reason=prompt-too-large"
+  [[ "$HOOK_STDERR" == *"REST API fallback succeeded"* ]]
+
+  run_hook
+  assert_approve_json
+}
+
+# =============================================================================
 # Time-Budget Guard + REST Timeout Clamping (v1.0.23)
 # =============================================================================
 
@@ -1613,11 +1736,11 @@ SCRIPT_EOF
 @test "budget-guard: budget exhausted + REST configured → skip retry → REST fires" {
   # HOOK_BUDGET=1 makes remaining ≈ 1 < ENGINE_TIMEOUT(90) on retry check
   export REVIEW_HOOK_BUDGET=1
-  create_flaky_engine "gemini" "<verdict>APPROVE</verdict>
+  create_flaky_engine "agy" "<verdict>APPROVE</verdict>
 Would succeed on retry but budget prevents it."
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nLooks good via REST."}}]}'
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nLooks good via REST.'
   INPUT=$(build_input)
 
   # Engine attempt 1 fails → budget guard blocks retry → REST fires → APPROVE → ack-deny
@@ -1634,7 +1757,7 @@ Would succeed on retry but budget prevents it."
 # 88. Budget sufficient → normal retry succeeds (no budget skip)
 @test "budget-guard: budget sufficient → normal retry succeeds" {
   # Default budget (115s) easily fits ENGINE_TIMEOUT(90s) retry
-  create_flaky_engine "gemini" "<verdict>APPROVE</verdict>
+  create_flaky_engine "agy" "<verdict>APPROVE</verdict>
 All good on retry."
   INPUT=$(build_input)
 
@@ -1653,7 +1776,7 @@ All good on retry."
 # 89. Budget exhausted + no REST → break retry → fail-deny (engine was tried)
 @test "budget-guard: budget exhausted + no REST → fail-deny" {
   export REVIEW_HOOK_BUDGET=1
-  create_flaky_engine "gemini" "<verdict>APPROVE</verdict>
+  create_flaky_engine "agy" "<verdict>APPROVE</verdict>
 Would succeed on retry."
   # No REST configured (unset by common_setup)
   INPUT=$(build_input)
@@ -1671,24 +1794,12 @@ Would succeed on retry."
 # 90. REST timeout clamped to remaining budget
 @test "budget-guard: REST timeout clamped to remaining budget" {
   export REVIEW_HOOK_BUDGET=10
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  # Mock curl that records the timeout wrapper argument it received
-  cat > "${MOCK_BIN}/curl" << 'SCRIPT_EOF'
-#!/bin/bash
-# Parse -o flag to find output file
-out_file=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -o) out_file="$2"; shift 2 ;;
-    *)  shift ;;
-  esac
-done
-[ -n "$out_file" ] && printf '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\\nOK"}}]}' > "$out_file"
-printf '200'
-SCRIPT_EOF
-  chmod +x "${MOCK_BIN}/curl"
+  # SSE success mock (consumes curl's --speed-limit/--speed-time/--no-buffer flags)
+  create_mock_curl_sse '<verdict>APPROVE</verdict>
+OK'
   INPUT=$(build_input)
 
   run_hook
@@ -1715,11 +1826,11 @@ SCRIPT_EOF
 @test "degrade: fresh degraded file + REST configured → skip CLI, REST used" {
   create_degraded_file 0  # fresh timestamp
   # Gemini mock returns CONCERNS — if called, result would be deny from CONCERNS, not ack-approve
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 [Major] This should not be seen."
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nREST approved."}}]}'
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nREST approved.'
   INPUT=$(build_input)
 
   # Degraded: CLI skipped → REST fires → APPROVE → ack-deny
@@ -1739,7 +1850,7 @@ SCRIPT_EOF
   # Use tiny TTL (1s) and a 5s-old file → expired
   export REVIEW_ENGINE_DEGRADE_TTL=1
   create_degraded_file 5
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 LGTM."
   INPUT=$(build_input)
 
@@ -1754,7 +1865,7 @@ LGTM."
 @test "degrade: fresh degraded file + REST not configured → Gemini called normally" {
   create_degraded_file 0  # fresh, but REST not configured
   # REVIEW_API_URL/REVIEW_API_KEY unset by common_setup — degraded check requires both
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 LGTM from Gemini."
   INPUT=$(build_input)
 
@@ -1767,10 +1878,10 @@ LGTM from Gemini."
 
 # 94. Capacity-fast-break triggers → degraded file written
 @test "degrade: capacity-fast-break → degraded file written" {
-  create_capacity_exhausted_engine "gemini"
+  create_capacity_exhausted_engine "agy"
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nREST approved."}}]}'
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nREST approved.'
   INPUT=$(build_input)
 
   run_hook
@@ -1787,7 +1898,7 @@ LGTM from Gemini."
 
 # 95. Regular failure (exit 1, non-capacity) → degraded file NOT written
 @test "degrade: regular failure (exit 1, non-capacity) → no degraded file written" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   # No REST configured — regular failure path, not capacity path
   INPUT=$(build_input)
 
@@ -1802,7 +1913,7 @@ LGTM from Gemini."
 
 # 96. Gemini capacity exhausted + REST fails → deny with combined failure reason
 @test "degrade: capacity + REST fails → deny with failure reason" {
-  create_capacity_exhausted_engine "gemini"
+  create_capacity_exhausted_engine "agy"
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
   create_failing_curl 1
@@ -1836,7 +1947,7 @@ LGTM from Gemini."
 
 # 98. Regular failure + REST configured → degrade file written at REST entry
 @test "degrade: regular failure + REST configured → degrade file written" {
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
   # REST also fails — we just care that the degrade file is written before REST runs
@@ -1860,10 +1971,10 @@ LGTM from Gemini."
   create_degraded_file 5  # 5s old > 1s TTL → expired; Gemini will be re-called
   local old_ts; old_ts=$(cat "${REVIEW_COUNTER_DIR}/.gemini-degraded")
 
-  create_failing_engine "gemini" 1
+  create_failing_engine "agy" 1
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nREST approved."}}]}'
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nREST approved.'
   INPUT=$(build_input)
 
   run_hook
@@ -1903,7 +2014,7 @@ LGTM from Gemini."
 
 # 102. plan 含 Task( + 完整 manifest → 进入正常引擎审阅路径
 @test "manifest: plan with Task( + Dispatch Manifest → proceeds to engine review" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Plan looks good with manifest."
   local plan_with_manifest="## Plan
 Step 1: Use Task( to run analysis.
@@ -1921,7 +2032,7 @@ Step 1: Use Task( to run analysis.
 
 # 103. plan 不含 Task 关键词 → 不要求 manifest
 @test "manifest: plan without Task/Agent keywords → no manifest required" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Simple plan, no dispatch needed."
   INPUT=$(build_input plan="Simple plan: edit file X, run tests, commit.")
   run_hook
@@ -1943,7 +2054,7 @@ Simple plan, no dispatch needed."
 
 # 105. APPROVE 路径 + plan 含 manifest → dispatch JSON 写入且 schema 合法
 @test "manifest: APPROVE path + manifest → dispatch JSON written with valid schema" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 All good."
   local plan_with_manifest="## Implementation
 Use Task( for isolation.
@@ -1971,7 +2082,7 @@ Use Task( for isolation.
 
 # 106. APPROVE 路径 + plan 无 manifest → 不写 dispatch JSON
 @test "manifest: APPROVE path + no manifest → no dispatch JSON written" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Simple plan approved."
   INPUT=$(build_input plan="Simple plan: edit file, run tests.")
   run_hook_to_completion
@@ -1983,7 +2094,7 @@ Simple plan approved."
 
 # 107. manifest 行含 stray 引号 → 落地 JSON 仍合法（jq -e 通过）
 @test "manifest: stray quotes in manifest rows → dispatch JSON still valid" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 LGTM."
   local plan_with_quoted_manifest='## Task( analysis
 
@@ -2031,7 +2142,7 @@ LGTM."
 
 # 109. APPROVE 写入 dispatch 前清理 stale 文件
 @test "manifest: APPROVE path cleans up stale dispatch files" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Good."
   local plan_with_manifest="## Task( work
 
@@ -2082,7 +2193,7 @@ Step 1: Use Task( for analysis.
 
 # 111. mixed manifest (dash + real agent) → passes pre-flight (non-regression)
 @test "manifest: mixed manifest with real agent_type → passes pre-flight to engine" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 All good."
   local plan_mixed="## Plan
 Step 1: Prepare context. Step 2: Use Task( for heavy lifting.
@@ -2150,7 +2261,7 @@ Step 1: Use Task( for isolation.
 
 # 114. agent_type="worker" + model="-" → NOT blocked (only agent_type checked)
 @test "manifest: real agent_type with dash model → passes pre-flight" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 OK."
   local plan_agent_no_model="## Plan
 Use Task( for analysis.
@@ -2168,10 +2279,10 @@ Use Task( for analysis.
 # 100. Capacity-fast-break → degrade file already written; REST entry does not overwrite
 #      (double-write is harmless: timestamps differ by <1s, both numeric, TTL still valid)
 @test "degrade: capacity-fast-break + REST success → degrade file refreshed (double-write harmless)" {
-  create_capacity_exhausted_engine "gemini"
+  create_capacity_exhausted_engine "agy"
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
-  create_mock_curl '{"choices":[{"message":{"content":"<verdict>APPROVE</verdict>\nREST approved."}}]}'
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nREST approved.'
   INPUT=$(build_input)
 
   run_hook
@@ -2271,7 +2382,7 @@ Use Task( for analysis.
 # 117. manifest detection survives prompt refactor — Task( + manifest reaches engine
 # Non-regression: same scenario as test 102, re-asserted post-heredoc-refactor.
 @test "dispatch-economy: Task( + Dispatch Manifest still proceeds to engine review after refactor" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Dispatch Economy verified."
   local plan_with_manifest="## Plan
 Step 1: Use Task( for isolation.
@@ -2290,7 +2401,7 @@ Step 1: Use Task( for isolation.
 
 # 118. blank line between heading and table → manifest still parsed
 @test "manifest: blank line between heading and table → passes pre-flight" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 All good."
   local plan_blank="## Plan
 Step 1: Use Task( for isolation.
@@ -2327,7 +2438,7 @@ Step 1: Use Task( for work.
 
 # 120. multiple blank lines between heading and table → still parsed
 @test "manifest: multiple blank lines between heading and table → passes pre-flight" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 OK."
   local plan_multi="## Plan
 Use Task( for work.
@@ -2346,7 +2457,7 @@ Use Task( for work.
 
 # 121. blank line AFTER table terminates parsing (existing behavior preserved)
 @test "manifest: blank line after table terminates block" {
-  create_mock_engine "gemini" "<verdict>APPROVE</verdict>
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Good."
   local plan_trail="## Plan
 Use Task( for isolation.
@@ -2399,7 +2510,7 @@ Use Task( for analysis.
   [ "$(get_total_rounds)" -eq 1 ]
 
   # User fixes manifest, engine gives CONCERNS
-  create_mock_engine "gemini" "<verdict>CONCERNS</verdict>
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
 Issues found."
   local fixed_plan="## Plan
 Use Task( for analysis.
