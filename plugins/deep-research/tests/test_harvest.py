@@ -3992,6 +3992,72 @@ class TestGeminiMessagesConversion(unittest.TestCase):
         self.assertEqual(len(user_turns), 1)
         self.assertEqual(len(user_turns[0]["parts"]), 2)
 
+    def _assert_valid_gemini_part(self, part, where):
+        # A Gemini content part is a oneof: exactly one of text / functionCall /
+        # functionResponse must be present AND initialized. The original #99
+        # 400 ("parts[N].data: required oneof field 'data' must have one
+        # initialized field") is precisely the shape this guards against, so
+        # the assertion checks oneof presence directly rather than only
+        # `part.get("text") != ""` -- the latter passes vacuously for a part
+        # that carries NO oneof key at all (e.g. a degenerate {}), which is the
+        # exact uninitialized-oneof shape Gemini rejects. Verified against the
+        # live gateway (aapi.tbps.one, gemini-3.5-flash): {"text": ""} -> HTTP
+        # 400 with that exact message, {"text": " "} -> HTTP 200.
+        oneof_keys = [k for k in ("text", "functionCall", "functionResponse") if k in part]
+        self.assertEqual(len(oneof_keys), 1,
+                         f"{where}: part must carry exactly one oneof key, got {list(part)}: {part}")
+        key = oneof_keys[0]
+        if key == "text":
+            # An empty string is an *uninitialized* text oneof to Gemini.
+            self.assertNotEqual(part["text"], "", f"{where}: empty text oneof (rejected by Gemini): {part}")
+        else:
+            self.assertTrue(part[key], f"{where}: empty {key} oneof: {part}")
+
+    def test_empty_assistant_turn_yields_valid_nonempty_oneof_part(self):
+        # Regression for #99: a degenerate assistant message -- empty content
+        # AND no tool_calls (a thinking model that spent its whole output
+        # budget on thoughts, or a safety-stripped candidate whose only
+        # product is content="") -- must NOT serialize to {"text": ""}.
+        # Gemini rejects an empty text part as an uninitialized oneof
+        # (contents[N].parts[0].data: required oneof field 'data' must have
+        # one initialized field -> HTTP 400), which crashed the forced-
+        # synthesis retry. The fallback part must be a valid, non-empty oneof,
+        # mirroring anthropic's non-empty-content fallback (anthropic.py:82).
+        for empty in ("", None):
+            _s, contents = harvest._oai_messages_to_gemini([{"role": "assistant", "content": empty}])
+            self.assertEqual(len(contents), 1)
+            self.assertEqual(contents[0]["role"], "model")
+            parts = contents[0]["parts"]
+            self.assertEqual(len(parts), 1, f"empty content={empty!r} must yield exactly one placeholder part")
+            self._assert_valid_gemini_part(parts[0], f"empty content={empty!r}")
+
+    def test_forced_synthesis_retry_history_produces_only_valid_oneof_parts(self):
+        # Scenario reproduction of #99's exact failure (see also the live-
+        # gateway E2E recorded in the issue): the forced-synthesis else-branch
+        # (harvest.py) keeps a parse-failed assistant message in history then
+        # appends a user reminder. When that assistant message is empty
+        # (content=""), EVERY replayed part must be a valid non-empty oneof --
+        # not just "no empty text part": a content entry with zero parts, or a
+        # part missing all oneof keys, is rejected by Gemini identically to an
+        # empty text part, so the whole payload is validated part-by-part.
+        messages = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "goal"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "function": {"name": "search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": json.dumps({"r": "A"})},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c2", "function": {"name": "search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c2", "content": json.dumps({"r": "B"})},
+            {"role": "assistant", "content": ""},  # forced-synthesis empty attempt
+            {"role": "user", "content": "JSON parse error: ... Re-output valid findings JSON."},
+        ]
+        _s, contents = harvest._oai_messages_to_gemini(messages)
+        for i, c in enumerate(contents):
+            self.assertTrue(c["parts"], f"contents[{i}] has zero parts (rejected by Gemini): {c}")
+            for j, part in enumerate(c["parts"]):
+                self._assert_valid_gemini_part(part, f"contents[{i}].parts[{j}]")
+
 
 class TestGeminiRespToOai(unittest.TestCase):
     def test_plain_text_stop_maps_to_stop(self):

@@ -131,7 +131,15 @@ def _oai_messages_to_gemini(messages):
                     part["thoughtSignature"] = tc["thought_signature"]
                 parts.append(part)
             if not parts:
-                parts = [{"text": ""}]
+                # A degenerate assistant turn -- empty content AND no
+                # tool_calls (a thinking model that spent its whole output
+                # budget on thoughts, or a safety-stripped candidate). Gemini
+                # rejects an empty text part {"text": ""} as an uninitialized
+                # oneof ("parts[N].data: required oneof field 'data' must have
+                # one initialized field" -> HTTP 400), so fall back to a
+                # single space, mirroring _assistant_to_anthropic_content's
+                # "never emit an empty text block" rule.
+                parts = [{"text": " "}]
             contents.append({"role": "model", "parts": parts})
             continue
         if role == "tool":
