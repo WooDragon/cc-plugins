@@ -39,3 +39,25 @@ def test_pipeline_excluded_deliverables_and_docs_included(tmp_path):
 
     assert docs_rel in all_files
     assert docs_rel in corpus_paths
+
+
+def test_intake_excluded(tmp_path):
+    _write(tmp_path / "intake" / "requirements" / "research-goal.md", "G0 goal")
+    _write(tmp_path / "intake" / "background" / "context.md", "background")
+    _write(tmp_path / "deliverables" / "final" / "report.md", "final report")
+
+    corpus, all_files, _forward, _backward = build_corpus_and_graph(str(tmp_path))
+
+    corpus_paths = {doc["path"] for doc in corpus}
+
+    intake_goal = str(Path("intake") / "requirements" / "research-goal.md")
+    intake_bg = str(Path("intake") / "background" / "context.md")
+    deliverables_rel = str(Path("deliverables") / "final" / "report.md")
+
+    assert intake_goal not in all_files
+    assert intake_goal not in corpus_paths
+    assert intake_bg not in all_files
+    assert intake_bg not in corpus_paths
+
+    assert deliverables_rel in all_files
+    assert deliverables_rel in corpus_paths

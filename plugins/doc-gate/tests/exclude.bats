@@ -34,6 +34,16 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "excluded: intake/requirements/research-goal.md (deep-research G0 product)" {
+  run doc_gate_is_excluded_path "/project/intake/requirements/research-goal.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "excluded: intake/background/context.md (deep-research G0 product)" {
+  run doc_gate_is_excluded_path "/project/intake/background/context.md"
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # NOT excluded (return 1) — deliverables stays governed
 # ============================================================
