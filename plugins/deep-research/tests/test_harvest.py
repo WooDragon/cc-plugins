@@ -1178,6 +1178,21 @@ class TestBackendDegradation(unittest.TestCase):
         socket.getaddrinfo = self._orig_getaddrinfo
         harvest_safety._real_getaddrinfo = self._orig_real
 
+    def test_unknown_search_backend_type_records_attempt_and_returns_none(self):
+        # Regression lock for the gemini-cli removal: a config still naming a
+        # dropped/unknown backend type (e.g. a stale project-local config that
+        # kept "gemini-cli" or "agy-cli") must degrade cleanly -- call_search_backend
+        # returns None and records an "unknown search backend type" attempt, so
+        # do_search just falls through to the next backend rather than crashing.
+        # call_search_backend returns the bare result (None on failure); the
+        # failure reason is side-channelled onto the caller-supplied attempts
+        # list, not returned.
+        attempts = []
+        result = harvest_search.call_search_backend(
+            {"type": "gemini-cli"}, harvest.RateLimiter(0), "q", "en", self.config, attempts)
+        self.assertIsNone(result)
+        self.assertIn("unknown search backend type", attempts[0]["error"])
+
     def test_search_falls_through_to_second_backend(self):
         journal = []
         backends = [

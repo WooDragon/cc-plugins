@@ -10,7 +10,7 @@
 |------|------|
 | `scripts/harvest.py` | 主编排：pipeline / worker / judge / merge / verify / CLI |
 | `scripts/harvest_safety.py` | SSRF 守卫 / 域黑名单 / 路径沙箱 / 限流 / URL 规范化（零外部依赖叶子） |
-| `scripts/harvest_search/` | 4 个 web search backend + do_search 编排 |
+| `scripts/harvest_search/` | 3 个 web search backend + do_search 编排 |
 | `scripts/harvest_fetch/` | 4 个 URL fetch backend + do_fetch 编排 |
 | `scripts/harvest_clients/base.py` | HTTP/SSE 原语 + curl_cffi 传输能力 |
 

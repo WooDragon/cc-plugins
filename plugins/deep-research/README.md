@@ -16,8 +16,7 @@ The methodology (skill + subagents) works out of the box. The **multi-model harv
 
 | Dependency | Needed for | How |
 |------------|-----------|-----|
-| `GATEWAY_API_KEY` (env) | harvest.py panel models (gemini/gpt/claude via your OpenAI-compatible gateway) | Set gateway `base_url` + key in `scripts/harvest.config.json` / env |
-| `agy` CLI | primary search backend | Install per your `agy` setup |
+| `GATEWAY_API_KEY` (env) | harvest.py panel models (gemini/gpt/claude via your OpenAI-compatible gateway) **and the primary `gemini-grounding` search backend** | Set gateway `base_url` + key in `scripts/harvest.config.json` / env |
 | `curl_cffi` (Python, optional) | `curl-cffi` fetch backend (direct free fetch) | `pip3 install --user curl_cffi` — else harvest.py exits 4 with install hint |
 | `TAVILY_API_KEY` / `JINA_API_KEY` (env, optional) | tavily/jina search & fetch fallbacks | Set as env vars if used |
 | Python 3 | harvest.py + gate_check.py (stdlib only) | System Python 3 |
