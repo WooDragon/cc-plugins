@@ -70,6 +70,14 @@ TOOL_SCHEMAS = [
             "lang": {"type": "string"},
         }, "required": ["query"]}}},
     {"type": "function", "function": {
+        "name": "search_social",
+        "description": "Search social media for community opinions/discussion "
+                        "(e.g. X/Twitter), as a reference frame distinct from general web search.",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string"},
+            "lang": {"type": "string"},
+        }, "required": ["query"]}}},
+    {"type": "function", "function": {
         "name": "fetch",
         "description": "Fetch the full text content of a URL.",
         "parameters": {"type": "object", "properties": {
@@ -219,9 +227,16 @@ def build_journal_url_set(journal):
     # Every URL the model has *seen* (via a search result), not just the
     # ones it fetched -- lets validate_claims distinguish "hallucinated a
     # URL nothing ever surfaced" from "saw it in search but skipped fetch".
+    # "search_social" is harvest_search.social's own journal tool name
+    # (distinct from plain web "search" so a journal reader can tell social
+    # hits apart from web hits) -- it's recognized here alongside "search"
+    # so a social-search url still counts as "seen" and a claim citing it
+    # still needs an explicit fetch/read_local before it can be considered
+    # actually retrieved; see build_fetch_index, which intentionally does
+    # NOT recognize search_social (or search) at all.
     urls = set()
     for entry in journal:
-        if entry.get("tool") == "search":
+        if entry.get("tool") in ("search", "search_social"):
             for u in entry.get("urls", []):
                 urls.add(normalize_url(u))
         elif entry.get("tool") in ("fetch", "read_local", "search_grounding"):
@@ -273,6 +288,7 @@ from harvest_clients import (
     AnthropicGatewayClient,
     ResponsesGatewayClient,
     GeminiNativeGatewayClient,
+    GrokCliClient,
     make_client_factory,
 )
 from harvest_clients.base import (
@@ -369,7 +385,7 @@ def do_read_local(path, offset, journal, config, local_dir):
     return chunk
 
 
-def execute_tool_call(tc, search_backends, fetch_backends, journal, config, local_dir):
+def execute_tool_call(tc, search_backends, social_backends, fetch_backends, journal, config, local_dir):
     fn_info = tc.get("function", {})
     name = fn_info.get("name", "")
     try:
@@ -378,6 +394,8 @@ def execute_tool_call(tc, search_backends, fetch_backends, journal, config, loca
         args = {}
     if name == "search":
         return harvest_search.do_search(args.get("query", ""), args.get("lang", ""), search_backends, journal, config)
+    if name == "search_social":
+        return harvest_search.do_social_search(args.get("query", ""), args.get("lang", ""), social_backends, journal, config)
     if name == "fetch":
         return harvest_fetch.do_fetch(args.get("url", ""), fetch_backends, journal, config)
     if name == "read_local":
@@ -388,7 +406,7 @@ def execute_tool_call(tc, search_backends, fetch_backends, journal, config, loca
 _PARALLEL_FETCH_MAX_WORKERS = 3
 
 
-def _run_fetch_calls_parallel(tool_calls, search_backends, fetch_backends, journal, config, local_dir):
+def _run_fetch_calls_parallel(tool_calls, search_backends, social_backends, fetch_backends, journal, config, local_dir):
     """Only called when every tool_call in this round is a `fetch` and there
     is more than one -- mixed/search/single rounds stay on the plain
     sequential path in run_worker. Each call still runs execute_tool_call ->
@@ -406,7 +424,7 @@ def _run_fetch_calls_parallel(tool_calls, search_backends, fetch_backends, journ
     results = [None] * len(tool_calls)
     with ThreadPoolExecutor(max_workers=min(len(tool_calls), _PARALLEL_FETCH_MAX_WORKERS)) as pool:
         future_to_index = {
-            pool.submit(execute_tool_call, tc, search_backends, fetch_backends, journal, config, local_dir): i
+            pool.submit(execute_tool_call, tc, search_backends, social_backends, fetch_backends, journal, config, local_dir): i
             for i, tc in enumerate(tool_calls)
         }
         for fut in as_completed(future_to_index):
@@ -438,22 +456,84 @@ def build_backends(config):
     # fallback to the search interval so an older config missing this key
     # still works exactly as before rather than KeyError-ing.
     fetch_interval = limits.get("fetch_min_interval_s", search_interval)
+    # Social search is also a quota-limited external call (like web search),
+    # but grok CLI's own call latency dwarfs typical web-search backends --
+    # independent key with a fallback to search's interval, same back-compat
+    # pattern as fetch_interval above.
+    social_interval = limits.get("social_min_interval_s", search_interval)
+
+    raw_search_backends = list(config.get("search_backends", []))
+    web_backends = []
+    migrated_social = []
+    for b in raw_search_backends:
+        if b.get("type") == "x-search":
+            # Back-compat migration for pre-refactor configs that still
+            # declare the old "x-search" web-search-backend entry: rebuild
+            # it as a fresh dict under social_search_backends' "grok-x" type
+            # rather than mutating the original config dict/list in place
+            # (the caller may hold other references to that same config
+            # object across multiple build_backends() calls).
+            migrated_social.append({
+                "type": "grok-x",
+                "model": b.get("model", "grok-4.5"),
+                "effort": b.get("effort", "low"),
+                "timeout_s": b.get("timeout_s", 90),
+            })
+        else:
+            web_backends.append(b)
 
     search_backends = [(b, limiter_for(f"search:{i}", search_interval))
-                        for i, b in enumerate(config.get("search_backends", []))]
+                        for i, b in enumerate(web_backends)]
+
+    # De-dupe by type before availability-filtering: an old config that
+    # still declares the pre-refactor "x-search" entry AND a fresh config
+    # that already declares its migrated "grok-x" equivalent under
+    # social_search_backends must not both survive into raw_social_backends
+    # -- that would run the same grok-x social backend twice per query. The
+    # explicitly-configured social_search_backends entry wins; the migrated
+    # one is dropped when its type is already present.
+    raw_social_backends = list(config.get("social_search_backends", []))
+    existing_social_types = {b.get("type") for b in raw_social_backends}
+    for b in migrated_social:
+        if b.get("type") not in existing_social_types:
+            raw_social_backends.append(b)
+            existing_social_types.add(b.get("type"))
+
+    # grok-* social backends (currently just "grok-x") are driven through
+    # the local `grok` CLI (see harvest_search.social._search_grok_x), not a
+    # gateway HTTP endpoint. Unlike a gateway backend going down transiently,
+    # a missing `grok` binary never heals itself mid-run -- probe once here
+    # and drop grok-backed social backends up front so do_social_search's
+    # existing "no backends configured" short-circuit handles the rest,
+    # instead of every query burning a FileNotFoundError round-trip through
+    # call_social_backend.
+    if raw_social_backends and not shutil.which("grok"):
+        before = len(raw_social_backends)
+        raw_social_backends = [b for b in raw_social_backends if not str(b.get("type", "")).startswith("grok")]
+        if len(raw_social_backends) != before:
+            print("grok CLI not found, skipping grok social search backend(s)", file=sys.stderr)
+
+    social_backends = [(b, limiter_for(f"social:{i}", social_interval))
+                        for i, b in enumerate(raw_social_backends)]
+
     fetch_backends = [(b, limiter_for(f"fetch:{i}", fetch_interval))
                        for i, b in enumerate(config.get("fetch_backends", []))]
-    return search_backends, fetch_backends
+    return search_backends, social_backends, fetch_backends
 
 # ---------------------------------------------------------------------------
 # Panel worker driver
 # ---------------------------------------------------------------------------
 
-def build_system_prompt(goal_text, local_manifest, alias, max_steps):
+def build_system_prompt(goal_text, local_manifest, alias, max_steps, has_social_backends=False):
+    tools_line = "Tools: search(query, lang), fetch(url), read_local(path, offset)."
+    if has_social_backends:
+        tools_line = ("Tools: search(query, lang), search_social(query, lang) -- use search_social "
+                       "for community opinions/discussion (e.g. X/Twitter) as a reference frame "
+                       "distinct from general web search, fetch(url), read_local(path, offset).")
     lines = [
         "You are one member of a multi-model research panel. Decompose the "
         "research goal independently and collect evidence with the tools.",
-        "Tools: search(query, lang), fetch(url), read_local(path, offset).",
+        tools_line,
         "Hard rules:",
         "1. Never cite a URL before fetching its full text via fetch/read_local; "
         "citing a bare search snippet is forbidden.",
@@ -548,18 +628,18 @@ _FORCED_SYNTHESIS_PROMPT = (
 )
 
 
-def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
+def run_worker(alias, model_id, client, config, search_backends, social_backends, fetch_backends,
                 goal_text, local_manifest, local_dir):
     t0 = time.monotonic()
     completion_wall = [0.0]  # mutable box so inner can accumulate
-    r = _run_worker_inner(alias, model_id, client, config, search_backends, fetch_backends,
+    r = _run_worker_inner(alias, model_id, client, config, search_backends, social_backends, fetch_backends,
                            goal_text, local_manifest, local_dir, completion_wall)
     r.wall_clock_s = round(time.monotonic() - t0, 2)
     r.completion_wall_s = round(completion_wall[0], 2)
     return r
 
 
-def _run_worker_inner(alias, model_id, client, config, search_backends, fetch_backends,
+def _run_worker_inner(alias, model_id, client, config, search_backends, social_backends, fetch_backends,
                        goal_text, local_manifest, local_dir, completion_wall):
     journal = []
     try:
@@ -568,7 +648,8 @@ def _run_worker_inner(alias, model_id, client, config, search_backends, fetch_ba
         deadline = time.monotonic() + limits["wall_clock_s"]
         messages = [
             {"role": "system", "content": build_system_prompt(goal_text, local_manifest, alias,
-                                                                limits["max_steps_per_model"])},
+                                                                limits["max_steps_per_model"],
+                                                                has_social_backends=bool(social_backends))},
             {"role": "user", "content": goal_text},
         ]
         parse_retry_used = False
@@ -603,13 +684,13 @@ def _run_worker_inner(alias, model_id, client, config, search_backends, fetch_ba
                     tc.get("function", {}).get("name") == "fetch" for tc in tool_calls
                 )
                 if is_all_fetch:
-                    results = _run_fetch_calls_parallel(tool_calls, search_backends, fetch_backends,
+                    results = _run_fetch_calls_parallel(tool_calls, search_backends, social_backends, fetch_backends,
                                                           journal, config, local_dir)
                     for tc, result_text in zip(tool_calls, results):
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result_text})
                 else:
                     for tc in tool_calls:
-                        result_text = execute_tool_call(tc, search_backends, fetch_backends, journal, config, local_dir)
+                        result_text = execute_tool_call(tc, search_backends, social_backends, fetch_backends, journal, config, local_dir)
                         messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result_text})
                 # Progressive budget nudges so a model that never spontaneously
                 # converges (e.g. keeps searching/fetching every round) gets an
@@ -725,9 +806,28 @@ def _run_worker_inner(alias, model_id, client, config, search_backends, fetch_ba
         return WorkerResult(alias, model_id, "FAILED", None, journal, f"exception: {e}")
 
 
+def _filter_available_panel_models(panel_models):
+    """Drop grok-* entries from `panel_models` when the local `grok` CLI is
+    not on PATH. Mirrors build_backends' grok-x social-backend availability
+    probe: a grok-* panel model is driven through GrokCliClient, which
+    shells out to the `grok` binary (see harvest_clients.grok_cli) rather
+    than calling a gateway HTTP endpoint -- a missing binary never heals
+    itself mid-run, so without this filter every grok-* worker would just
+    burn a step budget hitting FileNotFoundError and report FAILED instead
+    of the panel gracefully running with its remaining (gateway-backed)
+    models. Non-grok panel_models are returned unchanged and in order."""
+    if not any(str(m).startswith("grok") for m in panel_models):
+        return list(panel_models)
+    if shutil.which("grok"):
+        return list(panel_models)
+    filtered = [m for m in panel_models if not str(m).startswith("grok")]
+    print("grok CLI not found, skipping grok panel model(s)", file=sys.stderr)
+    return filtered
+
+
 def run_panel(config, goal_text, local_manifest, local_dir, client_factory):
-    search_backends, fetch_backends = build_backends(config)
-    panel_models = config["panel_models"]
+    search_backends, social_backends, fetch_backends = build_backends(config)
+    panel_models = _filter_available_panel_models(config["panel_models"])
     quorum = config["limits"]["quorum"]
     results = []
     with ThreadPoolExecutor(max_workers=len(panel_models)) as pool:
@@ -736,7 +836,7 @@ def run_panel(config, goal_text, local_manifest, local_dir, client_factory):
             alias = f"m{i + 1}"
             client = client_factory(model_id)
             fut = pool.submit(run_worker, alias, model_id, client, config,
-                               search_backends, fetch_backends, goal_text, local_manifest, local_dir)
+                               search_backends, social_backends, fetch_backends, goal_text, local_manifest, local_dir)
             futures[fut] = alias
         for fut in as_completed(futures):
             alias = futures[fut]
@@ -782,7 +882,25 @@ def judge_clusters(judge_client, worker_findings_by_alias):
 
 def run_judge_with_fallback(config, client_factory, worker_findings_by_alias, panel_models):
     preferred = config.get("judge_model") or panel_models[0]
-    candidates = list(dict.fromkeys([preferred] + list(panel_models)))
+    all_candidates = list(dict.fromkeys([preferred] + list(panel_models)))
+    # grok-* models are driven through GrokCliClient, a single-shot research
+    # agent that fakes run_worker's tool-use contract (see grok_cli.py's
+    # module docstring) -- it is not a general chat-completions client and
+    # cannot serve judge_clusters' plain complete(messages, tools=None) call:
+    # the last message it sees is role=user, so GrokCliClient.complete
+    # routes it into Phase 1's findings-JSON research flow instead of a
+    # judge verdict, which then either fails to parse as judge JSON or burns
+    # a full grok CLI timeout for nothing. Judge candidates are filtered to
+    # exclude grok-* up front rather than letting it fail through the retry
+    # loop.
+    candidates = [m for m in all_candidates if not m.startswith("grok")]
+    if not candidates:
+        # Every candidate (preferred + full panel) is grok-* -- nothing
+        # judge-capable is configured. Fall back to the raw judge_model
+        # config value (even though it's grok) so the caller gets an
+        # explicit, attributable failure out of judge_clusters rather than
+        # an empty-candidates silent no-op.
+        candidates = [preferred]
     last_err = None
     for model_id in candidates:
         client = client_factory(model_id)
@@ -1193,7 +1311,7 @@ def cmd_run_local(args, config):
     install_ssrf_guard()
 
     queries = _read_queries_json(args.queries_json)
-    search_backends, fetch_backends = build_backends(config)
+    search_backends, social_backends, fetch_backends = build_backends(config)
     _local_t0 = time.monotonic()
 
     journal = []
@@ -1203,6 +1321,15 @@ def cmd_run_local(args, config):
         results = json.loads(result_json).get("results", [])
         for r in results:
             all_urls.append((r["url"], r.get("title", "")))
+        # Social search is best-effort here too: only attempted when the
+        # config actually declares a social backend, and its results feed
+        # into the same URL pool -- a failure/empty chain never blocks the
+        # rest of this query's (or later queries') local-mode collection.
+        if social_backends:
+            social_json = harvest_search.do_social_search(query, "auto", social_backends, journal, config)
+            social_results = json.loads(social_json).get("results", [])
+            for r in social_results:
+                all_urls.append((r["url"], r.get("title", "")))
 
     url_counts = Counter(url for url, _ in all_urls)
     seen = set()

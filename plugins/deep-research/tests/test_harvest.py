@@ -171,7 +171,7 @@ class TestBuildBackendsFetchInterval(unittest.TestCase):
         )
         config["limits"]["search_min_interval_s"] = 2.0
         config["limits"]["fetch_min_interval_s"] = 0.5
-        _, fetch_backends = harvest.build_backends(config)
+        _, _, fetch_backends = harvest.build_backends(config)
         limiter = fetch_backends[0][1]
         self.assertEqual(limiter._min_interval, 0.5)
 
@@ -185,7 +185,7 @@ class TestBuildBackendsFetchInterval(unittest.TestCase):
         )
         config["limits"]["search_min_interval_s"] = 2.0
         self.assertNotIn("fetch_min_interval_s", config["limits"])
-        _, fetch_backends = harvest.build_backends(config)
+        _, _, fetch_backends = harvest.build_backends(config)
         limiter = fetch_backends[0][1]
         self.assertEqual(limiter._min_interval, 2.0)
 
@@ -196,9 +196,134 @@ class TestBuildBackendsFetchInterval(unittest.TestCase):
         )
         config["limits"]["search_min_interval_s"] = 2.0
         config["limits"]["fetch_min_interval_s"] = 0.5
-        search_backends, _ = harvest.build_backends(config)
+        search_backends, _, _ = harvest.build_backends(config)
         limiter = search_backends[0][1]
         self.assertEqual(limiter._min_interval, 2.0)
+
+
+class TestBuildBackendsGrokAvailability(unittest.TestCase):
+    """grok PR #105 review, Major #3: grok-* social backends are driven
+    through the local `grok` CLI, not a gateway HTTP endpoint -- a missing
+    binary never heals itself mid-run, so build_backends probes once with
+    shutil.which("grok") and drops grok-backed social backends up front
+    rather than letting every query burn a FileNotFoundError round-trip."""
+
+    def test_grok_missing_drops_grok_x_social_backend(self):
+        config = base_config(social_search_backends=[{"type": "grok-x", "model": "grok-4.5"}])
+        with mock.patch.object(harvest.shutil, "which", return_value=None):
+            _, social_backends, _ = harvest.build_backends(config)
+        self.assertEqual(social_backends, [])
+
+    def test_grok_present_keeps_grok_x_social_backend(self):
+        config = base_config(social_search_backends=[{"type": "grok-x", "model": "grok-4.5"}])
+        with mock.patch.object(harvest.shutil, "which", return_value="/usr/local/bin/grok"):
+            _, social_backends, _ = harvest.build_backends(config)
+        self.assertEqual(len(social_backends), 1)
+        self.assertEqual(social_backends[0][0]["type"], "grok-x")
+
+    def test_grok_missing_does_not_probe_or_affect_non_grok_backends(self):
+        # No grok-* social backend configured at all -- shutil.which must
+        # not even be consulted, and non-grok backends (web search, fetch)
+        # must be entirely unaffected by grok's availability.
+        config = base_config(
+            search_backends=[{"type": "duckduckgo"}],
+            fetch_backends=[{"type": "urllib-ua"}],
+        )
+        with mock.patch.object(harvest.shutil, "which") as which_mock:
+            search_backends, social_backends, fetch_backends = harvest.build_backends(config)
+        which_mock.assert_not_called()
+        self.assertEqual(len(search_backends), 1)
+        self.assertEqual(len(fetch_backends), 1)
+        self.assertEqual(social_backends, [])
+
+    def test_migrated_x_search_dropped_too_when_grok_missing(self):
+        # The pre-refactor "x-search" entry under search_backends migrates
+        # into a grok-x social backend (see the x-search migration below) --
+        # that migrated entry must be subject to the exact same availability
+        # probe as an explicitly-configured social_search_backends entry.
+        config = base_config(search_backends=[{"type": "x-search", "model": "grok-4.5"}])
+        with mock.patch.object(harvest.shutil, "which", return_value=None):
+            _, social_backends, _ = harvest.build_backends(config)
+        self.assertEqual(social_backends, [])
+
+
+class TestBuildBackendsXSearchMigrationDedup(unittest.TestCase):
+    """grok PR #105 review, Minor #6: an old config declaring both the
+    pre-refactor "x-search" search_backends entry AND an already-migrated
+    social_search_backends "grok-x" entry must not run grok-x twice per
+    query -- the migration step de-dupes by backend type, keeping the
+    explicitly-configured entry."""
+
+    def test_explicit_grok_x_and_legacy_x_search_do_not_both_survive(self):
+        config = base_config(
+            search_backends=[{"type": "x-search", "model": "grok-4.5", "effort": "low"}],
+            social_search_backends=[{"type": "grok-x", "model": "grok-4.5", "effort": "high"}],
+        )
+        with mock.patch.object(harvest.shutil, "which", return_value="/usr/local/bin/grok"):
+            _, social_backends, _ = harvest.build_backends(config)
+        grok_x_backends = [b for b, _ in social_backends if b.get("type") == "grok-x"]
+        self.assertEqual(len(grok_x_backends), 1)
+        # The explicitly-configured social_search_backends entry wins over
+        # the migrated one (its effort="high" survives, not the legacy
+        # x-search entry's effort="low").
+        self.assertEqual(grok_x_backends[0]["effort"], "high")
+
+    def test_legacy_x_search_alone_still_migrates_normally(self):
+        # No explicit social_search_backends entry -- the migration path
+        # must still work exactly as before when there's nothing to dedupe
+        # against.
+        config = base_config(search_backends=[{"type": "x-search", "model": "grok-4.5"}])
+        with mock.patch.object(harvest.shutil, "which", return_value="/usr/local/bin/grok"):
+            _, social_backends, _ = harvest.build_backends(config)
+        self.assertEqual(len(social_backends), 1)
+        self.assertEqual(social_backends[0][0]["type"], "grok-x")
+
+
+class TestFilterAvailablePanelModels(unittest.TestCase):
+    """grok PR #105 review, Major #3: a grok-* panel model is driven through
+    GrokCliClient, which shells out to the local `grok` binary -- when it's
+    missing, the panel must degrade gracefully (drop the grok-* entry, keep
+    the rest running) rather than every grok-* worker hard-FAILED-ing on
+    FileNotFoundError."""
+
+    def test_grok_missing_drops_grok_panel_models(self):
+        with mock.patch.object(harvest.shutil, "which", return_value=None):
+            result = harvest._filter_available_panel_models(["model-a", "grok-4.5", "model-b"])
+        self.assertEqual(result, ["model-a", "model-b"])
+
+    def test_grok_present_keeps_grok_panel_models(self):
+        with mock.patch.object(harvest.shutil, "which", return_value="/usr/local/bin/grok"):
+            result = harvest._filter_available_panel_models(["model-a", "grok-4.5"])
+        self.assertEqual(result, ["model-a", "grok-4.5"])
+
+    def test_no_grok_models_does_not_probe_at_all(self):
+        with mock.patch.object(harvest.shutil, "which") as which_mock:
+            result = harvest._filter_available_panel_models(["model-a", "model-b"])
+        which_mock.assert_not_called()
+        self.assertEqual(result, ["model-a", "model-b"])
+
+    def test_run_panel_degrades_gracefully_without_grok_cli(self):
+        # End-to-end through run_panel: quorum is met from the surviving
+        # non-grok models even though grok-4.5 is configured in
+        # panel_models, and no worker for grok-4.5 is ever spawned (the
+        # client_factory is never asked to build a client for it).
+        config = base_config(panel_models=["model-a", "grok-4.5"])
+        config["limits"]["quorum"] = 1
+        requested_models = []
+
+        def factory(model_id):
+            requested_models.append(model_id)
+            return ScriptedClient([
+                assistant_final(findings_block([
+                    {"claim": "c", "excerpt": "e", "url": "local://x"}]))
+            ])
+
+        with mock.patch.object(harvest.shutil, "which", return_value=None), \
+             mock.patch("harvest.build_fetch_index", return_value={"local://x": ["e"]}):
+            results, alive, quorum_met = harvest.run_panel(config, "goal", [], None, factory)
+        self.assertTrue(quorum_met)
+        self.assertNotIn("grok-4.5", requested_models)
+        self.assertEqual(len(results), 1)
 
 
 class TestRunFetchCallsParallel(unittest.TestCase):
@@ -215,14 +340,14 @@ class TestRunFetchCallsParallel(unittest.TestCase):
             {"id": "c3", "function": {"name": "fetch", "arguments": json.dumps({"url": "https://a.com/3"})}},
         ]
 
-        def fake_execute(tc, search_backends, fetch_backends, journal, config, local_dir):
+        def fake_execute(tc, search_backends, social_backends, fetch_backends, journal, config, local_dir):
             args = json.loads(tc["function"]["arguments"])
             if args["url"] == "https://a.com/2":
                 raise RuntimeError("boom")
             return json.dumps({"content": args["url"]})
 
         with mock.patch("harvest.execute_tool_call", side_effect=fake_execute):
-            results = harvest._run_fetch_calls_parallel(tool_calls, [], [], journal, config, None)
+            results = harvest._run_fetch_calls_parallel(tool_calls, [], [], [], journal, config, None)
 
         self.assertEqual(len(results), 3)
         self.assertEqual(json.loads(results[0])["content"], "https://a.com/1")
@@ -501,6 +626,30 @@ class TestCitationValidation(unittest.TestCase):
         valid, invalid = self._validate(journal, claims)
         self.assertEqual(valid, [])
         self.assertEqual(invalid[0][1], "url_not_fetched")
+
+    def test_url_seen_via_search_social_but_never_fetched_rejected_as_not_fetched(self):
+        # grok PR #105 review, Major #4: harvest_search.social journals under
+        # its own "search_social" tool name (not "search"). build_journal_url_set
+        # must still recognize it as a url the model has *seen* -- rejecting
+        # a claim over it as "url_not_fetched" (seen but never fetched), the
+        # same as a plain web-search hit, NOT "url_not_in_journal" (never
+        # seen at all).
+        journal = [{"tool": "search_social", "query": "q", "lang": "en", "backend": "grok-x",
+                    "urls": ["https://x.com/only-searched/status/1"]}]
+        claims = harvest.assign_claim_ids("m1", [
+            {"claim": "c", "excerpt": "anything", "url": "https://x.com/only-searched/status/1"}])
+        valid, invalid = self._validate(journal, claims)
+        self.assertEqual(valid, [])
+        self.assertEqual(invalid[0][1], "url_not_fetched")
+
+    def test_search_social_url_never_enters_fetch_index(self):
+        # build_fetch_index intentionally only recognizes fetch/read_local --
+        # a search_social hit (like a plain search hit) must never itself
+        # count as a successful fetch, only as "seen".
+        journal = [{"tool": "search_social", "query": "q", "lang": "en", "backend": "grok-x",
+                    "urls": ["https://x.com/only-searched/status/1"]}]
+        idx = harvest.build_fetch_index(journal)
+        self.assertEqual(idx, {})
 
     def test_local_and_web_share_same_validation_path(self):
         journal = [{"tool": "read_local", "url": "local://notes/a.md", "content": "internal fact X"}]
@@ -793,6 +942,250 @@ def _grounding_chunk(uri, title):
 
 def _grounding_response(chunks):
     return {"candidates": [{"content": {}, "groundingMetadata": {"groundingChunks": chunks}}]}
+
+
+def _fake_completed_proc(stdout, returncode=0, stderr=""):
+    proc = mock.Mock()
+    proc.stdout = stdout
+    proc.stderr = stderr
+    proc.returncode = returncode
+    return proc
+
+
+class TestSocialSearchGrokX(unittest.TestCase):
+    """harvest_search.social._search_grok_x: X/Twitter search via the shared
+    grok_exec.run_grok_plain primitive, mocked at run_grok_plain's boundary
+    (not the subprocess boundary -- that belongs to TestGrokExec now).
+    Covers the host allowlist/normalization edge cases and the
+    never-raise-on-failure contract that do_social_search's callers depend
+    on."""
+
+    def test_parses_results_and_keeps_x_and_twitter_hosts(self):
+        stdout = json.dumps({"results": [
+            {"url": "https://x.com/foo/status/1", "title": "T1", "snippet": "S1"},
+            {"url": "https://twitter.com/bar/status/2", "title": "T2", "snippet": "S2"},
+        ]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            results, reason = harvest_search.social._search_grok_x({}, "topic", 30)
+        self.assertIsNone(reason)
+        self.assertEqual([r["url"] for r in results],
+                         ["https://x.com/foo/status/1", "https://twitter.com/bar/status/2"])
+        self.assertEqual(results[0]["title"], "T1")
+        self.assertEqual(results[0]["snippet"], "S1")
+
+    def test_bare_domain_url_is_normalized_and_kept(self):
+        # "x.com/status/1" has no scheme -- urlsplit(...).hostname would be
+        # empty and the host filter would silently drop it; the backend must
+        # first prepend https:// so a genuine X result survives.
+        stdout = json.dumps({"results": [{"url": "x.com/status/1", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            results, reason = harvest_search.social._search_grok_x({}, "q", 30)
+        self.assertIsNone(reason)
+        self.assertEqual(results[0]["url"], "https://x.com/status/1")
+
+    def test_non_x_domain_is_filtered_out(self):
+        stdout = json.dumps({"results": [
+            {"url": "https://nytimes.com/article", "title": "n", "snippet": "s"},
+            {"url": "https://x.com/keep/status/9", "title": "k", "snippet": "s"},
+        ]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            results, reason = harvest_search.social._search_grok_x({}, "q", 30)
+        self.assertIsNone(reason)
+        self.assertEqual([r["url"] for r in results], ["https://x.com/keep/status/9"])
+
+    def test_uppercase_host_is_accepted_case_insensitively(self):
+        # "X.com" differs only in case from an allowed host -- the host
+        # comparison lowercases, so it must be kept (and the original-cased
+        # URL preserved in the returned result, not rewritten).
+        stdout = json.dumps({"results": [{"url": "https://X.com/Post/1", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            results, reason = harvest_search.social._search_grok_x({}, "q", 30)
+        self.assertIsNone(reason)
+        self.assertEqual(results[0]["url"], "https://X.com/Post/1")
+
+    def test_port_does_not_bypass_host_allowlist(self):
+        stdout = json.dumps({"results": [{"url": "https://evil.com:443@x.com/fake", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            results, reason = harvest_search.social._search_grok_x({}, "q", 30)
+        # urlsplit's hostname for "https://evil.com:443@x.com/fake" is
+        # "x.com" (evil.com:443 is userinfo, stripped before the '@') -- this
+        # genuinely IS an allowed host per urlsplit's parsing, so assert the
+        # userinfo case specifically rather than assume it's rejected.
+        self.assertIsNone(reason)
+        self.assertEqual(results[0]["url"], "https://evil.com:443@x.com/fake")
+
+    def test_trailing_dot_fqdn_host_is_normalized_and_kept(self):
+        stdout = json.dumps({"results": [{"url": "https://x.com./status/1", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            results, reason = harvest_search.social._search_grok_x({}, "q", 30)
+        self.assertIsNone(reason)
+        self.assertEqual(results[0]["url"], "https://x.com./status/1")
+
+    def test_host_with_explicit_port_is_still_allowed(self):
+        stdout = json.dumps({"results": [{"url": "https://x.com:8443/status/1", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            results, reason = harvest_search.social._search_grok_x({}, "q", 30)
+        self.assertIsNone(reason)
+        self.assertEqual(results[0]["url"], "https://x.com:8443/status/1")
+
+    def test_no_results_array_returns_none_reason(self):
+        with mock.patch("harvest_search.social.run_grok_plain", return_value="not json at all"):
+            results, reason = harvest_search.social._search_grok_x({}, "q", 30)
+        self.assertIsNone(results)
+        self.assertIn("no 'results' array", reason)
+
+    def test_no_results_after_filtering_returns_none_reason(self):
+        stdout = json.dumps({"results": [{"url": "https://nytimes.com/x", "title": "n", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            results, reason = harvest_search.social._search_grok_x({}, "q", 30)
+        self.assertIsNone(results)
+        self.assertIn("after domain filtering", reason)
+
+    def test_uses_config_model_and_effort(self):
+        stdout = json.dumps({"results": [{"url": "https://x.com/z/status/7", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout) as run_mock:
+            harvest_search.social._search_grok_x({"model": "grok-4.5", "effort": "low"}, "q", 30)
+        # _search_grok_x passes rules as a keyword arg (rules=None, it has no
+        # backend-specific rules text of its own) -- only the first 4
+        # positionals are guaranteed positional.
+        _prompt, model, effort, timeout = run_mock.call_args.args
+        self.assertEqual(model, "grok-4.5")
+        self.assertEqual(effort, "low")
+        self.assertEqual(timeout, 30)
+
+
+class TestCallSocialBackend(unittest.TestCase):
+    """call_social_backend: the terminus that must never let an exception
+    (including grok_exec.run_grok_plain's FileNotFoundError/RuntimeError)
+    propagate up into do_social_search -- always (None, reason) on any
+    failure."""
+
+    def test_file_not_found_from_run_grok_plain_returns_none_reason_not_raise(self):
+        with mock.patch("harvest_search.social.run_grok_plain",
+                         side_effect=FileNotFoundError("grok not found")):
+            results, reason = harvest_search.call_social_backend(
+                {"type": "grok-x"}, harvest.RateLimiter(0), "q", 30)
+        self.assertIsNone(results)
+        self.assertIn("grok-x", reason)
+        self.assertIn("unexpected error", reason)
+
+    def test_runtime_error_from_run_grok_plain_returns_none_reason_not_raise(self):
+        with mock.patch("harvest_search.social.run_grok_plain",
+                         side_effect=RuntimeError("grok: exited with code 1 (after 3 attempts)")):
+            results, reason = harvest_search.call_social_backend(
+                {"type": "grok-x"}, harvest.RateLimiter(0), "q", 30)
+        self.assertIsNone(results)
+        self.assertIn("grok-x", reason)
+
+    def test_unknown_backend_type_returns_none_reason(self):
+        results, reason = harvest_search.call_social_backend(
+            {"type": "bogus-social"}, harvest.RateLimiter(0), "q", 30)
+        self.assertIsNone(results)
+        self.assertIn("unknown social backend type", reason)
+
+    def test_grok_x_success_delegates_to_search_grok_x(self):
+        stdout = json.dumps({"results": [{"url": "https://x.com/hit/status/5", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            results, reason = harvest_search.call_social_backend(
+                {"type": "grok-x", "model": "grok-4.5", "effort": "low"},
+                harvest.RateLimiter(0), "q", 30)
+        self.assertIsNone(reason)
+        self.assertEqual([r["url"] for r in results], ["https://x.com/hit/status/5"])
+
+
+class TestDoSocialSearch(unittest.TestCase):
+    """do_social_search: the independent social-search chain's first-success
+    orchestration -- empty config, all-backends-fail, and blacklist
+    filtering must all degrade to an error-carrying JSON payload rather than
+    raise, exactly like do_search's own tail."""
+
+    def test_empty_backends_returns_not_configured_error(self):
+        result = harvest_search.do_social_search("q", "en", [], [], base_config())
+        data = json.loads(result)
+        self.assertEqual(data, {"error": "social search is not configured"})
+
+    def test_old_config_with_no_social_section_behaves_as_not_configured(self):
+        # base_config() predates social_search_backends entirely -- build_backends
+        # on such a config must produce an empty social_backends list, and
+        # do_social_search must degrade cleanly rather than KeyError.
+        cfg = base_config()
+        self.assertNotIn("social_search_backends", cfg)
+        _, social_backends, _ = harvest.build_backends(cfg)
+        result = harvest_search.do_social_search("q", "en", social_backends, [], cfg)
+        self.assertEqual(json.loads(result), {"error": "social search is not configured"})
+
+    def test_backend_failure_does_not_block_returns_error_dict(self):
+        journal = []
+        backends = [({"type": "grok-x"}, harvest.RateLimiter(0))]
+        with mock.patch("harvest_search.social.run_grok_plain",
+                         side_effect=FileNotFoundError("no grok")):
+            result = harvest_search.do_social_search("q", "en", backends, journal, base_config())
+        data = json.loads(result)
+        self.assertEqual(data["results"], [])
+        self.assertIn("all social backends failed", data["error"])
+        self.assertEqual(journal[0]["backend"], None)
+
+    def test_success_journals_and_returns_filtered_results(self):
+        journal = []
+        backends = [({"type": "grok-x"}, harvest.RateLimiter(0))]
+        stdout = json.dumps({"results": [{"url": "https://x.com/a/status/1", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            result = harvest_search.do_social_search("q", "en", backends, journal, base_config())
+        data = json.loads(result)
+        self.assertEqual([r["url"] for r in data["results"]], ["https://x.com/a/status/1"])
+        self.assertEqual(journal[0]["backend"], "grok-x")
+        self.assertEqual(journal[0]["urls"], ["https://x.com/a/status/1"])
+
+    def test_journal_entry_records_search_social_tool_name_not_search(self):
+        # grok PR #105 review, Major #4: do_social_search's own module
+        # docstring said it journals "under its own tool name
+        # (search_social)", but it actually recorded "tool":"search" --
+        # semantics that only worked because build_journal_url_set's
+        # "search" branch happened to accept it. The journal entry must
+        # actually say "search_social", both on success and on the
+        # all-backends-failed tail.
+        journal = []
+        backends = [({"type": "grok-x"}, harvest.RateLimiter(0))]
+        stdout = json.dumps({"results": [{"url": "https://x.com/a/status/1", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            harvest_search.do_social_search("q", "en", backends, journal, base_config())
+        self.assertEqual(journal[0]["tool"], "search_social")
+
+        journal2 = []
+        with mock.patch("harvest_search.social.run_grok_plain", side_effect=FileNotFoundError("no grok")):
+            harvest_search.do_social_search("q", "en", backends, journal2, base_config())
+        self.assertEqual(journal2[0]["tool"], "search_social")
+
+    def test_blacklisted_results_are_filtered_and_chain_falls_through(self):
+        journal = []
+        backends = [({"type": "grok-x"}, harvest.RateLimiter(0))]
+        stdout = json.dumps({"results": [{"url": "https://blog.csdn.net/status/1", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            result = harvest_search.do_social_search("q", "en", backends, journal, base_config())
+        data = json.loads(result)
+        self.assertEqual(data["results"], [])
+        self.assertIn("all social backends failed", data["error"])
+
+
+class TestSearchSocialToolRouting(unittest.TestCase):
+    """search_social routes through execute_tool_call into
+    harvest_search.do_social_search, threading the dedicated social_backends
+    parameter -- distinct from search_backends/fetch_backends."""
+
+    def test_execute_tool_call_routes_search_social_to_do_social_search(self):
+        tc = {"id": "c1", "function": {"name": "search_social",
+                                        "arguments": json.dumps({"query": "topic", "lang": "en"})}}
+        journal = []
+        backends = [({"type": "grok-x"}, harvest.RateLimiter(0))]
+        stdout = json.dumps({"results": [{"url": "https://x.com/a/status/1", "title": "t", "snippet": "s"}]})
+        with mock.patch("harvest_search.social.run_grok_plain", return_value=stdout):
+            result = harvest.execute_tool_call(tc, [], backends, [], journal, base_config(), None)
+        data = json.loads(result)
+        self.assertEqual([r["url"] for r in data["results"]], ["https://x.com/a/status/1"])
+
+    def test_search_social_tool_schema_always_present(self):
+        names = [t["function"]["name"] for t in harvest.TOOL_SCHEMAS]
+        self.assertIn("search_social", names)
 
 
 class TestGeminiGroundingSearch(unittest.TestCase):
@@ -1115,7 +1508,7 @@ class TestGatewayRetry(unittest.TestCase):
                          side_effect=[_http_error(503), _http_error(503), _http_error(503),
                                       _http_error(503), _http_error(503), _http_error(503)]), \
              mock.patch("harvest_clients.base.time.sleep"):
-            result = harvest.run_worker("m1", "model-a", FlakyClient(), base_config(), [], [], "goal", [], None)
+            result = harvest.run_worker("m1", "model-a", FlakyClient(), base_config(), [], [], [], "goal", [], None)
         self.assertEqual(result.status, "FAILED")
         self.assertTrue(result.reason.startswith("synthesis_failed (RuntimeError):"), result.reason)
         self.assertIn("HTTP 503 after 3 attempts", result.reason)
@@ -1427,7 +1820,7 @@ class TestJournalTimestamps(unittest.TestCase):
         client = ScriptedClient([assistant_final(findings_block([]))])
         side_effect = [100.0, 100.0, 100.0, 100.0, 105.0, 110.0]
         with mock.patch("harvest.time.monotonic", side_effect=side_effect):
-            result = harvest.run_worker("m1", "model-a", client, self.config, [], [],
+            result = harvest.run_worker("m1", "model-a", client, self.config, [], [], [],
                                         "goal", [], None)
         self.assertEqual(result.status, "OK")
         self.assertEqual(result.wall_clock_s, 10.0)
@@ -1442,7 +1835,7 @@ class TestJournalTimestamps(unittest.TestCase):
         class ExplodingClient:
             def complete(self, messages, tools):
                 raise RuntimeError("network exploded")
-        result = harvest.run_worker("m1", "model-a", ExplodingClient(), self.config, [], [],
+        result = harvest.run_worker("m1", "model-a", ExplodingClient(), self.config, [], [], [],
                                     "goal", [], None)
         self.assertEqual(result.status, "FAILED")
         self.assertGreaterEqual(result.completion_wall_s, 0)
@@ -2134,7 +2527,7 @@ class TestWorkerDriver(unittest.TestCase):
 
     def _run(self, client):
         with mock.patch("harvest_fetch.call_fetch_backend", return_value="Rayleigh scattering explains the blue sky."):
-            return harvest.run_worker("m1", "model-a", client, self.config, self.search_backends,
+            return harvest.run_worker("m1", "model-a", client, self.config, self.search_backends, [],
                                        self.fetch_backends, "why is the sky blue?", [], None)
 
     def test_happy_path_produces_valid_findings(self):
@@ -2214,7 +2607,7 @@ class TestWorkerDriver(unittest.TestCase):
                 {"claim": "c", "excerpt": fact, "url": "https://a.com/2", "credibility": 4, "language": "en"}])),
         ])
         with mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
-            result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+            result = harvest.run_worker("m1", "model-a", client, cfg, [], [], self.fetch_backends, "goal", [], None)
         self.assertEqual(client.calls, 3)
         self.assertEqual(result.status, "OK")
         self.assertEqual(len(result.findings["claims"]), 1)
@@ -2236,7 +2629,7 @@ class TestWorkerDriver(unittest.TestCase):
             assistant_final("still not valid json"),
         ])
         with mock.patch("harvest_fetch.call_fetch_backend", return_value="text"):
-            result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+            result = harvest.run_worker("m1", "model-a", client, cfg, [], [], self.fetch_backends, "goal", [], None)
         self.assertEqual(client.calls, 4)
         self.assertEqual(result.status, "FAILED")
         self.assertTrue(result.reason.startswith("synthesis_parse_failed:"), result.reason)
@@ -2253,7 +2646,7 @@ class TestWorkerDriver(unittest.TestCase):
                 {"claim": "c", "excerpt": "never fetched text", "url": "https://a.com/x"}])),
             assistant_final(findings_block([])),
         ])
-        result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+        result = harvest.run_worker("m1", "model-a", client, cfg, [], [], self.fetch_backends, "goal", [], None)
         self.assertEqual(result.status, "OK")
         forced_messages = client.messages_log[1]
         roles = [m["role"] for m in forced_messages]
@@ -2272,13 +2665,13 @@ class TestWorkerDriver(unittest.TestCase):
         class ExplodingClient:
             def complete(self, messages, tools):
                 raise RuntimeError("network exploded")
-        result = harvest.run_worker("m1", "model-a", ExplodingClient(), self.config, [], self.fetch_backends, "goal", [], None)
+        result = harvest.run_worker("m1", "model-a", ExplodingClient(), self.config, [], [], self.fetch_backends, "goal", [], None)
         self.assertEqual(result.status, "FAILED")
         self.assertIn("network exploded", result.reason)
 
     def test_bad_response_shape_handled(self):
         client = ScriptedClient([{"unexpected": "shape"}])
-        result = harvest.run_worker("m1", "model-a", client, self.config, [], self.fetch_backends, "goal", [], None)
+        result = harvest.run_worker("m1", "model-a", client, self.config, [], [], self.fetch_backends, "goal", [], None)
         self.assertEqual(result.status, "FAILED")
         self.assertEqual(result.reason, "bad_response")
 
@@ -2511,6 +2904,51 @@ class TestJudgeFallback(unittest.TestCase):
         data, err = harvest.run_judge_with_fallback(config, factory, worker_findings, config["panel_models"])
         self.assertIsNone(data)
         self.assertIsNotNone(err)
+
+    def test_grok_panel_model_is_never_instantiated_as_a_judge_candidate(self):
+        # grok PR #105 review, Major #2: GrokCliClient fakes run_worker's
+        # two-phase tool-use contract on top of a single-shot research CLI
+        # call -- it is not a general chat-completions client and cannot
+        # serve judge_clusters' plain complete(messages, tools=None) call.
+        # run_judge_with_fallback must filter grok-* out of its candidate
+        # list up front rather than letting it fail through the retry loop.
+        config = base_config(panel_models=["model-a", "grok-4.5"], judge_model="model-a")
+        worker_findings = {"m1": {"claims": [{"_id": "m1-1", "claim": "A", "excerpt": "e", "url": "u"}]}}
+        judge_ok_text = '```json\n{"clusters": [{"summary": "s", "source_claim_ids": ["m1-1"], "relation": "agree"}]}\n```'
+        instantiated = []
+
+        def factory(model_id):
+            instantiated.append(model_id)
+            if model_id.startswith("grok"):
+                raise AssertionError("grok-* must never be instantiated as a judge candidate")
+            return ScriptedClient([assistant_final(judge_ok_text)])
+
+        data, err = harvest.run_judge_with_fallback(config, factory, worker_findings, config["panel_models"])
+        self.assertIsNotNone(data)
+        self.assertIsNone(err)
+        self.assertNotIn("grok-4.5", instantiated)
+
+    def test_grok_only_panel_falls_back_to_configured_judge_model_for_an_attributable_error(self):
+        # Extreme edge case: every candidate (preferred judge_model + full
+        # panel) is grok-*. There's nothing judge-capable configured at all
+        # -- run_judge_with_fallback must not silently no-op on an empty
+        # candidate list; it falls back to attempting the raw judge_model
+        # so the caller gets an explicit, attributable failure.
+        config = base_config(panel_models=["grok-4.5"], judge_model="grok-4.5")
+        worker_findings = {"m1": {"claims": [{"_id": "m1-1", "claim": "A", "excerpt": "e", "url": "u"}]}}
+        instantiated = []
+
+        def factory(model_id):
+            instantiated.append(model_id)
+            class Dead:
+                def complete(self, messages, tools):
+                    raise RuntimeError("grok is not judge-capable")
+            return Dead()
+
+        data, err = harvest.run_judge_with_fallback(config, factory, worker_findings, config["panel_models"])
+        self.assertIsNone(data)
+        self.assertIsNotNone(err)
+        self.assertEqual(instantiated, ["grok-4.5"])
 
 
 # ---------------------------------------------------------------------------
@@ -3996,6 +4434,433 @@ class TestMakeClientFactoryThreeWayDispatch(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(data["clusters"][0]["source_claim_ids"], ["m1-1"])
 
+    def test_grok_dispatches_to_grok_cli_client(self):
+        factory = harvest.make_client_factory(base_config())
+        client = factory("grok-4.5")
+        self.assertIsInstance(client, harvest.GrokCliClient)
+
+    def test_grok_does_not_intercept_other_model_prefixes(self):
+        # A grok branch that used a too-loose match (e.g. "grok" in model_id)
+        # could swallow claude/gpt/gemini -- assert each still dispatches to
+        # its own client, not GrokCliClient.
+        factory = harvest.make_client_factory(base_config())
+        self.assertNotIsInstance(factory("claude-sonnet-5"), harvest.GrokCliClient)
+        self.assertNotIsInstance(factory("gpt-5.4"), harvest.GrokCliClient)
+        self.assertNotIsInstance(factory("gemini-3.5-flash"), harvest.GrokCliClient)
+
+    def test_grok_effort_and_max_urls_from_config(self):
+        config = base_config()
+        config["limits"] = dict(config["limits"], grok_effort="high", grok_max_urls=5)
+        factory = harvest.make_client_factory(config)
+        client = factory("grok-4.5")
+        self.assertEqual(client.effort, "high")
+        self.assertEqual(client.max_urls, 5)
+
+    def test_grok_effort_and_max_urls_defaults_when_absent(self):
+        # base_config()'s limits has neither grok key -- constructing the
+        # client must not KeyError and must fall back to the documented
+        # defaults (medium / 12).
+        config = base_config()
+        self.assertNotIn("grok_effort", config["limits"])
+        self.assertNotIn("grok_max_urls", config["limits"])
+        client = harvest.make_client_factory(config)("grok-4.5")
+        self.assertEqual(client.effort, "medium")
+        self.assertEqual(client.max_urls, 12)
+
+
+# ---------------------------------------------------------------------------
+# GrokCliClient: the grok-CLI-backed panel client's two-phase fetch-verify
+# state machine, driven entirely off the message-tail routing (no live grok
+# process -- every run_grok_plain call is mocked at the grok_cli module's
+# imported name, see harvest_clients.grok_cli's `from
+# harvest_clients.grok_exec import run_grok_plain, parse_embedded_json`).
+# ---------------------------------------------------------------------------
+
+def _grok_findings(urls):
+    """A findings dict with one claim per url (grok_cli's parsed-JSON draft)."""
+    return {
+        "claims": [{"claim": f"c{i}", "excerpt": f"e{i}", "url": u,
+                    "credibility": 4, "language": "en"} for i, u in enumerate(urls)],
+        "keywords_used": {"zh": [], "en": ["k"]},
+        "term_map": [],
+    }
+
+
+def _tool_result(call_id, content):
+    return {"role": "tool", "tool_call_id": call_id, "content": content}
+
+
+class TestGrokCliClientStateMachine(unittest.TestCase):
+    from harvest_clients import grok_cli as _grok_cli  # module handle for patching
+
+    def _client(self, **kw):
+        return harvest.GrokCliClient("grok-4.5", **kw)
+
+    def test_phase1_returns_fetch_tool_calls_for_claim_urls(self):
+        findings = _grok_findings(["https://a.com/1", "https://b.com/2"])
+        client = self._client()
+        messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "goal"}]
+        with mock.patch.object(self._grok_cli, "run_grok_plain", return_value=json.dumps(findings)):
+            resp = client.complete(messages=messages, tools=None)
+        msg = resp["choices"][0]["message"]
+        self.assertEqual(resp["choices"][0]["finish_reason"], "tool_calls")
+        self.assertIsNone(msg["content"])
+        names = [tc["function"]["name"] for tc in msg["tool_calls"]]
+        self.assertEqual(names, ["fetch", "fetch"])
+        urls = [json.loads(tc["function"]["arguments"])["url"] for tc in msg["tool_calls"]]
+        self.assertEqual(urls, ["https://a.com/1", "https://b.com/2"])
+
+    def test_phase1_without_urls_returns_findings_content_directly(self):
+        findings = {"claims": [], "keywords_used": {"zh": [], "en": []}, "term_map": []}
+        client = self._client()
+        messages = [{"role": "user", "content": "goal"}]
+        with mock.patch.object(self._grok_cli, "run_grok_plain", return_value=json.dumps(findings)):
+            resp = client.complete(messages=messages, tools=None)
+        msg = resp["choices"][0]["message"]
+        self.assertEqual(resp["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(json.loads(msg["content"]), findings)
+        self.assertNotIn("tool_calls", msg)
+
+    def test_phase2_filters_claims_to_actually_fetched_urls_not_merely_requested(self):
+        # P0 regression guard: phase 2 must filter by "the fetch tool result
+        # for this url actually succeeded" (read from the role:tool message
+        # content), NOT by "phase 1 merely requested a fetch for this url".
+        # https://b.com/2 is requested (a fetch tool_call is issued for it)
+        # but its matching tool result comes back as an error JSON -- it
+        # must be dropped even though it WAS requested. A stray claim for a
+        # url that was never requested/fetched at all must also be dropped.
+        findings = _grok_findings(["https://a.com/1", "https://b.com/2"])
+        client = self._client()
+        p1_messages = [{"role": "user", "content": "goal"}]
+        with mock.patch.object(self._grok_cli, "run_grok_plain", return_value=json.dumps(findings)):
+            client.complete(messages=p1_messages, tools=None)
+        # Inject a stray never-requested claim into the pending findings.
+        client._pending_findings["claims"].append(
+            {"claim": "x", "excerpt": "x", "url": "https://never-fetched.com/9"})
+        p2_messages = p1_messages + [
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "grok-fetch-0", "type": "function",
+                 "function": {"name": "fetch", "arguments": '{"url": "https://a.com/1"}'}},
+                {"id": "grok-fetch-1", "type": "function",
+                 "function": {"name": "fetch", "arguments": '{"url": "https://b.com/2"}'}},
+            ]},
+            _tool_result("grok-fetch-0", "page text for a.com"),
+            _tool_result("grok-fetch-1", json.dumps({"error": "fetch failed: HTTP 404"})),
+        ]
+        resp = client.complete(messages=p2_messages, tools=None)
+        msg = resp["choices"][0]["message"]
+        self.assertEqual(resp["choices"][0]["finish_reason"], "stop")
+        data = json.loads(msg["content"])
+        kept = [c["url"] for c in data["claims"]]
+        self.assertEqual(kept, ["https://a.com/1"])
+        self.assertNotIn("https://b.com/2", kept)  # requested, but fetch failed
+        self.assertNotIn("https://never-fetched.com/9", kept)  # never requested at all
+
+    def test_phase2_empty_tool_result_content_counts_as_failed_fetch(self):
+        findings = _grok_findings(["https://a.com/1"])
+        client = self._client()
+        p1_messages = [{"role": "user", "content": "goal"}]
+        with mock.patch.object(self._grok_cli, "run_grok_plain", return_value=json.dumps(findings)):
+            client.complete(messages=p1_messages, tools=None)
+        p2_messages = p1_messages + [
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "grok-fetch-0", "type": "function",
+                 "function": {"name": "fetch", "arguments": '{"url": "https://a.com/1"}'}}]},
+            _tool_result("grok-fetch-0", ""),
+        ]
+        resp = client.complete(messages=p2_messages, tools=None)
+        data = json.loads(resp["choices"][0]["message"]["content"])
+        self.assertEqual(data["claims"], [])
+
+    def test_budget_nudge_user_after_tool_round_still_routes_to_phase2(self):
+        # run_worker can append a role=user budget nudge right after a round
+        # of role=tool fetch results (prior msg is role=tool). That must NOT
+        # be treated as a content rejection -- it routes to phase 2, not a
+        # grok regeneration.
+        findings = _grok_findings(["https://a.com/1"])
+        client = self._client()
+        with mock.patch.object(self._grok_cli, "run_grok_plain",
+                               return_value=json.dumps(findings)) as run_mock:
+            client.complete(messages=[{"role": "user", "content": "goal"}], tools=None)
+            self.assertEqual(run_mock.call_count, 1)
+            messages = [
+                _tool_result("grok-fetch-0", "page"),
+                {"role": "user", "content": "[BUDGET] converge soon"},
+            ]
+            resp = client.complete(messages=messages, tools=None)
+            # No second grok call: phase 2 is pure-python filtering.
+            self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(resp["choices"][0]["finish_reason"], "stop")
+
+    def test_correction_retry_regenerates_and_never_replays_old_content(self):
+        # The death-loop regression guard: a role=user rejection landing
+        # right after our own role=assistant findings-content turn must
+        # trigger a fresh grok call (regenerate), not replay the stashed
+        # findings.
+        first = _grok_findings(["https://old.com/1"])
+        second = _grok_findings(["https://new.com/2"])
+        client = self._client()
+        with mock.patch.object(self._grok_cli, "run_grok_plain",
+                               side_effect=[json.dumps(first), json.dumps(second)]) as run_mock:
+            # Phase 1 -> fetch calls for old.com.
+            client.complete(messages=[{"role": "user", "content": "goal"}], tools=None)
+            self.assertEqual(client._requested_urls, ["https://old.com/1"])
+            # A findings-content turn was returned to run_worker; now a
+            # citation/parse-retry lands as user-after-assistant.
+            messages = [
+                {"role": "assistant", "content": json.dumps(first)},
+                {"role": "user", "content": "Invalid output: fix and re-output."},
+            ]
+            resp = client.complete(messages=messages, tools=None)
+            self.assertEqual(run_mock.call_count, 2)  # regenerated, not replayed
+        # New phase-1 result -> fetch calls for the NEW url, old state cleared.
+        msg = resp["choices"][0]["message"]
+        urls = [json.loads(tc["function"]["arguments"])["url"] for tc in msg["tool_calls"]]
+        self.assertEqual(urls, ["https://new.com/2"])
+        self.assertEqual(client._requested_urls, ["https://new.com/2"])
+
+    def test_max_urls_truncation_enforced_in_code(self):
+        findings = _grok_findings([f"https://s{i}.com/p" for i in range(10)])
+        client = self._client(max_urls=3)
+        with mock.patch.object(self._grok_cli, "run_grok_plain", return_value=json.dumps(findings)):
+            resp = client.complete(messages=[{"role": "user", "content": "goal"}], tools=None)
+        tool_calls = resp["choices"][0]["message"]["tool_calls"]
+        self.assertEqual(len(tool_calls), 3)
+        self.assertEqual(client._requested_urls,
+                         ["https://s0.com/p", "https://s1.com/p", "https://s2.com/p"])
+
+    def test_malformed_stdout_falls_back_to_empty_claims_not_raise(self):
+        # parse_embedded_json degrades to {} on unparseable stdout; the
+        # client must not crash phase 1 on a malformed/empty findings dict.
+        client = self._client()
+        with mock.patch.object(self._grok_cli, "run_grok_plain", return_value="not json at all"):
+            resp = client.complete(messages=[{"role": "user", "content": "goal"}], tools=None)
+        msg = resp["choices"][0]["message"]
+        self.assertEqual(resp["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(json.loads(msg["content"])["claims"], [])
+
+    def test_stale_tool_result_from_prior_round_is_not_inherited_across_regenerate(self):
+        # P0 regression guard (grok PR #105 review, Major #1): the synthetic
+        # fetch tool_call ids ("grok-fetch-<i>") are recycled positionally on
+        # every _phase1 call. If a correction-retry regenerate cycles back
+        # through _phase1 a second time, a STALE role=tool message from the
+        # FIRST round can still be sitting earlier in `messages` carrying the
+        # exact same id "grok-fetch-0" as the SECOND round's (different) url.
+        # _successful_fetch_urls must only honor the most recent round's tool
+        # results -- scanning the whole history would let the first round's
+        # success leak into the second round's verdict for an unrelated url.
+        first = _grok_findings(["https://old.com/1"])
+        second = _grok_findings(["https://new.com/2"])
+        client = self._client()
+        with mock.patch.object(self._grok_cli, "run_grok_plain",
+                               side_effect=[json.dumps(first), json.dumps(second)]):
+            # Round 1, phase 1: fetch call for old.com, id grok-fetch-0.
+            r1 = client.complete(messages=[{"role": "user", "content": "goal"}], tools=None)
+            r1_tool_calls = r1["choices"][0]["message"]["tool_calls"]
+            self.assertEqual(r1_tool_calls[0]["id"], "grok-fetch-0")
+            # Round 1, phase 2: that fetch SUCCEEDS.
+            messages = [
+                {"role": "user", "content": "goal"},
+                {"role": "assistant", "content": None, "tool_calls": r1_tool_calls},
+                _tool_result("grok-fetch-0", "page text for old.com"),
+            ]
+            phase2_resp = client.complete(messages=messages, tools=None)
+            messages.append(phase2_resp["choices"][0]["message"])
+            # Citation/parse-retry rejection lands as user-after-assistant ->
+            # regenerate. Round 2, phase 1 issues a FRESH fetch call for
+            # new.com, reusing the exact same synthetic id grok-fetch-0.
+            messages.append({"role": "user", "content": "Invalid output: fix and re-output."})
+            r2 = client.complete(messages=messages, tools=None)
+            r2_tool_calls = r2["choices"][0]["message"]["tool_calls"]
+            self.assertEqual(r2_tool_calls[0]["id"], "grok-fetch-0")
+            self.assertEqual(client._requested_urls, ["https://new.com/2"])
+            messages.append(r2["choices"][0]["message"])
+            # Round 2, phase 2: THIS round's fetch of new.com FAILS. Old
+            # round's stale success (also under id grok-fetch-0) is still
+            # earlier in `messages` -- it must not be resurrected.
+            messages.append(_tool_result("grok-fetch-0", json.dumps({"error": "fetch failed: HTTP 404"})))
+            final = client.complete(messages=messages, tools=None)
+        data = json.loads(final["choices"][0]["message"]["content"])
+        kept = [c["url"] for c in data["claims"]]
+        self.assertEqual(kept, [])
+        self.assertNotIn("https://old.com/1", kept)  # stale prior-round success
+        self.assertNotIn("https://new.com/2", kept)  # this round's fetch failed
+
+
+class TestGrokCliClientSubprocess(unittest.TestCase):
+    """grok_cli's plumbing into the shared grok_exec module: the panel
+    client passes through to run_grok_plain/parse_embedded_json rather than
+    duplicating subprocess/retry mechanics -- the mechanics themselves are
+    covered by TestGrokExec against harvest_clients.grok_exec directly."""
+
+    from harvest_clients import grok_cli as _grok_cli
+
+    def test_phase1_invokes_run_grok_plain_with_model_effort_timeout_and_rules(self):
+        client = harvest.GrokCliClient("grok-4.5", effort="low", timeout=90, max_urls=5)
+        with mock.patch.object(self._grok_cli, "run_grok_plain",
+                               return_value=json.dumps({"claims": []})) as run_mock:
+            client.complete(messages=[{"role": "user", "content": "goal"}], tools=None)
+        _prompt, model, effort, timeout, rules = run_mock.call_args.args
+        self.assertEqual(model, "grok-4.5")
+        self.assertEqual(effort, "low")
+        self.assertEqual(timeout, 90)
+        self.assertIn("5", rules)  # max_urls sentinel filled into the rules text
+
+    def test_run_grok_plain_exception_propagates_out_of_phase1(self):
+        # grok_exec.run_grok_plain already retries transient failures itself
+        # and raises RuntimeError only once truly exhausted -- grok_cli does
+        # not swallow that a second time; it propagates to run_worker's own
+        # per-model error handling.
+        client = harvest.GrokCliClient("grok-4.5")
+        with mock.patch.object(self._grok_cli, "run_grok_plain",
+                               side_effect=RuntimeError("grok: exited with code 1 (after 3 attempts)")):
+            with self.assertRaises(RuntimeError):
+                client.complete(messages=[{"role": "user", "content": "goal"}], tools=None)
+
+
+class TestGrokExec(unittest.TestCase):
+    """harvest_clients.grok_exec.run_grok_plain / parse_embedded_json: the
+    shared subprocess + JSON-salvage primitives used by both grok_cli's
+    panel client and harvest_search.social's grok-x backend. Fully mocked at
+    the subprocess boundary (CI has no grok binary / credentials)."""
+
+    from harvest_clients import grok_exec as _grok_exec
+
+    # -- run_grok_plain: subprocess retry/timeout/missing-binary contract --
+
+    def test_nonzero_exit_retries_then_raises_runtime_error(self):
+        failing = _fake_completed_proc("", returncode=2, stderr="grok boom")
+        with mock.patch.object(self._grok_exec.subprocess, "run", return_value=failing) as run_mock, \
+             mock.patch.object(self._grok_exec.time, "sleep") as sleep_mock:
+            with self.assertRaises(RuntimeError) as ctx:
+                self._grok_exec.run_grok_plain("p", "grok-4.5", "low", 30, "rules")
+        self.assertIn("exited with code 2", str(ctx.exception))
+        self.assertEqual(run_mock.call_count, len(self._grok_exec.DEFAULT_RETRY_BACKOFFS) + 1)
+        self.assertEqual(sleep_mock.call_count, len(self._grok_exec.DEFAULT_RETRY_BACKOFFS))
+
+    def test_timeout_retries_then_raises_runtime_error(self):
+        with mock.patch.object(self._grok_exec.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired(cmd="grok", timeout=30)) as run_mock, \
+             mock.patch.object(self._grok_exec.time, "sleep"):
+            with self.assertRaises(RuntimeError) as ctx:
+                self._grok_exec.run_grok_plain("p", "grok-4.5", "low", 30, "rules")
+        self.assertIn("timed out", str(ctx.exception))
+        self.assertEqual(run_mock.call_count, len(self._grok_exec.DEFAULT_RETRY_BACKOFFS) + 1)
+
+    def test_file_not_found_raises_immediately_without_retry(self):
+        with mock.patch.object(self._grok_exec.subprocess, "run",
+                               side_effect=FileNotFoundError("no grok")) as run_mock, \
+             mock.patch.object(self._grok_exec.time, "sleep") as sleep_mock:
+            with self.assertRaises(FileNotFoundError):
+                self._grok_exec.run_grok_plain("p", "grok-4.5", "low", 30, "rules")
+        self.assertEqual(run_mock.call_count, 1)  # not retried
+        sleep_mock.assert_not_called()
+
+    def test_success_returns_stdout_and_cleans_up_temp_file(self):
+        created = {}
+        real_init = self._grok_exec.tempfile.NamedTemporaryFile
+
+        def tracking_ntf(*a, **k):
+            f = real_init(*a, **k)
+            created["path"] = f.name
+            return f
+
+        with mock.patch.object(self._grok_exec.tempfile, "NamedTemporaryFile", side_effect=tracking_ntf), \
+             mock.patch.object(self._grok_exec.subprocess, "run",
+                               return_value=_fake_completed_proc("OUT")):
+            out = self._grok_exec.run_grok_plain("p", "grok-4.5", "low", 30, "rules")
+        self.assertEqual(out, "OUT")
+        self.assertFalse(os.path.exists(created["path"]))  # finally-block cleanup
+
+    def test_temp_file_cleaned_up_even_when_subprocess_raises(self):
+        created = {}
+        real_init = self._grok_exec.tempfile.NamedTemporaryFile
+
+        def tracking_ntf(*a, **k):
+            f = real_init(*a, **k)
+            created["path"] = f.name
+            return f
+
+        with mock.patch.object(self._grok_exec.tempfile, "NamedTemporaryFile", side_effect=tracking_ntf), \
+             mock.patch.object(self._grok_exec.subprocess, "run",
+                               side_effect=FileNotFoundError("no grok")):
+            with self.assertRaises(FileNotFoundError):
+                self._grok_exec.run_grok_plain("p", "grok-4.5", "low", 30, "rules")
+        self.assertFalse(os.path.exists(created["path"]))
+
+    def test_rules_arg_omitted_when_rules_falsy(self):
+        with mock.patch.object(self._grok_exec.subprocess, "run",
+                               return_value=_fake_completed_proc("OUT")) as run_mock:
+            self._grok_exec.run_grok_plain("p", "grok-4.5", "low", 30, rules=None)
+        cmd = run_mock.call_args.args[0]
+        self.assertNotIn("--rules", cmd)
+        self.assertIn("--output-format", cmd)
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "plain")
+        self.assertEqual(cmd[cmd.index("--sandbox") + 1], "read-only")
+        self.assertIs(run_mock.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    # -- parse_embedded_json: JSON salvage from plain-text stdout --
+
+    def test_pure_single_json_object(self):
+        result = self._grok_exec.parse_embedded_json('{"claims": [{"url": "https://a.com/1"}]}')
+        self.assertEqual(result["claims"], [{"url": "https://a.com/1"}])
+
+    def test_doubled_empty_then_real_object_merges_via_salvage(self):
+        text = '{}{"results": [{"url": "https://x.com/1"}]}'
+        result = self._grok_exec.parse_embedded_json(text)
+        self.assertEqual(result["results"], [{"url": "https://x.com/1"}])
+
+    def test_interleaved_explanatory_text_between_objects_is_skipped(self):
+        text = 'here is the answer:\n{"results": [{"url": "https://a.com/1"}]}\nhope that helps!'
+        result = self._grok_exec.parse_embedded_json(text)
+        self.assertEqual(result["results"], [{"url": "https://a.com/1"}])
+
+    def test_null_results_field_does_not_crash_and_is_dropped(self):
+        # A leading prose token forces the multi-object salvage scan path
+        # (the fast whole-string-is-one-object path returns a candidate
+        # verbatim with no filtering -- that's the "clean single object"
+        # case already covered by test_pure_single_json_object).
+        text = 'here: {"results": null, "note": "ok"}'
+        result = self._grok_exec.parse_embedded_json(text)
+        self.assertNotIn("results", result)
+        self.assertEqual(result["note"], "ok")
+
+    def test_string_results_field_is_dropped_not_iterated_as_chars(self):
+        text = 'here: {"results": "oops-a-string"}'
+        result = self._grok_exec.parse_embedded_json(text)
+        self.assertNotIn("results", result)
+
+    def test_non_dict_elements_in_results_list_are_filtered(self):
+        text = 'here: {"results": [{"url": "https://a.com/1"}, "garbage", 42, null]}'
+        result = self._grok_exec.parse_embedded_json(text)
+        self.assertEqual(result["results"], [{"url": "https://a.com/1"}])
+
+    def test_top_level_array_extracts_dict_elements(self):
+        text = '[{"url": "https://a.com/1"}, {"url": "https://b.com/2"}]'
+        result = self._grok_exec.parse_embedded_json(text)
+        # A bare top-level array has no "results"/"claims" key wrapping it --
+        # its dict elements become candidates whose own fields get merged,
+        # not automatically re-wrapped into a "results" key.
+        self.assertEqual(result.get("url"), "https://a.com/1")
+
+    def test_plain_non_json_text_returns_empty_dict(self):
+        result = self._grok_exec.parse_embedded_json("just some prose, no braces at all")
+        self.assertEqual(result, {})
+
+    def test_scalar_lock_not_overwritten_by_later_null_or_empty(self):
+        text = '{"note": "first"}{"note": null}{"note": ""}{"note": "second"}'
+        result = self._grok_exec.parse_embedded_json(text)
+        # First non-empty value locks; later null/empty/different values
+        # never clobber it.
+        self.assertEqual(result["note"], "first")
+
+    def test_claims_arrays_merge_across_doubled_objects(self):
+        text = ('{"claims": [{"url": "https://a.com/1"}]}'
+                '{"claims": [{"url": "https://b.com/2"}]}')
+        result = self._grok_exec.parse_embedded_json(text)
+        self.assertEqual([c["url"] for c in result["claims"]],
+                         ["https://a.com/1", "https://b.com/2"])
+
 
 # ---------------------------------------------------------------------------
 # research#40 / ADR-011 follow-up: gemini via Gemini-native generateContent,
@@ -4580,7 +5445,7 @@ class TestCompletionRetryAndForcedSynthesisRecovery(unittest.TestCase):
                  "credibility": 4, "language": "en"}])),
         ])
         with mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
-            result = harvest.run_worker("m1", "model-a", client, self.config, [],
+            result = harvest.run_worker("m1", "model-a", client, self.config, [], [],
                                          self.fetch_backends, "goal", [], None)
         self.assertEqual(result.status, "OK")
         self.assertEqual(len(result.findings["claims"]), 1)
@@ -4592,7 +5457,7 @@ class TestCompletionRetryAndForcedSynthesisRecovery(unittest.TestCase):
             def complete(self, messages, tools):
                 raise RuntimeError("network error after 5 attempts: Connection reset")
 
-        result = harvest.run_worker("m1", "model-a", AlwaysFails(), self.config, [],
+        result = harvest.run_worker("m1", "model-a", AlwaysFails(), self.config, [], [],
                                      self.fetch_backends, "goal", [], None)
         self.assertEqual(result.status, "FAILED")
         self.assertTrue(result.reason.startswith("synthesis_failed (RuntimeError):"),
@@ -4713,7 +5578,7 @@ class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
                 {"claim": "c", "excerpt": fact, "url": "https://a.com/6", "credibility": 4, "language": "en"}])),
         ])
         with mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
-            harvest.run_worker("m1", "model-a", client, self.config, [],
+            harvest.run_worker("m1", "model-a", client, self.config, [], [],
                                 self.fetch_backends, "goal", [], None)
 
         def has_budget_text(call_index, needle):
@@ -4752,7 +5617,7 @@ class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
             synthesis_with_stray_tool_call,
         ])
         with mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
-            result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+            result = harvest.run_worker("m1", "model-a", client, cfg, [], [], self.fetch_backends, "goal", [], None)
         self.assertEqual(client.calls, 3)
         self.assertEqual(result.status, "OK")
         self.assertEqual(len(result.findings["claims"]), 1)
@@ -4772,7 +5637,7 @@ class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
                 {"claim": "c", "excerpt": fact, "url": "https://a.com/2", "credibility": 4, "language": "en"}])),
         ])
         with mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
-            result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+            result = harvest.run_worker("m1", "model-a", client, cfg, [], [], self.fetch_backends, "goal", [], None)
         self.assertEqual(client.calls, cfg["limits"]["max_steps_per_model"] + 2)
         self.assertEqual(result.status, "OK")
         self.assertEqual(len(result.findings["claims"]), 1)
@@ -4795,7 +5660,7 @@ class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
             assistant_final("still not json"),
         ])
         with mock.patch("harvest_fetch.call_fetch_backend", return_value="text"):
-            result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
+            result = harvest.run_worker("m1", "model-a", client, cfg, [], [], self.fetch_backends, "goal", [], None)
         self.assertEqual(client.calls, 4)
         self.assertEqual(result.status, "FAILED")
         self.assertTrue(result.reason.startswith("synthesis_parse_failed:"), result.reason)
@@ -5339,7 +6204,7 @@ class TestProgressEmit(unittest.TestCase):
              mock.patch("harvest_fetch.call_fetch_backend",
                          return_value="Rayleigh scattering explains the blue sky."), \
              mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            harvest.run_worker("m1", "model-a", client, base_config(), search_backends, [],
+            harvest.run_worker("m1", "model-a", client, base_config(), search_backends, [], [],
                                 "goal", [], None)
         events = [json.loads(line) for line in stderr.getvalue().splitlines()]
         worker_steps = [e for e in events if e["event"] == "worker_step"]

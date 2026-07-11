@@ -1,5 +1,8 @@
 """harvest_search - web search backends (duckduckgo, tavily,
-gemini-grounding) + orchestration (call_search_backend/do_search). Depends on
+gemini-grounding) + orchestration (call_search_backend/do_search), plus a
+re-export of harvest_search.social's independent social-media search chain
+(do_social_search/call_social_backend -- see that module for why social
+search is its own tool/chain rather than a web-search backend). Depends on
 harvest_safety (blacklist) and harvest_clients.base (HTTP primitives +
 curl_cffi capability); never imports harvest_fetch (strict siblings)."""
 import html
@@ -15,11 +18,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import harvest_safety
 import harvest_clients.base
 import harvest_journal
+from harvest_search.social import call_social_backend, do_social_search
 
 __all__ = [
     "_ddg_extract_target_url", "_search_duckduckgo",
     "_search_tavily", "_resolve_grounding_redirect", "_search_gemini_grounding",
     "_no_redirect_opener", "call_search_backend", "do_search",
+    "call_social_backend", "do_social_search",
 ]
 # (_NoRedirect / _DDG_* / _GROUNDING_* / _HTML_TAG_RE are internal implementation,
 # not listed in __all__ -- but tests referencing them go through qualified
