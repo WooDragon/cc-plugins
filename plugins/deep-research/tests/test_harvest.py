@@ -14,6 +14,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import harvest  # noqa: E402
+import harvest_fetch  # noqa: E402
+import harvest_safety  # noqa: E402
+import harvest_search  # noqa: E402
+import harvest_clients.base  # noqa: E402
 
 _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -234,14 +238,14 @@ class TestRunFetchCallsParallel(unittest.TestCase):
 class TestSSRFGuard(unittest.TestCase):
     def setUp(self):
         self._orig_getaddrinfo = socket.getaddrinfo
-        self._orig_real = harvest._real_getaddrinfo
+        self._orig_real = harvest_safety._real_getaddrinfo
 
     def tearDown(self):
         socket.getaddrinfo = self._orig_getaddrinfo
-        harvest._real_getaddrinfo = self._orig_real
+        harvest_safety._real_getaddrinfo = self._orig_real
 
     def _install_fake_dns(self, ip):
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", (ip, 0))]
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", (ip, 0))]
 
     def test_private_ip_blocked_inside_tool_context(self):
         self._install_fake_dns("127.0.0.1")
@@ -585,7 +589,7 @@ _DDG_SAMPLE_HTML = """
 class TestDuckDuckGoSearch(unittest.TestCase):
     def setUp(self):
         # Force urllib path so HTML-parsing tests stay isolated from curl-cffi.
-        self._patch = mock.patch.object(harvest, "_HAS_CURL_CFFI", False)
+        self._patch = mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", False)
         self._patch.start()
 
     def tearDown(self):
@@ -594,7 +598,7 @@ class TestDuckDuckGoSearch(unittest.TestCase):
     def test_parses_result_links_and_unwraps_uddg_redirect(self):
         with mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
-            results, reason = harvest._search_duckduckgo({}, "query", 5)
+            results, reason = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNone(reason)
         urls = [r["url"] for r in results]
         self.assertIn("https://example.com/page?a=1", urls)
@@ -603,26 +607,26 @@ class TestDuckDuckGoSearch(unittest.TestCase):
     def test_title_html_entities_and_tags_stripped(self):
         with mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
-            results, _ = harvest._search_duckduckgo({}, "query", 5)
+            results, _ = harvest_search._search_duckduckgo({}, "query", 5)
         titles = [r["title"] for r in results]
         self.assertTrue(any("Example & Title highlighted" == t for t in titles))
 
     def test_non_result_anchor_ignored(self):
         with mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
-            results, _ = harvest._search_duckduckgo({}, "query", 5)
+            results, _ = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertEqual(len(results), 2)  # the result__snippet anchor is not counted
 
     def test_empty_page_returns_none_with_no_result_links_reason(self):
         with mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(b"<html><body>no results</body></html>")):
-            result, reason = harvest._search_duckduckgo({}, "query", 5)
+            result, reason = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNone(result)
         self.assertIn("no result links found", reason)
 
     def test_network_failure_returns_none_with_reason(self):
         with mock.patch("harvest.urllib.request.urlopen", side_effect=OSError("network down")):
-            result, reason = harvest._search_duckduckgo({}, "query", 5)
+            result, reason = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNone(result)
         self.assertIn("request failed", reason)
 
@@ -630,14 +634,18 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         # cfg has no api_key_env at all -- must not raise or require one.
         with mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
-            results, _ = harvest._search_duckduckgo({}, "query", 5)
+            results, _ = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNotNone(results)
 
     def test_full_do_search_filters_ddg_results_by_blacklist(self):
         journal = []
         cfg = base_config()
         backends = [({"type": "duckduckgo"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.urllib.request.urlopen",
+        # _HAS_CURL_CFFI pinned False so duckduckgo takes the mocked urllib
+        # path instead of curl_cffi_requests.get (real network) -- otherwise
+        # flaky on any machine with curl_cffi installed.
+        with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", False), \
+             mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
             result = harvest.do_search("query", "en", backends, journal, cfg)
         data = json.loads(result)
@@ -657,11 +665,11 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         target = "https://example.com/search?q=100%25done"
         wire_value = urllib.parse.quote(target, safe="")
         href = f"//duckduckgo.com/l/?uddg={wire_value}&rut=abc123"
-        self.assertEqual(harvest._ddg_extract_target_url(href), target)
+        self.assertEqual(harvest_search._ddg_extract_target_url(href), target)
 
     def test_extract_target_url_passes_through_non_redirect_href(self):
         href = "https://example.com/direct-link"
-        self.assertEqual(harvest._ddg_extract_target_url(href), href)
+        self.assertEqual(harvest_search._ddg_extract_target_url(href), href)
 
     def test_extract_target_url_does_not_match_lookalike_host_via_substring(self):
         # copilot review round 5 on #25: "duckduckgo.com" in netloc was a
@@ -669,13 +677,13 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         # "duckduckgo.com.evil.com" would also be (wrongly) treated as a
         # genuine DDG redirect wrapper. Must pass through unchanged.
         href = "https://duckduckgo.com.evil.com/l/?uddg=https%3A%2F%2Fattacker.example%2Fx"
-        self.assertEqual(harvest._ddg_extract_target_url(href), href)
+        self.assertEqual(harvest_search._ddg_extract_target_url(href), href)
 
     def test_extract_target_url_matches_duckduckgo_subdomain(self):
         target = "https://example.com/page"
         wire_value = urllib.parse.quote(target, safe="")
         href = f"//lite.duckduckgo.com/l/?uddg={wire_value}"
-        self.assertEqual(harvest._ddg_extract_target_url(href), target)
+        self.assertEqual(harvest_search._ddg_extract_target_url(href), target)
 
     def test_real_bot_check_page_detected_and_distinguished(self):
         # Real HTML snapshot captured from https://html.duckduckgo.com/html/?q=sqlite+wal
@@ -686,7 +694,7 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         fixture = _FIXTURES_DIR / "ddg_anomaly_real.html"
         raw = fixture.read_bytes()
         with mock.patch("harvest.urllib.request.urlopen", return_value=FakeHTTPResponse(raw)):
-            result, reason = harvest._search_duckduckgo({}, "sqlite wal", 5)
+            result, reason = harvest_search._search_duckduckgo({}, "sqlite wal", 5)
         self.assertIsNone(result)
         self.assertIn("bot-check challenge page", reason)
         self.assertIn("IP-reputation block", reason)
@@ -699,10 +707,10 @@ class TestDuckDuckGoSearchCurlCffi(unittest.TestCase):
         fake_resp = mock.Mock()
         fake_resp.status_code = 200
         fake_resp.text = _DDG_SAMPLE_HTML
-        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
-             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+        with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest_clients.base.curl_cffi_requests") as mock_curl:
             mock_curl.get.return_value = fake_resp
-            results, reason = harvest._search_duckduckgo({}, "query", 5)
+            results, reason = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNone(reason)
         self.assertTrue(len(results) > 0)
         mock_curl.get.assert_called_once()
@@ -710,18 +718,18 @@ class TestDuckDuckGoSearchCurlCffi(unittest.TestCase):
     def test_curl_cffi_non_200_returns_error(self):
         fake_resp = mock.Mock()
         fake_resp.status_code = 403
-        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
-             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+        with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest_clients.base.curl_cffi_requests") as mock_curl:
             mock_curl.get.return_value = fake_resp
-            result, reason = harvest._search_duckduckgo({}, "query", 5)
+            result, reason = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNone(result)
         self.assertIn("HTTP 403", reason)
 
     def test_curl_cffi_exception_returns_error(self):
-        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
-             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+        with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest_clients.base.curl_cffi_requests") as mock_curl:
             mock_curl.get.side_effect = RuntimeError("connection reset")
-            result, reason = harvest._search_duckduckgo({}, "query", 5)
+            result, reason = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNone(result)
         self.assertIn("curl-cffi request failed", reason)
 
@@ -729,24 +737,24 @@ class TestDuckDuckGoSearchCurlCffi(unittest.TestCase):
         fake_resp = mock.Mock()
         fake_resp.status_code = 200
         fake_resp.text = "<html></html>"
-        with mock.patch.object(harvest, "_HAS_CURL_CFFI", True), \
-             mock.patch("harvest.curl_cffi_requests") as mock_curl:
+        with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", True), \
+             mock.patch("harvest_clients.base.curl_cffi_requests") as mock_curl:
             mock_curl.get.return_value = fake_resp
-            harvest._search_duckduckgo({"impersonate": "safari"}, "q", 5)
+            harvest_search._search_duckduckgo({"impersonate": "safari"}, "q", 5)
         call_kwargs = mock_curl.get.call_args[1]
         self.assertEqual(call_kwargs["impersonate"], "safari")
 
 
 class TestSearchBackendMissingKeySkips(unittest.TestCase):
     def test_tavily_missing_key_returns_none_not_raise(self):
-        result, reason = harvest._search_tavily({"api_key_env": "NONEXISTENT_TAVILY_KEY_VAR"}, "q", 5)
+        result, reason = harvest_search._search_tavily({"api_key_env": "NONEXISTENT_TAVILY_KEY_VAR"}, "q", 5)
         self.assertIsNone(result)
         self.assertIn("not set", reason)
 
     def test_gemini_grounding_missing_key_returns_none_not_raise(self):
         cfg = base_config()
         cfg["gateway"]["api_key_env"] = "NONEXISTENT_GATEWAY_KEY_VAR"
-        result, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+        result, reason = harvest_search._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
         self.assertIsNone(result)
         self.assertIn("not set", reason)
         self.assertIn("gemini-grounding", reason)
@@ -758,7 +766,11 @@ class TestSearchBackendMissingKeySkips(unittest.TestCase):
             ({"type": "tavily", "api_key_env": "NONEXISTENT_TAVILY_KEY_VAR"}, harvest.RateLimiter(0)),
             ({"type": "duckduckgo"}, harvest.RateLimiter(0)),
         ]
-        with mock.patch("harvest.urllib.request.urlopen",
+        # _HAS_CURL_CFFI pinned False so duckduckgo takes the mocked urllib
+        # path instead of curl_cffi_requests.get (real network) -- otherwise
+        # flaky on any machine with curl_cffi installed.
+        with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", False), \
+             mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
             result = harvest.do_search("query", "en", backends, journal, cfg)
         data = json.loads(result)
@@ -790,10 +802,10 @@ class TestGeminiGroundingSearch(unittest.TestCase):
             _grounding_chunk("https://vertexaisearch.cloud.google.com/grounding-api-redirect/2", "other.com"),
         ]
         with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
-             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)), \
-             mock.patch("harvest._resolve_grounding_redirect",
+             mock.patch("harvest_clients.base._http_json_post", return_value=_grounding_response(chunks)), \
+             mock.patch("harvest_search._resolve_grounding_redirect",
                          side_effect=["https://example.com/real", "https://other.com/real"]):
-            results, reason = harvest._search_gemini_grounding({"model": "gemini-3.5-flash"}, "q", 5, cfg)
+            results, reason = harvest_search._search_gemini_grounding({"model": "gemini-3.5-flash"}, "q", 5, cfg)
         self.assertIsNone(reason)
         self.assertEqual([r["url"] for r in results], ["https://example.com/real", "https://other.com/real"])
         self.assertEqual(results[0]["title"], "example.com")
@@ -810,9 +822,9 @@ class TestGeminiGroundingSearch(unittest.TestCase):
         chunks = [_grounding_chunk(
             "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1", "example.com")]
         with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
-             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)) as post_mock, \
-             mock.patch("harvest._resolve_grounding_redirect", return_value="https://example.com/real"):
-            harvest._search_gemini_grounding({"model": "gemini-3.5-flash"}, "q", 5, cfg)
+             mock.patch("harvest_clients.base._http_json_post", return_value=_grounding_response(chunks)) as post_mock, \
+             mock.patch("harvest_search._resolve_grounding_redirect", return_value="https://example.com/real"):
+            harvest_search._search_gemini_grounding({"model": "gemini-3.5-flash"}, "q", 5, cfg)
         sent_url, sent_payload = post_mock.call_args.args[0], post_mock.call_args.args[1]
         self.assertEqual(
             sent_url, "https://gw.example.com/v1beta/models/gemini-3.5-flash:generateContent")
@@ -822,8 +834,8 @@ class TestGeminiGroundingSearch(unittest.TestCase):
     def test_missing_grounding_metadata_degrades_with_reason(self):
         cfg = base_config()
         with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
-             mock.patch("harvest._http_json_post", return_value={"candidates": [{"content": {}}]}):
-            result, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+             mock.patch("harvest_clients.base._http_json_post", return_value={"candidates": [{"content": {}}]}):
+            result, reason = harvest_search._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
         self.assertIsNone(result)
         self.assertIn("no grounding chunks", reason)
 
@@ -834,9 +846,9 @@ class TestGeminiGroundingSearch(unittest.TestCase):
             _grounding_chunk("https://vertexaisearch.cloud.google.com/grounding-api-redirect/2", "alive.com"),
         ]
         with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
-             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)), \
-             mock.patch("harvest._resolve_grounding_redirect", side_effect=[None, "https://alive.com/real"]):
-            results, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+             mock.patch("harvest_clients.base._http_json_post", return_value=_grounding_response(chunks)), \
+             mock.patch("harvest_search._resolve_grounding_redirect", side_effect=[None, "https://alive.com/real"]):
+            results, reason = harvest_search._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
         self.assertIsNone(reason)
         self.assertEqual([r["url"] for r in results], ["https://alive.com/real"])
 
@@ -844,17 +856,17 @@ class TestGeminiGroundingSearch(unittest.TestCase):
         cfg = base_config()
         chunks = [_grounding_chunk("https://vertexaisearch.cloud.google.com/grounding-api-redirect/1", "dead.com")]
         with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
-             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)), \
-             mock.patch("harvest._resolve_grounding_redirect", return_value=None):
-            result, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+             mock.patch("harvest_clients.base._http_json_post", return_value=_grounding_response(chunks)), \
+             mock.patch("harvest_search._resolve_grounding_redirect", return_value=None):
+            result, reason = harvest_search._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
         self.assertIsNone(result)
         self.assertIn("no resolvable source URLs", reason)
 
     def test_missing_key_returns_none_not_raise(self):
         cfg = base_config()
         cfg["gateway"]["api_key_env"] = "NONEXISTENT_GATEWAY_KEY_VAR"
-        with mock.patch("harvest._http_json_post") as m:
-            result, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+        with mock.patch("harvest_clients.base._http_json_post") as m:
+            result, reason = harvest_search._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
         self.assertIsNone(result)
         self.assertIn("not set", reason)
         m.assert_not_called()
@@ -862,14 +874,14 @@ class TestGeminiGroundingSearch(unittest.TestCase):
 
 class TestResolveGroundingRedirect(unittest.TestCase):
     def test_non_grounding_host_rejected_without_any_network_call(self):
-        with mock.patch("harvest._no_redirect_opener.open") as m:
-            result = harvest._resolve_grounding_redirect("http://169.254.169.254/", 5)
+        with mock.patch("harvest_search._no_redirect_opener.open") as m:
+            result = harvest_search._resolve_grounding_redirect("http://169.254.169.254/", 5)
         self.assertIsNone(result)
         m.assert_not_called()
 
     def test_localhost_host_rejected_without_any_network_call(self):
-        with mock.patch("harvest._no_redirect_opener.open") as m:
-            result = harvest._resolve_grounding_redirect("http://127.0.0.1/", 5)
+        with mock.patch("harvest_search._no_redirect_opener.open") as m:
+            result = harvest_search._resolve_grounding_redirect("http://127.0.0.1/", 5)
         self.assertIsNone(result)
         m.assert_not_called()
 
@@ -878,23 +890,23 @@ class TestResolveGroundingRedirect(unittest.TestCase):
         err = harvest.urllib.error.HTTPError(
             url=uri, code=302, msg="Found",
             hdrs={"Location": "https://real.example.com/article"}, fp=io.BytesIO(b""))
-        with mock.patch("harvest._no_redirect_opener.open", side_effect=err):
-            result = harvest._resolve_grounding_redirect(uri, 5)
+        with mock.patch("harvest_search._no_redirect_opener.open", side_effect=err):
+            result = harvest_search._resolve_grounding_redirect(uri, 5)
         self.assertEqual(result, "https://real.example.com/article")
 
     def test_grounding_host_network_error_returns_none(self):
         uri = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1"
-        with mock.patch("harvest._no_redirect_opener.open",
+        with mock.patch("harvest_search._no_redirect_opener.open",
                          side_effect=harvest.urllib.error.URLError("connection refused")):
-            result = harvest._resolve_grounding_redirect(uri, 5)
+            result = harvest_search._resolve_grounding_redirect(uri, 5)
         self.assertIsNone(result)
 
     def test_malformed_uri_returns_none_without_raising(self):
         # uri is model-controlled grounding output; an unterminated IPv6
         # literal makes urlsplit raise ValueError -- must be swallowed and
         # dropped, never propagated to abort the whole backend.
-        with mock.patch("harvest._no_redirect_opener.open") as m:
-            result = harvest._resolve_grounding_redirect("http://[::1", 5)
+        with mock.patch("harvest_search._no_redirect_opener.open") as m:
+            result = harvest_search._resolve_grounding_redirect("http://[::1", 5)
         self.assertIsNone(result)
         m.assert_not_called()
 
@@ -903,8 +915,8 @@ class TestResolveGroundingRedirect(unittest.TestCase):
         # chunk (None) and close the response rather than leak it.
         uri = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1"
         fake_resp = mock.Mock()
-        with mock.patch("harvest._no_redirect_opener.open", return_value=fake_resp):
-            result = harvest._resolve_grounding_redirect(uri, 5)
+        with mock.patch("harvest_search._no_redirect_opener.open", return_value=fake_resp):
+            result = harvest_search._resolve_grounding_redirect(uri, 5)
         self.assertIsNone(result)
         fake_resp.close.assert_called_once()
 
@@ -921,7 +933,7 @@ class TestGeminiGroundingFallThrough(unittest.TestCase):
             ({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0)),
         ]
         real_results = [{"url": "https://real.example.com/article", "title": "t", "snippet": "s"}]
-        with mock.patch("harvest.call_search_backend", side_effect=[None, real_results]):
+        with mock.patch("harvest_search.call_search_backend", side_effect=[None, real_results]):
             result = harvest.do_search("q", "en", backends, journal, cfg)
         data = json.loads(result)
         self.assertEqual(data["results"][0]["url"], "https://real.example.com/article")
@@ -938,12 +950,12 @@ class TestGeminiGroundingFallThrough(unittest.TestCase):
 
 class TestGroundingPromptCompleteness(unittest.TestCase):
     def test_prompt_demands_complete_source_set(self):
-        prompt = harvest._GROUNDING_SEARCH_PROMPT
+        prompt = harvest_search._GROUNDING_SEARCH_PROMPT
         self.assertIn("COMPLETE set", prompt)
         self.assertIn("do not truncate", prompt)
 
     def test_prompt_has_no_hard_must_call_constraint(self):
-        self.assertNotIn("You MUST", harvest._GROUNDING_SEARCH_PROMPT)
+        self.assertNotIn("You MUST", harvest_search._GROUNDING_SEARCH_PROMPT)
 
 
 # ---------------------------------------------------------------------------
@@ -960,9 +972,9 @@ class TestGroundingThinkingBudget(unittest.TestCase):
             "https://vertexaisearch.cloud.google.com/grounding-api-redirect/1", "example.com")
         backend_cfg = {"model": "gemini-3.5-flash", **cfg_overrides}
         with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
-             mock.patch("harvest._http_json_post", return_value=_grounding_response([chunk])) as post_mock, \
-             mock.patch("harvest._resolve_grounding_redirect", return_value="https://example.com/real"):
-            harvest._search_gemini_grounding(backend_cfg, "q", 5, cfg)
+             mock.patch("harvest_clients.base._http_json_post", return_value=_grounding_response([chunk])) as post_mock, \
+             mock.patch("harvest_search._resolve_grounding_redirect", return_value="https://example.com/real"):
+            harvest_search._search_gemini_grounding(backend_cfg, "q", 5, cfg)
         return post_mock.call_args.args[1]
 
     def test_thinking_budget_configured_adds_generation_config(self):
@@ -1018,9 +1030,9 @@ class TestGroundingRedirectResolutionParallel(unittest.TestCase):
             return result
 
         with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
-             mock.patch("harvest._http_json_post", return_value=_grounding_response(chunks)), \
-             mock.patch("harvest._resolve_grounding_redirect", side_effect=fake_resolve_side_effect):
-            results, reason = harvest._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
+             mock.patch("harvest_clients.base._http_json_post", return_value=_grounding_response(chunks)), \
+             mock.patch("harvest_search._resolve_grounding_redirect", side_effect=fake_resolve_side_effect):
+            results, reason = harvest_search._search_gemini_grounding({"model": "g"}, "q", 5, cfg)
 
         self.assertIsNone(reason)
         # chunk2 (exception) dropped, chunk4 (dedup of chunk1's real url)
@@ -1157,13 +1169,13 @@ class TestBackendDegradation(unittest.TestCase):
     def setUp(self):
         self.config = base_config()
         self._orig_getaddrinfo = socket.getaddrinfo
-        self._orig_real = harvest._real_getaddrinfo
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
+        self._orig_real = harvest_safety._real_getaddrinfo
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
         harvest.install_ssrf_guard()
 
     def tearDown(self):
         socket.getaddrinfo = self._orig_getaddrinfo
-        harvest._real_getaddrinfo = self._orig_real
+        harvest_safety._real_getaddrinfo = self._orig_real
 
     def test_search_falls_through_to_second_backend(self):
         journal = []
@@ -1171,7 +1183,7 @@ class TestBackendDegradation(unittest.TestCase):
             ({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0)),
             ({"type": "duckduckgo"}, harvest.RateLimiter(0)),
         ]
-        with mock.patch("harvest.call_search_backend", side_effect=[None, [{"url": "https://a.com", "title": "t", "snippet": "s"}]]):
+        with mock.patch("harvest_search.call_search_backend", side_effect=[None, [{"url": "https://a.com", "title": "t", "snippet": "s"}]]):
             result = harvest.do_search("q", "en", backends, journal, self.config)
         data = json.loads(result)
         self.assertEqual(data["results"][0]["url"], "https://a.com")
@@ -1180,7 +1192,7 @@ class TestBackendDegradation(unittest.TestCase):
     def test_search_all_backends_fail(self):
         journal = []
         backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_search_backend", return_value=None):
+        with mock.patch("harvest_search.call_search_backend", return_value=None):
             result = harvest.do_search("q", "en", backends, journal, self.config)
         data = json.loads(result)
         self.assertEqual(data["results"], [])
@@ -1195,7 +1207,7 @@ class TestBackendDegradation(unittest.TestCase):
             ({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0)),
             ({"type": "duckduckgo"}, harvest.RateLimiter(0)),
         ]
-        with mock.patch("harvest.call_search_backend", side_effect=[
+        with mock.patch("harvest_search.call_search_backend", side_effect=[
             [{"url": "https://blog.csdn.net/x", "title": "t", "snippet": "s"}],
             [{"url": "https://good.com/y", "title": "t2", "snippet": "s2"}],
         ]):
@@ -1209,7 +1221,7 @@ class TestBackendDegradation(unittest.TestCase):
         backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
         results = [{"url": "https://blog.csdn.net/x", "title": "t", "snippet": "s"},
                    {"url": "https://good.com/x", "title": "t", "snippet": "s"}]
-        with mock.patch("harvest.call_search_backend", return_value=results):
+        with mock.patch("harvest_search.call_search_backend", return_value=results):
             result = harvest.do_search("q", "en", backends, journal, self.config)
         data = json.loads(result)
         urls = [r["url"] for r in data["results"]]
@@ -1222,7 +1234,7 @@ class TestBackendDegradation(unittest.TestCase):
             ({"type": "tavily-extract", "api_key_env": "X"}, harvest.RateLimiter(0)),
             ({"type": "urllib-ua"}, harvest.RateLimiter(0)),
         ]
-        with mock.patch("harvest.call_fetch_backend", side_effect=[None, "full page text"]):
+        with mock.patch("harvest_fetch.call_fetch_backend", side_effect=[None, "full page text"]):
             result = harvest.do_fetch("https://good.com/x", backends, journal, self.config)
         self.assertEqual(result, "full page text")
         self.assertEqual(journal[0]["backend"], "urllib-ua")
@@ -1230,7 +1242,7 @@ class TestBackendDegradation(unittest.TestCase):
     def test_fetch_all_backends_fail(self):
         journal = []
         backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_fetch_backend", return_value=None):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value=None):
             result = harvest.do_fetch("https://good.com/x", backends, journal, self.config)
         data = json.loads(result)
         self.assertIn("error", data)
@@ -1238,17 +1250,17 @@ class TestBackendDegradation(unittest.TestCase):
     def test_fetch_blacklisted_domain_rejected_before_backends(self):
         journal = []
         backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_fetch_backend") as m:
+        with mock.patch("harvest_fetch.call_fetch_backend") as m:
             result = harvest.do_fetch("https://blog.csdn.net/x", backends, journal, self.config)
         m.assert_not_called()
         self.assertEqual(journal[0]["blocked"], "blacklist")
 
     def test_fetch_ssrf_private_ip_rejected(self):
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("127.0.0.1", 0))]
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("127.0.0.1", 0))]
         harvest.install_ssrf_guard()
         journal = []
         backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_fetch_backend") as m:
+        with mock.patch("harvest_fetch.call_fetch_backend") as m:
             result = harvest.do_fetch("http://internal.local/x", backends, journal, self.config)
         m.assert_not_called()
         self.assertEqual(journal[0]["blocked"], "ssrf")
@@ -1258,7 +1270,7 @@ class TestBackendDegradation(unittest.TestCase):
         cfg = base_config()
         cfg["limits"]["fetch_max_chars"] = 5
         backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_fetch_backend", return_value="0123456789"):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value="0123456789"):
             result = harvest.do_fetch("https://good.com/x", backends, journal, cfg)
         self.assertEqual(result, "01234")
 
@@ -1271,7 +1283,12 @@ class TestBackendDegradation(unittest.TestCase):
             ({"type": "tavily", "api_key_env": "NONEXISTENT_TAVILY_KEY_VAR"}, harvest.RateLimiter(0)),
             ({"type": "duckduckgo"}, harvest.RateLimiter(0)),
         ]
-        with mock.patch("harvest.urllib.request.urlopen",
+        # _HAS_CURL_CFFI pinned False so the duckduckgo backend takes the
+        # mocked urllib path -- without this pin it hits curl_cffi_requests.get
+        # (real network) on any machine where curl_cffi is installed, making
+        # this test flaky. Mirrors the sibling test below.
+        with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", False), \
+             mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
             result = harvest.do_search("q", "en", backends, journal, self.config)
         data = json.loads(result)
@@ -1287,7 +1304,7 @@ class TestBackendDegradation(unittest.TestCase):
             ({"type": "tavily", "api_key_env": "NONEXISTENT_TAVILY_KEY_VAR"}, harvest.RateLimiter(0)),
             ({"type": "duckduckgo"}, harvest.RateLimiter(0)),
         ]
-        with mock.patch.object(harvest, "_HAS_CURL_CFFI", False), \
+        with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", False), \
              mock.patch("harvest.urllib.request.urlopen", side_effect=OSError("network down")):
             harvest.do_search("q", "en", backends, journal, self.config)
         attempts = journal[0]["attempts"]
@@ -1314,7 +1331,7 @@ class TestUrllibUaHtmlStripping(unittest.TestCase):
     def _fetch(self, html_body, max_chars=20000):
         with mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(html_body.encode("utf-8"))):
-            return harvest._fetch_urllib_ua({}, "https://a.com/x", 5, max_chars)
+            return harvest_fetch._fetch_urllib_ua({}, "https://a.com/x", 5, max_chars)
 
     def test_tags_stripped_from_output(self):
         content, reason = self._fetch("<html><body><p>Hello <b>world</b>.</p></body></html>")
@@ -1359,23 +1376,23 @@ class TestUrllibUaHtmlStripping(unittest.TestCase):
         cfg["limits"]["fetch_max_chars"] = 200
         backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
         orig_getaddrinfo = socket.getaddrinfo
-        orig_real_getaddrinfo = harvest._real_getaddrinfo
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
+        orig_real_getaddrinfo = harvest_safety._real_getaddrinfo
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
         harvest.install_ssrf_guard()
         try:
             with mock.patch("harvest.urllib.request.urlopen",
                              return_value=FakeHTTPResponse(html_body.encode("utf-8"))):
                 result = harvest.do_fetch("https://a.com/x", backends, journal, cfg)
         finally:
-            harvest._real_getaddrinfo = orig_real_getaddrinfo
+            harvest_safety._real_getaddrinfo = orig_real_getaddrinfo
             socket.getaddrinfo = orig_getaddrinfo
         self.assertIn("keep this text", result)
 
 
 @unittest.skipUnless(
-    harvest._HAS_CURL_CFFI,
-    "curl_cffi not installed: harvest.curl_cffi_requests is None, so "
-    "mock.patch('harvest.curl_cffi_requests.get') cannot attach. These tests "
+    harvest_clients.base._HAS_CURL_CFFI,
+    "curl_cffi not installed: harvest_clients.base.curl_cffi_requests is None, so "
+    "mock.patch('harvest_clients.base.curl_cffi_requests.get') cannot attach. These tests "
     "exercise the curl-cffi fetch backend and require the optional dependency.",
 )
 class TestCurlCffiFetch(unittest.TestCase):
@@ -1385,36 +1402,36 @@ class TestCurlCffiFetch(unittest.TestCase):
 
     def setUp(self):
         self._orig_getaddrinfo = socket.getaddrinfo
-        self._orig_real = harvest._real_getaddrinfo
-        self._orig_has = harvest._HAS_CURL_CFFI
-        harvest._HAS_CURL_CFFI = True
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
+        self._orig_real = harvest_safety._real_getaddrinfo
+        self._orig_has = harvest_clients.base._HAS_CURL_CFFI
+        harvest_clients.base._HAS_CURL_CFFI = True
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
         harvest.install_ssrf_guard()
 
     def tearDown(self):
         socket.getaddrinfo = self._orig_getaddrinfo
-        harvest._real_getaddrinfo = self._orig_real
-        harvest._HAS_CURL_CFFI = self._orig_has
+        harvest_safety._real_getaddrinfo = self._orig_real
+        harvest_clients.base._HAS_CURL_CFFI = self._orig_has
 
     def _fetch(self, url, timeout=5, max_chars=20000, config=None):
         with harvest.tool_request_guard():
-            return harvest._fetch_curl_cffi({}, url, timeout, max_chars, config or base_config())
+            return harvest_fetch._fetch_curl_cffi({}, url, timeout, max_chars, config or base_config())
 
     def test_normal_fetch_strips_html_and_pins_resolved_ip(self):
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, "<p>Hello <b>world</b>.</p>")) as m:
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(reason)
         self.assertNotIn("<", result)
         self.assertIn("Hello world", result)
         kwargs = m.call_args.kwargs
-        pin_list = kwargs["curl_options"][harvest.CurlCffiOpt.RESOLVE]
+        pin_list = kwargs["curl_options"][harvest_clients.base.CurlCffiOpt.RESOLVE]
         self.assertEqual(pin_list, ["a.com:443:93.184.216.34"])
         self.assertFalse(kwargs["allow_redirects"])
 
     def test_private_host_blocked_before_any_curl_call(self):
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("127.0.0.1", 0))]
-        with mock.patch("harvest.curl_cffi_requests.get") as m:
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("127.0.0.1", 0))]
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get") as m:
             with self.assertRaises(harvest.SSRFBlocked):
                 self._fetch("http://internal.local/x")
         m.assert_not_called()
@@ -1428,14 +1445,14 @@ class TestCurlCffiFetch(unittest.TestCase):
             if host == "internal.local":
                 return [(2, 1, 6, "", ("127.0.0.1", 0))]
             return [(2, 1, 6, "", ("93.184.216.34", 0))]
-        harvest._real_getaddrinfo = fake_resolve
-        with mock.patch("harvest.curl_cffi_requests.get",
+        harvest_safety._real_getaddrinfo = fake_resolve
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(302, location="http://internal.local/x")):
             with self.assertRaises(harvest.SSRFBlocked):
                 self._fetch("https://a.com/start")
 
     def test_redirect_hop_to_blacklisted_domain_rejected(self):
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(302, location="https://blog.csdn.net/x")):
             result, reason = self._fetch("https://a.com/start")
         self.assertIsNone(result)
@@ -1446,34 +1463,34 @@ class TestCurlCffiFetch(unittest.TestCase):
             FakeCurlResponse(301, location="/next"),
             FakeCurlResponse(200, "final content"),
         ]
-        with mock.patch("harvest.curl_cffi_requests.get", side_effect=responses):
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get", side_effect=responses):
             result, reason = self._fetch("https://a.com/start")
         self.assertIsNone(reason)
         self.assertIn("final content", result)
 
     def test_exceeds_max_redirect_hops_fails(self):
         responses = [FakeCurlResponse(302, location=f"/hop{i}") for i in range(10)]
-        with mock.patch("harvest.curl_cffi_requests.get", side_effect=responses):
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get", side_effect=responses):
             result, reason = self._fetch("https://a.com/start")
         self.assertIsNone(result)
         self.assertIn("max redirect hops", reason)
 
     def test_redirect_missing_location_header_fails(self):
-        with mock.patch("harvest.curl_cffi_requests.get", return_value=FakeCurlResponse(302)):
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get", return_value=FakeCurlResponse(302)):
             result, reason = self._fetch("https://a.com/start")
         self.assertIsNone(result)
         self.assertIn("Location", reason)
 
     def test_request_exception_degrades_with_reason(self):
-        with mock.patch("harvest.curl_cffi_requests.get", side_effect=RuntimeError("boom")):
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get", side_effect=RuntimeError("boom")):
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(result)
         self.assertIn("request failed", reason)
 
     def test_call_fetch_backend_dispatches_to_curl_cffi(self):
         cfg = base_config()
-        with mock.patch("harvest._fetch_curl_cffi", return_value=("clean text", None)) as m:
-            content = harvest.call_fetch_backend({"type": "curl-cffi"}, harvest.RateLimiter(0), "https://a.com/x", cfg)
+        with mock.patch("harvest_fetch._fetch_curl_cffi", return_value=("clean text", None)) as m:
+            content = harvest_fetch.call_fetch_backend({"type": "curl-cffi"}, harvest.RateLimiter(0), "https://a.com/x", cfg)
         self.assertEqual(content, "clean text")
         m.assert_called_once()
 
@@ -1481,12 +1498,12 @@ class TestCurlCffiFetch(unittest.TestCase):
         cfg = base_config()
         cfg["limits"]["fetch_low_speed_bytes_s"] = 999
         cfg["limits"]["fetch_low_speed_window_s"] = 7
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, "<p>ok</p>")) as m:
             self._fetch("https://a.com/x", config=cfg)
         curl_options = m.call_args.kwargs["curl_options"]
-        self.assertEqual(curl_options[harvest.CurlCffiOpt.LOW_SPEED_LIMIT], 999)
-        self.assertEqual(curl_options[harvest.CurlCffiOpt.LOW_SPEED_TIME], 7)
+        self.assertEqual(curl_options[harvest_clients.base.CurlCffiOpt.LOW_SPEED_LIMIT], 999)
+        self.assertEqual(curl_options[harvest_clients.base.CurlCffiOpt.LOW_SPEED_TIME], 7)
 
     def test_timeout_tuple_connect_plus_read_equals_remaining_budget(self):
         # curl_cffi 0.15.0 sums (connect, read) into CURLOPT_TIMEOUT_MS for
@@ -1494,7 +1511,7 @@ class TestCurlCffiFetch(unittest.TestCase):
         # `remaining - connect`, not `remaining`, or the effective total
         # would be connect + remaining (over budget).
         with mock.patch("harvest.time.monotonic", side_effect=[0.0, 0.0]), \
-             mock.patch("harvest.curl_cffi_requests.get",
+             mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, "<p>ok</p>")) as m:
             self._fetch("https://a.com/x", timeout=20)
         conn, read = m.call_args.kwargs["timeout"]
@@ -1509,7 +1526,7 @@ class TestCurlCffiFetch(unittest.TestCase):
         # "simplified" to conn = remaining (which would zero out the read
         # component and reintroduce the libcurl 0ms-means-infinite hang).
         with mock.patch("harvest.time.monotonic", side_effect=[0.0, 0.0]), \
-             mock.patch("harvest.curl_cffi_requests.get",
+             mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, "<p>ok</p>")) as m:
             self._fetch("https://a.com/x", timeout=2)
         conn, read = m.call_args.kwargs["timeout"]
@@ -1522,7 +1539,7 @@ class TestCurlCffiFetch(unittest.TestCase):
         # second hop would fire, the shared deadline has less than 1s left
         # -- it must abort there instead of issuing another curl call.
         with mock.patch("harvest.time.monotonic", side_effect=[0.0, 0.0, 4.5]), \
-             mock.patch("harvest.curl_cffi_requests.get",
+             mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(302, location="/next")) as m:
             result, reason = self._fetch("https://a.com/start", timeout=5)
         self.assertIsNone(result)
@@ -1538,7 +1555,7 @@ class TestCurlCffiFetch(unittest.TestCase):
         cfg["limits"] = {k: v for k, v in cfg["limits"].items()
                           if k not in ("fetch_connect_timeout_s", "fetch_low_speed_bytes_s",
                                        "fetch_low_speed_window_s")}
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, "<p>legacy ok</p>")):
             result, reason = self._fetch("https://a.com/x", config=cfg)
         self.assertIsNone(reason)
@@ -1547,7 +1564,7 @@ class TestCurlCffiFetch(unittest.TestCase):
     def test_non_2xx_terminal_status_degrades_without_returning_body(self):
         # No challenge marker in the body -- this is gate 2 (plain HTTP
         # error), not gate 1. The body text must not leak into the reason.
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(403, "<html>Access Denied</html>")):
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(result)
@@ -1556,7 +1573,7 @@ class TestCurlCffiFetch(unittest.TestCase):
 
     def test_cloudflare_challenge_200_degrades(self):
         body = "<html><body><script src='/cdn-cgi/challenge-platform/h/g'></script></body></html>"
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, body)):
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(result)
@@ -1566,7 +1583,7 @@ class TestCurlCffiFetch(unittest.TestCase):
         # Locks down gate ordering: challenge detection (gate 1) must fire
         # before the generic HTTP-status gate (gate 2), even on a 403.
         body = "<html><body><script src='/cdn-cgi/challenge-platform/h/g'></script></body></html>"
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(403, body)):
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(result)
@@ -1575,7 +1592,7 @@ class TestCurlCffiFetch(unittest.TestCase):
 
     def test_datadome_challenge_degrades(self):
         body = "<html><body><script src='https://ct.captcha-delivery.com/c.js'></script></body></html>"
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, body)):
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(result)
@@ -1583,7 +1600,7 @@ class TestCurlCffiFetch(unittest.TestCase):
 
     def test_perimeterx_challenge_degrades(self):
         body = "<html><body><div id='px-captcha'></div></body></html>"
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, body)):
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(result)
@@ -1593,7 +1610,7 @@ class TestCurlCffiFetch(unittest.TestCase):
         # Mixed case in the source, verifying marker matching is
         # case-insensitive.
         body = "<html><body><div id='_Incapsula_Resource'></div></body></html>"
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, body)):
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(result)
@@ -1606,27 +1623,27 @@ class TestCurlCffiFetch(unittest.TestCase):
         # "cf-turnstile" -- the size gate lets anything >= 100KB through.
         body = "<p>" + "Cloudflare Turnstile 分析。" * 20000 + " cf-turnstile </p>"
         self.assertGreaterEqual(len(body), 100 * 1024)
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, body)):
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(reason)
         self.assertIn("Cloudflare Turnstile", result)
 
     def test_empty_body_does_not_crash(self):
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, "")):
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(reason)
         self.assertEqual(result, "")
-        self.assertFalse(harvest._looks_like_challenge_page(None))
-        self.assertFalse(harvest._looks_like_challenge_page(""))
+        self.assertFalse(harvest_fetch._looks_like_challenge_page(None))
+        self.assertFalse(harvest_fetch._looks_like_challenge_page(""))
 
     def test_small_page_quoting_challenge_prose_not_flagged(self):
         # Human-readable phrases like "just a moment" or vendor names like
         # "datadome" appearing in ordinary prose must not trigger a false
         # positive -- only the literal script/DOM/CDN artifacts do.
         body = "<p>Just a moment while we discuss the datadome product review.</p>"
-        with mock.patch("harvest.curl_cffi_requests.get",
+        with mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, body)):
             result, reason = self._fetch("https://a.com/x")
         self.assertIsNone(reason)
@@ -1640,29 +1657,29 @@ class TestCurlCffiStartupCheck(unittest.TestCase):
     call -- not silently degrade to the next fetch backend."""
 
     def setUp(self):
-        self._orig_has = harvest._HAS_CURL_CFFI
+        self._orig_has = harvest_clients.base._HAS_CURL_CFFI
 
     def tearDown(self):
-        harvest._HAS_CURL_CFFI = self._orig_has
+        harvest_clients.base._HAS_CURL_CFFI = self._orig_has
 
     def test_configured_but_missing_exits_4_with_install_instructions(self):
-        harvest._HAS_CURL_CFFI = False
+        harvest_clients.base._HAS_CURL_CFFI = False
         cfg = base_config(fetch_backends=[{"type": "curl-cffi"}, {"type": "urllib-ua"}])
         with self.assertRaises(SystemExit) as ctx:
             with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                harvest._check_curl_cffi_available(cfg)
+                harvest_clients.base._check_curl_cffi_available(cfg)
         self.assertEqual(ctx.exception.code, 4)
         self.assertIn("pip3 install --user curl_cffi", stderr.getvalue())
 
     def test_configured_and_installed_does_not_exit(self):
-        harvest._HAS_CURL_CFFI = True
+        harvest_clients.base._HAS_CURL_CFFI = True
         cfg = base_config(fetch_backends=[{"type": "curl-cffi"}])
-        harvest._check_curl_cffi_available(cfg)  # must not raise
+        harvest_clients.base._check_curl_cffi_available(cfg)  # must not raise
 
     def test_not_configured_never_exits_regardless_of_install_state(self):
-        harvest._HAS_CURL_CFFI = False
+        harvest_clients.base._HAS_CURL_CFFI = False
         cfg = base_config(fetch_backends=[{"type": "urllib-ua"}])
-        harvest._check_curl_cffi_available(cfg)  # must not raise
+        harvest_clients.base._check_curl_cffi_available(cfg)  # must not raise
 
 
 class TestCallFetchBackendPerBackendTimeout(unittest.TestCase):
@@ -1674,22 +1691,22 @@ class TestCallFetchBackendPerBackendTimeout(unittest.TestCase):
 
     def test_backend_with_timeout_s_uses_its_own_value(self):
         cfg = base_config()
-        with mock.patch("harvest._fetch_curl_cffi", return_value=("text", None)) as m:
-            harvest.call_fetch_backend({"type": "curl-cffi", "timeout_s": 25},
+        with mock.patch("harvest_fetch._fetch_curl_cffi", return_value=("text", None)) as m:
+            harvest_fetch.call_fetch_backend({"type": "curl-cffi", "timeout_s": 25},
                                         harvest.RateLimiter(0), "https://a.com/x", cfg)
         self.assertEqual(m.call_args.args[2], 25)
 
     def test_jina_backend_with_timeout_s_uses_its_own_value(self):
         cfg = base_config()
-        with mock.patch("harvest._fetch_jina_reader", return_value=("text", None)) as m:
-            harvest.call_fetch_backend({"type": "jina-reader", "timeout_s": 60},
+        with mock.patch("harvest_fetch._fetch_jina_reader", return_value=("text", None)) as m:
+            harvest_fetch.call_fetch_backend({"type": "jina-reader", "timeout_s": 60},
                                         harvest.RateLimiter(0), "https://a.com/x", cfg)
         self.assertEqual(m.call_args.args[2], 60)
 
     def test_backend_without_timeout_s_falls_back_to_call_timeout_s(self):
         cfg = base_config()  # call_timeout_s: 5, from base_config()
-        with mock.patch("harvest._fetch_urllib_ua", return_value=("text", None)) as m:
-            harvest.call_fetch_backend({"type": "urllib-ua"},
+        with mock.patch("harvest_fetch._fetch_urllib_ua", return_value=("text", None)) as m:
+            harvest_fetch.call_fetch_backend({"type": "urllib-ua"},
                                         harvest.RateLimiter(0), "https://a.com/x", cfg)
         self.assertEqual(m.call_args.args[2], cfg["limits"]["call_timeout_s"])
 
@@ -1735,7 +1752,7 @@ class TestJinaReaderAuthHeader(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=False), \
              mock.patch("harvest.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(b"page text")) as m:
-            harvest._fetch_jina_reader({"api_key_env": "JINA_API_KEY"}, "https://a.com/x", 5, 20000)
+            harvest_fetch._fetch_jina_reader({"api_key_env": "JINA_API_KEY"}, "https://a.com/x", 5, 20000)
         return m.call_args.args[0]
 
     def test_authorization_header_present_when_key_set(self):
@@ -1778,11 +1795,11 @@ _ORIG_TOOL_REQUEST_GUARD = harvest.tool_request_guard
 class TestSSRFGuardScopeNarrowing(unittest.TestCase):
     def setUp(self):
         self._orig_getaddrinfo = socket.getaddrinfo
-        self._orig_real = harvest._real_getaddrinfo
+        self._orig_real = harvest_safety._real_getaddrinfo
 
     def tearDown(self):
         socket.getaddrinfo = self._orig_getaddrinfo
-        harvest._real_getaddrinfo = self._orig_real
+        harvest_safety._real_getaddrinfo = self._orig_real
 
     def _spy_guard(self, calls):
         class SpyGuard(_ORIG_TOOL_REQUEST_GUARD):
@@ -1794,33 +1811,33 @@ class TestSSRFGuardScopeNarrowing(unittest.TestCase):
     def test_search_backends_never_enter_guard(self):
         calls = []
         backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.tool_request_guard", self._spy_guard(calls)), \
-             mock.patch("harvest.call_search_backend", return_value=[{"url": "https://a.com", "title": "t", "snippet": "s"}]):
+        with mock.patch("harvest_safety.tool_request_guard", self._spy_guard(calls)), \
+             mock.patch("harvest_search.call_search_backend", return_value=[{"url": "https://a.com", "title": "t", "snippet": "s"}]):
             harvest.do_search("q", "en", backends, [], base_config())
         self.assertEqual(calls, [])
 
     def test_tavily_extract_backend_never_enters_guard(self):
         calls = []
         backends = [({"type": "tavily-extract", "api_key_env": "X"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.tool_request_guard", self._spy_guard(calls)), \
-             mock.patch("harvest.call_fetch_backend", return_value="content"):
+        with mock.patch("harvest_safety.tool_request_guard", self._spy_guard(calls)), \
+             mock.patch("harvest_fetch.call_fetch_backend", return_value="content"):
             harvest.do_fetch("https://a.com/x", backends, [], base_config())
         self.assertEqual(calls, [])
 
     def test_jina_reader_backend_never_enters_guard(self):
         calls = []
         backends = [({"type": "jina-reader", "api_key_env": "X"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.tool_request_guard", self._spy_guard(calls)), \
-             mock.patch("harvest.call_fetch_backend", return_value="content"):
+        with mock.patch("harvest_safety.tool_request_guard", self._spy_guard(calls)), \
+             mock.patch("harvest_fetch.call_fetch_backend", return_value="content"):
             harvest.do_fetch("https://a.com/x", backends, [], base_config())
         self.assertEqual(calls, [])
 
     def test_urllib_ua_backend_still_enters_guard(self):
         calls = []
         backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.tool_request_guard", self._spy_guard(calls)), \
-             mock.patch("harvest._ssrf_precheck"), \
-             mock.patch("harvest.call_fetch_backend", return_value="content"):
+        with mock.patch("harvest_safety.tool_request_guard", self._spy_guard(calls)), \
+             mock.patch("harvest_safety._ssrf_precheck"), \
+             mock.patch("harvest_fetch.call_fetch_backend", return_value="content"):
             harvest.do_fetch("https://a.com/x", backends, [], base_config())
         self.assertGreaterEqual(len(calls), 1)
 
@@ -1830,9 +1847,9 @@ class TestSSRFGuardScopeNarrowing(unittest.TestCase):
         # take `url` as a request parameter to a fixed API host).
         calls = []
         backends = [({"type": "curl-cffi"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.tool_request_guard", self._spy_guard(calls)), \
-             mock.patch("harvest._ssrf_precheck"), \
-             mock.patch("harvest.call_fetch_backend", return_value="content"):
+        with mock.patch("harvest_safety.tool_request_guard", self._spy_guard(calls)), \
+             mock.patch("harvest_safety._ssrf_precheck"), \
+             mock.patch("harvest_fetch.call_fetch_backend", return_value="content"):
             harvest.do_fetch("https://a.com/x", backends, [], base_config())
         self.assertGreaterEqual(len(calls), 1)
 
@@ -1840,28 +1857,28 @@ class TestSSRFGuardScopeNarrowing(unittest.TestCase):
         # Fake DNS resolves the search backend's target to a private IP --
         # since search is unguarded, this must NOT raise SSRFBlocked (an
         # internally-hosted gateway/API must keep working).
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("10.0.0.5", 0))]
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("10.0.0.5", 0))]
         harvest.install_ssrf_guard()
         backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_search_backend", return_value=[{"url": "https://a.com", "title": "t", "snippet": "s"}]):
+        with mock.patch("harvest_search.call_search_backend", return_value=[{"url": "https://a.com", "title": "t", "snippet": "s"}]):
             result = harvest.do_search("q", "en", backends, [], base_config())
         data = json.loads(result)
         self.assertEqual(data["results"][0]["url"], "https://a.com")
 
     def test_tavily_extract_reaching_private_host_not_blocked(self):
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("10.0.0.5", 0))]
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("10.0.0.5", 0))]
         harvest.install_ssrf_guard()
         backends = [({"type": "tavily-extract", "api_key_env": "X"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_fetch_backend", return_value="internal gateway content"):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value="internal gateway content"):
             result = harvest.do_fetch("https://internal-gateway.local/x", backends, [], base_config())
         self.assertEqual(result, "internal gateway content")
 
     def test_urllib_ua_private_host_still_rejected(self):
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("127.0.0.1", 0))]
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("127.0.0.1", 0))]
         harvest.install_ssrf_guard()
         journal = []
         backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_fetch_backend") as m:
+        with mock.patch("harvest_fetch.call_fetch_backend") as m:
             result = harvest.do_fetch("http://internal.local/x", backends, journal, base_config())
         m.assert_not_called()
         self.assertEqual(journal[0]["blocked"], "ssrf")
@@ -1869,11 +1886,11 @@ class TestSSRFGuardScopeNarrowing(unittest.TestCase):
         self.assertIn("error", data)
 
     def test_curl_cffi_private_host_still_rejected(self):
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("127.0.0.1", 0))]
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("127.0.0.1", 0))]
         harvest.install_ssrf_guard()
         journal = []
         backends = [({"type": "curl-cffi"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_fetch_backend") as m:
+        with mock.patch("harvest_fetch.call_fetch_backend") as m:
             result = harvest.do_fetch("http://internal.local/x", backends, journal, base_config())
         m.assert_not_called()
         self.assertEqual(journal[0]["blocked"], "ssrf")
@@ -1930,7 +1947,7 @@ class TestSubprocessSafety(unittest.TestCase):
         self.assertNotIn("shell=True", source)
 
     def test_gemini_cli_uses_list_args_and_devnull_stdin(self):
-        source = Path(harvest.__file__).read_text(encoding="utf-8")
+        source = Path(harvest_search.__file__).read_text(encoding="utf-8")
         self.assertIn("stdin=subprocess.DEVNULL", source)
         self.assertIn('["gemini", "-m"', source)
 
@@ -1950,12 +1967,12 @@ class TestWorkerDriver(unittest.TestCase):
         self.config = base_config()
         self.search_backends = []
         self.fetch_backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
-        patcher = mock.patch("harvest._ssrf_precheck")  # SSRF DNS resolution not under test here
+        patcher = mock.patch("harvest_safety._ssrf_precheck")  # SSRF DNS resolution not under test here
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def _run(self, client):
-        with mock.patch("harvest.call_fetch_backend", return_value="Rayleigh scattering explains the blue sky."):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value="Rayleigh scattering explains the blue sky."):
             return harvest.run_worker("m1", "model-a", client, self.config, self.search_backends,
                                        self.fetch_backends, "why is the sky blue?", [], None)
 
@@ -2035,7 +2052,7 @@ class TestWorkerDriver(unittest.TestCase):
             assistant_final(findings_block([
                 {"claim": "c", "excerpt": fact, "url": "https://a.com/2", "credibility": 4, "language": "en"}])),
         ])
-        with mock.patch("harvest.call_fetch_backend", return_value=fact):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
             result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
         self.assertEqual(client.calls, 3)
         self.assertEqual(result.status, "OK")
@@ -2057,7 +2074,7 @@ class TestWorkerDriver(unittest.TestCase):
             assistant_final("not valid json"),
             assistant_final("still not valid json"),
         ])
-        with mock.patch("harvest.call_fetch_backend", return_value="text"):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value="text"):
             result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
         self.assertEqual(client.calls, 4)
         self.assertEqual(result.status, "FAILED")
@@ -2600,9 +2617,9 @@ class TestCmdRunEndToEnd(unittest.TestCase):
         self.goal_file = self.project_dir / harvest.GOAL_FILE_NAME
         self.goal_file.write_text("why is the sky blue?", encoding="utf-8")
 
-        self._orig_real = harvest._real_getaddrinfo
+        self._orig_real = harvest_safety._real_getaddrinfo
         self._orig_getaddrinfo = socket.getaddrinfo
-        harvest._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
+        harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
 
         # cmd_run's new gateway-key gate (--no-api local mode) fires before
         # any of the normal-mode logic these tests exercise -- fake key
@@ -2614,7 +2631,7 @@ class TestCmdRunEndToEnd(unittest.TestCase):
 
     def tearDown(self):
         self._env_patch.stop()
-        harvest._real_getaddrinfo = self._orig_real
+        harvest_safety._real_getaddrinfo = self._orig_real
         socket.getaddrinfo = self._orig_getaddrinfo
         self.tmpdir.cleanup()
 
@@ -2645,7 +2662,7 @@ class TestCmdRunEndToEnd(unittest.TestCase):
 
         with mock.patch("harvest.load_config", return_value=config), \
              mock.patch("harvest.make_client_factory", return_value=factory), \
-             mock.patch("harvest.call_fetch_backend", return_value=fact):
+             mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
             harvest.cmd_run(args)
 
         verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
@@ -2701,7 +2718,7 @@ class TestCmdRunEndToEnd(unittest.TestCase):
 
         with mock.patch("harvest.load_config", return_value=config), \
              mock.patch("harvest.make_client_factory", return_value=factory), \
-             mock.patch("harvest.call_fetch_backend", return_value="irrelevant fetched text"):
+             mock.patch("harvest_fetch.call_fetch_backend", return_value="irrelevant fetched text"):
             with self.assertRaises(SystemExit) as ctx:
                 harvest.cmd_run(args)
         self.assertEqual(ctx.exception.code, 3)
@@ -2747,7 +2764,7 @@ class TestCmdRunEndToEnd(unittest.TestCase):
 
         with mock.patch("harvest.load_config", return_value=config), \
              mock.patch("harvest.make_client_factory", return_value=factory), \
-             mock.patch("harvest.call_fetch_backend", return_value=fact):
+             mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
             harvest.cmd_run(args)
 
         verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
@@ -2794,7 +2811,7 @@ class TestCmdRunEndToEnd(unittest.TestCase):
 
         with mock.patch("harvest.load_config", return_value=config), \
              mock.patch("harvest.make_client_factory", return_value=factory), \
-             mock.patch("harvest.call_fetch_backend", return_value=fact):
+             mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
             harvest.cmd_run(args)
 
         report = (self.raw_dir / "fetch-report.md").read_text(encoding="utf-8")
@@ -2839,7 +2856,7 @@ class TestCmdRunEndToEnd(unittest.TestCase):
 
         with mock.patch("harvest.load_config", return_value=config), \
              mock.patch("harvest.make_client_factory", return_value=factory), \
-             mock.patch("harvest.call_fetch_backend", return_value=fact):
+             mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
             harvest.cmd_run(args)
 
         report = (self.raw_dir / "fetch-report.md").read_text(encoding="utf-8")
@@ -4366,7 +4383,7 @@ class TestCompletionRetryAndForcedSynthesisRecovery(unittest.TestCase):
     def setUp(self):
         self.config = base_config()
         self.fetch_backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
-        patcher = mock.patch("harvest._ssrf_precheck")
+        patcher = mock.patch("harvest_safety._ssrf_precheck")
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -4399,7 +4416,7 @@ class TestCompletionRetryAndForcedSynthesisRecovery(unittest.TestCase):
                 {"claim": "c", "excerpt": fact, "url": "https://a.com/x",
                  "credibility": 4, "language": "en"}])),
         ])
-        with mock.patch("harvest.call_fetch_backend", return_value=fact):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
             result = harvest.run_worker("m1", "model-a", client, self.config, [],
                                          self.fetch_backends, "goal", [], None)
         self.assertEqual(result.status, "OK")
@@ -4439,7 +4456,7 @@ class TestGeminiGroundingJournalInjection(unittest.TestCase):
         journal = []
         cfg = base_config()
         backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_search_backend", return_value=self._grounding_results()):
+        with mock.patch("harvest_search.call_search_backend", return_value=self._grounding_results()):
             harvest.do_search("q", "en", backends, journal, cfg)
 
         # No "fetch"-typed entries at all from grounding -- they must be
@@ -4462,7 +4479,7 @@ class TestGeminiGroundingJournalInjection(unittest.TestCase):
         journal = []
         cfg = base_config()
         backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_search_backend", return_value=self._grounding_results()):
+        with mock.patch("harvest_search.call_search_backend", return_value=self._grounding_results()):
             harvest.do_search("q", "en", backends, journal, cfg)
 
         claims = harvest.assign_claim_ids("m1", [
@@ -4483,7 +4500,7 @@ class TestGeminiGroundingJournalInjection(unittest.TestCase):
         journal = []
         cfg = base_config()
         backends = [({"type": "gemini-grounding", "model": "g"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_search_backend", return_value=self._grounding_results()):
+        with mock.patch("harvest_search.call_search_backend", return_value=self._grounding_results()):
             harvest.do_search("q", "en", backends, journal, cfg)
         journal.append({"tool": "fetch", "url": "https://example.com/page1",
                          "backend": "urllib-ua", "content": "Full real page text."})
@@ -4511,7 +4528,7 @@ class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
         self.config = base_config()
         self.config["limits"]["max_steps_per_model"] = 6
         self.fetch_backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
-        patcher = mock.patch("harvest._ssrf_precheck")
+        patcher = mock.patch("harvest_safety._ssrf_precheck")
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -4532,7 +4549,7 @@ class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
             assistant_final(findings_block([
                 {"claim": "c", "excerpt": fact, "url": "https://a.com/6", "credibility": 4, "language": "en"}])),
         ])
-        with mock.patch("harvest.call_fetch_backend", return_value=fact):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
             harvest.run_worker("m1", "model-a", client, self.config, [],
                                 self.fetch_backends, "goal", [], None)
 
@@ -4571,7 +4588,7 @@ class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
             assistant_tool_call("c2", "fetch", {"url": "https://a.com/2"}),
             synthesis_with_stray_tool_call,
         ])
-        with mock.patch("harvest.call_fetch_backend", return_value=fact):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
             result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
         self.assertEqual(client.calls, 3)
         self.assertEqual(result.status, "OK")
@@ -4591,7 +4608,7 @@ class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
             assistant_final(findings_block([
                 {"claim": "c", "excerpt": fact, "url": "https://a.com/2", "credibility": 4, "language": "en"}])),
         ])
-        with mock.patch("harvest.call_fetch_backend", return_value=fact):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value=fact):
             result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
         self.assertEqual(client.calls, cfg["limits"]["max_steps_per_model"] + 2)
         self.assertEqual(result.status, "OK")
@@ -4614,7 +4631,7 @@ class TestBudgetNudgeAndForcedSynthesisConvergence(unittest.TestCase):
             assistant_final("this is not json at all"),
             assistant_final("still not json"),
         ])
-        with mock.patch("harvest.call_fetch_backend", return_value="text"):
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value="text"):
             result = harvest.run_worker("m1", "model-a", client, cfg, [], self.fetch_backends, "goal", [], None)
         self.assertEqual(client.calls, 4)
         self.assertEqual(result.status, "FAILED")
@@ -4681,8 +4698,8 @@ class TestCmdRunLocalModeDispatch(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"}), \
              mock.patch("harvest.load_config", return_value=config), \
              mock.patch("harvest.make_client_factory", side_effect=AssertionError("must not call normal-mode factory")), \
-             mock.patch("harvest.do_search", return_value=json.dumps({"results": [{"url": "https://a.com/1", "title": "t"}]})), \
-             mock.patch("harvest.do_fetch") as mock_do_fetch:
+             mock.patch("harvest_search.do_search", return_value=json.dumps({"results": [{"url": "https://a.com/1", "title": "t"}]})), \
+             mock.patch("harvest_fetch.do_fetch") as mock_do_fetch:
             def fake_fetch(url, fetch_backends, journal, config):
                 journal.append({"tool": "fetch", "url": url, "backend": "urllib-ua", "content": "fetched body"})
                 return "fetched body"
@@ -4731,8 +4748,8 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
             journal.append({"tool": "fetch", "url": url, "backend": "urllib-ua", "content": content})
             return content
 
-        with mock.patch("harvest.do_search", return_value=search_results), \
-             mock.patch("harvest.do_fetch", side_effect=fake_fetch):
+        with mock.patch("harvest_search.do_search", return_value=search_results), \
+             mock.patch("harvest_fetch.do_fetch", side_effect=fake_fetch):
             harvest.cmd_run_local(self._args(queries_file), self.config)
 
         verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
@@ -4765,7 +4782,7 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
         queries_file = self.project_dir / "queries.json"
         queries_file.write_text(json.dumps({"queries": ["q1"]}), encoding="utf-8")
         empty_results = json.dumps({"results": []})
-        with mock.patch("harvest.do_search", return_value=empty_results):
+        with mock.patch("harvest_search.do_search", return_value=empty_results):
             with self.assertRaises(SystemExit) as ctx:
                 harvest.cmd_run_local(self._args(queries_file), self.config)
         self.assertEqual(ctx.exception.code, 3)
@@ -4782,8 +4799,8 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
             journal.append({"tool": "fetch", "url": url, "backend": None, "content": None})
             return json.dumps({"error": "all fetch backends failed"})
 
-        with mock.patch("harvest.do_search", return_value=search_results), \
-             mock.patch("harvest.do_fetch", side_effect=fake_fetch_fail):
+        with mock.patch("harvest_search.do_search", return_value=search_results), \
+             mock.patch("harvest_fetch.do_fetch", side_effect=fake_fetch_fail):
             with self.assertRaises(SystemExit) as ctx:
                 harvest.cmd_run_local(self._args(queries_file), self.config)
         self.assertEqual(ctx.exception.code, 3)
@@ -4810,8 +4827,8 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
             journal.append({"tool": "fetch", "url": url, "backend": "urllib-ua", "content": "c"})
             return "c"
 
-        with mock.patch("harvest.do_search", side_effect=fake_search), \
-             mock.patch("harvest.do_fetch", side_effect=fake_fetch):
+        with mock.patch("harvest_search.do_search", side_effect=fake_search), \
+             mock.patch("harvest_fetch.do_fetch", side_effect=fake_fetch):
             harvest.cmd_run_local(self._args(queries_file), self.config)
 
         self.assertEqual(fetch_order[0], "https://x.com/b")
@@ -4832,8 +4849,8 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
             journal.append({"tool": "fetch", "url": url, "backend": "urllib-ua", "content": "c"})
             return "c"
 
-        with mock.patch("harvest.do_search", return_value=many_results), \
-             mock.patch("harvest.do_fetch", side_effect=fake_fetch):
+        with mock.patch("harvest_search.do_search", return_value=many_results), \
+             mock.patch("harvest_fetch.do_fetch", side_effect=fake_fetch):
             harvest.cmd_run_local(self._args(queries_file), cfg)
 
         self.assertEqual(len(fetched), 2)
@@ -5083,9 +5100,9 @@ class TestProgressEmit(unittest.TestCase):
                  "url": "https://a.com/x", "credibility": 4, "language": "en"}])),
         ])
         search_backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
-        with mock.patch("harvest.call_search_backend",
+        with mock.patch("harvest_search.call_search_backend",
                          return_value=[{"url": "https://a.com/x", "title": "t", "snippet": "s"}]), \
-             mock.patch("harvest.call_fetch_backend",
+             mock.patch("harvest_fetch.call_fetch_backend",
                          return_value="Rayleigh scattering explains the blue sky."), \
              mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
             harvest.run_worker("m1", "model-a", client, base_config(), search_backends, [],

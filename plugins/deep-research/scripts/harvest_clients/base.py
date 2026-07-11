@@ -10,9 +10,42 @@ import http.client
 import json
 import socket
 import ssl
+import sys
 import time
 import urllib.error
 import urllib.request
+
+# curl_cffi is an optional soft dependency (the "curl-cffi" fetch backend
+# only): the core pipeline stays stdlib-only and degrades cleanly to the
+# next fetch backend when it isn't installed. Never import it at module
+# scope unconditionally -- that would turn a missing optional package into
+# a hard crash for every consumer of this module (including the
+# SubagentStop hook, which imports harvest.py on every turn).
+try:
+    from curl_cffi import requests as curl_cffi_requests
+    from curl_cffi.const import CurlOpt as CurlCffiOpt
+    _HAS_CURL_CFFI = True
+except ImportError:
+    curl_cffi_requests = None
+    CurlCffiOpt = None
+    _HAS_CURL_CFFI = False
+
+
+_CURL_CFFI_MISSING_MSG = (
+    "ERROR: fetch backend 'curl-cffi' is configured but curl_cffi is not "
+    "installed. Run: pip3 install --user curl_cffi"
+)
+
+
+def _check_curl_cffi_available(config):
+    # Config declares the backend -> it must be installed, fail fast before
+    # touching any state (cleanup/tombstone) or spending an API call. Config
+    # doesn't declare it -> curl_cffi is never imported at runtime and the
+    # pipeline stays exactly as stdlib-only as it always has been.
+    types = [b.get("type") for b in config.get("fetch_backends", [])]
+    if "curl-cffi" in types and not _HAS_CURL_CFFI:
+        print(_CURL_CFFI_MISSING_MSG, file=sys.stderr)
+        sys.exit(4)
 
 
 def _read_http_error_body(e):
