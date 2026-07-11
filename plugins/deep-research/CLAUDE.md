@@ -10,11 +10,14 @@
 |------|------|
 | `scripts/harvest.py` | 主编排：pipeline / worker / judge / merge / verify / CLI |
 | `scripts/harvest_safety.py` | SSRF 守卫 / 域黑名单 / 路径沙箱 / 限流 / URL 规范化（零外部依赖叶子） |
-| `scripts/harvest_search/` | 3 个 web search backend + do_search 编排 |
+| `scripts/harvest_search/` | 3 个 web search backend（gemini-grounding/tavily/duckduckgo）+ do_search 编排 |
+| `scripts/harvest_search/social.py` | 独立社交搜索链（search_social tool，backend-agnostic，现仅 grok-x） |
 | `scripts/harvest_fetch/` | 4 个 URL fetch backend + do_fetch 编排 |
 | `scripts/harvest_clients/base.py` | HTTP/SSE 原语 + curl_cffi 传输能力 |
+| `scripts/harvest_clients/grok_cli.py` | grok-4.5 panel client，本地 grok CLI 驱动，伪装 run_worker 两阶段 tool-use 契约 |
+| `scripts/harvest_clients/grok_exec.py` | grok CLI 共享执行/解析叶子模块（run_grok_plain + parse_embedded_json），grok_cli 与 social.py 共用 |
 
-**铁律**：search 与 fetch 严格平级互不 import；safety 与 clients.base 是叶子，不 import 主模块。加 backend、改安全策略、改测试 patch（facade mock 穿透规则）前，先读上表模块地图 + 本节铁律。
+**铁律**：search 与 fetch 严格平级互不 import；safety 与 clients.base 是叶子，不 import 主模块。social 链（search_social/grok-x）与 web 链（search/do_search）相互独立，一方失败不阻塞另一方；grok_exec 是叶子模块，只被 grok_cli 与 social.py 引用，不 import 主模块或平级 backend。grok CLI 未安装时优雅降级：grok-* panel 模型从 roster 过滤、grok-x social backend 跳过，整管线不因此 FAILED。加 backend、改安全策略、改测试 patch（facade mock 穿透规则）前，先读上表模块地图 + 本节铁律。
 
 **mock 穿透约束**：测试 patch 必须打在符号的真实使用点（`harvest_search.*` / `harvest_fetch.*` / `harvest_clients.base.*`），不要打 `harvest.*` re-export 面——后者靠 stdlib 单例巧合生效，清死 import 后会静默失效。
 

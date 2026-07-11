@@ -19,6 +19,7 @@ The methodology (skill + subagents) works out of the box. The **multi-model harv
 | `GATEWAY_API_KEY` (env) | harvest.py panel models (gemini/gpt/claude via your OpenAI-compatible gateway) **and the primary `gemini-grounding` search backend** | Set gateway `base_url` + key in `scripts/harvest.config.json` / env |
 | `curl_cffi` (Python, optional) | `curl-cffi` fetch backend (direct free fetch) | `pip3 install --user curl_cffi` — else harvest.py exits 4 with install hint |
 | `TAVILY_API_KEY` / `JINA_API_KEY` (env, optional) | tavily/jina search & fetch fallbacks | Set as env vars if used |
+| `grok` CLI (optional, `grok login`) | `grok-4.5` panel model + `grok-x` social search backend | Install locally + authenticate; if absent, `grok-*` panel models and `grok-x` social backends are dropped/skipped and the pipeline still completes |
 | Python 3 | harvest.py + gate_check.py (stdlib only) | System Python 3 |
 
 harvest.py **never silently degrades**: if multi-model harvesting is unavailable it exits 3 (`UNAVAILABLE`) and blocks — recovery is either fixing the setup and re-running, or an explicit user-signed `legacy-exemption.md`. An incomplete study masquerading as complete is worse than a visible failure.
@@ -34,7 +35,10 @@ deep-research/
 │   └── research-reviewer.md    # G1/G2/G3 sufficiency + Validation review
 ├── scripts/
 │   ├── harvest.py              # multi-model harvest + deterministic citation verification
-│   ├── harvest.config.json     # gateway / panel models / search & fetch backend chains
+│   ├── harvest.config.json     # gateway / panel models / search & fetch & social_search backend chains
+│   ├── harvest_search/social.py     # independent search_social tool chain (grok-x / X-Twitter)
+│   ├── harvest_clients/grok_cli.py  # grok-4.5 panel client (local grok CLI, two-phase tool-use fake)
+│   ├── harvest_clients/grok_exec.py # shared grok CLI subprocess exec + JSON salvage (leaf module)
 │   └── create-research-project.sh   # scaffold a research project in the current directory
 └── hooks/
     ├── hooks.json              # SubagentStop → gate_check.py
@@ -89,6 +93,7 @@ python3 -m pytest plugins/deep-research/tests/
 
 ## Version History
 
+- **v1.14.0** — Two additions, both built on a shared leaf module (`harvest_clients/grok_exec.py`, subprocess exec + JSON salvage for the local `grok` CLI): (1) **`grok-4.5` panel model** via `harvest_clients/grok_cli.py` — grok has no gateway HTTP endpoint, so `GrokCliClient` fakes `run_worker`'s two-phase tool-use contract on top of a single-shot CLI call (phase 1: grok researches + drafts findings, its claimed URLs come back as synthetic `fetch` tool_calls; phase 2: findings are filtered down to only the URLs that phase 2's independent re-fetch actually verified). The citation-verifiability rule stays intact — grok's own say-so is never trusted, every URL is independently re-fetched through the existing fetch/journal machinery. (2) **Independent social search** — a new `search_social` tool backed by its own `social_search_backends` chain (type `grok-x`, X/Twitter search via the same `grok` CLI), pulled out of the web `do_search` first-success chain so a social-search failure never blocks web search or vice versa; domain filtering is hard-restricted to X/Twitter hosts. Both features degrade gracefully when the `grok` CLI isn't installed: `grok-*` panel models are dropped from the roster, `grok-x` social backends are skipped, and the pipeline still completes rather than failing. A legacy `x-search` config key is auto-migrated in-memory into `social_search_backends` for backward compatibility.
 - **v1.1.5** — Real grounded fallback search: the `gateway-gemini` backend (which asked an OpenAI-compat `/chat/completions` to "list some URLs" and got model-recalled, hallucinated links with no live retrieval) is replaced by `gemini-grounding`, which hits the gateway's Gemini-native `/v1beta/models/<model>:generateContent` endpoint with the built-in `google_search` tool. Grounding chunks carry redirect-wrapped real source URLs, resolved to true landing pages (302 `Location` read **without following**, connecting only to the fixed `vertexaisearch.cloud.google.com` host — a hallucinated/injected `uri` is rejected before any byte leaves the process) before entering the citation-verifiable pipeline. This also fixes the fake backend permanently masking the real tavily/duckduckgo backends behind it in `do_search`'s first-hit-wins loop.
 - **v1.1.3** — Model refresh: panel `claude-sonnet-4-6` → `claude-sonnet-5`; fallback `gateway-gemini` search backend `gemini-2.5-flash` → `gemini-3.5-flash` (plus the mirrored default in `harvest.py`, doc examples, and test fixture). The `startswith("claude")` dispatch keeps `claude-sonnet-5` on the Anthropic-native `/messages` path (prompt caching intact).
 - **v1.1.2** — `create-research-project.sh` scaffolds into `projects/` idempotently: a path-segment `case` resolves the single `projects/` root no matter where cwd sits in the tree, so it appends exactly once and never nests. Fixed two stale `framework/*.md` references in `assets/` templates (→ skill `references/`).

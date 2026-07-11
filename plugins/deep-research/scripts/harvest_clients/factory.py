@@ -6,6 +6,7 @@ from harvest_clients.gateway import GatewayClient
 from harvest_clients.anthropic import AnthropicGatewayClient
 from harvest_clients.responses import ResponsesGatewayClient
 from harvest_clients.gemini import GeminiNativeGatewayClient
+from harvest_clients.grok_cli import GrokCliClient
 
 
 def make_client_factory(config):
@@ -70,6 +71,18 @@ def make_client_factory(config):
     gemini_stream = config.get("limits", {}).get("gemini_stream", True)
     gateway_stream = config.get("limits", {}).get("gateway_stream", True)
     gateway_stream_options = config.get("limits", {}).get("gateway_stream_options", False)
+    # grok-* models bypass the gateway entirely (GrokCliClient shells out to
+    # the local grok CLI) -- effort/max_urls are grok-specific knobs with no
+    # HTTP-gateway equivalent, hence their own config keys rather than reuse
+    # of claude_effort/gpt_endpoint-style names. Same .get()-with-default
+    # back-compat pattern as every other key here.
+    grok_effort = config.get("limits", {}).get("grok_effort", "medium")
+    grok_max_urls = config.get("limits", {}).get("grok_max_urls", 12)
+    # grok CLI calls (agentic web+X search inside a single invocation) run
+    # far longer than a typical gateway HTTP completion -- independent
+    # timeout key rather than reusing completion_timeout_s, so raising one
+    # doesn't silently also relax the other for every gateway-backed client.
+    grok_timeout = config.get("limits", {}).get("grok_timeout_s", 240)
 
     def factory(model_id):
         # claude models go through the Anthropic-native /messages path so
@@ -95,6 +108,8 @@ def make_client_factory(config):
             return GeminiNativeGatewayClient(gw["base_url"], api_key, model_id, timeout, max_tokens,
                                               stream_enabled=gemini_stream, ttft_timeout=stream_ttft,
                                               inter_token_timeout=stream_inter)
+        if model_id.startswith("grok"):
+            return GrokCliClient(model_id, effort=grok_effort, timeout=grok_timeout, max_urls=grok_max_urls)
         return GatewayClient(gw["base_url"], api_key, model_id, timeout,
                               stream_enabled=gateway_stream, ttft_timeout=stream_ttft,
                               inter_token_timeout=stream_inter, stream_options=gateway_stream_options)
