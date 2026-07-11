@@ -76,12 +76,9 @@
 
 内部 search 后端链按优先级降级（配置于 `harvest.config.json`，与 `harvest.py` 同目录）：
 
-1. agy-cli（主力，本机 `agy` CLI，经实测可联网搜索，零网关成本）
-2. 网关 gemini（经聚合网关调用，agy-cli 失败时兜底）
-3. 付费搜索 API（tavily 适配器，key 就绪时启用）
-4. DuckDuckGo HTML（零 key 尽力型兜底，可能被反爬拦截）
-
-> gemini-cli 适配器代码保留但已移出默认链（本机 CLI 凭据长期失效，每次搜索空耗一次 subprocess 失败）。CLI 恢复登录后可在 config 中重新加回链，或继续用 agy-cli 作为其替代。
+1. gemini-grounding（主力，经聚合网关 API 调用 Gemini grounding 搜索）
+2. 付费搜索 API（tavily 适配器，key 就绪时启用）
+3. DuckDuckGo HTML（零 key 尽力型兜底，可能被反爬拦截）
 
 fetch 后端链同理降级：curl-cffi（本地免费直连，软依赖）→ tavily-extract → jina-reader → urllib+UA 兜底。**harvest.py 采集失败（exit 3 / `UNAVAILABLE`）不自动降级到 legacy 链**——失败即阻塞上报用户裁决，降级权在用户（见 [quality-gates.md](./quality-gates.md) 引用校验机械门）。
 

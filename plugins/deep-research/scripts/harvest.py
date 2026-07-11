@@ -29,7 +29,6 @@ import re
 import shutil
 import socket
 import ssl
-import subprocess
 import sys
 import threading
 import time
@@ -326,7 +325,7 @@ from harvest_clients.gemini import (
 
 
 from harvest_search import (
-    _search_gemini_cli, _ddg_extract_target_url, _search_duckduckgo,
+    _ddg_extract_target_url, _search_duckduckgo,
     _search_tavily, _resolve_grounding_redirect, _search_gemini_grounding,
     _no_redirect_opener, call_search_backend, do_search,
 )

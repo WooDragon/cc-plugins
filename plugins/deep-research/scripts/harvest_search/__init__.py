@@ -1,4 +1,4 @@
-"""harvest_search - web search backends (gemini-cli, duckduckgo, tavily,
+"""harvest_search - web search backends (duckduckgo, tavily,
 gemini-grounding) + orchestration (call_search_backend/do_search). Depends on
 harvest_safety (blacklist) and harvest_clients.base (HTTP primitives +
 curl_cffi capability); never imports harvest_fetch (strict siblings)."""
@@ -6,7 +6,6 @@ import html
 import json
 import os
 import re
-import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -18,7 +17,7 @@ import harvest_clients.base
 import harvest_journal
 
 __all__ = [
-    "_search_gemini_cli", "_ddg_extract_target_url", "_search_duckduckgo",
+    "_ddg_extract_target_url", "_search_duckduckgo",
     "_search_tavily", "_resolve_grounding_redirect", "_search_gemini_grounding",
     "_no_redirect_opener", "call_search_backend", "do_search",
 ]
@@ -36,28 +35,6 @@ _PARALLEL_FETCH_MAX_WORKERS = 3
 # ---------------------------------------------------------------------------
 # Search backends (degrade in config order)
 # ---------------------------------------------------------------------------
-
-def _search_gemini_cli(cfg, query, timeout):
-    try:
-        proc = subprocess.run(
-            ["gemini", "-m", cfg.get("model", "gemini-3.5-flash"), "-p", query],
-            capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL, text=True,
-        )
-    except subprocess.TimeoutExpired:
-        return None, "gemini-cli: timed out"
-    except OSError as e:
-        return None, f"gemini-cli: failed to launch subprocess: {e}"
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip()[:200]
-        return None, f"gemini-cli: exited with code {proc.returncode}" + (f": {detail}" if detail else "")
-    text = proc.stdout or ""
-    if not text.strip():
-        return None, "gemini-cli: empty output"
-    urls = list(dict.fromkeys(re.findall(r'https?://[^\s\)\]\'"<>]+', text)))
-    if not urls:
-        return None, "gemini-cli: no URLs found in output"
-    return [{"url": u, "title": "", "snippet": text[:500]} for u in urls], None
-
 
 _DDG_ANCHOR_RE = re.compile(r'<a\b([^>]*)>(.*?)</a>', re.IGNORECASE | re.DOTALL)
 _DDG_HREF_RE = re.compile(r'href="([^"]*)"')
@@ -334,9 +311,7 @@ def call_search_backend(backend_cfg, limiter, query, lang, config, attempts=None
     timeout = config["limits"]["call_timeout_s"]
     btype = backend_cfg["type"]
     try:
-        if btype == "gemini-cli":
-            result, reason = _search_gemini_cli(backend_cfg, query, timeout)
-        elif btype == "tavily":
+        if btype == "tavily":
             result, reason = _search_tavily(backend_cfg, query, timeout)
         elif btype == "duckduckgo":
             result, reason = _search_duckduckgo(backend_cfg, query, timeout)

@@ -32,7 +32,7 @@ def base_config(**overrides):
         "gateway": {"base_url": "https://gw.example.com/v1", "api_key_env": "TEST_GATEWAY_KEY"},
         "panel_models": ["model-a", "model-b", "model-c"],
         "judge_model": "model-judge",
-        "search_backends": [{"type": "gemini-cli", "model": "gemini-3.5-flash"}],
+        "search_backends": [{"type": "gemini-grounding", "model": "gemini-3.5-flash"}],
         "fetch_backends": [{"type": "urllib-ua"}],
         "local_sources": {"enabled": False, "dir": "intake/local_sources"},
         "limits": {"max_steps_per_model": 6, "call_timeout_s": 5, "wall_clock_s": 60,
@@ -494,7 +494,7 @@ class TestCitationValidation(unittest.TestCase):
         self.assertEqual(invalid, [])
 
     def test_url_seen_in_search_but_never_fetched_rejected_as_not_fetched(self):
-        journal = [{"tool": "search", "query": "q", "lang": "en", "backend": "gemini-cli",
+        journal = [{"tool": "search", "query": "q", "lang": "en", "backend": "gemini-grounding",
                     "urls": ["https://a.com/only-searched"]}]
         claims = harvest.assign_claim_ids("m1", [
             {"claim": "c", "excerpt": "anything", "url": "https://a.com/only-searched"}])
@@ -1178,10 +1178,25 @@ class TestBackendDegradation(unittest.TestCase):
         socket.getaddrinfo = self._orig_getaddrinfo
         harvest_safety._real_getaddrinfo = self._orig_real
 
+    def test_unknown_search_backend_type_records_attempt_and_returns_none(self):
+        # Regression lock for the gemini-cli removal: a config still naming a
+        # dropped/unknown backend type (e.g. a stale project-local config that
+        # kept "gemini-cli" or "agy-cli") must degrade cleanly -- call_search_backend
+        # returns None and records an "unknown search backend type" attempt, so
+        # do_search just falls through to the next backend rather than crashing.
+        # call_search_backend returns the bare result (None on failure); the
+        # failure reason is side-channelled onto the caller-supplied attempts
+        # list, not returned.
+        attempts = []
+        result = harvest_search.call_search_backend(
+            {"type": "gemini-cli"}, harvest.RateLimiter(0), "q", "en", self.config, attempts)
+        self.assertIsNone(result)
+        self.assertIn("unknown search backend type", attempts[0]["error"])
+
     def test_search_falls_through_to_second_backend(self):
         journal = []
         backends = [
-            ({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0)),
+            ({"type": "gemini-grounding", "model": "x"}, harvest.RateLimiter(0)),
             ({"type": "duckduckgo"}, harvest.RateLimiter(0)),
         ]
         with mock.patch("harvest_search.call_search_backend", side_effect=[None, [{"url": "https://a.com", "title": "t", "snippet": "s"}]]):
@@ -1192,7 +1207,7 @@ class TestBackendDegradation(unittest.TestCase):
 
     def test_search_all_backends_fail(self):
         journal = []
-        backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
+        backends = [({"type": "gemini-grounding", "model": "x"}, harvest.RateLimiter(0))]
         with mock.patch("harvest_search.call_search_backend", return_value=None):
             result = harvest.do_search("q", "en", backends, journal, self.config)
         data = json.loads(result)
@@ -1205,7 +1220,7 @@ class TestBackendDegradation(unittest.TestCase):
         # genuine empty answer -- the chain must still try the next backend.
         journal = []
         backends = [
-            ({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0)),
+            ({"type": "gemini-grounding", "model": "x"}, harvest.RateLimiter(0)),
             ({"type": "duckduckgo"}, harvest.RateLimiter(0)),
         ]
         with mock.patch("harvest_search.call_search_backend", side_effect=[
@@ -1219,7 +1234,7 @@ class TestBackendDegradation(unittest.TestCase):
 
     def test_search_results_filtered_by_blacklist(self):
         journal = []
-        backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
+        backends = [({"type": "gemini-grounding", "model": "x"}, harvest.RateLimiter(0))]
         results = [{"url": "https://blog.csdn.net/x", "title": "t", "snippet": "s"},
                    {"url": "https://good.com/x", "title": "t", "snippet": "s"}]
         with mock.patch("harvest_search.call_search_backend", return_value=results):
@@ -1377,7 +1392,10 @@ class TestJournalTimestamps(unittest.TestCase):
 
     def test_do_search_success_entry_carries_t_and_exact_duration_s(self):
         journal = []
-        backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
+        # duckduckgo (not gemini-grounding): grounding backends prepend a
+        # per-URL search_grounding entry, which would make journal[0] the
+        # grounding row (no duration_s) instead of the search row under test.
+        backends = [({"type": "duckduckgo"}, harvest.RateLimiter(0))]
         # Same shape as do_fetch: call_search_backend mocked wholesale means
         # only do_search's own two time.monotonic() calls (_t0, then the
         # success entry) fire -- limiter.acquire() lives inside the mocked
@@ -1392,7 +1410,7 @@ class TestJournalTimestamps(unittest.TestCase):
 
     def test_do_search_all_backends_failed_entry_carries_duration_s(self):
         journal = []
-        backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
+        backends = [({"type": "gemini-grounding", "model": "x"}, harvest.RateLimiter(0))]
         with mock.patch("harvest_search.call_search_backend", return_value=None), \
              mock.patch("harvest_search.time.monotonic", side_effect=[10.0, 10.75]):
             harvest.do_search("q", "en", backends, journal, self.config)
@@ -1459,7 +1477,7 @@ class TestJournalTimestamps(unittest.TestCase):
         journal = [
             {"tool": "fetch", "url": "https://a.com/x", "content": "The quick brown fox.",
              "t": 100.0, "duration_s": 0.5, "attempts": []},
-            {"tool": "search", "query": "q", "lang": "en", "backend": "gemini-cli",
+            {"tool": "search", "query": "q", "lang": "en", "backend": "gemini-grounding",
              "urls": ["https://a.com/only-searched"], "t": 100.1, "duration_s": 0.2, "attempts": []},
         ]
         claims = harvest.assign_claim_ids("m1", [
@@ -2093,11 +2111,6 @@ class TestSubprocessSafety(unittest.TestCase):
     def test_no_shell_true_in_source(self):
         source = Path(harvest.__file__).read_text(encoding="utf-8")
         self.assertNotIn("shell=True", source)
-
-    def test_gemini_cli_uses_list_args_and_devnull_stdin(self):
-        source = Path(harvest_search.__file__).read_text(encoding="utf-8")
-        self.assertIn("stdin=subprocess.DEVNULL", source)
-        self.assertIn('["gemini", "-m"', source)
 
     def test_all_urlopen_calls_have_explicit_timeout(self):
         source = Path(harvest.__file__).read_text(encoding="utf-8")
@@ -5320,7 +5333,7 @@ class TestProgressEmit(unittest.TestCase):
                 {"claim": "c", "excerpt": "Rayleigh scattering explains the blue sky.",
                  "url": "https://a.com/x", "credibility": 4, "language": "en"}])),
         ])
-        search_backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
+        search_backends = [({"type": "gemini-grounding", "model": "x"}, harvest.RateLimiter(0))]
         with mock.patch("harvest_search.call_search_backend",
                          return_value=[{"url": "https://a.com/x", "title": "t", "snippet": "s"}]), \
              mock.patch("harvest_fetch.call_fetch_backend",
