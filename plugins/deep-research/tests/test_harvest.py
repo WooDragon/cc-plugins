@@ -596,7 +596,7 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         self._patch.stop()
 
     def test_parses_result_links_and_unwraps_uddg_redirect(self):
-        with mock.patch("harvest.urllib.request.urlopen",
+        with mock.patch("harvest_search.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
             results, reason = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNone(reason)
@@ -605,34 +605,34 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         self.assertIn("https://blog.csdn.net/x", urls)  # blacklist filtering happens in do_search, not here
 
     def test_title_html_entities_and_tags_stripped(self):
-        with mock.patch("harvest.urllib.request.urlopen",
+        with mock.patch("harvest_search.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
             results, _ = harvest_search._search_duckduckgo({}, "query", 5)
         titles = [r["title"] for r in results]
         self.assertTrue(any("Example & Title highlighted" == t for t in titles))
 
     def test_non_result_anchor_ignored(self):
-        with mock.patch("harvest.urllib.request.urlopen",
+        with mock.patch("harvest_search.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
             results, _ = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertEqual(len(results), 2)  # the result__snippet anchor is not counted
 
     def test_empty_page_returns_none_with_no_result_links_reason(self):
-        with mock.patch("harvest.urllib.request.urlopen",
+        with mock.patch("harvest_search.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(b"<html><body>no results</body></html>")):
             result, reason = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNone(result)
         self.assertIn("no result links found", reason)
 
     def test_network_failure_returns_none_with_reason(self):
-        with mock.patch("harvest.urllib.request.urlopen", side_effect=OSError("network down")):
+        with mock.patch("harvest_search.urllib.request.urlopen", side_effect=OSError("network down")):
             result, reason = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNone(result)
         self.assertIn("request failed", reason)
 
     def test_requires_no_api_key(self):
         # cfg has no api_key_env at all -- must not raise or require one.
-        with mock.patch("harvest.urllib.request.urlopen",
+        with mock.patch("harvest_search.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
             results, _ = harvest_search._search_duckduckgo({}, "query", 5)
         self.assertIsNotNone(results)
@@ -645,7 +645,7 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         # path instead of curl_cffi_requests.get (real network) -- otherwise
         # flaky on any machine with curl_cffi installed.
         with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", False), \
-             mock.patch("harvest.urllib.request.urlopen",
+             mock.patch("harvest_search.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
             result = harvest.do_search("query", "en", backends, journal, cfg)
         data = json.loads(result)
@@ -693,7 +693,7 @@ class TestDuckDuckGoSearch(unittest.TestCase):
         # "no results" -- it's an IP-reputation block, not a parser bug.
         fixture = _FIXTURES_DIR / "ddg_anomaly_real.html"
         raw = fixture.read_bytes()
-        with mock.patch("harvest.urllib.request.urlopen", return_value=FakeHTTPResponse(raw)):
+        with mock.patch("harvest_search.urllib.request.urlopen", return_value=FakeHTTPResponse(raw)):
             result, reason = harvest_search._search_duckduckgo({}, "sqlite wal", 5)
         self.assertIsNone(result)
         self.assertIn("bot-check challenge page", reason)
@@ -770,7 +770,7 @@ class TestSearchBackendMissingKeySkips(unittest.TestCase):
         # path instead of curl_cffi_requests.get (real network) -- otherwise
         # flaky on any machine with curl_cffi installed.
         with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", False), \
-             mock.patch("harvest.urllib.request.urlopen",
+             mock.patch("harvest_search.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
             result = harvest.do_search("query", "en", backends, journal, cfg)
         data = json.loads(result)
@@ -1288,7 +1288,7 @@ class TestBackendDegradation(unittest.TestCase):
         # (real network) on any machine where curl_cffi is installed, making
         # this test flaky. Mirrors the sibling test below.
         with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", False), \
-             mock.patch("harvest.urllib.request.urlopen",
+             mock.patch("harvest_search.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(_DDG_SAMPLE_HTML.encode("utf-8"))):
             result = harvest.do_search("q", "en", backends, journal, self.config)
         data = json.loads(result)
@@ -1305,7 +1305,7 @@ class TestBackendDegradation(unittest.TestCase):
             ({"type": "duckduckgo"}, harvest.RateLimiter(0)),
         ]
         with mock.patch.object(harvest_clients.base, "_HAS_CURL_CFFI", False), \
-             mock.patch("harvest.urllib.request.urlopen", side_effect=OSError("network down")):
+             mock.patch("harvest_search.urllib.request.urlopen", side_effect=OSError("network down")):
             harvest.do_search("q", "en", backends, journal, self.config)
         attempts = journal[0]["attempts"]
         self.assertEqual(len(attempts), 2)
@@ -1317,7 +1317,7 @@ class TestBackendDegradation(unittest.TestCase):
             ({"type": "tavily-extract", "api_key_env": "NONEXISTENT_TAVILY_KEY_VAR"}, harvest.RateLimiter(0)),
             ({"type": "urllib-ua"}, harvest.RateLimiter(0)),
         ]
-        with mock.patch("harvest.urllib.request.urlopen",
+        with mock.patch("harvest_fetch.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(b"full page text")):
             result = harvest.do_fetch("https://good.com/x", backends, journal, self.config)
         self.assertEqual(result, "full page text")
@@ -1329,7 +1329,7 @@ class TestBackendDegradation(unittest.TestCase):
 
 class TestUrllibUaHtmlStripping(unittest.TestCase):
     def _fetch(self, html_body, max_chars=20000):
-        with mock.patch("harvest.urllib.request.urlopen",
+        with mock.patch("harvest_fetch.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(html_body.encode("utf-8"))):
             return harvest_fetch._fetch_urllib_ua({}, "https://a.com/x", 5, max_chars)
 
@@ -1380,7 +1380,7 @@ class TestUrllibUaHtmlStripping(unittest.TestCase):
         harvest_safety._real_getaddrinfo = lambda host, *a, **kw: [(2, 1, 6, "", ("93.184.216.34", 0))]
         harvest.install_ssrf_guard()
         try:
-            with mock.patch("harvest.urllib.request.urlopen",
+            with mock.patch("harvest_fetch.urllib.request.urlopen",
                              return_value=FakeHTTPResponse(html_body.encode("utf-8"))):
                 result = harvest.do_fetch("https://a.com/x", backends, journal, cfg)
         finally:
@@ -1510,7 +1510,7 @@ class TestCurlCffiFetch(unittest.TestCase):
         # non-stream calls -- so the read component must be
         # `remaining - connect`, not `remaining`, or the effective total
         # would be connect + remaining (over budget).
-        with mock.patch("harvest.time.monotonic", side_effect=[0.0, 0.0]), \
+        with mock.patch("harvest_fetch.time.monotonic", side_effect=[0.0, 0.0]), \
              mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, "<p>ok</p>")) as m:
             self._fetch("https://a.com/x", timeout=20)
@@ -1525,7 +1525,7 @@ class TestCurlCffiFetch(unittest.TestCase):
         # 0.1. This locks down the epsilon fallback so it can't be
         # "simplified" to conn = remaining (which would zero out the read
         # component and reintroduce the libcurl 0ms-means-infinite hang).
-        with mock.patch("harvest.time.monotonic", side_effect=[0.0, 0.0]), \
+        with mock.patch("harvest_fetch.time.monotonic", side_effect=[0.0, 0.0]), \
              mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(200, "<p>ok</p>")) as m:
             self._fetch("https://a.com/x", timeout=2)
@@ -1538,7 +1538,7 @@ class TestCurlCffiFetch(unittest.TestCase):
         # First hop resolves within budget and redirects; by the time the
         # second hop would fire, the shared deadline has less than 1s left
         # -- it must abort there instead of issuing another curl call.
-        with mock.patch("harvest.time.monotonic", side_effect=[0.0, 0.0, 4.5]), \
+        with mock.patch("harvest_fetch.time.monotonic", side_effect=[0.0, 0.0, 4.5]), \
              mock.patch("harvest_clients.base.curl_cffi_requests.get",
                          return_value=FakeCurlResponse(302, location="/next")) as m:
             result, reason = self._fetch("https://a.com/start", timeout=5)
@@ -1750,7 +1750,7 @@ class TestJinaReaderAuthHeader(unittest.TestCase):
 
     def _fetch(self, env):
         with mock.patch.dict(os.environ, env, clear=False), \
-             mock.patch("harvest.urllib.request.urlopen",
+             mock.patch("harvest_fetch.urllib.request.urlopen",
                          return_value=FakeHTTPResponse(b"page text")) as m:
             harvest_fetch._fetch_jina_reader({"api_key_env": "JINA_API_KEY"}, "https://a.com/x", 5, 20000)
         return m.call_args.args[0]

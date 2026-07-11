@@ -14,11 +14,11 @@
 | `scripts/harvest_fetch/` | 4 个 URL fetch backend + do_fetch 编排 |
 | `scripts/harvest_clients/base.py` | HTTP/SSE 原语 + curl_cffi 传输能力 |
 
-**铁律**：search 与 fetch 严格平级互不 import；safety 与 clients.base 是叶子，不 import 主模块。加 backend、改安全策略、改测试 patch（facade mock 穿透规则）前，先读完整代码地图——模块地图、依赖 DAG、维护决策树、mock 穿透约束都在其中：
+**铁律**：search 与 fetch 严格平级互不 import；safety 与 clients.base 是叶子，不 import 主模块。加 backend、改安全策略、改测试 patch（facade mock 穿透规则）前，先读上表模块地图 + 本节铁律。
 
-@../../../../research/docs/architecture/harvest-code-structure.md
+**mock 穿透约束**：测试 patch 必须打在符号的真实使用点（`harvest_search.*` / `harvest_fetch.*` / `harvest_clients.base.*`），不要打 `harvest.*` re-export 面——后者靠 stdlib 单例巧合生效，清死 import 后会静默失效。
 
-运行时行为 / 数据流 / 产物 schema / verify.json 状态机是另一篇正交文档（67KB，按需读，不常驻）：`research/docs/architecture/harvest-architecture.md`。
+延伸阅读（本机 research 仓，非安装依赖，缺失不影响插件运行）：完整依赖 DAG 与维护决策树见 `research/docs/architecture/harvest-code-structure.md`；运行时行为 / 数据流 / 产物 schema / verify.json 状态机见 `research/docs/architecture/harvest-architecture.md`。
 
 ## 版本
 
