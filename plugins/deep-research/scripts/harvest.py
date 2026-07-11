@@ -1218,7 +1218,8 @@ def cmd_run_local(args, config):
     top_urls = ranked[:max_fetch]
     if not top_urls:
         print("error: all searches returned no usable URLs", file=sys.stderr)
-        abort_unavailable(verify_dir, goal_hash, "no usable URLs from search")
+        abort_unavailable(verify_dir, goal_hash, "no usable URLs from search",
+                          {"harvest_wall_s": round(time.monotonic() - _local_t0, 2)})
 
     fetched_pages = []
     harvest_dir = raw_dir / HARVEST_SUBDIR / "local"
@@ -1246,7 +1247,8 @@ def cmd_run_local(args, config):
 
     if not fetched_pages:
         print("error: all fetches failed", file=sys.stderr)
-        abort_unavailable(verify_dir, goal_hash, "all fetches failed")
+        abort_unavailable(verify_dir, goal_hash, "all fetches failed",
+                          {"harvest_wall_s": round(time.monotonic() - _local_t0, 2)})
 
     harvest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1440,6 +1442,8 @@ def cmd_run(args):
         cleanup_stale_state(pipeline_dir, verify_dir, raw_dir)
     write_tombstone(verify_dir, goal_hash, verify_filename=verify_filename)
 
+    _harvest_t0 = None
+    harvest_wall_s = None
     try:
         install_ssrf_guard()
 
@@ -1515,7 +1519,12 @@ def cmd_run(args):
     except SystemExit:
         raise
     except Exception as e:
-        abort_unavailable(verify_dir, goal_hash, f"unexpected error: {e}", verify_filename=verify_filename)
+        extra = {}
+        if harvest_wall_s is not None:
+            extra["harvest_wall_s"] = harvest_wall_s
+        elif _harvest_t0 is not None:
+            extra["harvest_wall_s"] = round(time.monotonic() - _harvest_t0, 2)
+        abort_unavailable(verify_dir, goal_hash, f"unexpected error: {e}", extra, verify_filename=verify_filename)
 
 
 _VERDICT_EXIT_CODES = {"PASS": 0, "FAIL": 1, "N_A": 2}

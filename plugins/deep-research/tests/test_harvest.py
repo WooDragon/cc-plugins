@@ -4941,6 +4941,10 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
         verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
         data = json.loads(verify_file.read_text(encoding="utf-8"))
         self.assertEqual(data["verdict"], "UNAVAILABLE")
+        # Regression: this abort path used to skip harvest_wall_s entirely,
+        # leaving no way to tell how long the local run ran before bailing.
+        self.assertIn("harvest_wall_s", data)
+        self.assertGreaterEqual(data["harvest_wall_s"], 0)
 
     def test_all_fetches_fail_aborts_unavailable(self):
         queries_file = self.project_dir / "queries.json"
@@ -4959,6 +4963,10 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
         verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
         data = json.loads(verify_file.read_text(encoding="utf-8"))
         self.assertEqual(data["verdict"], "UNAVAILABLE")
+        # Regression: this abort path used to skip harvest_wall_s entirely,
+        # leaving no way to tell how long the local run ran before bailing.
+        self.assertIn("harvest_wall_s", data)
+        self.assertGreaterEqual(data["harvest_wall_s"], 0)
 
     def test_ranks_urls_by_search_result_frequency(self):
         # url "b" appears in both query results, "a" only once -- ranked
@@ -5006,6 +5014,67 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
             harvest.cmd_run_local(self._args(queries_file), cfg)
 
         self.assertEqual(len(fetched), 2)
+
+
+# ---------------------------------------------------------------------------
+# cmd_run: top-level except must still carry harvest_wall_s once the
+# try-block has reached run_panel, even when run_panel itself blows up.
+# ---------------------------------------------------------------------------
+
+class TestCmdRunUnexpectedErrorCarriesWallClock(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.project_dir = Path(self.tmpdir.name)
+        self.pipeline_dir = self.project_dir / "pipeline"
+        self.raw_dir = self.pipeline_dir / "1_raw"
+        self.raw_dir.mkdir(parents=True)
+        self.goal_file = self.project_dir / harvest.GOAL_FILE_NAME
+        self.goal_file.write_text("why is the sky blue?", encoding="utf-8")
+        self._env_patch = mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self.tmpdir.cleanup()
+
+    def test_run_panel_exception_still_records_harvest_wall_s(self):
+        config = base_config()
+        args = argparse_ns(goal_file=str(self.goal_file), out=str(self.raw_dir), config="unused", local_dir=None)
+
+        with mock.patch("harvest.load_config", return_value=config), \
+             mock.patch("harvest.run_panel", side_effect=RuntimeError("boom")):
+            with self.assertRaises(SystemExit) as ctx:
+                harvest.cmd_run(args)
+        self.assertEqual(ctx.exception.code, 3)
+
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "UNAVAILABLE")
+        self.assertIn("unexpected error: boom", data["reason"])
+        # Regression: the top-level except used to write no harvest_wall_s
+        # at all, even though _harvest_t0 was already ticking by the time
+        # run_panel raised.
+        self.assertIn("harvest_wall_s", data)
+        self.assertGreaterEqual(data["harvest_wall_s"], 0)
+
+    def test_failure_before_run_panel_omits_harvest_wall_s(self):
+        # install_ssrf_guard() runs before _harvest_t0 is ever set -- if
+        # something blows up that early, there is no wall-clock reading to
+        # report, and abort_unavailable must not choke on an empty extra.
+        config = base_config()
+        args = argparse_ns(goal_file=str(self.goal_file), out=str(self.raw_dir), config="unused", local_dir=None)
+
+        with mock.patch("harvest.load_config", return_value=config), \
+             mock.patch("harvest.install_ssrf_guard", side_effect=RuntimeError("early boom")):
+            with self.assertRaises(SystemExit) as ctx:
+                harvest.cmd_run(args)
+        self.assertEqual(ctx.exception.code, 3)
+
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "UNAVAILABLE")
+        self.assertIn("unexpected error: early boom", data["reason"])
+        self.assertNotIn("harvest_wall_s", data)
 
 
 # ---------------------------------------------------------------------------
