@@ -41,21 +41,6 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-# curl_cffi is an optional soft dependency (the "curl-cffi" fetch backend
-# only): the core pipeline stays stdlib-only and degrades cleanly to the
-# next fetch backend when it isn't installed. Never import it at module
-# scope unconditionally -- that would turn a missing optional package into
-# a hard crash for every consumer of this module (including the
-# SubagentStop hook, which imports harvest.py on every turn).
-try:
-    from curl_cffi import requests as curl_cffi_requests
-    from curl_cffi.const import CurlOpt as CurlCffiOpt
-    _HAS_CURL_CFFI = True
-except ImportError:
-    curl_cffi_requests = None
-    CurlCffiOpt = None
-    _HAS_CURL_CFFI = False
-
 VERIFY_FILE = "harvest-verify.json"
 LEGACY_EXEMPTION_FILE = "legacy-exemption.md"
 MERGED_FINDINGS_FILE = "merged-findings.json"
@@ -129,133 +114,18 @@ def _emit(event, **kw):
         pass
 
 
-# ---------------------------------------------------------------------------
-# Rate limiting
-# ---------------------------------------------------------------------------
-
-class RateLimiter:
-    """One lock-protected timestamp per backend instance. Critical section is
-    timestamp-only; sleep and the actual call happen outside the lock."""
-
-    def __init__(self, min_interval_s):
-        self._min_interval = min_interval_s
-        self._lock = threading.Lock()
-        self._next_allowed = 0.0
-
-    def acquire(self):
-        with self._lock:
-            now = time.monotonic()
-            wait = max(0.0, self._next_allowed - now)
-            self._next_allowed = max(now, self._next_allowed) + self._min_interval
-        if wait > 0:
-            time.sleep(wait)
-
-
-# ---------------------------------------------------------------------------
-# SSRF guard: process-level getaddrinfo wrapper + thread-local tool context.
-# No TOCTOU window (resolution and connection are the same call), no
-# whitelist while the tool-context flag is set.
-# ---------------------------------------------------------------------------
-
-class SSRFBlocked(Exception):
-    pass
-
-
-_tool_ctx = threading.local()
-_real_getaddrinfo = socket.getaddrinfo
-
-
-def _is_blocked_ip(ip_str):
-    try:
-        ip = ipaddress.ip_address(ip_str)
-    except ValueError:
-        return True
-    return (ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
-
-
-def _guarded_getaddrinfo(host, *args, **kwargs):
-    result = _real_getaddrinfo(host, *args, **kwargs)
-    if getattr(_tool_ctx, "active", False):
-        for item in result:
-            ip = item[4][0]
-            if _is_blocked_ip(ip):
-                raise SSRFBlocked(f"blocked address for host {host}: {ip}")
-    return result
-
-
-def install_ssrf_guard():
-    """Monkeypatch socket.getaddrinfo. Called at run-start, not at import
-    time, so importing this module (e.g. from the SubagentStop hook) stays
-    side-effect free."""
-    socket.getaddrinfo = _guarded_getaddrinfo
-
-
-class tool_request_guard:
-    """Context manager marking the current thread as executing a tool call
-    whose network target may be attacker/model controlled. Only active
-    inside this context does the guard reject private/loopback/reserved
-    addresses -- gateway chat-completion calls are made outside it."""
-
-    def __enter__(self):
-        self._prev = getattr(_tool_ctx, "active", False)
-        _tool_ctx.active = True
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        _tool_ctx.active = self._prev
-        return False
-
-
-def _ssrf_validate_and_resolve(url):
-    """Shared SSRF validation: scheme + host-presence checks, then a single
-    guarded socket.getaddrinfo() call (raises SSRFBlocked if any returned
-    address is private/loopback/reserved). Returns (host, port, first_ip)
-    so callers that need the actual resolved address -- not just a pass/
-    fail check -- don't have to resolve a second time."""
-    parts = urllib.parse.urlsplit(url)
-    if parts.scheme not in ("http", "https"):
-        raise SSRFBlocked(f"unsupported scheme: {parts.scheme}")
-    host = parts.hostname
-    if not host:
-        raise SSRFBlocked("no host in URL")
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    results = socket.getaddrinfo(host, port)
-    return host, port, results[0][4][0]
-
-
-def _ssrf_precheck(url):
-    _ssrf_validate_and_resolve(url)
-
-
-# ---------------------------------------------------------------------------
-# Domain blacklist / path sandbox
-# ---------------------------------------------------------------------------
-
-def is_blacklisted(url, blacklist_domains):
-    try:
-        host = urllib.parse.urlsplit(url).hostname
-    except ValueError:
-        return True
-    if not host:
-        return False
-    # .hostname (not manual "@"/":" splitting) correctly strips userinfo,
-    # port, and IPv6 brackets -- manual colon-splitting breaks on IPv6
-    # literals, which contain colons inside the address itself.
-    host = host.lower().rstrip(".")
-    for domain in blacklist_domains:
-        domain = domain.lower().rstrip(".")
-        if host == domain or host.endswith("." + domain):
-            return True
-    return False
-
-
-def _is_relative_to(path, base):
-    try:
-        path.relative_to(base)
-        return True
-    except ValueError:
-        return False
+from harvest_safety import (  # re-export: safety layer moved to its own module
+    RateLimiter,
+    SSRFBlocked,
+    install_ssrf_guard,
+    tool_request_guard,
+    _ssrf_validate_and_resolve,
+    _ssrf_precheck,
+    is_blacklisted,
+    _is_relative_to,
+    normalize_url,
+    _guarded_getaddrinfo,
+)
 
 
 def resolve_local_path(local_dir, rel_path):
@@ -266,28 +136,6 @@ def resolve_local_path(local_dir, rel_path):
     if not _is_relative_to(target, base):
         return None
     return target
-
-
-# ---------------------------------------------------------------------------
-# URL / whitespace normalization for citation matching
-# ---------------------------------------------------------------------------
-
-def normalize_url(url):
-    url = (url or "").strip()
-    if url.startswith("local://"):
-        return "local://" + url[len("local://"):].strip("/")
-    try:
-        parts = urllib.parse.urlsplit(url)
-        netloc = parts.netloc.lower()
-        path = parts.path.rstrip("/")
-        return urllib.parse.urlunsplit((parts.scheme.lower(), netloc, path, parts.query, ""))
-    except ValueError:
-        # Malformed URL (e.g. a broken IPv6 literal) from model output or a
-        # search backend result -- treat as non-normalizable rather than
-        # crashing the worker. Returning it unnormalized just means it
-        # won't match any journal-derived key, which correctly fails
-        # citation validation instead of taking down the whole run.
-        return url
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +268,7 @@ def build_rejected_claims(invalid):
 # refactor, zero behavior change). Re-imported here so every existing
 # harvest.<name> call site and test reference keeps working unchanged.
 # ---------------------------------------------------------------------------
+import harvest_clients.base
 from harvest_clients import (
     GatewayClient,
     AnthropicGatewayClient,
@@ -443,6 +292,10 @@ from harvest_clients.base import (
     _http_stream_post,
     _STREAM_RETRYABLE_EXCEPTIONS,
     _run_stream_attempt_with_retry,
+    curl_cffi_requests,
+    CurlCffiOpt,
+    _HAS_CURL_CFFI,
+    _check_curl_cffi_available,
 )
 from harvest_clients.anthropic import (
     _anthropic_post_with_retry,
@@ -472,692 +325,20 @@ from harvest_clients.gemini import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Search backends (degrade in config order)
-# ---------------------------------------------------------------------------
-
-def _search_gemini_cli(cfg, query, timeout):
-    try:
-        proc = subprocess.run(
-            ["gemini", "-m", cfg.get("model", "gemini-3.5-flash"), "-p", query],
-            capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL, text=True,
-        )
-    except subprocess.TimeoutExpired:
-        return None, "gemini-cli: timed out"
-    except OSError as e:
-        return None, f"gemini-cli: failed to launch subprocess: {e}"
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip()[:200]
-        return None, f"gemini-cli: exited with code {proc.returncode}" + (f": {detail}" if detail else "")
-    text = proc.stdout or ""
-    if not text.strip():
-        return None, "gemini-cli: empty output"
-    urls = list(dict.fromkeys(re.findall(r'https?://[^\s\)\]\'"<>]+', text)))
-    if not urls:
-        return None, "gemini-cli: no URLs found in output"
-    return [{"url": u, "title": "", "snippet": text[:500]} for u in urls], None
-
-
-_DDG_ANCHOR_RE = re.compile(r'<a\b([^>]*)>(.*?)</a>', re.IGNORECASE | re.DOTALL)
-_DDG_HREF_RE = re.compile(r'href="([^"]*)"')
-_HTML_TAG_RE = re.compile(r'<[^>]+>')
-# Markers observed in html.duckduckgo.com's anti-bot interstitial ("Select
-# all squares containing a duck") -- used to distinguish a genuine
-# zero-results page from an IP-reputation block, for observability only.
-_DDG_BOT_CHECK_MARKERS = ("anomaly-modal", "challenge-form")
-
-
-def _ddg_extract_target_url(href):
-    # html.duckduckgo.com wraps result links in a same-site redirect
-    # (//duckduckgo.com/l/?uddg=<url-encoded target>&rut=...); unwrap it to
-    # get the real target URL. Non-redirect hrefs pass through unchanged.
-    parsed = urllib.parse.urlsplit(href)
-    host = (parsed.hostname or "").lower().rstrip(".")
-    # Suffix/equality match, not substring containment -- "in" would also
-    # match an unrelated host like "duckduckgo.com.evil.com" (same class of
-    # anti-pattern is_blacklisted() already guards against elsewhere in
-    # this file).
-    if host == "duckduckgo.com" or host.endswith(".duckduckgo.com"):
-        qs = urllib.parse.parse_qs(parsed.query)
-        if "uddg" in qs and qs["uddg"]:
-            # parse_qs() already percent-decodes query values once; a second
-            # unquote() here double-decodes and corrupts any target URL that
-            # itself contains a literal "%" escape sequence.
-            return qs["uddg"][0]
-    return href
-
-
-def _search_duckduckgo(cfg, query, timeout):
-    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote(query)
-
-    if _HAS_CURL_CFFI:
-        try:
-            resp = curl_cffi_requests.get(
-                url, impersonate=(cfg or {}).get("impersonate", "chrome"),
-                timeout=timeout, allow_redirects=True,
-            )
-            if resp.status_code != 200:
-                return None, f"duckduckgo: HTTP {resp.status_code}"
-            page = resp.text
-        except Exception as e:
-            return None, f"duckduckgo: curl-cffi request failed: {e}"
-    else:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; harvest.py/1.0)",
-                   "Accept-Encoding": "identity"}
-        req = urllib.request.Request(url, headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = _maybe_decompress(resp.read(), resp)
-        except (urllib.error.URLError, OSError) as e:
-            return None, f"duckduckgo: request failed: {e}"
-        try:
-            page = raw.decode("utf-8", errors="replace")
-        except Exception as e:
-            return None, f"duckduckgo: failed to decode response body: {e}"
-
-    results = []
-    for attrs, inner in _DDG_ANCHOR_RE.findall(page):
-        if "result__a" not in attrs:
-            continue
-        href_match = _DDG_HREF_RE.search(attrs)
-        if not href_match:
-            continue
-        target = _ddg_extract_target_url(html.unescape(href_match.group(1)))
-        if not target:
-            continue
-        title = html.unescape(_HTML_TAG_RE.sub("", inner)).strip()
-        results.append({"url": target, "title": title, "snippet": ""})
-    if results:
-        return results, None
-    if any(marker in page for marker in _DDG_BOT_CHECK_MARKERS):
-        return None, ("duckduckgo: bot-check challenge page returned instead of results "
-                       "(IP-reputation block, not a parsing bug)")
-    return None, "duckduckgo: no result links found in response"
-
-
-def _search_tavily(cfg, query, timeout):
-    api_key = os.environ.get(cfg.get("api_key_env", ""), "")
-    if not api_key:
-        return None, f"tavily: {cfg.get('api_key_env') or '(no api_key_env configured)'} not set"
-    payload = {"api_key": api_key, "query": query}
-    try:
-        data = _http_json_post("https://api.tavily.com/search", payload, {"Content-Type": "application/json"}, timeout)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as e:
-        return None, f"tavily: request failed: {e}"
-    items = data.get("results") or []
-    results = [{"url": r.get("url", ""), "title": r.get("title", ""), "snippet": r.get("content", "")}
-               for r in items if r.get("url")]
-    if not results:
-        return None, "tavily: empty results"
-    return results, None
-
-
-# Gemini's grounding chunks never carry the real source URL directly -- each
-# web.uri is a Google redirect short link on this fixed host. It is the ONLY
-# host _resolve_grounding_redirect is ever allowed to connect to; anything
-# else (a hallucinated/injected uri like http://169.254.169.254/) is rejected
-# before a byte leaves the process.
-_GROUNDING_REDIRECT_HOST = "vertexaisearch.cloud.google.com"
-_GROUNDING_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
-_GROUNDING_REDIRECT_TIMEOUT_S = 10
-
-# Grounding is a real live search, so (unlike the old fake gateway-gemini) the
-# prompt doesn't ask the model to invent URLs -- it just steers the query and
-# mirrors the repo-wide content-farm exclusion. The exclusion line is a
-# courtesy only -- prompting the model to skip a domain does not stop it
-# appearing in groundingChunks (those are raw retrieval results the prompt
-# text has no control over); is_blacklisted() in do_search() is the actual
-# enforcement. No SEARCH_FAILED sentinel: whether retrieval happened is read
-# structurally from groundingMetadata, not parsed out of free text.
-#
-# The "cite EVERY source ... COMPLETE set ... do not truncate" line is
-# load-bearing, not decoration. Debugging against the raw API showed the
-# model already searches even on a MISS (groundingMetadata/webSearchQueries/
-# 9-15 chunks all present) -- the miss was this prompt only asking to search
-# "the live web" and the model then under-reporting which sources it
-# actually consulted. Adding this sentence took a repeatedly-empty-chunks
-# Chinese query from 0 to 21 chunks and this backend's measured hit rate
-# from ~60% to 100%. Deliberately NOT adding a "you MUST call google_search"
-# hard constraint -- tested too, no measured gain and it adds thinking-token
-# latency.
-_GROUNDING_SEARCH_PROMPT = (
-    "Search the live web for: {query}\n"
-    "Cite EVERY source you actually consulted -- return the COMPLETE set of "
-    "source URLs, do not truncate or summarize the list.\n"
-    "Exclude results from content-farm hosts: csdn.net, cloud.baidu.com, "
-    "cloud.tencent.com, huaweicloud.com, aliyun.com, volcengine.com, juejin.cn."
+from harvest_search import (
+    _search_gemini_cli, _ddg_extract_target_url, _search_duckduckgo,
+    _search_tavily, _resolve_grounding_redirect, _search_gemini_grounding,
+    _no_redirect_opener, call_search_backend, do_search,
 )
+import harvest_search  # for qualified do_search() calls in body (facade-penetration guard)
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Intercept every 30x so urllib never auto-follows a grounding redirect
-    to its real target. urllib.request.urlopen installs an HTTPRedirectHandler
-    by default that transparently connects to the Location host -- that would
-    defeat the host-allowlist check in _resolve_grounding_redirect entirely
-    (the guard vets the redirect host, not the target). Returning None here
-    turns the 302 into a raised HTTPError whose Location header we read WITHOUT
-    ever connecting to it."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_no_redirect_opener = urllib.request.build_opener(_NoRedirect)
-
-
-def _resolve_grounding_redirect(uri, timeout):
-    """Resolve a grounding-api-redirect short link to its real landing URL by
-    reading the 302 Location header without following it. Connects ONLY to the
-    fixed, trusted grounding host -- any other host is rejected before a single
-    byte goes out (so this is not an SSRF surface even though the uri
-    originates from model output). Returns the real URL, or None (caller drops
-    the chunk) on a malformed uri, a non-grounding host, a non-redirect
-    response, or any network error."""
-    try:
-        # uri is model/provider-controlled grounding output; a malformed value
-        # (e.g. an unterminated IPv6 literal) makes urlsplit raise ValueError.
-        # Treat it as a droppable bad chunk -- same guard is_blacklisted() puts
-        # on this exact call -- so one bad uri can't abort the whole backend
-        # and discard every other valid chunk.
-        host = urllib.parse.urlsplit(uri).hostname
-    except ValueError:
-        return None
-    if host != _GROUNDING_REDIRECT_HOST:
-        return None
-    req = urllib.request.Request(
-        uri, headers={"User-Agent": "Mozilla/5.0 (compatible; harvest.py/1.0)"})
-    try:
-        # A genuine 200 (no redirect) means the short link resolved to nothing
-        # citable -- close it and drop. The redirect case below is the norm.
-        resp = _no_redirect_opener.open(req, timeout=timeout)
-        resp.close()
-        return None
-    except urllib.error.HTTPError as e:
-        if e.code in _GROUNDING_REDIRECT_STATUSES:
-            return e.headers.get("Location")
-        return None
-    except (urllib.error.URLError, OSError):
-        return None
-
-
-def _search_gemini_grounding(cfg, query, timeout, config):
-    """Real grounded web search via the gateway's Gemini-native
-    generateContent endpoint + built-in google_search tool. Replaces the old
-    fake gateway-gemini backend, which asked an OpenAI-compat /chat/completions
-    to 'list some URLs' and got model-recalled (hallucinated) links with no
-    live retrieval -- and, worse, since do_search stops at the first backend
-    that returns any non-blacklisted URL, that fake result permanently masked
-    the real tavily/duckduckgo backends behind it. Here the model actually
-    searches; grounding chunks carry real (redirect-wrapped) source URLs that
-    we resolve to true landing pages before returning them to the
-    citation-verifiable pipeline."""
-    gw = config["gateway"]
-    api_key = os.environ.get(gw["api_key_env"], "")
-    if not api_key:
-        return None, f"gemini-grounding: {gw.get('api_key_env') or '(no api_key_env configured)'} not set"
-    # Native endpoint is <origin>/v1beta/models/<model>:generateContent. Derive
-    # origin via urlsplit -- NOT base_url.rstrip('/v1'), which strips a char
-    # SET not a suffix and would mangle '.../v1' unpredictably. This makes a
-    # base_url of '.../v1', '.../v1/', or a bare origin all resolve correctly.
-    parts = urllib.parse.urlsplit(gw["base_url"])
-    url = f"{parts.scheme}://{parts.netloc}/v1beta/models/{cfg.get('model', '')}:generateContent"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": _GROUNDING_SEARCH_PROMPT.format(query=query)}]}],
-        "tools": [{"google_search": {}}],
-    }
-    # thinkingBudget is opt-in and back-compat-strict: only add
-    # generationConfig at all when the config explicitly sets it, so a
-    # config predating this key sends byte-for-byte the same payload as
-    # before (no generationConfig with an implicit default sneaking in).
-    # Measured: thinkingBudget=0 does not lower the hit rate (google_search
-    # is a tool call, not something reasoning/thinking gates) and cuts
-    # latency to ~11-16s from the un-budgeted baseline.
-    if "thinking_budget" in cfg:
-        payload["generationConfig"] = {"thinkingConfig": {"thinkingBudget": cfg["thinking_budget"]}}
-    try:
-        data = _http_json_post(url, payload, headers, timeout)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as e:
-        return None, f"gemini-grounding: request failed: {e}"
-    try:
-        chunks = data["candidates"][0]["groundingMetadata"]["groundingChunks"]
-    except (KeyError, IndexError, TypeError):
-        # No groundingMetadata/chunks -> the model chose not to search
-        # (grounding is model-discretionary, never guaranteed). Degrade to the
-        # next backend rather than mining plain text for URLs.
-        return None, "gemini-grounding: no grounding chunks (model did not search)"
-    redirect_timeout = min(timeout, _GROUNDING_REDIRECT_TIMEOUT_S)
-    # Redirect resolution is a network round-trip per chunk with no data
-    # dependency between chunks -- resolving serially measured 18.2s for 16
-    # chunks vs 2.5s in parallel. Same index-preallocate + future-to-index +
-    # as_completed-fills-by-original-index pattern as
-    # _run_fetch_calls_parallel (as_completed only picks scheduling order,
-    # never the order results land in `resolved`) so chunk-submission order
-    # -- which the dedup/citation-mapping below depends on -- survives
-    # regardless of which redirect answers first.
-    resolved = [None] * len(chunks)
-    with ThreadPoolExecutor(max_workers=min(len(chunks), _PARALLEL_FETCH_MAX_WORKERS) or 1) as pool:
-        future_to_index = {
-            pool.submit(_resolve_grounding_redirect, (ch.get("web") or {}).get("uri", ""), redirect_timeout): i
-            for i, ch in enumerate(chunks)
-        }
-        for fut in as_completed(future_to_index):
-            i = future_to_index[fut]
-            try:
-                resolved[i] = fut.result()
-            except Exception:
-                # A single bad uri (malformed/hostile/network blip) must not
-                # take down the whole grounding backend -- drop just this
-                # chunk, same as a normal unresolvable-redirect result.
-                resolved[i] = None
-    results, seen = [], set()
-    for ch, real_url in zip(chunks, resolved):
-        web = ch.get("web") or {}
-        uri = web.get("uri", "")
-        if not uri:
-            continue
-        if not real_url or real_url in seen:
-            continue
-        seen.add(real_url)
-        title = web.get("title", "")
-        # snippet = title (usually just the domain); blacklist filtering is
-        # do_search's job, kept out of here to avoid duplicating that concern.
-        results.append({"url": real_url, "title": title, "snippet": title})
-    if not results:
-        return None, "gemini-grounding: no resolvable source URLs in grounding chunks"
-    return results, None
-
-
-def call_search_backend(backend_cfg, limiter, query, lang, config, attempts=None):
-    limiter.acquire()
-    timeout = config["limits"]["call_timeout_s"]
-    btype = backend_cfg["type"]
-    try:
-        if btype == "gemini-cli":
-            result, reason = _search_gemini_cli(backend_cfg, query, timeout)
-        elif btype == "tavily":
-            result, reason = _search_tavily(backend_cfg, query, timeout)
-        elif btype == "duckduckgo":
-            result, reason = _search_duckduckgo(backend_cfg, query, timeout)
-        elif btype == "gemini-grounding":
-            result, reason = _search_gemini_grounding(backend_cfg, query, timeout, config)
-        else:
-            result, reason = None, f"unknown search backend type: {btype}"
-    except Exception as e:
-        result, reason = None, f"unexpected error: {e}"
-    if not result and attempts is not None:
-        attempts.append({"backend": btype, "error": reason or "no results"})
-    return result
-
-
-def do_search(query, lang, search_backends, journal, config):
-    # Search backends only ever connect to a fixed, developer-configured
-    # host (api.tavily.com / html.duckduckgo.com / our own gateway) -- the model's
-    # query text does not steer the connection destination, so this is not
-    # an SSRF surface and is not wrapped in tool_request_guard().
-    blacklist = config.get("blacklist_domains", [])
-    attempts = []
-    for backend_cfg, limiter in search_backends:
-        results = call_search_backend(backend_cfg, limiter, query, lang, config, attempts)
-        if results:
-            filtered = [r for r in results if not is_blacklisted(r["url"], blacklist)]
-            if not filtered:
-                # Every result from this backend was blacklisted -- that's a
-                # degrade-worthy failure, not a genuine "no results" answer;
-                # try the next backend instead of returning an empty set.
-                attempts.append({"backend": backend_cfg["type"], "error": "all results filtered by blacklist"})
-                continue
-            if backend_cfg["type"] == "gemini-grounding":
-                for r in filtered:
-                    # NOT "fetch": grounding gives us a URL the model *saw* in
-                    # search results, not full page text -- content here is
-                    # only a title/domain string. Using a distinct tool type
-                    # keeps build_fetch_index() (which only recognizes
-                    # "fetch"/"read_local") from treating this title string as
-                    # verified full-text content, while build_journal_url_set()
-                    # still recognizes "search_grounding" so a claim citing
-                    # this URL without an explicit fetch() call correctly
-                    # fails as url_not_fetched (real citation retry required)
-                    # rather than url_not_in_journal (worse: implies the model
-                    # never even saw the URL) or silently passing.
-                    journal.append({"tool": "search_grounding", "url": r["url"],
-                                    "backend": "grounding", "content": None,
-                                    "title": r.get("title") or r["url"]})
-            journal.append({"tool": "search", "query": query, "lang": lang,
-                             "backend": backend_cfg["type"], "urls": [r["url"] for r in filtered],
-                             "attempts": attempts})
-            return json.dumps({"results": filtered}, ensure_ascii=False)
-    journal.append({"tool": "search", "query": query, "lang": lang, "backend": None, "urls": [], "attempts": attempts})
-    return json.dumps({"results": [], "error": "all search backends failed"})
-
-
-# ---------------------------------------------------------------------------
-# Fetch backends (degrade in config order)
-# ---------------------------------------------------------------------------
-
-def _fetch_tavily_extract(cfg, url, timeout, max_chars):
-    api_key = os.environ.get(cfg.get("api_key_env", ""), "")
-    if not api_key:
-        return None, f"tavily-extract: {cfg.get('api_key_env') or '(no api_key_env configured)'} not set"
-    payload = {"api_key": api_key, "urls": [url]}
-    try:
-        data = _http_json_post("https://api.tavily.com/extract", payload, {"Content-Type": "application/json"}, timeout)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as e:
-        return None, f"tavily-extract: request failed: {e}"
-    results = data.get("results") or []
-    if not results:
-        return None, "tavily-extract: empty results"
-    content = results[0].get("raw_content") or results[0].get("content")
-    if not content:
-        return None, "tavily-extract: empty content in result"
-    return content, None
-
-
-def _fetch_jina_reader(cfg, url, timeout, max_chars):
-    api_key = os.environ.get(cfg.get("api_key_env", ""), "")
-    # r.jina.ai rejects urllib's default "Python-urllib/3.x" UA with HTTP 403
-    # (independent of the API key -- any non-default UA gets 200). Send the
-    # same UA as _fetch_urllib_ua so this backend isn't silently 403'd.
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; harvest.py/1.0)",
-               "Accept": "text/plain", "Accept-Encoding": "identity"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request("https://r.jina.ai/" + url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = _maybe_decompress(resp.read(max_chars * 4), resp)
-    except (urllib.error.URLError, OSError) as e:
-        return None, f"jina-reader: request failed: {e}"
-    try:
-        return raw.decode("utf-8", errors="replace"), None
-    except Exception as e:
-        return None, f"jina-reader: failed to decode response body: {e}"
-
-
-_HTML_SCRIPT_STYLE_RE = re.compile(r'<(script|style)\b[^>]*>.*?</\1>', re.IGNORECASE | re.DOTALL)
-
-
-def _strip_html_to_text(raw_html):
-    # urllib-ua and curl-cffi are the backends that return raw page source
-    # (tavily-extract/jina-reader already return clean text) -- without
-    # this, the fetch_max_chars budget is spent on markup instead of prose,
-    # and an excerpt that spans an inline tag (e.g. "...the <a href=...>WAL
-    # </a> file...") fails substring matching against the untouched HTML
-    # even though it's a real verbatim quote of the rendered text. Strip
-    # script/style blocks first (their contents aren't page text at all),
-    # then every remaining tag, then resolve entities, then fold whitespace
-    # -- in that order so truncation to fetch_max_chars (done by the
-    # caller, after this returns) spends the budget on prose, not tags.
-    text = _HTML_SCRIPT_STYLE_RE.sub(" ", raw_html)
-    text = _HTML_TAG_RE.sub(" ", text)
-    text = html.unescape(text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-_CURL_CFFI_MAX_REDIRECT_HOPS = 3
-_CURL_CFFI_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
-
-# curl_cffi impersonates a real browser's TLS/HTTP fingerprint but cannot
-# execute JavaScript -- so when a WAF (Cloudflare/DataDome/PerimeterX/
-# Imperva) serves a JS challenge ("holding page"), curl_cffi gets exactly
-# that holding page back as its final response, not the article. Without
-# this check, that holding page's body (often HTTP 200, sometimes 403/503)
-# is silently stripped-to-text and returned as if it were real page
-# content, poisoning the downstream citation-verification pipeline with
-# challenge-script prose that happens to contain no obvious HTTP error.
-# See issue #81.
-#
-# Markers are deliberately script paths / JS globals / DOM ids / CDN
-# domains -- unique implementation artifacts of the challenge widgets
-# themselves -- rather than human-readable phrases like "checking your
-# browser" or "just a moment". Human phrases appear verbatim in ordinary
-# prose (news articles about Cloudflare outages, blog posts explaining
-# Turnstile, this very code review) and would cause false positives;
-# the literal script/DOM/CDN artifacts below only ever appear when the
-# actual vendor widget markup is present on the page.
-_CHALLENGE_PAGE_MARKERS = (
-    # Cloudflare (challenge-platform script, browser-verification banner,
-    # the cf_chl_opt JS config object, Turnstile widget, _cf_chl JS global)
-    "/cdn-cgi/challenge-platform/",
-    "cf-browser-verification",
-    "_cf_chl_opt",
-    "cf-turnstile",
-    "window._cf_chl",
-    # DataDome (captcha delivery CDN the challenge script loads from)
-    "captcha-delivery.com",
-    # PerimeterX / HUMAN (captcha widget id, JS app-id global)
-    "px-captcha",
-    "window._pxappid",
-    # Imperva / Incapsula (challenge resource endpoint)
-    "_incapsula_resource",
+from harvest_fetch import (
+    _fetch_tavily_extract, _fetch_jina_reader, _strip_html_to_text,
+    _looks_like_challenge_page, _fetch_curl_cffi, _fetch_urllib_ua,
+    call_fetch_backend, do_fetch,
 )
-
-# Challenge/holding pages are minimal (a script tag, a spinner, a couple
-# of divs) -- always tiny, never anywhere near fetch_max_chars territory.
-# Real long-form content that happens to discuss these vendors (e.g. a
-# deep-research task investigating WAF/Turnstile bypass techniques, or an
-# article with an embedded code sample) can legitimately contain these
-# same artifact strings inside tens of KB of genuine prose. This gate lets
-# such long-form pages through unconditionally while still catching even
-# a bloated/verbose challenge page, since real-world challenge HTML has
-# never been observed anywhere close to 100KB.
-_CHALLENGE_MAX_PAGE_CHARS = 100 * 1024
-
-
-def _looks_like_challenge_page(raw_html):
-    # resp.text can be None or "" (empty body, e.g. a HEAD-like 204, or a
-    # decode that yielded nothing) -- guard first, since .lower() on None
-    # would raise AttributeError and take curl-cffi out of rotation via
-    # call_fetch_backend's broad except instead of cleanly degrading.
-    if not raw_html:
-        return False
-    if len(raw_html) >= _CHALLENGE_MAX_PAGE_CHARS:
-        return False
-    lowered = raw_html.lower()
-    return any(marker in lowered for marker in _CHALLENGE_PAGE_MARKERS)
-
-
-def _fetch_curl_cffi(cfg, url, timeout, max_chars, config):
-    # libcurl (which curl_cffi wraps via C bindings) does its own DNS
-    # resolution entirely inside libcurl's C layer -- it never calls back
-    # into Python's socket.getaddrinfo, so the process-level SSRF guard
-    # (install_ssrf_guard()'s monkeypatch) provides ZERO protection here.
-    # The fix: resolve each hop ourselves through the guarded
-    # getaddrinfo (via _ssrf_validate_and_resolve, which raises
-    # SSRFBlocked on any private/reserved address), then pin libcurl to
-    # that exact, already-vetted IP with CURLOPT_RESOLVE. This closes the
-    # TOCTOU window entirely -- libcurl is never allowed to resolve the
-    # host itself, only to connect to the address we already validated.
-    # Redirects are followed manually (allow_redirects=False) so every hop
-    # gets its own independent guard + blacklist check; libcurl's built-in
-    # redirect-following would silently reuse the pinned IP for whatever
-    # Location header a compromised/malicious first hop returned.
-    #
-    # No "not installed -> skip" branch here: _check_curl_cffi_available()
-    # already fail-fast-exits cmd_run() before any fetch happens if this
-    # backend is configured but curl_cffi isn't importable, so by the time
-    # this function runs, _HAS_CURL_CFFI is guaranteed True.
-    #
-    # `timeout` is the total budget for this call *across all redirect
-    # hops*, not per-hop -- without this, a tarpit (slow-drip response)
-    # combined with a redirect chain could burn hops * timeout wall clock.
-    # `.get(key, default)` (not `config["limits"][key]`) is deliberate:
-    # these three keys are new, and a config that predates them must keep
-    # working with these defaults rather than KeyError -> get swallowed by
-    # call_fetch_backend's broad except into a silent, permanent
-    # "unexpected error" that takes curl-cffi out of rotation for good.
-    limits = config.get("limits", {})
-    connect_timeout_s = limits.get("fetch_connect_timeout_s", 5)
-    low_speed_bytes_s = limits.get("fetch_low_speed_bytes_s", 512)
-    low_speed_window_s = limits.get("fetch_low_speed_window_s", 10)
-    blacklist = config.get("blacklist_domains", [])
-    impersonate = cfg.get("impersonate", "chrome")
-    current_url = url
-    deadline = time.monotonic() + timeout
-    for hop in range(_CURL_CFFI_MAX_REDIRECT_HOPS + 1):
-        # < 1, not <= 0: curl_cffi converts seconds to milliseconds via
-        # int(x * 1000), and libcurl treats a 0ms timeout as *no limit*.
-        # A remaining budget inside that sub-millisecond window would
-        # otherwise round down to 0 and silently reopen the hang this
-        # deadline exists to close.
-        remaining = deadline - time.monotonic()
-        if remaining < 1:
-            return None, "curl-cffi: total fetch deadline exceeded across redirects"
-        if is_blacklisted(current_url, blacklist):
-            return None, f"curl-cffi: redirect target domain blacklisted: {current_url}"
-        try:
-            host, port, ip = _ssrf_validate_and_resolve(current_url)
-        except (socket.gaierror, OSError) as e:
-            return None, f"curl-cffi: DNS resolution failed: {e}"
-        pin = f"{host}:{port}:{ip}"
-        # curl_cffi 0.15.0 sets CURLOPT_TIMEOUT_MS = connect + read for a
-        # tuple timeout (it sums the two components, it doesn't treat
-        # `read` as the total) -- so to cap this hop's total at exactly
-        # `remaining`, the read component must be `remaining - conn`, not
-        # `remaining` itself. `- 0.1` keeps a strictly positive read
-        # component even when remaining is barely above the connect cap.
-        conn = min(connect_timeout_s, remaining - 0.1)
-        try:
-            resp = curl_cffi_requests.get(
-                current_url, timeout=(conn, remaining - conn), impersonate=impersonate,
-                allow_redirects=False, headers={"Accept-Encoding": "identity"},
-                curl_options={
-                    CurlCffiOpt.RESOLVE: [pin],
-                    CurlCffiOpt.MAXFILESIZE_LARGE: max_chars * 4,
-                    CurlCffiOpt.LOW_SPEED_LIMIT: low_speed_bytes_s,
-                    CurlCffiOpt.LOW_SPEED_TIME: low_speed_window_s,
-                },
-            )
-        except Exception as e:
-            return None, f"curl-cffi: request failed: {e}"
-        if resp.status_code in _CURL_CFFI_REDIRECT_STATUSES:
-            location = resp.headers.get("location")
-            if not location:
-                return None, f"curl-cffi: redirect status {resp.status_code} missing Location header"
-            current_url = urllib.parse.urljoin(current_url, location)
-            continue
-        try:
-            text = resp.text
-        except Exception as e:
-            return None, f"curl-cffi: failed to decode response body: {e}"
-        # Gate 1: challenge page first, regardless of status code -- a
-        # Cloudflare/DataDome/etc holding page served with 403/503 must be
-        # reported as a challenge, not swallowed by the generic HTTP-error
-        # gate below (which would lose the actual root cause from
-        # telemetry: "anti-bot challenge" vs. "some 403").
-        if _looks_like_challenge_page(text):
-            return None, "curl-cffi: anti-bot JS challenge page (needs a JS-capable backend)"
-        # Gate 2: an ordinary error page (403/404/5xx, no challenge marker)
-        # is also not article content -- refuse to return its body too.
-        if not (200 <= resp.status_code < 300):
-            return None, f"curl-cffi: HTTP {resp.status_code}"
-        return _strip_html_to_text(text), None
-    return None, f"curl-cffi: exceeded max redirect hops ({_CURL_CFFI_MAX_REDIRECT_HOPS})"
-
-
-_CURL_CFFI_MISSING_MSG = (
-    "ERROR: fetch backend 'curl-cffi' is configured but curl_cffi is not "
-    "installed. Run: pip3 install --user curl_cffi"
-)
-
-
-def _check_curl_cffi_available(config):
-    # Config declares the backend -> it must be installed, fail fast before
-    # touching any state (cleanup/tombstone) or spending an API call. Config
-    # doesn't declare it -> curl_cffi is never imported at runtime and the
-    # pipeline stays exactly as stdlib-only as it always has been.
-    types = [b.get("type") for b in config.get("fetch_backends", [])]
-    if "curl-cffi" in types and not _HAS_CURL_CFFI:
-        print(_CURL_CFFI_MISSING_MSG, file=sys.stderr)
-        sys.exit(4)
-
-
-def _fetch_urllib_ua(cfg, url, timeout, max_chars):
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; harvest.py/1.0)",
-               "Accept-Encoding": "identity"}
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = _maybe_decompress(resp.read(max_chars * 4), resp)
-    except (urllib.error.URLError, OSError) as e:
-        return None, f"urllib-ua: request failed: {e}"
-    try:
-        text = raw.decode("utf-8", errors="replace")
-    except Exception as e:
-        return None, f"urllib-ua: failed to decode response body: {e}"
-    return _strip_html_to_text(text), None
-
-
-def call_fetch_backend(backend_cfg, limiter, url, config, attempts=None):
-    limiter.acquire()
-    # Per-backend timeout_s override, falling back to the shared
-    # call_timeout_s -- .get() means backends that don't declare timeout_s
-    # (or a config predating this field) keep the old 180s behavior.
-    timeout = backend_cfg.get("timeout_s", config["limits"]["call_timeout_s"])
-    max_chars = config["limits"]["fetch_max_chars"]
-    btype = backend_cfg["type"]
-    try:
-        if btype == "tavily-extract":
-            content, reason = _fetch_tavily_extract(backend_cfg, url, timeout, max_chars)
-        elif btype == "jina-reader":
-            content, reason = _fetch_jina_reader(backend_cfg, url, timeout, max_chars)
-        elif btype == "curl-cffi":
-            content, reason = _fetch_curl_cffi(backend_cfg, url, timeout, max_chars, config)
-        elif btype == "urllib-ua":
-            content, reason = _fetch_urllib_ua(backend_cfg, url, timeout, max_chars)
-        else:
-            content, reason = None, f"unknown fetch backend type: {btype}"
-    except SSRFBlocked:
-        raise
-    except Exception as e:
-        content, reason = None, f"unexpected error: {e}"
-    if not content and attempts is not None:
-        attempts.append({"backend": btype, "error": reason or "no content"})
-    return content
-
-
-def do_fetch(url, fetch_backends, journal, config):
-    # SSRF guard scope: only the connection whose destination host is
-    # derived from model-controlled input is a real SSRF surface -- that is
-    # urllib-ua's and curl-cffi's direct connection to `url` (and any
-    # redirects they follow). tavily-extract/jina-reader take `url` as a
-    # request *parameter* to a fixed, trusted API host; the actual fetch of
-    # that URL happens on their servers, not on this machine, so guarding
-    # them here would only false-positive-block a legitimate internally-
-    # hosted gateway/API without adding any real protection. The domain
-    # blacklist still applies to `url` regardless of which backend ends up
-    # serving it. (curl-cffi additionally re-validates + re-pins every
-    # redirect hop internally, since libcurl's own DNS resolution bypasses
-    # this guard entirely -- see _fetch_curl_cffi().)
-    blacklist = config.get("blacklist_domains", [])
-    if is_blacklisted(url, blacklist):
-        journal.append({"tool": "fetch", "url": url, "blocked": "blacklist", "content": None})
-        return json.dumps({"error": "domain blacklisted"})
-
-    max_chars = config["limits"]["fetch_max_chars"]
-    attempts = []
-    for backend_cfg, limiter in fetch_backends:
-        guarded = backend_cfg["type"] in ("urllib-ua", "curl-cffi")
-        try:
-            if guarded:
-                with tool_request_guard():
-                    _ssrf_precheck(url)
-                    content = call_fetch_backend(backend_cfg, limiter, url, config, attempts)
-            else:
-                content = call_fetch_backend(backend_cfg, limiter, url, config, attempts)
-        except SSRFBlocked as e:
-            journal.append({"tool": "fetch", "url": url, "blocked": "ssrf", "content": None, "attempts": attempts})
-            return json.dumps({"error": f"blocked by SSRF guard: {e}"})
-        except Exception as e:
-            content = None
-            attempts.append({"backend": backend_cfg["type"], "error": f"unexpected error: {e}"})
-        if content:
-            truncated = content[:max_chars]
-            journal.append({"tool": "fetch", "url": url, "backend": backend_cfg["type"], "content": truncated,
-                             "attempts": attempts})
-            return truncated
-    journal.append({"tool": "fetch", "url": url, "backend": None, "content": None, "attempts": attempts})
-    return json.dumps({"error": "all fetch backends failed"})
+import harvest_fetch  # for qualified do_fetch() calls in body (facade-penetration guard)
 
 
 # ---------------------------------------------------------------------------
@@ -1196,9 +377,9 @@ def execute_tool_call(tc, search_backends, fetch_backends, journal, config, loca
     except json.JSONDecodeError:
         args = {}
     if name == "search":
-        return do_search(args.get("query", ""), args.get("lang", ""), search_backends, journal, config)
+        return harvest_search.do_search(args.get("query", ""), args.get("lang", ""), search_backends, journal, config)
     if name == "fetch":
-        return do_fetch(args.get("url", ""), fetch_backends, journal, config)
+        return harvest_fetch.do_fetch(args.get("url", ""), fetch_backends, journal, config)
     if name == "read_local":
         return do_read_local(args.get("path", ""), args.get("offset", 0), journal, config, local_dir)
     return json.dumps({"error": f"unknown tool {name}"})
@@ -1993,7 +1174,7 @@ def cmd_run_local(args, config):
     journal = []
     all_urls = []
     for query in queries:
-        result_json = do_search(query, "auto", search_backends, journal, config)
+        result_json = harvest_search.do_search(query, "auto", search_backends, journal, config)
         results = json.loads(result_json).get("results", [])
         for r in results:
             all_urls.append((r["url"], r.get("title", "")))
@@ -2025,7 +1206,7 @@ def cmd_run_local(args, config):
         # with "{"), so read the journal entry do_fetch just appended
         # instead; its "content" field uses the same None-on-failure
         # convention build_fetch_index() already relies on elsewhere.
-        do_fetch(item["url"], fetch_backends, journal, config)
+        harvest_fetch.do_fetch(item["url"], fetch_backends, journal, config)
         content = journal[-1].get("content")
         if content:
             page_file = fetched_dir / f"page_{i + 1:03d}.txt"
@@ -2082,29 +1263,14 @@ def cmd_run_local(args, config):
     print(f"harvest local mode complete: {len(fetched_pages)} pages fetched")
 
 
-def cmd_run(args):
-    config = load_config(args.config)
-    _check_curl_cffi_available(config)
+def _resolve_run_paths(args):
+    """Derive all run directories + resolve/validate the goal file for a
+    normal (API) harvest run. Extracted verbatim from cmd_run -- the sys.exit
+    validation paths and every comment are unchanged, so behavior is identical.
 
-    # getattr(...) rather than args.no_api/args.queries_json: same
-    # back-compat rationale as args.project_dir above -- older test/caller
-    # code building an args namespace without these new attributes must
-    # keep working, taking the normal-mode path unchanged.
-    no_api = getattr(args, "no_api", False)
-    queries_json = getattr(args, "queries_json", None)
-    if no_api:
-        if not queries_json:
-            print("error: local mode requires --queries-json", file=sys.stderr)
-            sys.exit(1)
-        cmd_run_local(args, config)
-        return
-    gw_api_key_env = config.get("gateway", {}).get("api_key_env", "")
-    has_gateway_key = bool(os.environ.get(gw_api_key_env, ""))
-    if not has_gateway_key:
-        print("error: Gateway API key missing. To run in local mode, pass "
-              "--no-api --queries-json <file>.", file=sys.stderr)
-        sys.exit(3)
-
+    Returns: (raw_dir, project_dir, pipeline_dir, verify_dir, is_supplementary,
+              verify_filename, goal_text, goal_hash)
+    """
     raw_dir = Path(args.out)
     # getattr(...) rather than args.project_dir: keeps this importable by
     # older test/caller code that builds an args namespace without the new
@@ -2189,6 +1355,54 @@ def cmd_run(args):
     goal_text = run_goal_file.read_text(encoding="utf-8")
     goal_hash = hashlib.sha256(run_goal_file.read_bytes()).hexdigest()
 
+    return (raw_dir, project_dir, pipeline_dir, verify_dir, is_supplementary,
+            verify_filename, goal_text, goal_hash)
+
+
+def _persist_worker_outputs(raw_dir, results):
+    """Write each worker's findings.json / journal_<alias>.jsonl /
+    rejected_claims.json under raw_dir/HARVEST_SUBDIR/<alias>/. Extracted
+    verbatim from cmd_run -- pure disk IO, no behavior change."""
+    harvest_dir = raw_dir / HARVEST_SUBDIR
+    harvest_dir.mkdir(parents=True, exist_ok=True)
+    for r in results:
+        model_dir = harvest_dir / r.alias
+        model_dir.mkdir(parents=True, exist_ok=True)
+        findings_out = r.findings if r.findings is not None else {"claims": [], "status": r.status, "reason": r.reason}
+        (model_dir / "findings.json").write_text(json.dumps(findings_out, ensure_ascii=False, indent=2), encoding="utf-8")
+        with (model_dir / f"journal_{r.alias}.jsonl").open("w", encoding="utf-8") as f:
+            for entry in r.journal:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        (model_dir / "rejected_claims.json").write_text(
+            json.dumps(r.rejected_claims, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cmd_run(args):
+    config = load_config(args.config)
+    harvest_clients.base._check_curl_cffi_available(config)
+
+    # getattr(...) rather than args.no_api/args.queries_json: same
+    # back-compat rationale as args.project_dir above -- older test/caller
+    # code building an args namespace without these new attributes must
+    # keep working, taking the normal-mode path unchanged.
+    no_api = getattr(args, "no_api", False)
+    queries_json = getattr(args, "queries_json", None)
+    if no_api:
+        if not queries_json:
+            print("error: local mode requires --queries-json", file=sys.stderr)
+            sys.exit(1)
+        cmd_run_local(args, config)
+        return
+    gw_api_key_env = config.get("gateway", {}).get("api_key_env", "")
+    has_gateway_key = bool(os.environ.get(gw_api_key_env, ""))
+    if not has_gateway_key:
+        print("error: Gateway API key missing. To run in local mode, pass "
+              "--no-api --queries-json <file>.", file=sys.stderr)
+        sys.exit(3)
+
+    (raw_dir, project_dir, pipeline_dir, verify_dir, is_supplementary,
+     verify_filename, goal_text, goal_hash) = _resolve_run_paths(args)
+
     if is_supplementary:
         # Never cleanup_stale_state() here -- that function unconditionally
         # unlinks the PRIMARY VERIFY_FILE/EXEMPTION, which would erase the
@@ -2222,18 +1436,7 @@ def cmd_run(args):
               wall_clock_s=config["limits"]["wall_clock_s"])
         results, alive, quorum_met = run_panel(config, goal_text, local_manifest, local_dir, client_factory)
 
-        harvest_dir = raw_dir / HARVEST_SUBDIR
-        harvest_dir.mkdir(parents=True, exist_ok=True)
-        for r in results:
-            model_dir = harvest_dir / r.alias
-            model_dir.mkdir(parents=True, exist_ok=True)
-            findings_out = r.findings if r.findings is not None else {"claims": [], "status": r.status, "reason": r.reason}
-            (model_dir / "findings.json").write_text(json.dumps(findings_out, ensure_ascii=False, indent=2), encoding="utf-8")
-            with (model_dir / f"journal_{r.alias}.jsonl").open("w", encoding="utf-8") as f:
-                for entry in r.journal:
-                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            (model_dir / "rejected_claims.json").write_text(
-                json.dumps(r.rejected_claims, ensure_ascii=False, indent=2), encoding="utf-8")
+        _persist_worker_outputs(raw_dir, results)
 
         if not quorum_met:
             abort_unavailable(verify_dir, goal_hash, "quorum not met",
