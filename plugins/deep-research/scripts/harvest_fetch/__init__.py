@@ -14,6 +14,7 @@ import urllib.request
 
 import harvest_safety
 import harvest_clients.base
+import harvest_journal
 
 __all__ = [
     "_fetch_tavily_extract", "_fetch_jina_reader", "_strip_html_to_text",
@@ -305,9 +306,11 @@ def do_fetch(url, fetch_backends, journal, config):
     # serving it. (curl-cffi additionally re-validates + re-pins every
     # redirect hop internally, since libcurl's own DNS resolution bypasses
     # this guard entirely -- see _fetch_curl_cffi().)
+    _t0 = time.monotonic()
     blacklist = config.get("blacklist_domains", [])
     if harvest_safety.is_blacklisted(url, blacklist):
-        journal.append({"tool": "fetch", "url": url, "blocked": "blacklist", "content": None})
+        harvest_journal.jappend(journal, {"tool": "fetch", "url": url, "blocked": "blacklist", "content": None,
+                         "duration_s": round(time.monotonic() - _t0, 3)})
         return json.dumps({"error": "domain blacklisted"})
 
     max_chars = config["limits"]["fetch_max_chars"]
@@ -322,15 +325,17 @@ def do_fetch(url, fetch_backends, journal, config):
             else:
                 content = call_fetch_backend(backend_cfg, limiter, url, config, attempts)
         except harvest_safety.SSRFBlocked as e:
-            journal.append({"tool": "fetch", "url": url, "blocked": "ssrf", "content": None, "attempts": attempts})
+            harvest_journal.jappend(journal, {"tool": "fetch", "url": url, "blocked": "ssrf", "content": None,
+                             "attempts": attempts, "duration_s": round(time.monotonic() - _t0, 3)})
             return json.dumps({"error": f"blocked by SSRF guard: {e}"})
         except Exception as e:
             content = None
             attempts.append({"backend": backend_cfg["type"], "error": f"unexpected error: {e}"})
         if content:
             truncated = content[:max_chars]
-            journal.append({"tool": "fetch", "url": url, "backend": backend_cfg["type"], "content": truncated,
-                             "attempts": attempts})
+            harvest_journal.jappend(journal, {"tool": "fetch", "url": url, "backend": backend_cfg["type"], "content": truncated,
+                             "attempts": attempts, "duration_s": round(time.monotonic() - _t0, 3)})
             return truncated
-    journal.append({"tool": "fetch", "url": url, "backend": None, "content": None, "attempts": attempts})
+    harvest_journal.jappend(journal, {"tool": "fetch", "url": url, "backend": None, "content": None,
+                     "attempts": attempts, "duration_s": round(time.monotonic() - _t0, 3)})
     return json.dumps({"error": "all fetch backends failed"})

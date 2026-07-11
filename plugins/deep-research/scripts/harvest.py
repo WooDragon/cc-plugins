@@ -339,6 +339,7 @@ from harvest_fetch import (
     call_fetch_backend, do_fetch,
 )
 import harvest_fetch  # for qualified do_fetch() calls in body (facade-penetration guard)
+import harvest_journal
 
 
 # ---------------------------------------------------------------------------
@@ -348,24 +349,24 @@ import harvest_fetch  # for qualified do_fetch() calls in body (facade-penetrati
 def do_read_local(path, offset, journal, config, local_dir):
     local_cfg = config.get("local_sources", {})
     if not local_cfg.get("enabled"):
-        journal.append({"tool": "read_local", "url": f"local://{path}", "blocked": "disabled", "content": None})
+        harvest_journal.jappend(journal, {"tool": "read_local", "url": f"local://{path}", "blocked": "disabled", "content": None})
         return json.dumps({"error": "local_sources disabled"})
     if not local_dir:
-        journal.append({"tool": "read_local", "url": f"local://{path}", "blocked": "no_dir", "content": None})
+        harvest_journal.jappend(journal, {"tool": "read_local", "url": f"local://{path}", "blocked": "no_dir", "content": None})
         return json.dumps({"error": "no local_dir configured"})
     resolved = resolve_local_path(local_dir, path)
     if resolved is None or not resolved.is_file():
-        journal.append({"tool": "read_local", "url": f"local://{path}", "blocked": "sandbox", "content": None})
+        harvest_journal.jappend(journal, {"tool": "read_local", "url": f"local://{path}", "blocked": "sandbox", "content": None})
         return json.dumps({"error": "path rejected by sandbox"})
     try:
         text = resolved.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        journal.append({"tool": "read_local", "url": f"local://{path}", "blocked": "read_error", "content": None})
+        harvest_journal.jappend(journal, {"tool": "read_local", "url": f"local://{path}", "blocked": "read_error", "content": None})
         return json.dumps({"error": "read error"})
     offset = offset or 0
     max_chars = config["limits"]["fetch_max_chars"]
     chunk = text[offset:offset + max_chars]
-    journal.append({"tool": "read_local", "url": f"local://{path}", "content": chunk})
+    harvest_journal.jappend(journal, {"tool": "read_local", "url": f"local://{path}", "content": chunk})
     return chunk
 
 
@@ -489,7 +490,8 @@ def _extract_message(resp):
 
 
 class WorkerResult:
-    def __init__(self, alias, model_id, status, findings, journal, reason=None, rejected_claims=None):
+    def __init__(self, alias, model_id, status, findings, journal, reason=None, rejected_claims=None,
+                 wall_clock_s=None, completion_wall_s=0.0):
         self.alias = alias
         self.model_id = model_id
         self.status = status
@@ -497,6 +499,8 @@ class WorkerResult:
         self.journal = journal
         self.reason = reason
         self.rejected_claims = rejected_claims or []
+        self.wall_clock_s = wall_clock_s
+        self.completion_wall_s = completion_wall_s
 
 
 def append_or_merge_user(messages, text):
@@ -547,6 +551,17 @@ _FORCED_SYNTHESIS_PROMPT = (
 
 def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
                 goal_text, local_manifest, local_dir):
+    t0 = time.monotonic()
+    completion_wall = [0.0]  # mutable box so inner can accumulate
+    r = _run_worker_inner(alias, model_id, client, config, search_backends, fetch_backends,
+                           goal_text, local_manifest, local_dir, completion_wall)
+    r.wall_clock_s = round(time.monotonic() - t0, 2)
+    r.completion_wall_s = round(completion_wall[0], 2)
+    return r
+
+
+def _run_worker_inner(alias, model_id, client, config, search_backends, fetch_backends,
+                       goal_text, local_manifest, local_dir, completion_wall):
     journal = []
     try:
         limits = config["limits"]
@@ -562,10 +577,13 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
         for step in range(max_steps):
             if time.monotonic() > deadline:
                 return WorkerResult(alias, model_id, "FAILED", None, journal, "wall_clock_exceeded")
+            _cs = time.monotonic()
             try:
                 resp = client.complete(messages=messages, tools=TOOL_SCHEMAS)
             except Exception:
                 break
+            finally:
+                completion_wall[0] += time.monotonic() - _cs
             message = _extract_message(resp)
             if message is None:
                 return WorkerResult(alias, model_id, "FAILED", None, journal, "bad_response")
@@ -662,11 +680,14 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
         # calling a tool, not the schema's absence -- so a model that ignores
         # the prompt and returns tool_calls anyway is handled below by
         # looking only at text content, never by re-dispatching those calls.
+        _cs = time.monotonic()
         try:
             resp = client.complete(messages=messages, tools=TOOL_SCHEMAS)
         except Exception as e:
             return WorkerResult(alias, model_id, "FAILED", None, journal,
                                 f"synthesis_failed ({type(e).__name__}): {e}")
+        finally:
+            completion_wall[0] += time.monotonic() - _cs
         message = _extract_message(resp)
         if message is None:
             return WorkerResult(alias, model_id, "FAILED", None, journal, "synthesis_no_response")
@@ -687,11 +708,14 @@ def run_worker(alias, model_id, client, config, search_backends, fetch_backends,
                 # actually said) and feed back the concrete parse error.
                 messages.append(message)
                 messages.append({"role": "user", "content": f"JSON parse error: {err}. Re-output valid findings JSON."})
+            _cs = time.monotonic()
             try:
                 resp = client.complete(messages=messages, tools=TOOL_SCHEMAS)
             except Exception as e:
                 return WorkerResult(alias, model_id, "FAILED", None, journal,
                                     f"synthesis_retry_failed ({type(e).__name__}): {e}")
+            finally:
+                completion_wall[0] += time.monotonic() - _cs
             message = _extract_message(resp)
             content = (message.get("content") or "") if message else ""
             data, err = parse_findings_json(content)
@@ -729,7 +753,8 @@ def run_panel(config, goal_text, local_manifest, local_dir, client_factory):
                 claims_count = len(claims) if isinstance(claims, list) else 0
             except Exception:
                 pass
-            _emit("worker_done", alias=r.alias, model_id=r.model_id, status=r.status, claims=claims_count)
+            _emit("worker_done", alias=r.alias, model_id=r.model_id, status=r.status, claims=claims_count,
+                  wall_clock_s=r.wall_clock_s, completion_wall_s=r.completion_wall_s)
     alive = [r for r in results if r.status == "OK"]
     _emit("panel_done", alive=[r.alias for r in alive], quorum_met=len(alive) >= quorum)
     return results, alive, len(alive) >= quorum
@@ -1170,6 +1195,7 @@ def cmd_run_local(args, config):
 
     queries = _read_queries_json(args.queries_json)
     search_backends, fetch_backends = build_backends(config)
+    _local_t0 = time.monotonic()
 
     journal = []
     all_urls = []
@@ -1192,7 +1218,8 @@ def cmd_run_local(args, config):
     top_urls = ranked[:max_fetch]
     if not top_urls:
         print("error: all searches returned no usable URLs", file=sys.stderr)
-        abort_unavailable(verify_dir, goal_hash, "no usable URLs from search")
+        abort_unavailable(verify_dir, goal_hash, "no usable URLs from search",
+                          {"harvest_wall_s": round(time.monotonic() - _local_t0, 2)})
 
     fetched_pages = []
     harvest_dir = raw_dir / HARVEST_SUBDIR / "local"
@@ -1220,7 +1247,8 @@ def cmd_run_local(args, config):
 
     if not fetched_pages:
         print("error: all fetches failed", file=sys.stderr)
-        abort_unavailable(verify_dir, goal_hash, "all fetches failed")
+        abort_unavailable(verify_dir, goal_hash, "all fetches failed",
+                          {"harvest_wall_s": round(time.monotonic() - _local_t0, 2)})
 
     harvest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1258,6 +1286,7 @@ def cmd_run_local(args, config):
         "mode": "local",
         "pages_fetched": len(fetched_pages),
         "queries_executed": len(queries),
+        "harvest_wall_s": round(time.monotonic() - _local_t0, 2),
     })
 
     print(f"harvest local mode complete: {len(fetched_pages)} pages fetched")
@@ -1413,6 +1442,8 @@ def cmd_run(args):
         cleanup_stale_state(pipeline_dir, verify_dir, raw_dir)
     write_tombstone(verify_dir, goal_hash, verify_filename=verify_filename)
 
+    _harvest_t0 = None
+    harvest_wall_s = None
     try:
         install_ssrf_guard()
 
@@ -1434,13 +1465,16 @@ def cmd_run(args):
         _emit("run_start", models=config["panel_models"],
               max_steps=config["limits"]["max_steps_per_model"],
               wall_clock_s=config["limits"]["wall_clock_s"])
+        _harvest_t0 = time.monotonic()
         results, alive, quorum_met = run_panel(config, goal_text, local_manifest, local_dir, client_factory)
+        harvest_wall_s = round(time.monotonic() - _harvest_t0, 2)
 
         _persist_worker_outputs(raw_dir, results)
 
         if not quorum_met:
             abort_unavailable(verify_dir, goal_hash, "quorum not met",
-                               {"quorum_met": False, "models_alive": [r.alias for r in alive]},
+                               {"quorum_met": False, "models_alive": [r.alias for r in alive],
+                                "harvest_wall_s": harvest_wall_s},
                                verify_filename=verify_filename)
 
         worker_findings_by_alias = {r.alias: r.findings for r in alive}
@@ -1450,7 +1484,8 @@ def cmd_run(args):
               err=judge_err)
         if judge_data is None:
             abort_unavailable(verify_dir, goal_hash, f"judge failed: {judge_err}",
-                               {"quorum_met": True, "models_alive": [r.alias for r in alive]},
+                               {"quorum_met": True, "models_alive": [r.alias for r in alive],
+                                "harvest_wall_s": harvest_wall_s},
                                verify_filename=verify_filename)
 
         merged = merge_findings(worker_findings_by_alias, judge_data)
@@ -1462,6 +1497,7 @@ def cmd_run(args):
 
         if total_claims == 0:
             abort_unavailable(verify_dir, goal_hash, "quorum met but zero valid claims",
+                               {"harvest_wall_s": harvest_wall_s},
                                verify_filename=verify_filename)
 
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -1476,13 +1512,19 @@ def cmd_run(args):
             "invalid_citation_rate": invalid_rate,
             "invalid_claim_count": invalid_total,
             "total_claims": total_claims,
+            "harvest_wall_s": harvest_wall_s,
         }, verify_filename=verify_filename)
         _emit("run_done", verdict=verdict, total_claims=total_claims, invalid_rate=round(invalid_rate, 4))
         print(f"harvest run complete: verdict={verdict}")
     except SystemExit:
         raise
     except Exception as e:
-        abort_unavailable(verify_dir, goal_hash, f"unexpected error: {e}", verify_filename=verify_filename)
+        extra = {}
+        if harvest_wall_s is not None:
+            extra["harvest_wall_s"] = harvest_wall_s
+        elif _harvest_t0 is not None:
+            extra["harvest_wall_s"] = round(time.monotonic() - _harvest_t0, 2)
+        abort_unavailable(verify_dir, goal_hash, f"unexpected error: {e}", extra, verify_filename=verify_filename)
 
 
 _VERDICT_EXIT_CODES = {"PASS": 0, "FAIL": 1, "N_A": 2}

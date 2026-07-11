@@ -15,6 +15,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import harvest  # noqa: E402
 import harvest_fetch  # noqa: E402
+import harvest_journal  # noqa: E402
 import harvest_safety  # noqa: E402
 import harvest_search  # noqa: E402
 import harvest_clients.base  # noqa: E402
@@ -1325,6 +1326,153 @@ class TestBackendDegradation(unittest.TestCase):
         self.assertEqual(len(attempts), 1)
         self.assertEqual(attempts[0]["backend"], "tavily-extract")
         self.assertIn("not set", attempts[0]["error"])
+
+
+class TestJournalTimestamps(unittest.TestCase):
+    """harvest_journal.jappend is the single choke point every journal.append
+    call site was converted to -- these lock down the `t` (wall-clock) and
+    `duration_s` (monotonic-diff) fields it and its callers stamp on, plus
+    the wall_clock_s/completion_wall_s fields run_worker's wrapper computes
+    around _run_worker_inner. See #44."""
+
+    def setUp(self):
+        self.config = base_config()
+
+    def test_jappend_independently_importable_and_stamps_float_t(self):
+        # harvest_journal is a zero-dependency bottom module: importable and
+        # usable on its own, with no harvest/harvest_fetch/harvest_search
+        # import required first.
+        journal = []
+        entry = {"tool": "probe"}
+        with mock.patch("harvest_journal.time.time", return_value=123.456):
+            returned = harvest_journal.jappend(journal, entry)
+        self.assertIs(returned, entry)  # returns the same entry it mutated
+        self.assertIs(journal[0], entry)
+        self.assertEqual(journal[0]["t"], 123.5)  # round(x, 1)
+        self.assertIsInstance(journal[0]["t"], float)
+
+    def test_do_fetch_success_entry_carries_t_and_exact_duration_s(self):
+        journal = []
+        backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
+        # do_fetch calls time.monotonic() exactly twice on this path (_t0 at
+        # entry, then once more when building the success journal entry) --
+        # call_fetch_backend is mocked wholesale so RateLimiter.acquire()'s
+        # own internal monotonic() call never fires.
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value="hello world"), \
+             mock.patch("harvest_fetch.time.monotonic", side_effect=[10.0, 12.5]), \
+             mock.patch("harvest_fetch.time.time", return_value=999.0):
+            result = harvest.do_fetch("https://good.com/x", backends, journal, self.config)
+        self.assertEqual(result, "hello world")
+        self.assertEqual(journal[0]["duration_s"], 2.5)
+        self.assertEqual(journal[0]["t"], 999.0)
+
+    def test_do_fetch_all_backends_failed_entry_carries_duration_s(self):
+        journal = []
+        backends = [({"type": "urllib-ua"}, harvest.RateLimiter(0))]
+        with mock.patch("harvest_fetch.call_fetch_backend", return_value=None), \
+             mock.patch("harvest_fetch.time.monotonic", side_effect=[10.0, 11.0]):
+            harvest.do_fetch("https://good.com/x", backends, journal, self.config)
+        self.assertEqual(journal[0]["backend"], None)
+        self.assertEqual(journal[0]["duration_s"], 1.0)
+
+    def test_do_search_success_entry_carries_t_and_exact_duration_s(self):
+        journal = []
+        backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
+        # Same shape as do_fetch: call_search_backend mocked wholesale means
+        # only do_search's own two time.monotonic() calls (_t0, then the
+        # success entry) fire -- limiter.acquire() lives inside the mocked
+        # function and never runs.
+        with mock.patch("harvest_search.call_search_backend",
+                         return_value=[{"url": "https://a.com", "title": "t", "snippet": "s"}]), \
+             mock.patch("harvest_search.time.monotonic", side_effect=[10.0, 13.25]), \
+             mock.patch("harvest_search.time.time", return_value=888.0):
+            harvest.do_search("q", "en", backends, journal, self.config)
+        self.assertEqual(journal[0]["duration_s"], 3.25)
+        self.assertEqual(journal[0]["t"], 888.0)
+
+    def test_do_search_all_backends_failed_entry_carries_duration_s(self):
+        journal = []
+        backends = [({"type": "gemini-cli", "model": "x"}, harvest.RateLimiter(0))]
+        with mock.patch("harvest_search.call_search_backend", return_value=None), \
+             mock.patch("harvest_search.time.monotonic", side_effect=[10.0, 10.75]):
+            harvest.do_search("q", "en", backends, journal, self.config)
+        self.assertEqual(journal[0]["backend"], None)
+        self.assertEqual(journal[0]["duration_s"], 0.75)
+
+    def test_run_worker_computes_wall_clock_s_and_completion_wall_s(self):
+        # Deterministic single-threaded direct run_worker call (not
+        # run_panel, so a shared side_effect iterator is safe): one
+        # zero-tool-call OK turn walks through 6 time.monotonic() call
+        # sites -- wrapper t0, inner's deadline anchor, the per-step
+        # deadline check, _cs before client.complete(), the finally's
+        # accumulation read, and the wrapper's final wall_clock_s read.
+        client = ScriptedClient([assistant_final(findings_block([]))])
+        side_effect = [100.0, 100.0, 100.0, 100.0, 105.0, 110.0]
+        with mock.patch("harvest.time.monotonic", side_effect=side_effect):
+            result = harvest.run_worker("m1", "model-a", client, self.config, [], [],
+                                        "goal", [], None)
+        self.assertEqual(result.status, "OK")
+        self.assertEqual(result.wall_clock_s, 10.0)
+        self.assertEqual(result.completion_wall_s, 5.0)
+
+    def test_run_worker_completion_wall_s_nonnegative_on_exception_path(self):
+        # try/finally around client.complete() must still accumulate
+        # completion_wall even when the call raises -- exercised here via
+        # ExplodingClient (main-loop except -> break -> forced synthesis ->
+        # also raises -> FAILED), no time mocking so this is a real-clock
+        # sanity check rather than an exact-diff assertion.
+        class ExplodingClient:
+            def complete(self, messages, tools):
+                raise RuntimeError("network exploded")
+        result = harvest.run_worker("m1", "model-a", ExplodingClient(), self.config, [], [],
+                                    "goal", [], None)
+        self.assertEqual(result.status, "FAILED")
+        self.assertGreaterEqual(result.completion_wall_s, 0)
+        self.assertGreaterEqual(result.wall_clock_s, 0)
+
+    def test_worker_done_emit_carries_wall_clock_and_completion_wall(self):
+        # run_panel is multi-threaded (ThreadPoolExecutor) -- a shared
+        # side_effect list on time.monotonic would race across worker
+        # threads, so this only asserts the fields are present and
+        # non-negative (ANY-equivalent tolerance), not exact values.
+        config = base_config()
+
+        def factory(model_id):
+            return ScriptedClient([assistant_final(findings_block([]))])
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            harvest.run_panel(config, "goal", [], None, factory)
+        events = [json.loads(line) for line in stderr.getvalue().splitlines()]
+        worker_done_events = [e for e in events if e["event"] == "worker_done"]
+        self.assertTrue(worker_done_events)
+        for e in worker_done_events:
+            self.assertIn("wall_clock_s", e)
+            self.assertIn("completion_wall_s", e)
+            self.assertGreaterEqual(e["wall_clock_s"], 0)
+            self.assertGreaterEqual(e["completion_wall_s"], 0)
+
+    def test_new_journal_fields_do_not_break_citation_validation(self):
+        # Regression guard: build_fetch_index/build_journal_url_set/
+        # validate_claims only ever read tool/url/content/urls -- the
+        # additive t/duration_s fields on journal entries must not confuse
+        # them.
+        journal = [
+            {"tool": "fetch", "url": "https://a.com/x", "content": "The quick brown fox.",
+             "t": 100.0, "duration_s": 0.5, "attempts": []},
+            {"tool": "search", "query": "q", "lang": "en", "backend": "gemini-cli",
+             "urls": ["https://a.com/only-searched"], "t": 100.1, "duration_s": 0.2, "attempts": []},
+        ]
+        claims = harvest.assign_claim_ids("m1", [
+            {"claim": "c1", "excerpt": "quick brown fox", "url": "https://a.com/x"},
+            {"claim": "c2", "excerpt": "anything", "url": "https://a.com/only-searched"},
+        ])
+        idx = harvest.build_fetch_index(journal)
+        urls = harvest.build_journal_url_set(journal)
+        valid, invalid = harvest.validate_claims(claims, idx, urls)
+        self.assertEqual(len(valid), 1)
+        self.assertEqual(valid[0]["url"], "https://a.com/x")
+        self.assertEqual(len(invalid), 1)
+        self.assertEqual(invalid[0][1], "url_not_fetched")
 
 
 class TestUrllibUaHtmlStripping(unittest.TestCase):
@@ -2672,6 +2820,8 @@ class TestCmdRunEndToEnd(unittest.TestCase):
         self.assertTrue(data["quorum_met"])
         self.assertEqual(data["total_claims"], 3)
         self.assertEqual(data["invalid_citation_rate"], 0.0)
+        self.assertIn("harvest_wall_s", data)
+        self.assertGreaterEqual(data["harvest_wall_s"], 0)
 
         merged_file = self.raw_dir / harvest.MERGED_FINDINGS_FILE
         self.assertTrue(merged_file.exists())
@@ -4758,6 +4908,8 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
         self.assertEqual(data["verdict"], "LOCAL")
         self.assertEqual(data["pages_fetched"], 2)
         self.assertEqual(data["queries_executed"], 2)
+        self.assertIn("harvest_wall_s", data)
+        self.assertGreaterEqual(data["harvest_wall_s"], 0)
 
         manifest_file = self.raw_dir / "harvest-local.json"
         self.assertTrue(manifest_file.exists())
@@ -4789,6 +4941,10 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
         verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
         data = json.loads(verify_file.read_text(encoding="utf-8"))
         self.assertEqual(data["verdict"], "UNAVAILABLE")
+        # Regression: this abort path used to skip harvest_wall_s entirely,
+        # leaving no way to tell how long the local run ran before bailing.
+        self.assertIn("harvest_wall_s", data)
+        self.assertGreaterEqual(data["harvest_wall_s"], 0)
 
     def test_all_fetches_fail_aborts_unavailable(self):
         queries_file = self.project_dir / "queries.json"
@@ -4807,6 +4963,10 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
         verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
         data = json.loads(verify_file.read_text(encoding="utf-8"))
         self.assertEqual(data["verdict"], "UNAVAILABLE")
+        # Regression: this abort path used to skip harvest_wall_s entirely,
+        # leaving no way to tell how long the local run ran before bailing.
+        self.assertIn("harvest_wall_s", data)
+        self.assertGreaterEqual(data["harvest_wall_s"], 0)
 
     def test_ranks_urls_by_search_result_frequency(self):
         # url "b" appears in both query results, "a" only once -- ranked
@@ -4854,6 +5014,67 @@ class TestCmdRunLocalEndToEnd(unittest.TestCase):
             harvest.cmd_run_local(self._args(queries_file), cfg)
 
         self.assertEqual(len(fetched), 2)
+
+
+# ---------------------------------------------------------------------------
+# cmd_run: top-level except must still carry harvest_wall_s once the
+# try-block has reached run_panel, even when run_panel itself blows up.
+# ---------------------------------------------------------------------------
+
+class TestCmdRunUnexpectedErrorCarriesWallClock(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.project_dir = Path(self.tmpdir.name)
+        self.pipeline_dir = self.project_dir / "pipeline"
+        self.raw_dir = self.pipeline_dir / "1_raw"
+        self.raw_dir.mkdir(parents=True)
+        self.goal_file = self.project_dir / harvest.GOAL_FILE_NAME
+        self.goal_file.write_text("why is the sky blue?", encoding="utf-8")
+        self._env_patch = mock.patch.dict(os.environ, {"TEST_GATEWAY_KEY": "fake-key"})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self.tmpdir.cleanup()
+
+    def test_run_panel_exception_still_records_harvest_wall_s(self):
+        config = base_config()
+        args = argparse_ns(goal_file=str(self.goal_file), out=str(self.raw_dir), config="unused", local_dir=None)
+
+        with mock.patch("harvest.load_config", return_value=config), \
+             mock.patch("harvest.run_panel", side_effect=RuntimeError("boom")):
+            with self.assertRaises(SystemExit) as ctx:
+                harvest.cmd_run(args)
+        self.assertEqual(ctx.exception.code, 3)
+
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "UNAVAILABLE")
+        self.assertIn("unexpected error: boom", data["reason"])
+        # Regression: the top-level except used to write no harvest_wall_s
+        # at all, even though _harvest_t0 was already ticking by the time
+        # run_panel raised.
+        self.assertIn("harvest_wall_s", data)
+        self.assertGreaterEqual(data["harvest_wall_s"], 0)
+
+    def test_failure_before_run_panel_omits_harvest_wall_s(self):
+        # install_ssrf_guard() runs before _harvest_t0 is ever set -- if
+        # something blows up that early, there is no wall-clock reading to
+        # report, and abort_unavailable must not choke on an empty extra.
+        config = base_config()
+        args = argparse_ns(goal_file=str(self.goal_file), out=str(self.raw_dir), config="unused", local_dir=None)
+
+        with mock.patch("harvest.load_config", return_value=config), \
+             mock.patch("harvest.install_ssrf_guard", side_effect=RuntimeError("early boom")):
+            with self.assertRaises(SystemExit) as ctx:
+                harvest.cmd_run(args)
+        self.assertEqual(ctx.exception.code, 3)
+
+        verify_file = self.pipeline_dir / "verification" / harvest.VERIFY_FILE
+        data = json.loads(verify_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["verdict"], "UNAVAILABLE")
+        self.assertIn("unexpected error: early boom", data["reason"])
+        self.assertNotIn("harvest_wall_s", data)
 
 
 # ---------------------------------------------------------------------------

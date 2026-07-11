@@ -7,6 +7,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import harvest_safety
 import harvest_clients.base
+import harvest_journal
 
 __all__ = [
     "_search_gemini_cli", "_ddg_extract_target_url", "_search_duckduckgo",
@@ -354,6 +356,7 @@ def do_search(query, lang, search_backends, journal, config):
     # host (api.tavily.com / html.duckduckgo.com / our own gateway) -- the model's
     # query text does not steer the connection destination, so this is not
     # an SSRF surface and is not wrapped in tool_request_guard().
+    _t0 = time.monotonic()
     blacklist = config.get("blacklist_domains", [])
     attempts = []
     for backend_cfg, limiter in search_backends:
@@ -379,12 +382,13 @@ def do_search(query, lang, search_backends, journal, config):
                     # fails as url_not_fetched (real citation retry required)
                     # rather than url_not_in_journal (worse: implies the model
                     # never even saw the URL) or silently passing.
-                    journal.append({"tool": "search_grounding", "url": r["url"],
+                    harvest_journal.jappend(journal, {"tool": "search_grounding", "url": r["url"],
                                     "backend": "grounding", "content": None,
                                     "title": r.get("title") or r["url"]})
-            journal.append({"tool": "search", "query": query, "lang": lang,
+            harvest_journal.jappend(journal, {"tool": "search", "query": query, "lang": lang,
                              "backend": backend_cfg["type"], "urls": [r["url"] for r in filtered],
-                             "attempts": attempts})
+                             "attempts": attempts, "duration_s": round(time.monotonic() - _t0, 3)})
             return json.dumps({"results": filtered}, ensure_ascii=False)
-    journal.append({"tool": "search", "query": query, "lang": lang, "backend": None, "urls": [], "attempts": attempts})
+    harvest_journal.jappend(journal, {"tool": "search", "query": query, "lang": lang, "backend": None, "urls": [],
+                     "attempts": attempts, "duration_s": round(time.monotonic() - _t0, 3)})
     return json.dumps({"results": [], "error": "all search backends failed"})
