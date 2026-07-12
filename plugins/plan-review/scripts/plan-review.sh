@@ -516,6 +516,15 @@ calls, or parameter names that do not exist in YOUR environment — this is norm
 and correct. DO NOT judge whether tool names or agent type identifiers match your
 own system. Focus exclusively on logic, architecture, and engineering quality.
 
+Your training knowledge has a cutoff; the plan may reference things newer than it.
+Treat version identifiers in the plan — model names (e.g. `sonnet-5`, `opus-4.8`),
+library/dependency versions, API signatures — as GROUND TRUTH, not as claims to
+verify against your memory. Whether such an identifier "exists" or "is correct" is
+NOT common knowledge you may assert unprompted: it requires evidence from the plan
+or project context. Absent that evidence, you have no grounds to flag it — do not
+raise it. If you genuinely suspect a concrete, evidence-backed problem, emit it as
+`[UNVERIFIED]` (never Critical), never as a confident correction.
+
 Keep your response under 3000 characters.
 
 ## Review Criteria
@@ -593,7 +602,9 @@ False positives burn scarce negotiation rounds. Gate EVERY finding:
 1. **Confidence** — Low confidence + Minor/Major → DROP silently. Low confidence +
    suspected Critical → keep as `[UNVERIFIED]`, downgrade to Major (→ CONCERNS, not REJECT).
 2. **False-positive registry** — Never raise: naming/style preferences, justified design
-   choices (attack the justification instead), tool/agent-type/parameter names (Scope Boundary).
+   choices (attack the justification instead), tool/agent-type/parameter names, or version
+   identifiers whose existence or correctness you cannot verify from the plan or project
+   context — model names, library/dependency versions, API signatures (Scope Boundary).
 3. **Severity calibration** — Style is never Major/Critical. Critical requires a concrete,
    named blocker (specific vuln, data-loss path, wrong-result logic).
 4. **Verdict↔severity** — Confirm verdict matches highest surviving finding:
