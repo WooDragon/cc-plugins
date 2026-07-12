@@ -2380,6 +2380,11 @@ Use Task( for analysis.
   grep -q "3000 characters" "${HOOK_SCRIPT:?Missing hook script}"
 }
 
+@test "system-instructions: Scope Boundary has training-cutoff / version-identifier ground-truth directive" {
+  grep -q "GROUND TRUTH" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "verify against your memory" "${HOOK_SCRIPT:?Missing hook script}"
+}
+
 # ---------------------------------------------------------------------------
 # Finding Quality Gate (issue #30) — prompt-layer denoising directives.
 # These are static prompt-content assertions: the gate operates inside the
