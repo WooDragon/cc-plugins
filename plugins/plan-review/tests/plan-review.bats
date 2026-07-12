@@ -2383,6 +2383,9 @@ Use Task( for analysis.
 @test "system-instructions: Scope Boundary has training-cutoff / version-identifier ground-truth directive" {
   grep -q "GROUND TRUTH" "${HOOK_SCRIPT:?Missing hook script}"
   grep -q "verify against your memory" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "training knowledge has a cutoff" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "NOT common knowledge" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "never Critical" "${HOOK_SCRIPT:?Missing hook script}"
 }
 
 # ---------------------------------------------------------------------------

@@ -602,7 +602,9 @@ False positives burn scarce negotiation rounds. Gate EVERY finding:
 1. **Confidence** — Low confidence + Minor/Major → DROP silently. Low confidence +
    suspected Critical → keep as `[UNVERIFIED]`, downgrade to Major (→ CONCERNS, not REJECT).
 2. **False-positive registry** — Never raise: naming/style preferences, justified design
-   choices (attack the justification instead), tool/agent-type/parameter names (Scope Boundary).
+   choices (attack the justification instead), tool/agent-type/parameter names, or version
+   identifiers newer than your knowledge cutoff — model names, library/dependency versions,
+   API signatures (Scope Boundary).
 3. **Severity calibration** — Style is never Major/Critical. Critical requires a concrete,
    named blocker (specific vuln, data-loss path, wrong-result logic).
 4. **Verdict↔severity** — Confirm verdict matches highest surviving finding:
