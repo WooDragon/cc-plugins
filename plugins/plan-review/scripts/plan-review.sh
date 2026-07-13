@@ -407,6 +407,9 @@ fi
 # Never delete counter — tombstone blocks subsequent calls until human intervenes
 if [ "$TOTAL_ROUNDS" -ge "$REVIEW_MAX_TOTAL_ROUNDS" ]; then
   log_decision "decision=deny reason=global-safety-valve total=$TOTAL_ROUNDS"
+  # Keep the COUNTER_FILE tombstone, but the review cycle is over — no further
+  # engine call will happen, so drop the session ref to avoid an orphan CONV_FILE.
+  rm -f "${CONV_FILE:-}"
   BLOCK_MSG="## Red Team Review — HARD STOP
 
 审阅已达全局上限（${TOTAL_ROUNDS}/${REVIEW_MAX_TOTAL_ROUNDS}），仍存在未解决的审阅意见。
@@ -806,7 +809,7 @@ else
       # lives in agy's server-side session history, which lets the provider
       # hit prompt cache on it. Validate strictly (36-char UUID) since a
       # malformed/stale value would make `--conversation` resume garbage.
-      CONV_ID=$(cat "${CONV_FILE:-}" 2>/dev/null || true)
+      CONV_ID=$(cat "${CONV_FILE:-}" 2>/dev/null | tr 'A-F' 'a-f' || true)
       [[ "$CONV_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || CONV_ID=""
       CONV_ARGS=()
       [ -z "$CONV_ID" ] || CONV_ARGS=(--conversation "$CONV_ID")
@@ -819,8 +822,16 @@ else
         AGY_PROMPT="$SYSTEM_INSTRUCTIONS"$'\n\n'"$(cat "$PROMPT_FILE")"
       else
         # Reuse round: static prefix already lives in agy's session history —
-        # resend only the volatile tail (current plan + round framing).
-        AGY_PROMPT="This is a follow-up round. The plan may have been revised. Re-evaluate the CURRENT plan on its merits.
+        # resend only the volatile tail. Mirror the first-round Consultation
+        # Context framing (round number + "APPROVE if prior concerns addressed")
+        # so the reuse round carries the same negotiation semantics, not a bare
+        # plan dump. Resending the delta only (not the static context) is the
+        # point — it gets appended to session history, so duplicating context
+        # would cost tokens, not save them.
+        AGY_PROMPT="## Consultation Context
+This is round $((TOTAL_ROUNDS + 1)) of adversarial review.
+The plan author may have revised or added rebuttals since the previous round.
+Evaluate the CURRENT plan on its merits — if prior concerns have been addressed, APPROVE.
 
 ## Plan to Review
 ${PLAN}"
@@ -857,13 +868,11 @@ ${PLAN}"
       REVIEW=""
       if [ "$engine_exit" = "0" ] && [ -s "$ENGINE_OUT" ]; then
         # Capture the real conversation_id agy assigned (self-chosen server-side
-        # UUID; a client-invented one would not resume anything) and persist it
-        # for the next round. `q` after the first match — no pipe, no SIGPIPE.
-        NEW_CONV=$(sed -n '/"conversation_id"/{s/.*"conversation_id"[[:space:]]*:[[:space:]]*"\([0-9a-f-]\{36\}\)".*/\1/p;q;}' "$ENGINE_OUT" 2>/dev/null || true)
-        if [[ "$NEW_CONV" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
-          printf '%s' "$NEW_CONV" > "${CONV_FILE}.tmp.$$" 2>/dev/null && mv -f "${CONV_FILE}.tmp.$$" "$CONV_FILE" 2>/dev/null || true
-          log_decision "agy-conversation id=$NEW_CONV reuse=$([ -n "$CONV_ID" ] && echo yes || echo no)"
-        fi
+        # UUID; a client-invented one would not resume anything). `q` after the
+        # first match — no pipe, no SIGPIPE. Tolerate a lowercase-normalized id;
+        # persist is DEFERRED until response extraction succeeds (see below) so a
+        # broken envelope never leaves a CONV_FILE that the next round resumes.
+        NEW_CONV=$(sed -n '/"conversation_id"/{s/.*"conversation_id"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F-]\{36\}\)".*/\1/p;q;}' "$ENGINE_OUT" 2>/dev/null | tr 'A-F' 'a-f' || true)
 
         # Extract the "response" field value and unescape it. Deliberately NOT
         # keyed to field order/position — scan forward from the "response":"
@@ -873,9 +882,10 @@ ${PLAN}"
           BEGIN { RS="\x01" }
           {
             s = $0
-            m = index(s, "\"response\":\"")
-            if (m == 0) { exit }
-            s = substr(s, m + length("\"response\":\""))
+            # Tolerate optional whitespace around the key colon
+            # ("response" : "...") — do not bet on the compact serialization.
+            if (match(s, /"response"[ \t]*:[ \t]*"/) == 0) { exit }
+            s = substr(s, RSTART + RLENGTH)
             out = ""; i = 1; n = length(s)
             while (i <= n) {
               c = substr(s, i, 1)
@@ -904,15 +914,28 @@ ${PLAN}"
         # extractor — the raw envelope can contain echoed-back <verdict> tags
         # from the prompt and cause a false match. Extraction failure = empty
         # REVIEW, which the existing empty-response retry/REST path handles.
-        if [ -z "$REVIEW" ]; then
-          log_decision "agy-response-extract-failed"
-        else
+        #
+        # CONV_FILE persist policy (only when we got a usable review): persisting
+        # a conversation_id from a call whose response we COULDN'T parse would
+        # make the next round resume a session we can't actually consume — so
+        # persist only on non-empty REVIEW, and drop any stale CONV_FILE on
+        # extract failure (the session may be shaped wrong / unusable this cycle).
+        if [ -n "$REVIEW" ]; then
+          if [[ "$NEW_CONV" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            printf '%s' "$NEW_CONV" > "${CONV_FILE}.tmp.$$" 2>/dev/null && mv -f "${CONV_FILE}.tmp.$$" "$CONV_FILE" 2>/dev/null || true
+            log_decision "agy-conversation id=$NEW_CONV reuse=$([ -n "$CONV_ID" ] && echo yes || echo no)"
+          fi
           log_decision "agy-success"
+        else
+          rm -f "${CONV_FILE:-}"
+          log_decision "agy-response-extract-failed conv-cleared"
         fi
 
         # Usage observation (best-effort, never fatal if absent/unparseable).
-        AGY_IN=$(sed -n 's/.*"input_tokens"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p;' "$ENGINE_OUT" 2>/dev/null | head -n 1 || true)
-        AGY_TOTAL=$(sed -n 's/.*"total_tokens"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p;' "$ENGINE_OUT" 2>/dev/null | head -n 1 || true)
+        # `q` after first match — consistent with the conversation_id sed, no
+        # pipe, no SIGPIPE.
+        AGY_IN=$(sed -n 's/.*"input_tokens"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p;/"input_tokens"/q' "$ENGINE_OUT" 2>/dev/null || true)
+        AGY_TOTAL=$(sed -n 's/.*"total_tokens"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p;/"total_tokens"/q' "$ENGINE_OUT" 2>/dev/null || true)
         [ -z "$AGY_IN" ] && [ -z "$AGY_TOTAL" ] || log_decision "agy-usage in=${AGY_IN:-?} total=${AGY_TOTAL:-?}"
       fi
     fi

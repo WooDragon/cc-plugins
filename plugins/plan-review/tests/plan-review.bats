@@ -2788,3 +2788,110 @@ Should not run."
   run_hook
   assert_log_contains "gemini-degraded skip-cli"
 }
+
+# =============================================================================
+# grok review hardening (v1.2.0, PR #111): CONV cleanup on failure/plan-change,
+# whitespace-tolerant response extraction, reuse-round framing
+# =============================================================================
+
+# conv: extract failure → stale CONV_FILE cleared (not resumed next round)
+@test "conv: response extract failure → CONV_FILE cleared" {
+  # Seed a stale CONV_FILE, then have agy return an envelope with NO response
+  # field (extraction fails). No REST configured → engines fail → deny.
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  cat > "${MOCK_BIN}/agy" <<'MOCK_INNER'
+#!/bin/bash
+printf '%s\n' "$*" > "$(dirname "$0")/../.agy-args-agy"
+printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","status":"SUCCESS","no_response_here":"x"}\n'
+MOCK_INNER
+  chmod +x "${MOCK_BIN}/agy"
+  INPUT=$(build_input)
+  run_hook
+  assert_log_contains "agy-response-extract-failed"
+  [ ! -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
+}
+
+# conv: empty review → CONV_FILE NOT persisted (deferred-persist policy)
+@test "conv: empty extracted review → CONV_FILE not written" {
+  # agy exit 0 but response unwraps to empty → must not persist a conversation
+  # we cannot consume. No prior CONV_FILE, no REST → deny.
+  cat > "${MOCK_BIN}/agy" <<'MOCK_INNER'
+#!/bin/bash
+printf '%s\n' "$*" > "$(dirname "$0")/../.agy-args-agy"
+printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","response":"","usage":{}}\n'
+MOCK_INNER
+  chmod +x "${MOCK_BIN}/agy"
+  INPUT=$(build_input)
+  run_hook
+  [ ! -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
+}
+
+# conv: plan changed after approve → falls through to re-review, CONV cleared
+@test "conv: plan-changed-after-approve → CONV_FILE cleared on re-review" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Good."
+  INPUT=$(build_input plan="Original plan")
+  run_hook                    # APPROVE → ack-deny, APPROVE_MARKER + CONV_FILE written
+  assert_ack_approve_json
+  [ -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
+  # Now the plan changes before the ack-round → hash mismatch → re-review path.
+  # The re-review is a fresh first round for a DIFFERENT plan; the old session
+  # ref must not be silently resumed.
+  INPUT=$(build_input plan="Completely different plan")
+  run_hook
+  # Re-review ran (deny from CONCERNS/APPROVE cycle) and the new round rebuilt
+  # its own CONV_FILE from the fresh call — assert it reflects the new call,
+  # not a leftover from the pre-change approve.
+  assert_log_contains "reason=plan-changed-after-approve"
+}
+
+# conv: global safety valve → CONV_FILE cleared (no orphan)
+@test "conv: global safety valve → CONV_FILE cleared" {
+  set_counter_value 0 test-session 3
+  export REVIEW_MAX_TOTAL_ROUNDS=3
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"HARD STOP"* ]]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
+}
+
+# json: response with surrounding whitespace around key colon → still extracted
+@test "json: whitespace around response key colon → verdict still extracted" {
+  cat > "${MOCK_BIN}/agy" <<'MOCK_INNER'
+#!/bin/bash
+printf '%s\n' "$*" > "$(dirname "$0")/../.agy-args-agy"
+printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","response" : "<verdict>APPROVE</verdict>\nspaced key colon","usage":{}}\n'
+MOCK_INNER
+  chmod +x "${MOCK_BIN}/agy"
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+}
+
+# conv: reuse-round prompt carries Consultation Context (round framing)
+@test "conv: reuse round prompt includes Consultation Context framing" {
+  # Capture the full prompt agy receives on the reuse round via a mock that
+  # dumps its -p argument. Round 1 seeds CONV_FILE; round 2 is the reuse round.
+  cat > "${MOCK_BIN}/agy" <<'MOCK_INNER'
+#!/bin/bash
+# Find the -p value and dump it
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-p" ]; then printf '%s' "$a" > "$(dirname "$0")/../.agy-prompt-agy"; fi
+  prev="$a"
+done
+printf '%s\n' "$*" > "$(dirname "$0")/../.agy-args-agy"
+printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","response":"<verdict>CONCERNS</verdict>\n[Major] x","usage":{}}\n'
+MOCK_INNER
+  chmod +x "${MOCK_BIN}/agy"
+  INPUT=$(build_input)
+  run_hook   # round 1 → CONCERNS, seeds CONV_FILE
+  assert_deny_json
+  run_hook   # round 2 → reuse round
+  local prompt
+  prompt=$(cat "${MOCK_BIN}/../.agy-prompt-agy")
+  [[ "$prompt" == *"Consultation Context"* ]]
+  [[ "$prompt" == *"Plan to Review"* ]]
+}

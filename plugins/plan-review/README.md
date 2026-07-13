@@ -89,7 +89,9 @@ When `REVIEW_ENGINE=gemini` (agy CLI), a multi-round consultation reuses one agy
 - **First round** builds a fresh conversation and captures the `conversation_id` agy assigns (via `--output-format json`).
 - **Subsequent rounds** resume it with `--conversation <id>`, sending only the volatile tail (current plan + round framing). The static prefix (system instructions + project/global context) already lives in agy's session history, so the provider serves it from prompt cache.
 
-This lowers 429 frequency and quota consumption on multi-round negotiations. The conversation reference is session-scoped and torn down when the review cycle ends (approve / escalate / no-plan) or when agy hits capacity. Extraction/reuse failures fall through to a plain agy call or REST — never a new blocking path. Behavior with no config is unchanged apart from the shorter degrade cooldown.
+This lowers 429 frequency and quota consumption on multi-round negotiations. The conversation reference is session-scoped and torn down when the review cycle ends (approve / escalate / no-plan / global valve), when agy hits capacity, or when a response cannot be parsed. Extraction/reuse failures fall through to a plain agy call or REST — never a new blocking path.
+
+**agy invocation contract**: since v1.2.0 the agy CLI is always called with `--output-format json`, and the review body is text-sliced out of the (not-well-formed) JSON `response` field. This depends on agy's envelope carrying `conversation_id` and `response` keys. If a future agy build changes that envelope shape, extraction fails closed (empty review → retry / REST fallback), so a shape change degrades gracefully rather than mis-parsing — but it does mean the agy path is coupled to this envelope. The `claude` engine path and the REST fallback are unchanged. With no env config, the review decision logic behaves as before; the observable deltas are the JSON invocation, multi-round session reuse, and the shorter degrade cooldown (600s).
 
 ## Fault Tolerance
 
