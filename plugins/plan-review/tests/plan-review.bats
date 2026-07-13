@@ -2621,3 +2621,170 @@ Use Task( for analysis.
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"HARD STOP"* ]]
 }
+
+# =============================================================================
+# agy conversation reuse + JSON output + degrade TTL (v1.2.0)
+# =============================================================================
+
+# conv: first round — no CONV_FILE → agy called WITHOUT --conversation, id captured
+@test "conv: first round → agy invoked without --conversation, CONV_FILE created" {
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] Something to fix."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  # agy was called without a --conversation flag on the first round
+  [[ "$(agy_args agy)" != *"--conversation"* ]]
+  # agy was called with JSON output mode
+  [[ "$(agy_args agy)" == *"--output-format json"* ]]
+  # conversation_id was captured and persisted
+  local convfile="${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  [ -f "$convfile" ]
+  [[ "$(cat "$convfile")" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+  assert_log_contains "agy-conversation id=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee reuse=no"
+}
+
+# conv: reuse round — CONV_FILE present → agy called WITH --conversation <id>
+@test "conv: reuse round → agy invoked with --conversation <captured id>" {
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] Round issue."
+  INPUT=$(build_input)
+  # Round 1: creates CONV_FILE
+  run_hook
+  assert_deny_json
+  [ -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
+  # Round 2: should resume the captured conversation
+  run_hook
+  assert_deny_json
+  [[ "$(agy_args agy)" == *"--conversation aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"* ]]
+  assert_log_contains "reuse=yes"
+}
+
+# conv: cleanup on ack-round approved → CONV_FILE removed
+@test "conv: ack-round approved → CONV_FILE removed" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Looks good."
+  INPUT=$(build_input)
+  run_hook              # APPROVE → ack-deny, writes APPROVE_MARKER
+  assert_ack_approve_json
+  run_hook              # ack-round → allow, cleans counter + CONV_FILE
+  assert_approve_json
+  [ ! -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
+}
+
+# conv: cleanup on non-critical safety valve → CONV_FILE removed
+@test "conv: non-critical safety valve → CONV_FILE removed" {
+  export REVIEW_MAX_ROUNDS=1
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] Persistent."
+  INPUT=$(build_input)
+  run_hook              # ATTEMPT 0→1, CONCERNS deny, CONV_FILE written
+  assert_deny_json
+  run_hook              # ATTEMPT 1 >= MAX 1 → valve allow, cleans CONV_FILE
+  assert_approve_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"ESCALATED"* ]]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
+}
+
+# conv: no-plan fail-closed → CONV_FILE removed
+@test "conv: no-plan fail-closed → CONV_FILE removed" {
+  # Seed a stale CONV_FILE
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  INPUT=$(build_input_no_plan)
+  run_hook
+  assert_deny_json
+  [ ! -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
+}
+
+# conv: capacity fast-break → cached CONV_FILE cleared
+@test "conv: capacity fast-break → CONV_FILE cleared" {
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  create_capacity_exhausted_engine "agy"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nREST approved.'
+  INPUT=$(build_input)
+  run_hook
+  # capacity → fast-break → REST fallback; the cached conversation must be dropped
+  [ ! -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
+}
+
+# json: multi-line response with escaped chars → verdict correctly extracted
+@test "json: multi-line response body → verdict parsed, review unwrapped" {
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
+[Critical] Line one.
+[Critical] Line two with \"quotes\".
+End."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  # REJECT verdict was extracted from the JSON response despite raw newlines
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"REJECT"* ]]
+  [[ "$reason" == *"Line one."* ]]
+  [[ "$reason" == *"Line two"* ]]
+}
+
+# json: response extraction failure → no false verdict from envelope, engine treated as failed
+@test "json: malformed envelope with fake verdict tag → not mis-parsed as REJECT" {
+  # Mock emits JSON WITHOUT a response field, but the envelope text contains a
+  # <verdict>REJECT</verdict> literal (e.g. echoed prompt). The unwrap must fail
+  # and the raw shell must NOT be fed to the verdict extractor.
+  cat > "${MOCK_BIN}/agy" <<'MOCK_INNER'
+#!/bin/bash
+printf '%s\n' "$*" > "$(dirname "$0")/../.agy-args-agy"
+printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","status":"SUCCESS","echoed_prompt":"<verdict>REJECT</verdict>","usage":{"input_tokens":1,"total_tokens":2}}\n'
+MOCK_INNER
+  chmod +x "${MOCK_BIN}/agy"
+  INPUT=$(build_input)
+  run_hook
+  # response extraction failed → REVIEW empty → logged, no engine success
+  assert_log_contains "agy-response-extract-failed"
+  # The fake REJECT in the envelope must NOT drive the decision.
+  # With no REST configured, all engines fail → deny with engines-failed reason.
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // ""')
+  [[ "$reason" != *"REJECT"* ]]
+}
+
+# ttl: new default 600 — degraded file aged 700s (> 600) → expired, agy called
+@test "ttl: default 600 — 700s-old degrade file treated as expired (agy invoked)" {
+  create_degraded_file 700   # older than new 600 default
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Fresh call."
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  INPUT=$(build_input)
+  run_hook
+  # Not skipped: agy actually ran (args captured), no skip-cli log
+  [ -f "${MOCK_BIN}/../.agy-args-agy" ]
+  ! grep -q "gemini-degraded skip-cli" "${REVIEW_LOG_DIR}/plan-review.log"
+}
+
+# ttl: new default 600 — degraded file aged 500s (< 600) → still degraded, skip CLI
+@test "ttl: default 600 — 500s-old degrade file still active (skip CLI)" {
+  create_degraded_file 500   # within new 600 default
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+Should not run."
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nREST approved.'
+  INPUT=$(build_input)
+  run_hook
+  assert_log_contains "gemini-degraded skip-cli"
+}
+
+# ttl: explicit override — TTL=1200, 700s-old file → still degraded (env beats default)
+@test "ttl: explicit REVIEW_ENGINE_DEGRADE_TTL=1200 overrides default (700s still active)" {
+  export REVIEW_ENGINE_DEGRADE_TTL=1200
+  create_degraded_file 700   # < 1200 override, would be > 600 default
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+Should not run."
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nREST approved.'
+  INPUT=$(build_input)
+  run_hook
+  assert_log_contains "gemini-degraded skip-cli"
+}

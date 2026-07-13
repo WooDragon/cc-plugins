@@ -73,16 +73,51 @@ common_teardown() {
 
 # create_mock_engine <name> <output>
 #   Creates an executable mock at MOCK_BIN/<name> that prints <output> to stdout.
+#
+#   JSON-aware (agy --output-format json): the production script calls agy with
+#   `--output-format json` and unwraps the `response` field via awk. So this mock
+#   auto-detects that flag and, when present, wraps <output> into agy's JSON
+#   envelope (deliberately with raw newlines in the response value — mirroring
+#   agy's actual NOT-well-formed JSON). Without the flag it prints <output> as
+#   plain text (claude engine path / legacy). This one change keeps all existing
+#   `create_mock_engine "agy" "<text>"` call sites working unchanged.
+#
+#   Also captures the invocation args to ${MOCK_BIN}/../.agy-args-<name> so tests
+#   can assert whether `--conversation <id>` was passed (session-reuse behavior).
+#   Fixed test conversation_id: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
 create_mock_engine() {
   local name="$1"
   local output="$2"
+  local args_file="${MOCK_BIN}/../.agy-args-${name}"
   cat > "${MOCK_BIN}/${name}" << MOCK_EOF
 #!/bin/bash
-cat << 'ENGINE_OUTPUT'
+printf '%s\n' "\$*" > '${args_file}'
+json_mode=0
+case "\$*" in *"--output-format json"*) json_mode=1;; esac
+if [ "\$json_mode" = "1" ]; then
+  _out=\$(cat << 'ENGINE_OUTPUT'
 ${output}
 ENGINE_OUTPUT
+)
+  # Escape backslash + double-quote for the JSON string; keep raw newlines
+  # (agy's real JSON has unescaped newlines in "response" — that's the point).
+  _esc=\$(printf '%s' "\$_out" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
+  printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","status":"SUCCESS","response":"%s","usage":{"input_tokens":100,"total_tokens":200}}\n' "\$_esc"
+else
+  cat << 'ENGINE_OUTPUT'
+${output}
+ENGINE_OUTPUT
+fi
 MOCK_EOF
   chmod +x "${MOCK_BIN}/${name}"
+}
+
+# agy_args <name>
+#   Returns the captured invocation args string of the last call to mock <name>.
+#   Empty if the mock was never invoked. Used to assert --conversation presence.
+agy_args() {
+  local name="$1"
+  cat "${MOCK_BIN}/../.agy-args-${name}" 2>/dev/null || true
 }
 
 # create_failing_engine <name> <exit_code>
@@ -110,15 +145,24 @@ create_flaky_engine() {
   local first_action="exit 1"
   [ "$first_behavior" != "empty" ] || first_action="exit 0"
 
+  local args_file="${MOCK_BIN}/../.agy-args-${name}"
   cat > "${MOCK_BIN}/${name}" << MOCK_EOF
 #!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
 if [ ! -f "${state_file}" ]; then
   touch "${state_file}"
   ${first_action}
 fi
-cat << 'ENGINE_OUTPUT'
+_out=\$(cat << 'ENGINE_OUTPUT'
 ${output}
 ENGINE_OUTPUT
+)
+case "\$*" in
+  *"--output-format json"*)
+    _esc=\$(printf '%s' "\$_out" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
+    printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","status":"SUCCESS","response":"%s","usage":{"input_tokens":100,"total_tokens":200}}\n' "\$_esc" ;;
+  *) printf '%s\n' "\$_out" ;;
+esac
 MOCK_EOF
   chmod +x "${MOCK_BIN}/${name}"
 }
@@ -144,16 +188,25 @@ create_capacity_then_success_engine() {
   local name="$1"
   local output="$2"
   local state_file="${TEST_TEMP_DIR}/.capacity-${name}-state"
+  local args_file="${MOCK_BIN}/../.agy-args-${name}"
   cat > "${MOCK_BIN}/${name}" << MOCK_EOF
 #!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
 if [ ! -f "${state_file}" ]; then
   touch "${state_file}"
   echo '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}' >&2
   exit 1
 fi
-cat << 'ENGINE_OUTPUT'
+_out=\$(cat << 'ENGINE_OUTPUT'
 ${output}
 ENGINE_OUTPUT
+)
+case "\$*" in
+  *"--output-format json"*)
+    _esc=\$(printf '%s' "\$_out" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
+    printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","status":"SUCCESS","response":"%s","usage":{"input_tokens":100,"total_tokens":200}}\n' "\$_esc" ;;
+  *) printf '%s\n' "\$_out" ;;
+esac
 MOCK_EOF
   chmod +x "${MOCK_BIN}/${name}"
 }
