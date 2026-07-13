@@ -396,9 +396,12 @@ if [ -f "$APPROVE_MARKER" ]; then
     rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}"
     allow_with_reason "Red Team 审阅已通过，plan 放行。"
   else
-    # Plan was modified after approve: marker invalid, delete and fall through to re-review
-    log_decision "decision=review-again reason=plan-changed-after-approve"
-    rm -f "$APPROVE_MARKER"
+    # Plan was modified after approve: marker invalid, delete and fall through to re-review.
+    # Also drop the conversation handle — the session history is about the OLD
+    # plan; reusing it to review a DIFFERENT plan would resume stale context.
+    # The re-review must start a fresh first round for the new plan.
+    log_decision "decision=review-again reason=plan-changed-after-approve conv-cleared"
+    rm -f "$APPROVE_MARKER" "${CONV_FILE:-}"
     # Fall through to full review pipeline
   fi
 fi
@@ -872,7 +875,8 @@ ${PLAN}"
         # first match — no pipe, no SIGPIPE. Tolerate a lowercase-normalized id;
         # persist is DEFERRED until response extraction succeeds (see below) so a
         # broken envelope never leaves a CONV_FILE that the next round resumes.
-        NEW_CONV=$(sed -n '/"conversation_id"/{s/.*"conversation_id"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F-]\{36\}\)".*/\1/p;q;}' "$ENGINE_OUT" 2>/dev/null | tr 'A-F' 'a-f' || true)
+        NEW_CONV=$(sed -n '/"conversation_id"/{s/.*"conversation_id"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F-]\{36\}\)".*/\1/p;q;}' "$ENGINE_OUT" 2>/dev/null || true)
+        NEW_CONV=$(printf '%s' "$NEW_CONV" | tr 'A-F' 'a-f')
 
         # Extract the "response" field value and unescape it. Deliberately NOT
         # keyed to field order/position — scan forward from the "response":"
@@ -943,6 +947,11 @@ ${PLAN}"
     if [ "$engine_exit" != "0" ]; then
       REVIEW=""
       _fail_reason="${REVIEW_ENGINE}: exit ${engine_exit}"
+      # Any non-zero CLI exit (timeout 124, resume-rejected, network, plain 1)
+      # invalidates the resume handle — drop it so the next round starts a fresh
+      # full first round instead of re-sending a --conversation onto a session
+      # that just failed. The capacity branch below also rm's it (harmless dup).
+      rm -f "${CONV_FILE:-}"
       if [ "$engine_attempt" -lt 2 ]; then
         # Detect capacity-exhausted 429 (MODEL_CAPACITY_EXHAUSTED via cloudcode-pa.googleapis.com).
         # These outages last minutes — the default 2s retry delay is useless;

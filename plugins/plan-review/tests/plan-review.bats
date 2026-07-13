@@ -2827,22 +2827,22 @@ MOCK_INNER
 }
 
 # conv: plan changed after approve → falls through to re-review, CONV cleared
-@test "conv: plan-changed-after-approve → CONV_FILE cleared on re-review" {
+@test "conv: plan-changed-after-approve → old session dropped, re-review is fresh first round" {
   create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Good."
   INPUT=$(build_input plan="Original plan")
   run_hook                    # APPROVE → ack-deny, APPROVE_MARKER + CONV_FILE written
   assert_ack_approve_json
   [ -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
-  # Now the plan changes before the ack-round → hash mismatch → re-review path.
-  # The re-review is a fresh first round for a DIFFERENT plan; the old session
-  # ref must not be silently resumed.
+  # Plan changes before the ack-round → hash mismatch → plan-changed branch must
+  # drop the old conversation handle so the re-review does NOT resume the OLD
+  # plan's session to review a DIFFERENT plan.
   INPUT=$(build_input plan="Completely different plan")
   run_hook
-  # Re-review ran (deny from CONCERNS/APPROVE cycle) and the new round rebuilt
-  # its own CONV_FILE from the fresh call — assert it reflects the new call,
-  # not a leftover from the pre-change approve.
-  assert_log_contains "reason=plan-changed-after-approve"
+  assert_log_contains "reason=plan-changed-after-approve conv-cleared"
+  # The re-review round called agy WITHOUT --conversation (fresh first round),
+  # proving the stale handle was dropped rather than resumed onto the new plan.
+  [[ "$(agy_args agy)" != *"--conversation"* ]]
 }
 
 # conv: global safety valve → CONV_FILE cleared (no orphan)
@@ -2894,4 +2894,16 @@ MOCK_INNER
   prompt=$(cat "${MOCK_BIN}/../.agy-prompt-agy")
   [[ "$prompt" == *"Consultation Context"* ]]
   [[ "$prompt" == *"Plan to Review"* ]]
+}
+
+# conv: non-capacity CLI failure (exit≠0) → resume handle dropped
+@test "conv: agy exit≠0 (non-capacity) → CONV_FILE cleared" {
+  # Seed a stale CONV_FILE, then agy fails with a plain non-zero exit (not
+  # capacity). No REST configured. The resume handle must be dropped so the
+  # next round won't re-send --conversation onto a session that just failed.
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  create_failing_engine "agy" 1
+  INPUT=$(build_input)
+  run_hook
+  [ ! -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
 }
