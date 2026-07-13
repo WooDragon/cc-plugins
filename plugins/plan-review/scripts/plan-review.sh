@@ -30,7 +30,7 @@
 #   REVIEW_CAPACITY_DELAY=N      — seconds to wait when MODEL_CAPACITY_EXHAUSTED detected (default: 25)
 #   REVIEW_API_URL=<url>         — REST API fallback base URL (OpenAI-compatible, e.g. https://proxy.example.com)
 #   REVIEW_API_KEY=<key>         — REST API fallback auth key (Bearer token)
-#   REVIEW_ENGINE_DEGRADE_TTL=N  — seconds Gemini stays in degraded state after capacity exhaustion (default: 3600)
+#   REVIEW_ENGINE_DEGRADE_TTL=N  — seconds Gemini stays in degraded state after capacity exhaustion (default: 600)
 set -euo pipefail
 
 INPUT=$(cat)
@@ -313,6 +313,11 @@ COUNTER_FILE="$COUNTER_DIR/.review-count-${SESSION_ID}"
 APPROVE_MARKER="$COUNTER_DIR/.review-approved-${SESSION_ID}"
 # Gemini degraded state file (global, no session suffix — persists across hooks)
 DEGRADE_FILE="$COUNTER_DIR/.gemini-degraded"
+# agy conversation_id cache (session-scoped) — lets multi-round review reuse
+# agy's own server-side session so the static prompt prefix hits prompt cache
+# instead of being resent every round. Lifetime = one review cycle (see cleanup
+# points at the no-plan fail-closed / ack-round-approved / non-critical-valve exits).
+CONV_FILE="$COUNTER_DIR/.conversation-${SESSION_ID}"
 
 # --- Read counter (new format ATTEMPT:TOTAL, backward-compat with old single-number) ---
 IFS=: read -r ATTEMPT TOTAL_ROUNDS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0")"
@@ -358,7 +363,7 @@ if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null || echo "")
   CWD_VAL=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")
   log_decision "decision=deny reason=no-plan-content-fail-closed resolve=${RESOLVE_REASON:-none} resolvePath=${RESOLVE_PATH:-empty} planFilePath=${PLAN_FILE_PATH:-empty} top_keys=${TOP_KEYS} tool_input_keys=${TI_KEYS} transcript_path=${TRANSCRIPT_PATH:-empty} cwd=${CWD_VAL:-empty}"
-  rm -f "$APPROVE_MARKER" "$COUNTER_FILE"
+  rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}"
   # Three-state error message routed by the resolver's RESOLVE_REASON. Every
   # branch names the plan file path under evaluation (RESOLVE_PATH) so the user
   # can act — "write your plan to this exact file" instead of a bare directive.
@@ -388,12 +393,15 @@ if [ -f "$APPROVE_MARKER" ]; then
   if [ -z "$APPROVED_HASH" ] || [ "$CURRENT_HASH" = "$APPROVED_HASH" ]; then
     # True ack-round: plan unchanged (empty marker = legacy format, unconditional allow)
     log_decision "decision=allow reason=ack-round-approved"
-    rm -f "$APPROVE_MARKER" "$COUNTER_FILE"
+    rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}"
     allow_with_reason "Red Team 审阅已通过，plan 放行。"
   else
-    # Plan was modified after approve: marker invalid, delete and fall through to re-review
-    log_decision "decision=review-again reason=plan-changed-after-approve"
-    rm -f "$APPROVE_MARKER"
+    # Plan was modified after approve: marker invalid, delete and fall through to re-review.
+    # Also drop the conversation handle — the session history is about the OLD
+    # plan; reusing it to review a DIFFERENT plan would resume stale context.
+    # The re-review must start a fresh first round for the new plan.
+    log_decision "decision=review-again reason=plan-changed-after-approve conv-cleared"
+    rm -f "$APPROVE_MARKER" "${CONV_FILE:-}"
     # Fall through to full review pipeline
   fi
 fi
@@ -402,6 +410,9 @@ fi
 # Never delete counter — tombstone blocks subsequent calls until human intervenes
 if [ "$TOTAL_ROUNDS" -ge "$REVIEW_MAX_TOTAL_ROUNDS" ]; then
   log_decision "decision=deny reason=global-safety-valve total=$TOTAL_ROUNDS"
+  # Keep the COUNTER_FILE tombstone, but the review cycle is over — no further
+  # engine call will happen, so drop the session ref to avoid an orphan CONV_FILE.
+  rm -f "${CONV_FILE:-}"
   BLOCK_MSG="## Red Team Review — HARD STOP
 
 审阅已达全局上限（${TOTAL_ROUNDS}/${REVIEW_MAX_TOTAL_ROUNDS}），仍存在未解决的审阅意见。
@@ -416,7 +427,7 @@ fi
 # --- Non-Critical safety valve: CONCERNS rounds exhausted → allow (escalate to user) ---
 if [ "$ATTEMPT" -ge "$REVIEW_MAX_ROUNDS" ]; then
   log_decision "decision=allow reason=non-critical-safety-valve round=$ATTEMPT total=$TOTAL_ROUNDS"
-  rm -f "$COUNTER_FILE"
+  rm -f "$COUNTER_FILE" "${CONV_FILE:-}"
   VALVE_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
 
 非 Critical 磋商已达上限（${ATTEMPT}/${REVIEW_MAX_ROUNDS}），未能达成一致。Plan 直接呈现给用户做最终裁决。"
@@ -728,7 +739,7 @@ else
   # --- Gemini degraded-state check ---
   # If Gemini was capacity-exhausted recently and REST is configured,
   # skip CLI entirely — gives REST the full ~115s budget.
-  REVIEW_ENGINE_DEGRADE_TTL="${REVIEW_ENGINE_DEGRADE_TTL:-3600}"
+  REVIEW_ENGINE_DEGRADE_TTL="${REVIEW_ENGINE_DEGRADE_TTL:-600}"
   _gemini_skip_cli=0
   _fail_reason=""
   if [ "$REVIEW_ENGINE" = "gemini" ] && [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
@@ -794,10 +805,40 @@ else
       wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
       ENGINE_PID=""
     else
+      # --- agy multi-round session reuse ---
+      # Read back a previously-captured agy conversation_id (if any) so this
+      # round can resume it instead of resending the full static prefix — the
+      # prefix (system instructions + GLOBAL_MD/PROJECT_MD/USER_REQ) already
+      # lives in agy's server-side session history, which lets the provider
+      # hit prompt cache on it. Validate strictly (36-char UUID) since a
+      # malformed/stale value would make `--conversation` resume garbage.
+      CONV_ID=$(cat "${CONV_FILE:-}" 2>/dev/null | tr 'A-F' 'a-f' || true)
+      [[ "$CONV_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || CONV_ID=""
+      CONV_ARGS=()
+      [ -z "$CONV_ID" ] || CONV_ARGS=(--conversation "$CONV_ID")
+
       # agy does not read stdin as a prompt — must pass inline via -p. ANSI-C
       # quoting ($'\n\n') for a real newline separator; a plain "\n" inside
       # double quotes is a literal backslash-n, not a newline.
-      FULL_PROMPT="$SYSTEM_INSTRUCTIONS"$'\n\n'"$(cat "$PROMPT_FILE")"
+      if [ -z "$CONV_ID" ]; then
+        # First round (no session to resume yet): send the full static+dynamic prompt.
+        AGY_PROMPT="$SYSTEM_INSTRUCTIONS"$'\n\n'"$(cat "$PROMPT_FILE")"
+      else
+        # Reuse round: static prefix already lives in agy's session history —
+        # resend only the volatile tail. Mirror the first-round Consultation
+        # Context framing (round number + "APPROVE if prior concerns addressed")
+        # so the reuse round carries the same negotiation semantics, not a bare
+        # plan dump. Resending the delta only (not the static context) is the
+        # point — it gets appended to session history, so duplicating context
+        # would cost tokens, not save them.
+        AGY_PROMPT="## Consultation Context
+This is round $((TOTAL_ROUNDS + 1)) of adversarial review.
+The plan author may have revised or added rebuttals since the previous round.
+Evaluate the CURRENT plan on its merits — if prior concerns have been addressed, APPROVE.
+
+## Plan to Review
+${PLAN}"
+      fi
       # ARG_MAX defense: agy only accepts the prompt as a command-line argument,
       # so an oversized prompt trips E2BIG. Treat this as a CLI failure and
       # fall straight through to REST fallback rather than exec'ing a doomed command.
@@ -806,7 +847,7 @@ else
       # char) would undercount ~3x and defeat the 256KB guard. `wc -c` counts
       # bytes regardless of locale — one fork per hook invocation is negligible,
       # and it sidesteps the LC_ALL=C prefix-assignment locale-leak footgun.
-      AGY_PROMPT_BYTES=$(printf '%s' "$FULL_PROMPT" | wc -c | tr -d ' ')
+      AGY_PROMPT_BYTES=$(printf '%s' "$AGY_PROMPT" | wc -c | tr -d ' ')
       if [ "$AGY_PROMPT_BYTES" -gt 256000 ]; then
         log_decision "agy-skip reason=prompt-too-large bytes=$AGY_PROMPT_BYTES"
         REVIEW=""
@@ -814,16 +855,103 @@ else
         break
       fi
       ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} agy --model "$AGY_MODEL" --sandbox --dangerously-skip-permissions \
-        -p "$FULL_PROMPT" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
+        ${CONV_ARGS[@]+"${CONV_ARGS[@]}"} --output-format json \
+        -p "$AGY_PROMPT" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
       ENGINE_PID=$!
       wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
       ENGINE_PID=""
     fi
-    REVIEW=$(cat "$ENGINE_OUT" 2>/dev/null || true)
+    if [ "$REVIEW_ENGINE" = "claude" ]; then
+      REVIEW=$(cat "$ENGINE_OUT" 2>/dev/null || true)
+    else
+      # --- agy JSON response unwrap (--output-format json) ---
+      # agy's JSON is NOT well-formed (the "response" field contains raw
+      # unescaped newlines), so jq/python json.loads chokes on it. Everything
+      # below is deliberate sed/awk text slicing — zero jq, zero python.
+      REVIEW=""
+      if [ "$engine_exit" = "0" ] && [ -s "$ENGINE_OUT" ]; then
+        # Capture the real conversation_id agy assigned (self-chosen server-side
+        # UUID; a client-invented one would not resume anything). `q` after the
+        # first match — no pipe, no SIGPIPE. Tolerate a lowercase-normalized id;
+        # persist is DEFERRED until response extraction succeeds (see below) so a
+        # broken envelope never leaves a CONV_FILE that the next round resumes.
+        NEW_CONV=$(sed -n '/"conversation_id"/{s/.*"conversation_id"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F-]\{36\}\)".*/\1/p;q;}' "$ENGINE_OUT" 2>/dev/null || true)
+        NEW_CONV=$(printf '%s' "$NEW_CONV" | tr 'A-F' 'a-f')
+
+        # Extract the "response" field value and unescape it. Deliberately NOT
+        # keyed to field order/position — scan forward from the "response":"
+        # marker and stop at the first UNESCAPED double-quote, so trailing keys
+        # (usage, etc.) after response in the object don't matter.
+        REVIEW=$(awk '
+          BEGIN { RS="\x01" }
+          {
+            s = $0
+            # Tolerate optional whitespace around the key colon
+            # ("response" : "...") — do not bet on the compact serialization.
+            if (match(s, /"response"[ \t]*:[ \t]*"/) == 0) { exit }
+            s = substr(s, RSTART + RLENGTH)
+            out = ""; i = 1; n = length(s)
+            while (i <= n) {
+              c = substr(s, i, 1)
+              if (c == "\\") {
+                i++
+                nc = substr(s, i, 1)
+                if (nc == "n") out = out "\n"
+                else if (nc == "t") out = out "\t"
+                else if (nc == "\"") out = out "\""
+                else if (nc == "\\") out = out "\\"
+                else if (nc == "r") out = out "\r"
+                else out = out nc
+                i++
+              } else if (c == "\"") {
+                break
+              } else {
+                out = out c
+                i++
+              }
+            }
+            printf "%s", out
+          }
+        ' "$ENGINE_OUT" 2>/dev/null || true)
+
+        # Fallback: never hand the shell-wrapped JSON to the downstream verdict
+        # extractor — the raw envelope can contain echoed-back <verdict> tags
+        # from the prompt and cause a false match. Extraction failure = empty
+        # REVIEW, which the existing empty-response retry/REST path handles.
+        #
+        # CONV_FILE persist policy (only when we got a usable review): persisting
+        # a conversation_id from a call whose response we COULDN'T parse would
+        # make the next round resume a session we can't actually consume — so
+        # persist only on non-empty REVIEW, and drop any stale CONV_FILE on
+        # extract failure (the session may be shaped wrong / unusable this cycle).
+        if [ -n "$REVIEW" ]; then
+          if [[ "$NEW_CONV" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            printf '%s' "$NEW_CONV" > "${CONV_FILE}.tmp.$$" 2>/dev/null && mv -f "${CONV_FILE}.tmp.$$" "$CONV_FILE" 2>/dev/null || true
+            log_decision "agy-conversation id=$NEW_CONV reuse=$([ -n "$CONV_ID" ] && echo yes || echo no)"
+          fi
+          log_decision "agy-success"
+        else
+          rm -f "${CONV_FILE:-}"
+          log_decision "agy-response-extract-failed conv-cleared"
+        fi
+
+        # Usage observation (best-effort, never fatal if absent/unparseable).
+        # `q` after first match — consistent with the conversation_id sed, no
+        # pipe, no SIGPIPE.
+        AGY_IN=$(sed -n 's/.*"input_tokens"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p;/"input_tokens"/q' "$ENGINE_OUT" 2>/dev/null || true)
+        AGY_TOTAL=$(sed -n 's/.*"total_tokens"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p;/"total_tokens"/q' "$ENGINE_OUT" 2>/dev/null || true)
+        [ -z "$AGY_IN" ] && [ -z "$AGY_TOTAL" ] || log_decision "agy-usage in=${AGY_IN:-?} total=${AGY_TOTAL:-?}"
+      fi
+    fi
     : > "$ENGINE_OUT"
     if [ "$engine_exit" != "0" ]; then
       REVIEW=""
       _fail_reason="${REVIEW_ENGINE}: exit ${engine_exit}"
+      # Any non-zero CLI exit (timeout 124, resume-rejected, network, plain 1)
+      # invalidates the resume handle — drop it so the next round starts a fresh
+      # full first round instead of re-sending a --conversation onto a session
+      # that just failed. The capacity branch below also rm's it (harmless dup).
+      rm -f "${CONV_FILE:-}"
       if [ "$engine_attempt" -lt 2 ]; then
         # Detect capacity-exhausted 429 (MODEL_CAPACITY_EXHAUSTED via cloudcode-pa.googleapis.com).
         # These outages last minutes — the default 2s retry delay is useless;
@@ -832,6 +960,9 @@ else
         if tail -c "+$((log_pos_before + 1))" "$LOG_FILE" 2>/dev/null \
              | grep -qE "RESOURCE_EXHAUSTED|MODEL_CAPACITY" 2>/dev/null; then
           _fail_reason="${REVIEW_ENGINE}: capacity exhausted (MODEL_CAPACITY_EXHAUSTED)"
+          # Drop any cached conversation_id: the session on agy's side may be
+          # invalid/unrecoverable after a capacity outage — don't resume onto it.
+          rm -f "${CONV_FILE:-}"
           # If REST fallback is configured, skip retry immediately — retrying a
           # capacity-exhausted endpoint wastes the time budget REST needs.
           if [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then

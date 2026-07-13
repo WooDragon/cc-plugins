@@ -1,8 +1,8 @@
 # deep-research
 
-Deep research framework for Claude Code — drives structured, multi-stage research through a **7-Stage pipeline**, three **role-specialized subagents** (harvester / analyst / reviewer), **4 quality gates**, and a multi-model harvesting engine with deterministic citation verification.
+Deep research framework for Claude Code — drives structured, multi-stage research through a **7-Stage pipeline**, four **role-specialized subagents** (harvester / analyst / reviewer / publisher), **4 quality gates**, and a multi-model harvesting engine with deterministic citation verification.
 
-The framework treats the main session as a **Lead** that orchestrates the pipeline: it dispatches采集 to `research-harvester`, decomposition/synthesis to `research-analyst`, and sufficiency/quality review to `research-reviewer`, gating each stage transition (G0–G3). A `SubagentStop` hook mechanically verifies any `GATE_VERDICT: G1 PASS` claim against the harvest engine's citation journal — fail-open on anything uncertain, block only on a proven false PASS.
+The framework treats the main session as a **Lead** that orchestrates the pipeline: it dispatches采集 to `research-harvester`, decomposition/synthesis to `research-analyst`, sufficiency/quality review to `research-reviewer`, and final HTML rendering to `research-publisher`, gating each stage transition (G0–G3). A `SubagentStop` hook mechanically verifies any `GATE_VERDICT: G1 PASS` claim against the harvest engine's citation journal — fail-open on anything uncertain, block only on a proven false PASS.
 
 ## Installation
 
@@ -29,10 +29,11 @@ harvest.py **never silently degrades**: if multi-model harvesting is unavailable
 ```
 deep-research/
 ├── skills/deep-research/       # SKILL.md router + references/ (framework docs) + assets/ (templates)
-├── agents/                     # 3 native subagents
+├── agents/                     # 4 native subagents
 │   ├── research-harvester.md   # Stage 2-3: acquisition + sanitization
 │   ├── research-analyst.md     # Stage 4-5: decomposition + synthesis
-│   └── research-reviewer.md    # G1/G2/G3 sufficiency + Validation review
+│   ├── research-reviewer.md    # G1/G2/G3 sufficiency + Validation review
+│   └── research-publisher.md   # Stage 7: renders the approved report to self-contained HTML
 ├── scripts/
 │   ├── harvest.py              # multi-model harvest + deterministic citation verification
 │   ├── harvest.config.json     # gateway / panel models / search & fetch & social_search backend chains
@@ -59,7 +60,7 @@ This scaffolds `pipeline/{1_raw,2_cleaned,3_structured,4_extracted}` + `intake/`
 
 ### Run the pipeline
 
-Invoke the `deep-research` skill (it auto-triggers on research-type tasks). The Lead then walks the 7 stages, spawning subagents as `deep-research:research-harvester` / `:research-analyst` / `:research-reviewer`.
+Invoke the `deep-research` skill (it auto-triggers on research-type tasks). The Lead then walks the 7 stages, spawning subagents as `deep-research:research-harvester` / `:research-analyst` / `:research-reviewer` / `:research-publisher`.
 
 ### Harvest path discovery (how the Lead feeds harvest.py to the harvester)
 

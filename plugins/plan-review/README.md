@@ -16,16 +16,34 @@ claude --plugin-dir ~/.claude/dev-plugins/plan-review
 
 ## Environment Variables
 
+### `plan-review.sh` (ExitPlanMode adversarial review)
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REVIEW_ENGINE` | `gemini` | Review engine: `gemini` or `claude` |
+| `REVIEW_ENGINE` | `gemini` | Review engine: `gemini` (routed through the local `agy` CLI) or `claude` (`claude -p` subprocess) |
+| `AGY_MODEL` | `Gemini 3.1 Pro (High)` | Model id passed to the `agy` CLI when `REVIEW_ENGINE=gemini` |
+| `CLAUDE_MODEL` | `opus` | Claude model when `REVIEW_ENGINE=claude` |
+| `GEMINI_MODEL` | `gemini-3.1-pro-preview` | Model id used only by the REST fallback payload (not the `agy` CLI path) |
 | `REVIEW_DISABLED` | `0` | Set `1` to bypass entirely |
 | `REVIEW_DRY_RUN` | `0` | Set `1` to skip engine call (synthetic APPROVE) |
-| `REVIEW_MAX_ROUNDS` | `3` | Max consultation rounds before escalation |
-| `GEMINI_MODEL` | `gemini-3-pro-preview` | Gemini model ID |
-| `CLAUDE_MODEL` | `opus` | Claude model (when `REVIEW_ENGINE=claude`) |
+| `REVIEW_MAX_ROUNDS` | `3` | Max non-Critical consultation rounds (CONCERNS accumulation) before escalation |
+| `REVIEW_MAX_TOTAL_ROUNDS` | `20` | Absolute global ceiling (including REJECT rounds); hard-blocks once reached |
+| `REVIEW_ENGINE_TIMEOUT` | `595` | Engine call timeout in seconds (requires `timeout`/`gtimeout` on `PATH`) |
+| `REVIEW_API_URL` | _(empty)_ | REST API fallback base URL (OpenAI-compatible), used when the CLI path fails |
+| `REVIEW_API_KEY` | _(empty)_ | REST API fallback bearer token |
+| `REVIEW_REST_TIMEOUT` | `115` | REST fallback curl timeout in seconds (clamped to `remaining-3` by the budget logic) |
+| `REVIEW_REST_STALL_TIMEOUT` | `90` | REST SSE stream stall watchdog (`curl --speed-time`), tuned to tolerate legitimate reasoning-model TTFT |
+| `REVIEW_HOOK_BUDGET` | `595` | Total hook time budget in seconds (600s hook timeout minus 5s margin); governs the retry loop and REST timeout clamping |
+| `REVIEW_CAPACITY_DELAY` | `25` | Wait time after detecting `MODEL_CAPACITY_EXHAUSTED` (skipped — breaks immediately to REST — when REST is configured) |
+| `REVIEW_ENGINE_DEGRADE_TTL` | `600` | TTL in seconds for the Gemini degrade state; subsequent hooks within the TTL skip the CLI and go straight to REST. Shortened from 3600 in v1.2.0 — agy 429 probing is cheap (~26s median) and multi-round session reuse lowers 429 frequency, so a shorter cooldown recovers agy faster without thrashing |
 
 Legacy variables (`GEMINI_REVIEW_OFF`, `GEMINI_DRY_RUN`, `GEMINI_MAX_REVIEWS`) are supported via fallback mapping.
+
+### `dispatch-check.sh` (Layer 2 — Agent/Task dispatch enforcement)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DISPATCH_CHECK_DISABLED` | `0` | Set `1` to disable the Layer 2 dispatch-parameter check (kill switch) |
 
 ## Consultation Flow
 
@@ -63,6 +81,17 @@ When `REVIEW_ENGINE=claude`, the script spawns `claude -p` with triple isolation
 3. **`--tools ""`** — no tool calls = no PreToolUse events = no hook re-entry
 
 `unset CLAUDECODE` and `unset CLAUDE_CODE_ENTRYPOINT` prevent the subprocess from inheriting parent's internal state. This is implementation-dependent but necessary: user authenticates via OAuth (`claude login`), no `ANTHROPIC_API_KEY` available, making `claude -p` the only viable invocation path.
+
+## Session Reuse (agy, v1.2.0)
+
+When `REVIEW_ENGINE=gemini` (agy CLI), a multi-round consultation reuses one agy server-side conversation instead of resending the full static prompt every round:
+
+- **First round** builds a fresh conversation and captures the `conversation_id` agy assigns (via `--output-format json`).
+- **Subsequent rounds** resume it with `--conversation <id>`, sending only the volatile tail (current plan + round framing). The static prefix (system instructions + project/global context) already lives in agy's session history, so the provider serves it from prompt cache.
+
+This lowers 429 frequency and quota consumption on multi-round negotiations. The conversation reference is session-scoped and torn down when the review cycle ends (approve / escalate / no-plan / global valve), on any non-zero agy exit (capacity, timeout, resume-rejected, network), when a response cannot be parsed, or when the plan changes after an approval. Extraction/reuse failures fall through to a plain agy call or REST — never a new blocking path.
+
+**agy invocation contract**: since v1.2.0 the agy CLI is always called with `--output-format json`, and the review body is text-sliced out of the (not-well-formed) JSON `response` field. This depends on agy's envelope carrying `conversation_id` and `response` keys. If a future agy build changes that envelope shape, extraction fails closed (empty review → retry / REST fallback), so a shape change degrades gracefully rather than mis-parsing — but it does mean the agy path is coupled to this envelope. The `claude` engine path and the REST fallback are unchanged. With no env config, the review decision logic behaves as before; the observable deltas are the JSON invocation, multi-round session reuse, and the shorter degrade cooldown (600s).
 
 ## Fault Tolerance
 
