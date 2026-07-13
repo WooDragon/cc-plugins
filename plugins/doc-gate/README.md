@@ -125,7 +125,7 @@ Exit codes: `0` = ok, `1` = broken links found (check only), `2` = argument/tool
 |----------|---------|-------------|
 | `SKILL_GATE_DISABLED` | `0` | `1` disables the hard gate (skill-gate) |
 | `SKILL_GATE_DIR` | `/tmp/claude-reviews` | Marker directory (shared with plan-review) |
-| `SKILL_GATE_LOG_DIR` | `~/.claude/logs` | Log directory |
+| `SKILL_GATE_LOG_DIR` | _(empty)_ | Log directory; falls back to `REVIEW_LOG_DIR`, then `~/.claude/logs` |
 | `SKILL_GATE_STALE_MIN` | `120` | Marker expiry in minutes |
 | `RECALL_GATE_DISABLED` | `0` | `1` disables the soft gate (recall-gate) |
 | `RECALL_GATE_ROOT` | _(auto)_ | Explicit repo root override |

@@ -19,7 +19,7 @@
     {
       "name": "ppt-press",
       "description": "Self-contained PPT publishing — scaffold + create + deploy + manage with runtime dependency checking",
-      "version": "2.0.1",
+      "version": "2.0.2",
       "author": {
         "name": "WooDragon"
       },

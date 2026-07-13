@@ -16,16 +16,34 @@ claude --plugin-dir ~/.claude/dev-plugins/plan-review
 
 ## Environment Variables
 
+### `plan-review.sh` (ExitPlanMode adversarial review)
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REVIEW_ENGINE` | `gemini` | Review engine: `gemini` or `claude` |
+| `REVIEW_ENGINE` | `gemini` | Review engine: `gemini` (routed through the local `agy` CLI) or `claude` (`claude -p` subprocess) |
+| `AGY_MODEL` | `Gemini 3.1 Pro (High)` | Model id passed to the `agy` CLI when `REVIEW_ENGINE=gemini` |
+| `CLAUDE_MODEL` | `opus` | Claude model when `REVIEW_ENGINE=claude` |
+| `GEMINI_MODEL` | `gemini-3.1-pro-preview` | Model id used only by the REST fallback payload (not the `agy` CLI path) |
 | `REVIEW_DISABLED` | `0` | Set `1` to bypass entirely |
 | `REVIEW_DRY_RUN` | `0` | Set `1` to skip engine call (synthetic APPROVE) |
-| `REVIEW_MAX_ROUNDS` | `3` | Max consultation rounds before escalation |
-| `GEMINI_MODEL` | `gemini-3-pro-preview` | Gemini model ID |
-| `CLAUDE_MODEL` | `opus` | Claude model (when `REVIEW_ENGINE=claude`) |
+| `REVIEW_MAX_ROUNDS` | `3` | Max non-Critical consultation rounds (CONCERNS accumulation) before escalation |
+| `REVIEW_MAX_TOTAL_ROUNDS` | `20` | Absolute global ceiling (including REJECT rounds); hard-blocks once reached |
+| `REVIEW_ENGINE_TIMEOUT` | `595` | Engine call timeout in seconds (requires `timeout`/`gtimeout` on `PATH`) |
+| `REVIEW_API_URL` | _(empty)_ | REST API fallback base URL (OpenAI-compatible), used when the CLI path fails |
+| `REVIEW_API_KEY` | _(empty)_ | REST API fallback bearer token |
+| `REVIEW_REST_TIMEOUT` | `115` | REST fallback curl timeout in seconds (clamped to `remaining-3` by the budget logic) |
+| `REVIEW_REST_STALL_TIMEOUT` | `90` | REST SSE stream stall watchdog (`curl --speed-time`), tuned to tolerate legitimate reasoning-model TTFT |
+| `REVIEW_HOOK_BUDGET` | `595` | Total hook time budget in seconds (600s hook timeout minus 5s margin); governs the retry loop and REST timeout clamping |
+| `REVIEW_CAPACITY_DELAY` | `25` | Wait time after detecting `MODEL_CAPACITY_EXHAUSTED` (skipped — breaks immediately to REST — when REST is configured) |
+| `REVIEW_ENGINE_DEGRADE_TTL` | `3600` | TTL in seconds for the Gemini degrade state; subsequent hooks within the TTL skip the CLI and go straight to REST |
 
 Legacy variables (`GEMINI_REVIEW_OFF`, `GEMINI_DRY_RUN`, `GEMINI_MAX_REVIEWS`) are supported via fallback mapping.
+
+### `dispatch-check.sh` (Layer 2 — Agent/Task dispatch enforcement)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DISPATCH_CHECK_DISABLED` | `0` | Set `1` to disable the Layer 2 dispatch-parameter check (kill switch) |
 
 ## Consultation Flow
 
