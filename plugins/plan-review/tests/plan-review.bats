@@ -2770,6 +2770,37 @@ MOCK_INNER
   [[ "$reason" != *"REJECT"* ]]
 }
 
+# json: agy's real backend HTML-safe-escapes < > & inside the "response" string
+# value as < > & (Go encoding/json default, verified against
+# production output). Regression for a bug where these were NOT among the awk
+# unescaper's handled cases, silently corrupting the first-line verdict tag
+# into literal "u003cverdictu003e..." text and forcing every agy call to fall
+# back to CONCERNS regardless of the engine's real verdict.
+#
+# The JSON body is built into a shell VAR and emitted via `printf '%s' "$VAR"`
+# — NOT inlined into printf's format string — because bash's printf builtin
+# itself decodes \uHHHH escapes found in the FORMAT string (verified: it
+# would silently turn < back into a literal "<" before agy's mock even
+# runs), which would make the mock stop reproducing the real bug.
+@test "json: \\u003c/\\u003e/\\u0026-escaped verdict tag (agy's real HTML-safe JSON) → APPROVE, not corrupted-to-CONCERNS" {
+  cat > "${MOCK_BIN}/agy" <<'MOCK_INNER'
+#!/bin/bash
+printf '%s\n' "$*" > "$(dirname "$0")/../.agy-args-agy"
+BODY='{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","status":"SUCCESS","response":"\u003cverdict\u003eAPPROVE\u003c/verdict\u003e\nA \u0026 B look fine.","usage":{"input_tokens":1,"total_tokens":2}}'
+printf '%s\n' "$BODY"
+MOCK_INNER
+  chmod +x "${MOCK_BIN}/agy"
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  # The unescaped review body must reach the user cleanly — no leftover
+  # "u003c"-style mangling, and the escaped "&" must decode too.
+  [[ "$reason" == *"A & B look fine."* ]]
+  [[ "$reason" != *"u003c"* ]]
+}
+
 # ttl: new default 600 — degraded file aged 700s (> 600) → expired, agy called
 @test "ttl: default 600 — 700s-old degrade file treated as expired (agy invoked)" {
   create_degraded_file 700   # older than new 600 default
