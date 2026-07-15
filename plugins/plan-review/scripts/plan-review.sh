@@ -1206,7 +1206,7 @@ if [ "$VERDICT" = "APPROVE" ]; then
   FEEDBACK=$(cat << APPROVE_EOF
 ## ${APPROVE_HEADER}
 
-审阅引擎已**通过**本次 plan。以下是审阅摘要：
+审阅引擎对本次 plan **技术上无异议**（verdict=APPROVE）。以下是审阅摘要：
 
 ---
 

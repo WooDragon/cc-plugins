@@ -507,6 +507,9 @@ Plan looks solid."
   [[ "$reason" == *"ExitPlanMode"* ]]
   # Must instruct not to modify the plan before re-submitting
   [[ "$reason" == *"不修改 plan"* ]]
+  # Must forbid starting any implementation action at this point
+  [[ "$reason" == *"禁止"* ]]
+  [[ "$reason" == *"落地"* ]]
 }
 
 # 24b. Ack-deny with round info (multi-round APPROVE)
