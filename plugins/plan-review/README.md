@@ -49,10 +49,15 @@ Legacy variables (`GEMINI_REVIEW_OFF`, `GEMINI_DRY_RUN`, `GEMINI_MAX_REVIEWS`) a
 
 ```
 ExitPlanMode → hook intercepts → engine reviews
-  ├─ APPROVE → allow through
+  ├─ APPROVE → ack-deny: present review + re-call ExitPlanMode → allow (user's native go/no-go)
   ├─ CONCERNS/REJECT → deny + feedback → Claude revises → re-submit
   └─ max rounds reached → allow through (user decides)
 ```
+
+An engine APPROVE is **not** authorization to start work — it only clears the plan
+for the user's native ExitPlanMode decision. The ack-deny message instructs Claude to
+present the review and re-call ExitPlanMode (unchanged); only the user's native approval
+on that second call permits execution.
 
 ## Review Criteria
 

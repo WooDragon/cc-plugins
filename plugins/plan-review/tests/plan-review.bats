@@ -490,6 +490,25 @@ Plan looks solid."
   [ -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
 }
 
+# 24a-2. Ack-deny message must state APPROVE != authorization to start work,
+# and must direct Claude to re-call ExitPlanMode for the user's native go/no-go.
+@test "branch: APPROVE ack-deny message forbids starting work before user arbitration" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Plan looks solid."
+  INPUT=$(build_input)
+  run_hook
+
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+
+  # Must explicitly decouple approval from authorization to start work
+  [[ "$reason" == *"审阅通过 ≠ 可以开工"* ]]
+  # Must direct Claude to re-call ExitPlanMode for the user's native decision
+  [[ "$reason" == *"ExitPlanMode"* ]]
+  # Must instruct not to modify the plan before re-submitting
+  [[ "$reason" == *"不修改 plan"* ]]
+}
+
 # 24b. Ack-deny with round info (multi-round APPROVE)
 @test "branch: APPROVE ack-deny after prior rounds includes round info" {
   set_counter_value 2 test-session 4
