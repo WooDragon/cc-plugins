@@ -2770,34 +2770,49 @@ MOCK_INNER
   [[ "$reason" != *"REJECT"* ]]
 }
 
-# json: agy's real backend HTML-safe-escapes < > & inside the "response" string
-# value as < > & (Go encoding/json default, verified against
+# json: agy's real backend HTML-safe-escapes the "response" string value's
+# angle brackets and ampersand (Go encoding/json default, verified against
 # production output). Regression for a bug where these were NOT among the awk
 # unescaper's handled cases, silently corrupting the first-line verdict tag
-# into literal "u003cverdictu003e..." text and forcing every agy call to fall
-# back to CONCERNS regardless of the engine's real verdict.
-#
-# The JSON body is built into a shell VAR and emitted via `printf '%s' "$VAR"`
-# — NOT inlined into printf's format string — because bash's printf builtin
-# itself decodes \uHHHH escapes found in the FORMAT string (verified: it
-# would silently turn < back into a literal "<" before agy's mock even
-# runs), which would make the mock stop reproducing the real bug.
-@test "json: \\u003c/\\u003e/\\u0026-escaped verdict tag (agy's real HTML-safe JSON) → APPROVE, not corrupted-to-CONCERNS" {
-  cat > "${MOCK_BIN}/agy" <<'MOCK_INNER'
-#!/bin/bash
-printf '%s\n' "$*" > "$(dirname "$0")/../.agy-args-agy"
-BODY='{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","status":"SUCCESS","response":"\u003cverdict\u003eAPPROVE\u003c/verdict\u003e\nA \u0026 B look fine.","usage":{"input_tokens":1,"total_tokens":2}}'
-printf '%s\n' "$BODY"
-MOCK_INNER
-  chmod +x "${MOCK_BIN}/agy"
+# into mangled literal text and forcing every agy call to fall back to
+# CONCERNS regardless of the engine's real verdict. create_mock_engine itself
+# now performs this same HTML-safe escaping (test_helper/common-setup.bash),
+# so a plain fixture string round-trips through the real production shape
+# automatically -- no bespoke mock needed here.
+@test "json: HTML-safe-escaped verdict tag (agy's real JSON shape) -> APPROVE, not corrupted-to-CONCERNS" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+A & B look fine."
   INPUT=$(build_input)
   run_hook
   assert_ack_approve_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  # The unescaped review body must reach the user cleanly — no leftover
+  # The unescaped review body must reach the user cleanly -- no leftover
   # "u003c"-style mangling, and the escaped "&" must decode too.
   [[ "$reason" == *"A & B look fine."* ]]
+  [[ "$reason" != *"u003c"* ]]
+}
+
+# json: same HTML-safe-escaped shape, but a REJECT verdict -- the
+# higher-stakes half of this bug. Before the fix, ANY verdict (not just
+# APPROVE) silently fell back to CONCERNS on agy, since the first-line tag
+# structure itself was corrupted regardless of which keyword it wrapped. A
+# confirmed-Critical REJECT getting silently downgraded to CONCERNS is worse
+# than a missed APPROVE: REJECT resets the negotiation-round counter and
+# forces Critical framing in front of the user; CONCERNS just burns a round
+# and can eventually auto-allow via the non-critical safety valve -- letting
+# a plan with a real Critical defect slip through.
+@test "json: HTML-safe-escaped verdict tag (agy's real JSON shape) -> REJECT, not silently downgraded to CONCERNS" {
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
+[Critical] Data loss path & no rollback."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"REJECT"* ]]
+  [[ "$reason" != *"CONCERNS"* ]]
+  [[ "$reason" == *"Data loss path & no rollback."* ]]
   [[ "$reason" != *"u003c"* ]]
 }
 
