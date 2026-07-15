@@ -2770,6 +2770,52 @@ MOCK_INNER
   [[ "$reason" != *"REJECT"* ]]
 }
 
+# json: agy's real backend HTML-safe-escapes the "response" string value's
+# angle brackets and ampersand (Go encoding/json default, verified against
+# production output). Regression for a bug where these were NOT among the awk
+# unescaper's handled cases, silently corrupting the first-line verdict tag
+# into mangled literal text and forcing every agy call to fall back to
+# CONCERNS regardless of the engine's real verdict. create_mock_engine itself
+# now performs this same HTML-safe escaping (test_helper/common-setup.bash),
+# so a plain fixture string round-trips through the real production shape
+# automatically -- no bespoke mock needed here.
+@test "json: HTML-safe-escaped verdict tag (agy's real JSON shape) -> APPROVE, not corrupted-to-CONCERNS" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+A & B look fine."
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  # The unescaped review body must reach the user cleanly -- no leftover
+  # "u003c"-style mangling, and the escaped "&" must decode too.
+  [[ "$reason" == *"A & B look fine."* ]]
+  [[ "$reason" != *"u003c"* ]]
+}
+
+# json: same HTML-safe-escaped shape, but a REJECT verdict -- the
+# higher-stakes half of this bug. Before the fix, ANY verdict (not just
+# APPROVE) silently fell back to CONCERNS on agy, since the first-line tag
+# structure itself was corrupted regardless of which keyword it wrapped. A
+# confirmed-Critical REJECT getting silently downgraded to CONCERNS is worse
+# than a missed APPROVE: REJECT resets the negotiation-round counter and
+# forces Critical framing in front of the user; CONCERNS just burns a round
+# and can eventually auto-allow via the non-critical safety valve -- letting
+# a plan with a real Critical defect slip through.
+@test "json: HTML-safe-escaped verdict tag (agy's real JSON shape) -> REJECT, not silently downgraded to CONCERNS" {
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
+[Critical] Data loss path & no rollback."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"REJECT"* ]]
+  [[ "$reason" != *"CONCERNS"* ]]
+  [[ "$reason" == *"Data loss path & no rollback."* ]]
+  [[ "$reason" != *"u003c"* ]]
+}
+
 # ttl: new default 600 — degraded file aged 700s (> 600) → expired, agy called
 @test "ttl: default 600 — 700s-old degrade file treated as expired (agy invoked)" {
   create_degraded_file 700   # older than new 600 default

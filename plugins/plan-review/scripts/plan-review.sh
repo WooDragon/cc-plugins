@@ -901,6 +901,21 @@ ${PLAN}"
                 else if (nc == "\"") out = out "\""
                 else if (nc == "\\") out = out "\\"
                 else if (nc == "r") out = out "\r"
+                else if (nc == "u") {
+                  # \uXXXX: Go encoding/json HTML-safe mode escapes <, >, & and
+                  # U+2028/U+2029 this way by default (XSS defense) — that set
+                  # is what agy actually emits, verified by reproduction. Any
+                  # other \uXXXX is passed through literally (backslash intact)
+                  # rather than silently dropped, so an unanticipated escape is
+                  # visibly wrong instead of corrupting the tag structure.
+                  hex = tolower(substr(s, i + 1, 4))
+                  if (hex == "003c") out = out "<"
+                  else if (hex == "003e") out = out ">"
+                  else if (hex == "0026") out = out "&"
+                  else if (hex == "2028" || hex == "2029") out = out "\n"
+                  else out = out "\\u" substr(s, i + 1, 4)
+                  i += 4
+                }
                 else out = out nc
                 i++
               } else if (c == "\"") {

@@ -101,7 +101,12 @@ ENGINE_OUTPUT
 )
   # Escape backslash + double-quote for the JSON string; keep raw newlines
   # (agy's real JSON has unescaped newlines in "response" — that's the point).
-  _esc=\$(printf '%s' "\$_out" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
+  # Also HTML-safe-escape < > & into < > & — agy's real
+  # backend (Go encoding/json default) always does this, so a fixture
+  # containing a literal "<verdict>" tag must round-trip through the same
+  # \u-escaped shape production traffic actually has, or this mock silently
+  # stops exercising the awk unescaper's \u handling.
+  _esc=\$(printf '%s' "\$_out" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g; s/</\\\\u003c/g; s/>/\\\\u003e/g; s/\&/\\\\u0026/g')
   printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","status":"SUCCESS","response":"%s","usage":{"input_tokens":100,"total_tokens":200}}\n' "\$_esc"
 else
   cat << 'ENGINE_OUTPUT'
@@ -159,7 +164,7 @@ ENGINE_OUTPUT
 )
 case "\$*" in
   *"--output-format json"*)
-    _esc=\$(printf '%s' "\$_out" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
+    _esc=\$(printf '%s' "\$_out" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g; s/</\\\\u003c/g; s/>/\\\\u003e/g; s/\&/\\\\u0026/g')
     printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","status":"SUCCESS","response":"%s","usage":{"input_tokens":100,"total_tokens":200}}\n' "\$_esc" ;;
   *) printf '%s\n' "\$_out" ;;
 esac
@@ -203,7 +208,7 @@ ENGINE_OUTPUT
 )
 case "\$*" in
   *"--output-format json"*)
-    _esc=\$(printf '%s' "\$_out" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g')
+    _esc=\$(printf '%s' "\$_out" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g; s/</\\\\u003c/g; s/>/\\\\u003e/g; s/\&/\\\\u0026/g')
     printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","status":"SUCCESS","response":"%s","usage":{"input_tokens":100,"total_tokens":200}}\n' "\$_esc" ;;
   *) printf '%s\n' "\$_out" ;;
 esac
