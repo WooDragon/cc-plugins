@@ -1206,7 +1206,7 @@ if [ "$VERDICT" = "APPROVE" ]; then
   FEEDBACK=$(cat << APPROVE_EOF
 ## ${APPROVE_HEADER}
 
-审阅引擎已**通过**本次 plan。以下是审阅摘要：
+审阅引擎对本次 plan **技术上无异议**（verdict=APPROVE）。以下是审阅摘要：
 
 ---
 
@@ -1214,7 +1214,12 @@ ${REVIEW}
 
 ---
 
-> 请向用户简要展示上述审阅结果，然后直接再次调用 ExitPlanMode（不要修改 plan）。
+**审阅通过 ≠ 可以开工。** 审阅引擎只是对等 peer，它的 APPROVE 仅表示"技术上无异议"，**不代表**用户已授权执行。此刻**禁止**开始任何落地动作（编辑文件、执行命令）。
+
+下一步（必须严格照做）：
+1. 向用户简要展示上述审阅结果；
+2. **不修改 plan**，直接再次调用 ExitPlanMode——这一步才会把 plan 交给用户做原生的 go/no-go 决策；
+3. 只有在用户通过 ExitPlanMode 原生批准后，才可以开工。
 APPROVE_EOF
   )
   FEEDBACK_JSON=$(printf '%s' "$FEEDBACK" | jq -Rs .)
