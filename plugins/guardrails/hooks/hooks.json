@@ -1,6 +1,17 @@
 {
-  "description": "Guardrails: code-size informational gate (PostToolUse) + git-push guard against accidental push to main/master (PreToolUse)",
+  "description": "Guardrails: code-size informational gate (PostToolUse) + git-push guard against accidental push to main/master (PreToolUse) + supply-chain instruction file hidden-Unicode scan (SessionStart + PostToolUse)",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/instruction-scan.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
@@ -8,6 +19,16 @@
           {
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/code-size.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/git-import-scan.sh",
             "timeout": 10
           }
         ]
