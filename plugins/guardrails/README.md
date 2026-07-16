@@ -59,23 +59,20 @@ At session start, recursively scans the session's cwd tree (agent instruction fi
 
 Purely informational — emits `additionalContext` only, never blocks anything (a `SessionStart` hook has no way to block a session from starting). Silent when no hits are found.
 
+The hidden-character scan (`_gate_scan_hidden`) depends on `perl` being on `PATH` (present by default on macOS and virtually all Linux distros). If `perl` is unavailable, the scan silently returns nothing — this detection degrades to a no-op (fail-open), it does not error or block.
+
 Environment variables:
 
 | Var | Default | Purpose |
 |---|---|---|
 | `INSTRUCTION_SCAN_DISABLED` | `0` | kill switch (`1` disables) |
-| `MAX_HITS` | `10` | per-file hit cap before truncating the scan and appending an anti-desensitization warning (guards against padding a file with legitimate emoji/zero-width usage to burn the quota and hide a real payload past it) |
+| `MAX_HITS` | `10` | per-file hit cap before truncating the scan and appending a warning that the file has too many hidden characters and must be read in full (set `0` to truncate at the first hit) |
 
 ### git-import-scan.sh — `PostToolUse: Bash` (informational)
 
-After a Bash command shaped like a git/gh import action (`clone`, `pull`, `fetch`, `merge`, `checkout`, `switch`, `restore`, `rebase`, `reset`, `cherry-pick`, `submodule`, `apply`, `am`, `worktree` — matched as a fast-path literal substring on the command text, gated behind a `git`/`gh` mention first), re-runs the same hidden-Unicode scan as `instruction-scan.sh` over the **current state** of the tool call's cwd. This is deliberately a full re-scan of cwd-as-it-now-stands, not a diff / `git diff` / reflog-based check — diffing was a rejected design here, since it introduces path-offset and reflog-boundary bugs that scanning cwd's current state sidesteps entirely.
+After a Bash command shaped like a git/gh import action (`clone`, `pull`, `fetch`, `merge`, `checkout`, `switch`, `restore`, `rebase`, `reset`, `cherry-pick`, `submodule`, `apply`, `" am"` (leading space — see limitation #4 below), `worktree` — matched as a fast-path literal substring on the command text, gated behind a `git`/`gh` mention first), re-runs the same hidden-Unicode scan as `instruction-scan.sh` over the **current state** of the tool call's cwd. This is deliberately a full re-scan of cwd-as-it-now-stands, not a diff / `git diff` / reflog-based check — diffing was a rejected design here, since it introduces path-offset and reflog-boundary bugs that scanning cwd's current state sidesteps entirely.
 
-Two distinct message shapes:
-
-- **No hidden-char hits, but instruction files exist** → a plain change-notification listing every instruction file currently in cwd, suggesting a manual check of whether the import touched them.
-- **At least one hidden-char hit** → the same listing, plus the hidden-Unicode warning block (file/line/codepoint) for the affected files.
-
-Silent when cwd has no instruction files at all, or the command isn't import-shaped.
+Symmetric with `instruction-scan.sh`: silent unless at least one hidden-char hit fires. When a hit does fire, the alert lists the affected instruction file(s) plus the hidden-Unicode warning block (file/line/codepoint) for each. No hit — regardless of how many instruction files exist in cwd — produces no output at all.
 
 Environment variables:
 
@@ -88,9 +85,10 @@ Environment variables:
 
 1. **`instruction-scan.sh` alerts after the session has already loaded, not before** — it's a `SessionStart` hook, so any hidden payload in a file the agent already ingested at session start has already been read by the time this check runs. Blocking *before* load would require intercepting the read at the syscall/filesystem layer, which is out of scope for a Claude Code hook.
 2. **Plain-text (no hidden characters) prompt injection is not detected at all.** Neither hook attempts any semantic judgment of whether instruction-file content is malicious — that's an arms race against an adaptive adversary that a pattern-based hook cannot win. The mitigation here is narrower and durable: surface hidden/invisible characters mechanically, and rely on the change-notification plus human review for everything else.
-3. **`git-import-scan.sh`'s fast-path is literal substring matching on the command text, not a real shell parser**, so it has the same class of blind spots as `git-push-guard.sh`: a fully-qualified git binary path, an environment-variable prefix, a nested subshell, or (most notably) **a git alias standing in for the real subcommand** (e.g. `git up` configured as an alias for `git pull`) all short-circuit past the keyword match undetected. The next `SessionStart` still catches anything left behind, since `instruction-scan.sh` scans unconditionally regardless of how the files got there.
-4. **The `am` keyword is a substring match, so it over-triggers on unrelated commands containing that substring** — `git blame`, `git commit --amend`, etc. all cause a scan to fire even though no import happened. This is an accepted false-positive: it only costs an extra (cheap, fail-open) scan, never a false negative, and tightening the match (e.g. word-boundary anchoring) would compromise the fast-path's simplicity for a purely cosmetic gain.
-5. **`git-import-scan.sh` scans cwd's entire current state, not a diff of what the import actually changed.** The change-notification therefore always lists *every* instruction file present in cwd post-import, including ones untouched by that specific command — this is a deliberate simplicity/correctness tradeoff (see the script's design note), not an oversight.
+3. **`git-import-scan.sh`'s fast-path is literal substring matching on the full command text, not a real shell parser.** In practice this substring match is generous, not narrow: `/usr/bin/git pull`, `bash -c 'git pull'`, and similar wrapped/qualified forms still trigger, because the keyword and the `git`/`gh` mention only need to appear *somewhere* in the command string, not as the literal invoked binary. The one real blind spot is **a git alias standing in for the real subcommand** (e.g. `git up` configured as an alias for `git pull`) — the alias name itself doesn't contain any tracked keyword, so it short-circuits past the keyword match undetected. The next `SessionStart` still catches anything left behind, since `instruction-scan.sh` scans unconditionally regardless of how the files got there.
+4. **The `" am"` keyword (leading space) is a substring match**, so it can still over-trigger on the rare command text that happens to contain a literal `" am"` substring outside of `git am`. Tightening it from a bare `am` to `" am"` already eliminates the previously-noted false positives on `git blame` and `git commit --amend`. This remaining edge case is an accepted false-positive: it only costs an extra (cheap, fail-open) scan, never a false negative.
+5. **`git-import-scan.sh` scans cwd's entire current state, not a diff of what the import actually changed** — this is a deliberate simplicity/correctness tradeoff (see the script's design note), not an oversight. Since the hook now stays silent unless a hidden-char hit fires, this only matters for *which* files get scanned (all instruction files in cwd, not just ones the import touched), not for any listing surfaced to the user.
+6. **`_gate_instruction_files` uses `find -type f`, so symlinked instruction files are not scanned.** If `CLAUDE.md` (or another whitelisted filename) is a symlink, it's skipped regardless of where it points. If the symlink's target also happens to live inside the scanned cwd tree under a whitelisted name, it gets scanned independently as that target path; otherwise the symlinked file goes unscanned.
 
 ## Shared library
 

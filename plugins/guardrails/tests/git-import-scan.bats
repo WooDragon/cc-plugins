@@ -48,13 +48,11 @@ teardown() {
   assert_post_tooluse_alert_contains "U+200B"
 }
 
-@test "trigger: git pull + cwd has clean instruction file → change-notification wording, no hidden-char warning" {
+@test "trigger: git pull + cwd has clean instruction file → silent (no hit, no notification)" {
   write_clean_instruction_file "$WORKROOT/CLAUDE.md"
   INPUT=$(build_post_bash_input command="git pull" cwd="$WORKROOT")
   run_git_import_scan
-  assert_post_tooluse_alert_contains "CLAUDE.md"
-  assert_post_tooluse_alert_contains "建议核查"
-  [[ "$HOOK_STDOUT" != *"隐藏 Unicode"* ]]
+  assert_silent
 }
 
 @test "trigger: gh repo clone ... → also triggers (gh path)" {
@@ -64,32 +62,61 @@ teardown() {
   assert_post_tooluse_alert_contains "U+200B"
 }
 
-@test "trigger: git submodule update → triggers" {
-  write_clean_instruction_file "$WORKROOT/CLAUDE.md"
+@test "trigger: git submodule update + hidden-char file → triggers alert" {
+  write_hidden_char_file "$WORKROOT/CLAUDE.md" 200B
   INPUT=$(build_post_bash_input command="git submodule update --init" cwd="$WORKROOT")
   run_git_import_scan
   assert_post_tooluse_alert_contains "CLAUDE.md"
+  assert_post_tooluse_alert_contains "U+200B"
 }
 
-@test "trigger: git worktree add → triggers" {
-  write_clean_instruction_file "$WORKROOT/CLAUDE.md"
+@test "trigger: git worktree add + hidden-char file → triggers alert" {
+  write_hidden_char_file "$WORKROOT/CLAUDE.md" 200B
   INPUT=$(build_post_bash_input command="git worktree add ../wt feature-x" cwd="$WORKROOT")
   run_git_import_scan
   assert_post_tooluse_alert_contains "CLAUDE.md"
+  assert_post_tooluse_alert_contains "U+200B"
 }
 
-@test "trigger: git am <patch> → triggers" {
-  write_clean_instruction_file "$WORKROOT/CLAUDE.md"
+@test "trigger: git am <patch> + hidden-char file → triggers alert" {
+  write_hidden_char_file "$WORKROOT/CLAUDE.md" 200B
   INPUT=$(build_post_bash_input command="git am /tmp/some.patch" cwd="$WORKROOT")
   run_git_import_scan
   assert_post_tooluse_alert_contains "CLAUDE.md"
+  assert_post_tooluse_alert_contains "U+200B"
 }
 
-@test "trigger: git apply <patch> → triggers" {
-  write_clean_instruction_file "$WORKROOT/CLAUDE.md"
+@test "trigger: git apply <patch> + hidden-char file → triggers alert" {
+  write_hidden_char_file "$WORKROOT/CLAUDE.md" 200B
   INPUT=$(build_post_bash_input command="git apply /tmp/some.patch" cwd="$WORKROOT")
   run_git_import_scan
   assert_post_tooluse_alert_contains "CLAUDE.md"
+  assert_post_tooluse_alert_contains "U+200B"
+}
+
+# ============================================================
+# `am` keyword tightening — leading-space match, not bare substring
+# ============================================================
+
+@test "am-tighten: git commit --amend + hidden-char file present → silent (not import-shaped)" {
+  write_hidden_char_file "$WORKROOT/CLAUDE.md" 200B
+  INPUT=$(build_post_bash_input command="git commit --amend -m fix" cwd="$WORKROOT")
+  run_git_import_scan
+  assert_silent
+}
+
+@test "am-tighten: git blame + hidden-char file present → silent (not import-shaped)" {
+  write_hidden_char_file "$WORKROOT/CLAUDE.md" 200B
+  INPUT=$(build_post_bash_input command="git blame CLAUDE.md" cwd="$WORKROOT")
+  run_git_import_scan
+  assert_silent
+}
+
+@test "am-tighten: git am ... + hidden-char file → still triggers" {
+  write_hidden_char_file "$WORKROOT/CLAUDE.md" 200B
+  INPUT=$(build_post_bash_input command="git am --continue" cwd="$WORKROOT")
+  run_git_import_scan
+  assert_post_tooluse_alert_contains "U+200B"
 }
 
 # ============================================================

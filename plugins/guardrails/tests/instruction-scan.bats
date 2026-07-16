@@ -49,6 +49,13 @@ teardown() {
   assert_session_start_alert_contains "U+202E"
 }
 
+@test "detect: tag character U+E0001 in CLAUDE.md → hit" {
+  write_hidden_char_file "$WORKROOT/CLAUDE.md" E0001
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains "U+E0001"
+}
+
 # ============================================================
 # Legitimate BOM handling
 # ============================================================
@@ -71,12 +78,12 @@ teardown() {
 # MAX_HITS truncation + anti-desensitization warning
 # ============================================================
 
-@test "max-hits: >10 hidden chars in one file → truncation warning about emoji-cover / must read directly" {
+@test "max-hits: >10 hidden chars in one file → truncation warning about too many hidden chars / must read in full" {
   write_many_hidden_chars_file "$WORKROOT/CLAUDE.md" 15 200B
   INPUT=$(build_session_start_input cwd="$WORKROOT")
   run_instruction_scan
-  assert_session_start_alert_contains "emoji 掩护"
-  assert_session_start_alert_contains "必须直接读取"
+  assert_session_start_alert_contains "隐藏 Unicode 字符过多"
+  assert_session_start_alert_contains "必须直接通读"
 }
 
 @test "max-hits: custom MAX_HITS respected (truncates earlier)" {
@@ -84,10 +91,24 @@ teardown() {
   write_many_hidden_chars_file "$WORKROOT/CLAUDE.md" 5 200B
   INPUT=$(build_session_start_input cwd="$WORKROOT")
   run_instruction_scan
-  assert_session_start_alert_contains "emoji 掩护"
+  assert_session_start_alert_contains "隐藏 Unicode 字符过多"
   # Only lines 1-3 should be reported before truncation fires.
   [[ "$HOOK_STDOUT" == *"4:U+200B"* ]] && {
     echo "Expected truncation before line 4, but line 4 hit was reported: $HOOK_STDOUT"
+    return 1
+  }
+  return 0
+}
+
+@test "max-hits: MAX_HITS=0 truncates at the first hit (explicit zero is respected, not treated as unset)" {
+  export MAX_HITS=0
+  write_many_hidden_chars_file "$WORKROOT/CLAUDE.md" 3 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains "1:U+200B"
+  assert_session_start_alert_contains "隐藏 Unicode 字符过多"
+  [[ "$HOOK_STDOUT" == *"2:U+200B"* ]] && {
+    echo "Expected truncation after line 1 (MAX_HITS=0), but line 2 hit was reported: $HOOK_STDOUT"
     return 1
   }
   return 0

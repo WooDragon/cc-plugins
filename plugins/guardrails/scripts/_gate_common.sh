@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# guardrails 包内共享库 — code-size.sh / git-push-guard.sh 共享的无副作用纯函数。
+# guardrails 包内共享库 — code-size.sh / git-push-guard.sh / instruction-scan.sh /
+# git-import-scan.sh 四个 hook 共享的无副作用纯函数。
 #
-# 只抽两个 hook 之间真正重复的输入解析/防御样板（jq 探测、字段提取、bypass
-# 开关判定）。绝不抽顶层兜底：code-size 用 `_main 2>/dev/null || true` 软兜底
-# 全吞，git-push 用逐步 `exit 0` + 命中 `exit 2` 硬阻断，两者 fail-open 哲学
-# 相反，合并顶层兜底会破坏 git-push 的阻断语义。
+# 只抽 hook 之间真正重复的输入解析/防御样板（jq 探测、字段提取、bypass
+# 开关判定），以及 instruction-scan.sh/git-import-scan.sh 共用的隐藏字符扫描
+# 逻辑（_gate_instruction_files 枚举指令文件、_gate_scan_hidden 扫隐藏
+# Unicode 码点）。绝不抽顶层兜底：code-size/instruction-scan/git-import-scan
+# 用 `_main 2>/dev/null || true` 软兜底全吞，git-push 用逐步 `exit 0` + 命中
+# `exit 2` 硬阻断，两者 fail-open 哲学相反，合并顶层兜底会破坏 git-push 的
+# 阻断语义。
 
 # _gate_require_jq — 探测 jq 是否可用。只返回状态码，调用方自行决定
 # return 还是 exit（不代为退出）。
@@ -64,14 +68,14 @@ _gate_scan_hidden() {
 
   MAX_HITS="${MAX_HITS:-10}" perl -CSD -ne '
     use utf8;
-    BEGIN { $max = $ENV{MAX_HITS} || 10; $hits = 0; }
+    BEGIN { $max = (defined($ENV{MAX_HITS}) && $ENV{MAX_HITS} ne "") ? $ENV{MAX_HITS} : 10; $hits = 0; }
     eval {
       s/^\x{FEFF}// if $. == 1;
       while (/([\x{200B}-\x{200D}\x{2060}-\x{2064}\x{200E}-\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}\x{FEFF}\x{E0000}-\x{E007F}])/g) {
         $hits++;
         printf("%d:U+%04X\n", $., ord($1));
         if ($hits >= $max) {
-          print "[警告] 扫描已截断,存在利用 emoji 掩护恶意指令的极高风险,必须直接读取该文件排查剩余内容\n";
+          print "[警告] 该文件隐藏 Unicode 字符过多,已截断,存在恶意指令注入的极高风险,必须直接通读该文件全文排查剩余内容\n";
           exit;
         }
       }

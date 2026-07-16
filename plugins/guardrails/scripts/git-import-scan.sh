@@ -41,8 +41,12 @@ _main() {
 
   # Must also contain an import-shaped action keyword — a bare `git status`
   # or `gh pr view` never pulls external code into the tree.
+  # NOTE: `*" am"*` (leading space) rather than bare `*am*` — the latter
+  # would over-trigger on `git blame` and `git commit --amend`, neither of
+  # which is an import action. A leading space still matches "git am" and
+  # "git am --continue" while not matching "bl-am-e" or "--am-end".
   case "$COMMAND" in
-    *clone*|*pull*|*fetch*|*merge*|*checkout*|*switch*|*restore*|*rebase*|*reset*|*cherry-pick*|*submodule*|*apply*|*am*|*worktree*) ;;
+    *clone*|*pull*|*fetch*|*merge*|*checkout*|*switch*|*restore*|*rebase*|*reset*|*cherry-pick*|*submodule*|*apply*|*" am"*|*worktree*) ;;
     *) return ;;
   esac
 
@@ -51,15 +55,11 @@ _main() {
   [ -d "$CWD" ] || return
 
   # Enumerate instruction files currently present in cwd, scan each for
-  # hidden Unicode, collect hits. Also track every file found (regardless of
-  # hit) so the AI gets a change-notification of what instruction files
-  # exist post-import, even when no hidden-char hit fires.
-  FOUND=""
+  # hidden Unicode, collect hits. Symmetric with instruction-scan.sh: no hit
+  # → stay silent, regardless of how many instruction files exist.
   REPORT=""
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    FOUND="${FOUND}${f}
-"
     HITS=$(_gate_scan_hidden "$f") || HITS=""
     [ -n "$HITS" ] || continue
     REPORT="${REPORT}文件 ${f}:
@@ -68,24 +68,14 @@ ${HITS}
 "
   done < <(_gate_instruction_files "$CWD")
 
-  # Nothing found at all → stay silent.
-  [ -n "$FOUND" ] || return
+  # No hidden-char hit → stay silent.
+  [ -n "$REPORT" ] || return
 
-  MSG="[git-import-scan] 检测到 git/gh 导入动作（拉取/合并/切换等），当前工作区（${CWD}）存在以下 agent 指令文件："
+  MSG="[git-import-scan] 检测到 git/gh 导入动作（拉取/合并/切换等）后，当前工作区（${CWD}）的 agent 指令文件中检测到隐藏 Unicode 字符（零宽/双向控制/tag 字符/异常 BOM），存在指令注入风险，请人工核查："
 
   MSG="${MSG}
 
-${FOUND}"
-
-  if [ -n "$REPORT" ]; then
-    MSG="${MSG}
-⚠️ 其中检测到隐藏 Unicode 字符（零宽/双向控制/tag 字符/异常 BOM），存在指令注入风险，请人工核查：
-
 ${REPORT}"
-  else
-    MSG="${MSG}
-建议核查这些文件内容是否被本次导入动作变更或新增。"
-  fi
 
   MSG_JSON=$(printf '%s' "$MSG" | jq -Rs .) || return
   printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":%s}}' "$MSG_JSON"
