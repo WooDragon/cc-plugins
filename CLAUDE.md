@@ -178,4 +178,12 @@ recall-gate 内含 double-deny guard：skill-gate 启用且 marker 不存在时�
 - [#19 CLAUDE.md 强制门禁 & 全局/项目级分级 (v1.0.3)](https://github.com/WooDragon/cc-plugins/issues/19) — basename 豁免收缩（CLAUDE/README/CONTRIBUTING 纳入门禁）、全局 `~/.claude/CLAUDE.md` 大小写不敏感识别 + 无条件门禁（绕过位置排除）、deny 消息分级 + `skill-not-invoked-global` 日志、doc-maintenance 通用化原则章节、放弃 `DOC_GATE_FORCE_INCLUDE` 改用零配置内建规则
 - [#24 去重维护规范 & dedup 工具 YAGNI 决策 (v1.4.0)](https://github.com/WooDragon/cc-plugins/issues/24) — 实证研判（两库 103 篇 md 双轮扫描，真债仅 0.4%）毙掉 dedup 工具伪需求降级 backlog，doc-maintenance 补「去重维护」规范（单一来源 / 跨项目共享 / 定期 DEDUP 处置流程），复用现有 orphans/backlinks/check
 
+## 内部设计文档（how/why 去哪找）
+
+各插件的实现细节、设计决策与审阅记录（how/why）**不入本公共仓库**——按上文「公共 vs 私有归属规范」归私有侧。本仓库只含运行时文件（`plugin.json`/`hooks.json`/`scripts`/`skills`/`tests`）与面向安装者的 README（what）。
+
+how/why 文档由维护者保存在私有 docs 层，每插件一份 `<plugin>-internals.md`（plan-review、doc-gate、guardrails 等，含设计理据、迁移史、审阅记录）。**完整清单与索引以下方 `@` 引用展开的私有 CLAUDE.md「文档索引」表为权威单一来源**（此处不复制清单，避免两处漂移）。
+
+> 下方 `@` 路径为维护者机器本地——clone 本公共仓库者不含此私有层，属预期设计（归属规范的私有侧本就不发布）。
+
 @~/.claude/projects/-Users-woodragon-Work-github-cc-plugins/CLAUDE.md
