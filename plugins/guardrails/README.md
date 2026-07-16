@@ -49,7 +49,7 @@ Environment variables:
 **Known limitations (guards against slips, not against deliberate evasion).** [#118](https://github.com/WooDragon/cc-plugins/issues/118) closed the previously-tracked gaps (long options, `sudo -E`, `env`, `GIT_DIR=` prefix, full binary path, hard-coded `main`/`master`) — the remaining items below are accepted, still-open gaps:
 
 - **Nested shells bypass detection entirely** — `bash -c 'git push origin main'`, `(git push origin main)` — since the hook only pattern-matches the literal command string, not commands executed inside a spawned sub-shell.
-- **`sudo -u user git push ...`** is not recognized: the prefix stripper only skips *flag* tokens after `sudo`/`env`, so a non-flag argument like a username still breaks normalization.
+- **Only `sudo`/`env`/`VAR=val` invocation prefixes are normalized.** Other command wrappers pass through undetected — `time git push origin main`, `command git push ...`, `nice git push ...`, and `sudo -u user git push ...` (a non-flag argument like a username after `sudo` also breaks normalization). Recognizing every wrapper is an arms race a slip-catcher does not chase.
 - **False positive**: a remote literally named `main` (e.g. `git push main HEAD:feature`) is not distinguished from the `main` *branch* and may be flagged even though no protected branch is being pushed to. Use `ALLOW_PUSH_MAIN=1` to push through this case.
 - **`PROTECTED_BRANCHES` values containing regex metacharacters** have undefined matching behavior, since the list is spliced directly into the detection regex's alternation.
 
