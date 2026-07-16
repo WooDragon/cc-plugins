@@ -518,6 +518,39 @@ tr.rec td:first-child {
 .tag-amber { background: var(--signal-amber-dim); color: var(--signal-amber); }
 .tag-red { background: var(--signal-red-dim); color: var(--signal-red); }
 
+/* --- Archived appendix (ds:appendix on a ## heading) --- */
+.archived-appendix {
+  opacity: 0.72;
+  border-left: 3px dashed var(--text-tertiary);
+  padding-left: 1.5rem;
+  margin-left: 0.25rem;
+  filter: grayscale(45%);
+}
+.archived-appendix .section h2 { color: var(--text-secondary); }
+.archived-appendix .callout { background: var(--bg-surface); border-left-color: var(--text-tertiary); }
+
+/* --- Decision record (ds:badge type=decision-record on a ### heading) --- */
+.decision-record {
+  border: 1px dashed var(--accent-dim);
+  border-radius: 8px;
+  padding: 1.5rem 1.75rem;
+  margin: 1.5rem 0;
+  background: var(--bg-elevated);
+}
+.decision-record-badge {
+  display: inline-block;
+  font-family: 'Mono', monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-glow);
+  padding: 0.3em 0.65em;
+  border-radius: 4px;
+  margin-bottom: 1rem;
+}
+.decision-record h3 { margin-top: 0; }
+
 /* --- Responsive --- */
 @media (max-width: 640px) {
   .hero h1 { font-size: 1.6rem; }
