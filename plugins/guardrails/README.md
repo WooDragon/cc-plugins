@@ -37,11 +37,14 @@ Guards against `git push` (and compound commands containing one, split on `&&`, 
 
 Before matching, the command is normalized to strip leading invocation-prefix tokens — environment-variable assignments (`GIT_DIR=... git push`), `sudo`/`env` and their own flags (`sudo -E git push`, `env git push`) — so these collapse to a bare `git ... push ...` before pattern matching runs. The detection regex itself recognizes long options (`git --no-pager push`, `git --git-dir=.git push`) and an optional full/relative path prefix on the `git` binary (`/usr/bin/git push`).
 
-Protected branches default to `main master` and are configurable via `PROTECTED_BRANCHES` (space-separated branch names, e.g. `PROTECTED_BRANCHES="trunk develop"`).
-
 This is a **slip-catcher, not a security boundary** — it is pattern-matching over the literal command text, not a real shell parser, so it stops the common accidental-push shapes without attempting to be adversarially unevadable. See "Known limitations" below for what it does not cover.
 
-Bypass: `export ALLOW_PUSH_MAIN=1` (temporary, intended for genuine emergencies — not a standing override).
+Environment variables:
+
+| Var | Default | Purpose |
+|---|---|---|
+| `PROTECTED_BRANCHES` | `main master` | space-separated branch names to guard (e.g. `PROTECTED_BRANCHES="trunk develop"`) |
+| `ALLOW_PUSH_MAIN` | `0` | bypass switch (`1` allows a push to a protected branch); temporary, for genuine emergencies — not a standing override. Name retained for backward compatibility even though `PROTECTED_BRANCHES` generalized the guarded set beyond `main`. |
 
 **Known limitations (guards against slips, not against deliberate evasion).** [#118](https://github.com/WooDragon/cc-plugins/issues/118) closed the previously-tracked gaps (long options, `sudo -E`, `env`, `GIT_DIR=` prefix, full binary path, hard-coded `main`/`master`) — the remaining items below are accepted, still-open gaps:
 

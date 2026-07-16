@@ -52,9 +52,10 @@ normalize_git_prefix() {
       [A-Za-z_]*=*) ;;
       sudo)         ;;
       env)          ;;
-      # sudo/env flags (e.g. -E, -i) — only stripped mid-prefix, i.e. after
-      # we have already seen sudo/env, so a bare leading `-x` (not a valid
-      # command start) will not falsely trigger. Guarded by prev token below.
+      # Anything else (including a bare leading `-x`) ends the prefix run.
+      # sudo/env's own flags are NOT handled here — they are consumed by the
+      # dedicated inner loop below, only after sudo/env has been seen, so a
+      # statement starting with a stray `-x` never falsely strips.
       *) break ;;
     esac
     # Drop this token and continue.
@@ -99,20 +100,24 @@ check_push_target() {
   # which do NOT support \s: it silently fails to match as a metachar,
   # degrading the sed extraction below to a no-op (push_args ends up as
   # the whole original statement instead of just the push arguments).
-  # After normalize_git_prefix the statement starts at the git token (bare
-  # or full-path), so no leading anchor alternation is needed — keeping the
-  # fragment anchor-free lets the SAME fragment be reused inside the sed
-  # `s/^.*RE//` extraction (a leading `(^|...)` alternation breaks BSD sed).
+  # After normalize_git_prefix the statement STARTS at the git token (bare or
+  # full-path), so the regex is anchored to `^`: git must be in command
+  # position. This is what keeps `echo git push origin main` and
+  # `grep "git push origin main" f` from being flagged — the literal string
+  # `git push ...` appearing as an *argument* is not a command invocation.
+  # (Nested shells like `bash -c '...'` are still out of scope — see README.)
   local git_push_re='([^[:space:]]*/)?git([[:space:]]+(-[-a-zA-Z][^[:space:]]*|[^[:space:]-][^[:space:]]*))*[[:space:]]+push'
-  if ! grep -Eq "$git_push_re" <<< "$stmt"; then
+  if ! grep -Eq "^${git_push_re}" <<< "$stmt"; then
     return 1
   fi
 
-  # Extract everything after "push" (the push arguments). Use `#` as the sed
-  # delimiter — the path-prefix group ([^space]*/) contains a literal `/`,
-  # which would otherwise be parsed as the s/// delimiter and break the RE.
+  # Extract everything after "push" (the push arguments). Anchored `^` (not
+  # `^.*`) so the match starts at the git token, mirroring the detection
+  # above. Use `#` as the sed delimiter — the path-prefix group ([^space]*/)
+  # contains a literal `/`, which would otherwise be parsed as the s///
+  # delimiter and break the RE.
   local push_args
-  push_args=$(sed -E "s#^.*${git_push_re}##" <<< "$stmt")
+  push_args=$(sed -E "s#^${git_push_re}##" <<< "$stmt")
 
   # Strip quote characters so quoted branch names (e.g. "main", 'main')
   # line up with the same bare word-boundary checks below.

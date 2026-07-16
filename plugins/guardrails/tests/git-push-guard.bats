@@ -94,6 +94,19 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+# --- git must be in COMMAND position: the literal "git push ... main" as an
+#     argument to another command must NOT be flagged (anchor regression) ---
+
+@test "pass: echo git push origin main (git is an echo argument, not a command)" {
+  run_push_guard "$(mk_payload 'echo git push origin main')"
+  [ "$status" -eq 0 ]
+}
+
+@test "pass: grep \"git push origin main\" README.md (literal string search)" {
+  run_push_guard "$(mk_payload 'grep "git push origin main" README.md')"
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # BLOCK cases
 # ============================================================
