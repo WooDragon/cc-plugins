@@ -62,6 +62,11 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+@test "pass: git -C main push origin feature-x (push_args extraction must strip the git..push prefix, not leak the -C dir name into branch matching)" {
+  run_push_guard "$(mk_payload 'git -C main push origin feature-x')"
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # BLOCK cases
 # ============================================================
@@ -152,6 +157,36 @@ teardown() {
 
 @test "block: git -c key=val push origin main" {
   run_push_guard "$(mk_payload 'git -c http.sslVerify=false push origin main')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "block: git push origin +main (force-push shorthand prefix)" {
+  run_push_guard "$(mk_payload 'git push origin +main')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "block: git push origin +master (force-push shorthand prefix)" {
+  run_push_guard "$(mk_payload 'git push origin +master')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "block: git push origin refs/heads/main (full ref, no colon)" {
+  run_push_guard "$(mk_payload 'git push origin refs/heads/main')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test 'block: git push origin "main" (double-quoted branch name)' {
+  run_push_guard "$(mk_payload 'git push origin "main"')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "block: git push origin 'main' (single-quoted branch name)" {
+  run_push_guard "$(mk_payload "git push origin 'main'")"
   [ "$status" -eq 2 ]
   [[ "$stderr" == *"git-push-guard"* ]]
 }

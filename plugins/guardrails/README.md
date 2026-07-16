@@ -1,6 +1,6 @@
 # guardrails
 
-Two independent, fail-open guardrail hooks for Claude Code: an informational **code size gate** and a hard **git push protection** gate. Pure-hook plugin — no skills.
+Two independent, fail-open guardrail hooks for Claude Code: an informational **code size gate** and a **git push guard** that catches accidental direct pushes to `main`/`master`. Pure-hook plugin — no skills.
 
 ## Installation
 
@@ -33,11 +33,22 @@ Environment variables:
 
 ### git-push-guard.sh — `PreToolUse: Bash` (5s timeout)
 
-Blocks `git push` (and compound commands containing one, split on `&&`, `||`, `;`, newline) that target `main` or `master` — exact branch name, refspec (`:main`, `:refs/heads/main`), or `--all`/`--mirror`. On a hit: `exit 2` + explanatory `stderr`, hard-blocking the tool call. All other cases (parse ambiguity, missing fields, non-matching branch) fail open with `exit 0`.
+Guards against `git push` (and compound commands containing one, split on `&&`, `||`, `;`, newline) that target `main` or `master` — exact branch name (bare, `+`-prefixed force shorthand, or full `refs/heads/` path), refspec (`:main`, `:refs/heads/main`), or `--all`/`--mirror`. On a hit: `exit 2` + explanatory `stderr`, blocking that tool call. All other cases (parse ambiguity, missing fields, non-matching branch) fail open with `exit 0`.
 
-**Known limitation (v1.0.0): protected branch names are hard-coded to `main`/`master`.** Repositories using `trunk`, `develop`, or other default-branch conventions are **not currently protected** by this hook — pushes to those branches pass through untouched. Generalizing this to a configurable branch list (`PROTECTED_BRANCHES` env var) is a planned follow-up, not yet implemented.
+This is a **slip-catcher, not a security boundary** — it is pattern-matching over the literal command text, not a real shell parser, so it stops the common accidental-push shapes without attempting to be adversarially unevadable. See "Known limitations" below for what it does not cover.
 
 Bypass: `export ALLOW_PUSH_MAIN=1` (temporary, intended for genuine emergencies — not a standing override).
+
+**Known limitations (guards against slips, not against deliberate evasion).** These are known, accepted gaps — not yet implemented — tracked in [#118](https://github.com/WooDragon/cc-plugins/issues/118):
+
+- **Hard-coded protected branches.** Only `main`/`master` are recognized. Repos using `trunk`, `develop`, or other default-branch conventions are **not protected** — pushes to those branches pass through untouched. Planned fix: a configurable `PROTECTED_BRANCHES` env var.
+- **Alternate git invocations bypass detection entirely**, since the hook only pattern-matches the literal command string:
+  - Full binary path — `/usr/bin/git push origin main`
+  - `sudo -E git push origin main` (only bare `sudo git` is recognized)
+  - `env git push origin main`
+  - `GIT_DIR=... git push origin main` (env-var prefix before `git`)
+  - Nested shells — `bash -c 'git push origin main'`
+- **False positive**: a remote literally named `main` (e.g. `git push main HEAD:feature`) is not distinguished from the `main` *branch* and may be flagged even though no protected branch is being pushed to.
 
 ## Shared library
 
@@ -55,4 +66,4 @@ Run against both bash 5.x (Homebrew) and bash 3.2 (macOS system `/bin/bash`) —
 
 ## TODO (future version)
 
-- Generalize `git-push-guard.sh`'s hard-coded `main`/`master` to a `PROTECTED_BRANCHES` environment variable, so repos with `trunk`/`develop`-style default branches are covered.
+See "Known limitations" above and [#118](https://github.com/WooDragon/cc-plugins/issues/118) for the tracked follow-up work (evasion-vector hardening, `PROTECTED_BRANCHES` generalization).

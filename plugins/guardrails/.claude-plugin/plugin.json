@@ -1,6 +1,6 @@
 {
   "name": "guardrails",
-  "description": "Guardrail hooks — code size gate (informational) + git push protection (blocks direct push to main/master)",
+  "description": "Guardrail hooks — code size gate (informational) + git push guard (guards against accidental direct push to main/master)",
   "version": "1.0.0",
   "author": { "name": "WooDragon" }
 }

@@ -1,5 +1,5 @@
 {
-  "description": "Guardrails: code-size informational gate (PostToolUse) + git-push protection (PreToolUse)",
+  "description": "Guardrails: code-size informational gate (PostToolUse) + git-push guard against accidental push to main/master (PreToolUse)",
   "hooks": {
     "PostToolUse": [
       {

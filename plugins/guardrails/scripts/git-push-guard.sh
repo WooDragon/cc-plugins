@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# PreToolUse hook (Bash): block git push to main/master branches.
+# PreToolUse hook (Bash): guards against accidental direct push to
+# main/master branches (a slip-catcher, not a hard security boundary —
+# see README "Known limitations" for evasion vectors this does not cover).
 #
 # Fail-open: parse errors, missing fields, or ambiguous commands pass through.
 # Temporary bypass: export ALLOW_PUSH_MAIN=1
@@ -22,7 +24,7 @@ COMMAND=$(_gate_field "$INPUT" '.tool_input.command // empty') || exit 0
 [ -z "$COMMAND" ] && exit 0
 [[ "$COMMAND" != *"push"* ]] && exit 0
 
-# Split compound command into sub-statements on &&, ||, ;, |, newline
+# Split compound command into sub-statements on &&, ||, ;, newline
 # then check each for git push to main/master
 check_push_target() {
   local stmt="$1"
@@ -32,26 +34,39 @@ check_push_target() {
 
   # Must contain "git" in command position followed (eventually) by "push"
   # Allow global options between git and push: git -C path push, git -c k=v push
-  if ! grep -Eq '(^|sudo\s+)git(\s+(-[a-zA-Z][^ ]*|[^ -][^ ]*))*\s+push' <<< "$stmt"; then
+  #
+  # NOTE: [[:space:]] (not \s) throughout this function — \s is a GNU
+  # grep/sed extension. macOS ships BSD grep/sed as /usr/bin/{grep,sed},
+  # which do NOT support \s: it silently fails to match as a metachar,
+  # degrading the sed extraction below to a no-op (push_args ends up as
+  # the whole original statement instead of just the push arguments).
+  if ! grep -Eq '(^|sudo[[:space:]]+)git([[:space:]]+(-[a-zA-Z][^ ]*|[^ -][^ ]*))*[[:space:]]+push' <<< "$stmt"; then
     return 1
   fi
 
   # Extract everything after "push" (the push arguments)
   local push_args
-  push_args=$(sed -E 's/^.*git(\s+(-[a-zA-Z][^ ]*|[^ -][^ ]*))*\s+push//' <<< "$stmt")
+  push_args=$(sed -E 's/^.*git([[:space:]]+(-[a-zA-Z][^ ]*|[^ -][^ ]*))*[[:space:]]+push//' <<< "$stmt")
+
+  # Strip quote characters so quoted branch names (e.g. "main", 'main')
+  # line up with the same bare word-boundary checks below.
+  push_args=$(printf '%s' "$push_args" | tr -d "\"'")
 
   # --all / --mirror → blocks all branches including main
-  if grep -Eq '(^|\s)--(all|mirror)(\s|$)' <<< "$push_args"; then
+  if grep -Eq '(^|[[:space:]])--(all|mirror)([[:space:]]|$)' <<< "$push_args"; then
     return 0
   fi
 
-  # Check for main/master as exact branch name or in refspec
-  # Word-boundary: preceded by space/start, followed by space/end/colon
+  # Check for main/master as exact branch name (optionally prefixed with
+  # the force-push shorthand "+" and/or the full "refs/heads/" ref path)
+  # or as a colon-refspec destination.
+  # Word-boundary: preceded by space/start(/plus), followed by space/end
+  # Bare/prefixed: main, +main, refs/heads/main, +refs/heads/main
   # Refspec: :main, :refs/heads/main, :master, :refs/heads/master
-  if grep -Eq '(^|\s)(main|master)(\s|$)' <<< "$push_args"; then
+  if grep -Eq '(^|[[:space:]])\+?(refs/heads/)?(main|master)([[:space:]]|$)' <<< "$push_args"; then
     return 0
   fi
-  if grep -Eq ':(refs/heads/)?(main|master)(\s|$)' <<< "$push_args"; then
+  if grep -Eq ':(refs/heads/)?(main|master)([[:space:]]|$)' <<< "$push_args"; then
     return 0
   fi
 
