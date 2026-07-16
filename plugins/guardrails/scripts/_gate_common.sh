@@ -60,7 +60,7 @@ _gate_instruction_files() {
 # U+200E-U+200F/U+202A-U+202E/U+2066-U+2069；tag 字符 U+E0000-U+E007F；
 # 以及 U+FEFF）。首行行首的合法 BOM 会被剥离后再扫描该行（不是整行跳过）。
 # 单文件命中数达 MAX_HITS（默认 10，同名环境变量可覆盖）即停止扫描，并追加
-# 反盲化强提示，防止用合法 emoji 占满配额来掩护后续真 payload。
+# 反盲化强提示，防止用大量隐藏码点占满配额来掩护后续真 payload。
 _gate_scan_hidden() {
   local file="$1"
   [ -n "$file" ] && [ -f "$file" ] || return 0

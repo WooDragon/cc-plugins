@@ -3,8 +3,8 @@
 #
 # Covers: out-of-scope commands (non-git, git-without-import-keyword),
 # import-triggered scanning (clone/pull/gh-repo-clone/submodule/worktree/
-# am/apply), hidden-char alert vs. plain change-notification wording, kill
-# switch, and fail-open paths.
+# am/apply), hidden-char alert emitted only on a hit (silent otherwise), the
+# `" am"` tightening vs. blame/--amend, kill switch, and fail-open paths.
 
 bats_require_minimum_version 1.5.0
 
