@@ -44,14 +44,14 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-# ============================================================
-# NOT excluded (return 1) — deliverables stays governed
-# ============================================================
-
-@test "not excluded: deliverables/final/report.md (final deliverable, governed)" {
+@test "excluded: deliverables/final/report.md (ADR-010 conflict, own quality system)" {
   run doc_gate_is_excluded_path "/project/deliverables/final/report.md"
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 0 ]
 }
+
+# ============================================================
+# NOT excluded (return 1)
+# ============================================================
 
 @test "not excluded: docs/guide.md" {
   run doc_gate_is_excluded_path "/project/docs/guide.md"

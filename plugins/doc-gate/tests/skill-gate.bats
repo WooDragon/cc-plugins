@@ -189,10 +189,10 @@ teardown() {
   [ -z "$HOOK_STDOUT" ]
 }
 
-@test "gate: deliverables/final/report.md without marker → deny (final deliverable, governed)" {
+@test "path exclude: deliverables/final/report.md → silent allow (ADR-010 conflict, own quality system)" {
   INPUT=$(build_edit_input file_path=/project/deliverables/final/report.md)
   run_gate
-  assert_deny_json
+  assert_allowed
 }
 
 @test "path exclude: logs/run.md → silent allow (drift regression)" {
