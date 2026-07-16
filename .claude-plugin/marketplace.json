@@ -59,6 +59,17 @@
       "source": "./plugins/deep-research",
       "category": "research",
       "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "guardrails",
+      "description": "Guardrail hooks — code size gate (informational) + git push protection (blocks direct push to main/master)",
+      "version": "1.0.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/guardrails",
+      "category": "development",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
     }
   ]
 }

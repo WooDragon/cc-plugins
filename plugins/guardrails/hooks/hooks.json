@@ -1,0 +1,29 @@
+{
+  "description": "Guardrails: code-size informational gate (PostToolUse) + git-push protection (PreToolUse)",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/code-size.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/git-push-guard.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
