@@ -15,6 +15,8 @@ description: |
 
 在文档写入前强制预检、写入后强制自查，防止层位违规和索引腐烂。
 
+平台兼容性：在 Claude Code 中，doc-gate 插件 hook 会自动执行 skill-gate/recall-gate；在 opencode 中，除非另行安装 opencode adapter，本 skill 只提供人工遵循的文档维护流程，不承诺自动门禁。
+
 ## 1. 操作类型判定
 
 | 类型 | 判定信号 |

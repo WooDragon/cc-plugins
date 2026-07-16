@@ -67,6 +67,46 @@ teardown() {
   [ "$status" -eq 0 ]
 }
 
+# --- prefix/long-option forms must still PASS on feature branches (no FP after hardening) ---
+
+@test "pass: git --no-pager push origin feature-x (long option, feature branch)" {
+  run_push_guard "$(mk_payload 'git --no-pager push origin feature-x')"
+  [ "$status" -eq 0 ]
+}
+
+@test "pass: env git push origin feature-x (env prefix, feature branch)" {
+  run_push_guard "$(mk_payload 'env git push origin feature-x')"
+  [ "$status" -eq 0 ]
+}
+
+@test "pass: sudo -E git push origin feature-x (sudo+flag prefix, feature branch)" {
+  run_push_guard "$(mk_payload 'sudo -E git push origin feature-x')"
+  [ "$status" -eq 0 ]
+}
+
+@test "pass: /usr/bin/git push origin feature-x (full path, feature branch)" {
+  run_push_guard "$(mk_payload '/usr/bin/git push origin feature-x')"
+  [ "$status" -eq 0 ]
+}
+
+@test "pass: GIT_DIR=.git git push origin feature-x (env-var prefix, feature branch)" {
+  run_push_guard "$(mk_payload 'GIT_DIR=.git git push origin feature-x')"
+  [ "$status" -eq 0 ]
+}
+
+# --- git must be in COMMAND position: the literal "git push ... main" as an
+#     argument to another command must NOT be flagged (anchor regression) ---
+
+@test "pass: echo git push origin main (git is an echo argument, not a command)" {
+  run_push_guard "$(mk_payload 'echo git push origin main')"
+  [ "$status" -eq 0 ]
+}
+
+@test "pass: grep \"git push origin main\" README.md (literal string search)" {
+  run_push_guard "$(mk_payload 'grep "git push origin main" README.md')"
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # BLOCK cases
 # ============================================================
@@ -187,6 +227,73 @@ teardown() {
 
 @test "block: git push origin 'main' (single-quoted branch name)" {
   run_push_guard "$(mk_payload "git push origin 'main'")"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+# ============================================================
+# BLOCK cases — long options, prefixes, full path (#118 hardening)
+# ============================================================
+
+@test "block: git --no-pager push origin main (long option, real bug)" {
+  run_push_guard "$(mk_payload 'git --no-pager push origin main')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "block: git --git-dir=.git push origin main (long option with =value)" {
+  run_push_guard "$(mk_payload 'git --git-dir=.git push origin main')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "block: sudo -E git push origin main (sudo with flag)" {
+  run_push_guard "$(mk_payload 'sudo -E git push origin main')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "block: env git push origin main (env prefix)" {
+  run_push_guard "$(mk_payload 'env git push origin main')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "block: GIT_DIR=.git git push origin main (env-var assignment prefix)" {
+  run_push_guard "$(mk_payload 'GIT_DIR=.git git push origin main')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "block: /usr/bin/git push origin main (full binary path)" {
+  run_push_guard "$(mk_payload '/usr/bin/git push origin main')"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+# ============================================================
+# PROTECTED_BRANCHES generalization (#118)
+# ============================================================
+
+@test "block: PROTECTED_BRANCHES=trunk — git push origin trunk" {
+  run_push_guard "$(mk_payload 'git push origin trunk')" PROTECTED_BRANCHES=trunk
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "block: PROTECTED_BRANCHES='trunk develop' — git push origin develop" {
+  run_push_guard "$(mk_payload 'git push origin develop')" "PROTECTED_BRANCHES=trunk develop"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"git-push-guard"* ]]
+}
+
+@test "pass: PROTECTED_BRANCHES=trunk — git push origin main (main no longer protected)" {
+  run_push_guard "$(mk_payload 'git push origin main')" PROTECTED_BRANCHES=trunk
+  [ "$status" -eq 0 ]
+}
+
+@test "block: default PROTECTED_BRANCHES still protects main when unset" {
+  run_push_guard "$(mk_payload 'git push origin main')"
   [ "$status" -eq 2 ]
   [[ "$stderr" == *"git-push-guard"* ]]
 }

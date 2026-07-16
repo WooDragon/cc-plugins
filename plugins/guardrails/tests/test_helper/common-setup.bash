@@ -25,6 +25,10 @@ common_setup() {
   mkdir -p "$SRC_DIR"
 
   unset ALLOW_PUSH_MAIN
+  # Prevent a PROTECTED_BRANCHES exported in the parent env from polluting the
+  # default-protection cases (git-push-guard defaults to "main master" only
+  # when unset). Tests that need a custom list pass it explicitly via env.
+  unset PROTECTED_BRANCHES
 }
 
 common_teardown() {

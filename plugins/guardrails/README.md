@@ -33,22 +33,25 @@ Environment variables:
 
 ### git-push-guard.sh — `PreToolUse: Bash` (5s timeout)
 
-Guards against `git push` (and compound commands containing one, split on `&&`, `||`, `;`, newline) that target `main` or `master` — exact branch name (bare, `+`-prefixed force shorthand, or full `refs/heads/` path), refspec (`:main`, `:refs/heads/main`), or `--all`/`--mirror`. On a hit: `exit 2` + explanatory `stderr`, blocking that tool call. All other cases (parse ambiguity, missing fields, non-matching branch) fail open with `exit 0`.
+Guards against `git push` (and compound commands containing one, split on `&&`, `||`, `;`, newline) that target a protected branch — exact branch name (bare, `+`-prefixed force shorthand, or full `refs/heads/` path), refspec (`:main`, `:refs/heads/main`), or `--all`/`--mirror`. On a hit: `exit 2` + explanatory `stderr`, blocking that tool call. All other cases (parse ambiguity, missing fields, non-matching branch) fail open with `exit 0`.
+
+Before matching, the command is normalized to strip leading invocation-prefix tokens — environment-variable assignments (`GIT_DIR=... git push`), `sudo`/`env` and their own flags (`sudo -E git push`, `env git push`) — so these collapse to a bare `git ... push ...` before pattern matching runs. The detection regex itself recognizes long options (`git --no-pager push`, `git --git-dir=.git push`) and an optional full/relative path prefix on the `git` binary (`/usr/bin/git push`).
 
 This is a **slip-catcher, not a security boundary** — it is pattern-matching over the literal command text, not a real shell parser, so it stops the common accidental-push shapes without attempting to be adversarially unevadable. See "Known limitations" below for what it does not cover.
 
-Bypass: `export ALLOW_PUSH_MAIN=1` (temporary, intended for genuine emergencies — not a standing override).
+Environment variables:
 
-**Known limitations (guards against slips, not against deliberate evasion).** These are known, accepted gaps — not yet implemented — tracked in [#118](https://github.com/WooDragon/cc-plugins/issues/118):
+| Var | Default | Purpose |
+|---|---|---|
+| `PROTECTED_BRANCHES` | `main master` | space-separated branch names to guard (e.g. `PROTECTED_BRANCHES="trunk develop"`) |
+| `ALLOW_PUSH_MAIN` | `0` | bypass switch (`1` allows a push to a protected branch); temporary, for genuine emergencies — not a standing override. Name retained for backward compatibility even though `PROTECTED_BRANCHES` generalized the guarded set beyond `main`. |
 
-- **Hard-coded protected branches.** Only `main`/`master` are recognized. Repos using `trunk`, `develop`, or other default-branch conventions are **not protected** — pushes to those branches pass through untouched. Planned fix: a configurable `PROTECTED_BRANCHES` env var.
-- **Alternate git invocations bypass detection entirely**, since the hook only pattern-matches the literal command string:
-  - Full binary path — `/usr/bin/git push origin main`
-  - `sudo -E git push origin main` (only bare `sudo git` is recognized)
-  - `env git push origin main`
-  - `GIT_DIR=... git push origin main` (env-var prefix before `git`)
-  - Nested shells — `bash -c 'git push origin main'`
-- **False positive**: a remote literally named `main` (e.g. `git push main HEAD:feature`) is not distinguished from the `main` *branch* and may be flagged even though no protected branch is being pushed to.
+**Known limitations (guards against slips, not against deliberate evasion).** [#118](https://github.com/WooDragon/cc-plugins/issues/118) closed the previously-tracked gaps (long options, `sudo -E`, `env`, `GIT_DIR=` prefix, full binary path, hard-coded `main`/`master`) — the remaining items below are accepted, still-open gaps:
+
+- **Nested shells bypass detection entirely** — `bash -c 'git push origin main'`, `(git push origin main)` — since the hook only pattern-matches the literal command string, not commands executed inside a spawned sub-shell.
+- **Only `sudo`/`env`/`VAR=val` invocation prefixes are normalized.** Other command wrappers pass through undetected — `time git push origin main`, `command git push ...`, `nice git push ...`, and `sudo -u user git push ...` (a non-flag argument like a username after `sudo` also breaks normalization). Recognizing every wrapper is an arms race a slip-catcher does not chase.
+- **False positive**: a remote literally named `main` (e.g. `git push main HEAD:feature`) is not distinguished from the `main` *branch* and may be flagged even though no protected branch is being pushed to. Use `ALLOW_PUSH_MAIN=1` to push through this case.
+- **`PROTECTED_BRANCHES` values containing regex metacharacters** have undefined matching behavior, since the list is spliced directly into the detection regex's alternation.
 
 ## Shared library
 
@@ -66,4 +69,4 @@ Run against both bash 5.x (Homebrew) and bash 3.2 (macOS system `/bin/bash`) —
 
 ## TODO (future version)
 
-See "Known limitations" above and [#118](https://github.com/WooDragon/cc-plugins/issues/118) for the tracked follow-up work (evasion-vector hardening, `PROTECTED_BRANCHES` generalization).
+See "Known limitations" above and [#118](https://github.com/WooDragon/cc-plugins/issues/118) for the remaining tracked follow-up work (nested-shell detection, `sudo -u user` recognition).
