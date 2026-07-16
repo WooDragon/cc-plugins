@@ -15,8 +15,8 @@
 | `deliverable-matrix.md` | 报告交付物矩阵 | Lead 在 Delivery Stage 参照，确定最终输出结构 |
 | `deliverables-index.md.tmpl` | 交付物权威关系索引模板 | 多文档 deliverables 必备，声明 PRIMARY/CURRENT/HISTORICAL（见 principles.md 原则 5） |
 | `landing-feedback.md.tmpl` | Stage 8 Landing 回填模板（⚠ experimental） | Lead 在 Stage 8 落地实测后回写，五段结构（落地概览 / 四分类 Delta 表 / delta 分述 / 方法论边界声明 / 权威指针+补轨登记）。待 #11 字面复制验证后转 stable |
-| `report-shell.html.tmpl` | report.html house style 模板（暗色/亮色双主题、零 JS、自包含） | research-publisher agent 渲染 report.md 为 HTML 时填充占位符 |
-| `report-html-guide.md` | HTML 渲染设计规范（组件词汇表、内容→组件映射规则、渲染铁律） | research-publisher agent 渲染时参照，判断内容如何映射到 house style 组件 |
+| `report-shell.html.tmpl` | report.html house style 模板（暗色/亮色双主题、零 JS、自包含） | 插件内置确定性渲染器 `scripts/render.py` 渲染 report.md 为 HTML 时填充占位符（不再由 agent 现场生成） |
+| `report-html-guide.md` | HTML 渲染注释词汇表（`<!-- ds:xxx -->` 指令与组件类对应、内容→组件映射建议） | research-analyst / research-publisher 标注 report.md 时参照，判断内容该配哪个 ds: 指令 |
 
 ## 关联
 
