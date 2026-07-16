@@ -49,6 +49,16 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "excluded: deliverables via relative path (projects/x/deliverables/final/report.md)" {
+  run doc_gate_is_excluded_path "projects/x/deliverables/final/report.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "excluded: deliverables nested arbitrarily deep (a/b/c/deliverables/drafts/v2/report.md)" {
+  run doc_gate_is_excluded_path "/project/a/b/c/deliverables/drafts/v2/report.md"
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # NOT excluded (return 1)
 # ============================================================
