@@ -1,10 +1,13 @@
 #!/bin/bash
 # Test infrastructure for guardrails plugin BDD tests (code-size.bats +
-# git-push-guard.bats). Pattern mirrors cc-plugins doc-gate test_helper
-# (mock/assert/setup-teardown style).
+# git-push-guard.bats + instruction-scan.bats + git-import-scan.bats).
+# Pattern mirrors cc-plugins doc-gate test_helper (mock/assert/setup-teardown
+# style).
 
 HOOK_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/code-size.sh"
 GIT_PUSH_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/git-push-guard.sh"
+INSTR_SCAN_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/instruction-scan.sh"
+GIT_IMPORT_SCAN_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/git-import-scan.sh"
 
 # --- Setup / Teardown ---
 
@@ -29,6 +32,15 @@ common_setup() {
   # default-protection cases (git-push-guard defaults to "main master" only
   # when unset). Tests that need a custom list pass it explicitly via env.
   unset PROTECTED_BRANCHES
+
+  # instruction-scan.sh / git-import-scan.sh fixtures live under a dedicated
+  # WORKROOT so _gate_instruction_files' maxdepth-6 recursive find has a
+  # realistic tree to walk, separate from SRC_DIR (code-size's scratch dir).
+  unset INSTRUCTION_SCAN_DISABLED
+  unset GIT_IMPORT_SCAN_DISABLED
+  unset MAX_HITS
+  WORKROOT="${TEST_TEMP_DIR}/work"
+  mkdir -p "$WORKROOT"
 }
 
 common_teardown() {
@@ -244,4 +256,240 @@ run_push_guard() {
   else
     run --separate-stderr "$runner" "$GIT_PUSH_SCRIPT" <<< "$payload"
   fi
+}
+
+# --- Fixture Generation (instruction-scan / git-import-scan) ---
+
+# hidden_char <codepoint_hex> — emit the real UTF-8 bytes for a Unicode
+# codepoint (given as hex, no "U+" prefix) to stdout via perl. Used to build
+# fixtures containing genuine multi-byte hidden characters (e.g. "200B" for
+# U+200B ZERO WIDTH SPACE, 3 bytes: \xe2\x80\x8b) rather than shell escapes
+# that are easy to get wrong across bash versions.
+hidden_char() {
+  perl -CO -e 'print chr(hex($ARGV[0]))' "$1"
+}
+
+# write_clean_instruction_file <path> [line_count] — plain-ASCII instruction
+# file, no hidden chars anywhere. Default 3 lines.
+write_clean_instruction_file() {
+  local path="$1"
+  local lines="${2:-3}"
+  : > "$path"
+  local i=1
+  while [ "$i" -le "$lines" ]; do
+    printf '# instruction line %d\n' "$i" >> "$path"
+    i=$((i + 1))
+  done
+}
+
+# write_hidden_char_file <path> <codepoint_hex> [prefix_text] — writes a file
+# whose first line is "<prefix_text><hidden char>trailing" so the hit lands
+# on line 1. prefix_text defaults to "hello".
+write_hidden_char_file() {
+  local path="$1"
+  local cp="$2"
+  local prefix="${3:-hello}"
+  {
+    printf '%s' "$prefix"
+    hidden_char "$cp"
+    printf 'world\n'
+    printf 'second line, clean\n'
+  } > "$path"
+}
+
+# write_bom_prefixed_clean_file <path> — legitimate BOM (U+FEFF) at the very
+# start of line 1, followed by ordinary clean text. _gate_scan_hidden strips
+# a line-1-leading BOM before scanning, so this must NOT be flagged.
+write_bom_prefixed_clean_file() {
+  local path="$1"
+  {
+    hidden_char FEFF
+    printf 'clean first line\n'
+    printf 'clean second line\n'
+  } > "$path"
+}
+
+# write_bom_then_payload_file <path> <payload_codepoint_hex> — legitimate BOM
+# at line-1 start, immediately followed by a hidden payload char on the same
+# line. Verifies the BOM-strip is a substring strip, not a whole-line skip —
+# the payload right after the BOM must still be caught.
+write_bom_then_payload_file() {
+  local path="$1"
+  local cp="$2"
+  {
+    hidden_char FEFF
+    hidden_char "$cp"
+    printf 'rest of line\n'
+  } > "$path"
+}
+
+# write_many_hidden_chars_file <path> <count> <codepoint_hex> — one hidden
+# char per line, <count> lines, to drive past MAX_HITS (default 10) and
+# exercise the truncation + anti-desensitization warning.
+write_many_hidden_chars_file() {
+  local path="$1"
+  local count="$2"
+  local cp="$3"
+  : > "$path"
+  local i=1
+  while [ "$i" -le "$count" ]; do
+    { hidden_char "$cp"; printf 'line %d\n' "$i"; } >> "$path"
+    i=$((i + 1))
+  done
+}
+
+# --- Input Construction (instruction-scan) ---
+
+# build_session_start_input cwd=X [session_id=Y] — SessionStart hook payload
+build_session_start_input() {
+  local cwd=""
+  local session_id="test-session"
+  for arg in "$@"; do
+    local key="${arg%%=*}"
+    local val="${arg#*=}"
+    case "$key" in
+      cwd)        cwd="$val" ;;
+      session_id) session_id="$val" ;;
+    esac
+  done
+  jq -n --arg cwd "$cwd" --arg sid "$session_id" \
+    '{hook_event_name: "SessionStart", session_id: $sid, cwd: $cwd}'
+}
+
+# --- Run Helpers (instruction-scan) ---
+
+# run_instruction_scan — invokes instruction-scan.sh with $INPUT on stdin,
+# respecting $BATS_RUN_BASH. Sets HOOK_STDOUT/HOOK_STDERR/HOOK_EXIT (same
+# convention as run_gate, reused by assert_alert_contains-style helpers).
+run_instruction_scan() {
+  local input="${INPUT:-$(build_session_start_input cwd=/nonexistent)}"
+  local runner="${BATS_RUN_BASH:-bash}"
+  HOOK_STDOUT="" HOOK_STDERR="" HOOK_EXIT=0
+  local stderr_file
+  stderr_file=$(mktemp)
+  HOOK_STDOUT=$("$runner" "$INSTR_SCAN_SCRIPT" <<< "$input" 2>"$stderr_file") || HOOK_EXIT=$?
+  HOOK_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# run_instruction_scan_raw_stdin <literal_input>
+run_instruction_scan_raw_stdin() {
+  local raw_input="$1"
+  local runner="${BATS_RUN_BASH:-bash}"
+  HOOK_STDOUT="" HOOK_STDERR="" HOOK_EXIT=0
+  local stderr_file
+  stderr_file=$(mktemp)
+  HOOK_STDOUT=$(printf '%s' "$raw_input" | "$runner" "$INSTR_SCAN_SCRIPT" 2>"$stderr_file") || HOOK_EXIT=$?
+  HOOK_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# assert_session_start_alert_contains <pattern> — exit 0, valid JSON,
+# hookEventName=SessionStart, additionalContext contains pattern.
+assert_session_start_alert_contains() {
+  local pattern="$1"
+  [ "$HOOK_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $HOOK_EXIT"
+    echo "stderr: $HOOK_STDERR"
+    return 1
+  }
+  echo "$HOOK_STDOUT" | jq . >/dev/null 2>&1 || {
+    echo "stdout is not valid JSON: $HOOK_STDOUT"
+    return 1
+  }
+  local event_name
+  event_name=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.hookEventName')
+  [ "$event_name" = "SessionStart" ] || {
+    echo "Expected hookSpecificOutput.hookEventName=SessionStart, got: '$event_name'"
+    return 1
+  }
+  local ctx
+  ctx=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.additionalContext')
+  case "$ctx" in
+    *"$pattern"*) ;;
+    *)
+      echo "Pattern '$pattern' not found in additionalContext: $ctx"
+      return 1
+      ;;
+  esac
+}
+
+# --- Input Construction (git-import-scan) ---
+
+# build_post_bash_input command=X cwd=Y [session_id=Z] — PostToolUse:Bash
+# hook payload.
+build_post_bash_input() {
+  local command=""
+  local cwd=""
+  local session_id="test-session"
+  for arg in "$@"; do
+    local key="${arg%%=*}"
+    local val="${arg#*=}"
+    case "$key" in
+      command)    command="$val" ;;
+      cwd)        cwd="$val" ;;
+      session_id) session_id="$val" ;;
+    esac
+  done
+  jq -n --arg cmd "$command" --arg cwd "$cwd" --arg sid "$session_id" \
+    '{hook_event_name: "PostToolUse", tool_name: "Bash", session_id: $sid, cwd: $cwd, tool_input: {command: $cmd}}'
+}
+
+# --- Run Helpers (git-import-scan) ---
+
+# run_git_import_scan — invokes git-import-scan.sh with $INPUT on stdin.
+run_git_import_scan() {
+  local input="${INPUT:-$(build_post_bash_input command="npm install" cwd=/nonexistent)}"
+  local runner="${BATS_RUN_BASH:-bash}"
+  HOOK_STDOUT="" HOOK_STDERR="" HOOK_EXIT=0
+  local stderr_file
+  stderr_file=$(mktemp)
+  HOOK_STDOUT=$("$runner" "$GIT_IMPORT_SCAN_SCRIPT" <<< "$input" 2>"$stderr_file") || HOOK_EXIT=$?
+  HOOK_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# run_git_import_scan_raw_stdin <literal_input>
+run_git_import_scan_raw_stdin() {
+  local raw_input="$1"
+  local runner="${BATS_RUN_BASH:-bash}"
+  HOOK_STDOUT="" HOOK_STDERR="" HOOK_EXIT=0
+  local stderr_file
+  stderr_file=$(mktemp)
+  HOOK_STDOUT=$(printf '%s' "$raw_input" | "$runner" "$GIT_IMPORT_SCAN_SCRIPT" 2>"$stderr_file") || HOOK_EXIT=$?
+  HOOK_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# assert_post_tooluse_alert_contains <pattern> — exit 0, valid JSON,
+# hookEventName=PostToolUse, additionalContext contains pattern. Distinct
+# name from code-size's assert_alert_contains even though the shape is
+# identical, so a future divergence (e.g. different event name) doesn't
+# silently cross-contaminate both hooks' test suites.
+assert_post_tooluse_alert_contains() {
+  local pattern="$1"
+  [ "$HOOK_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $HOOK_EXIT"
+    echo "stderr: $HOOK_STDERR"
+    return 1
+  }
+  echo "$HOOK_STDOUT" | jq . >/dev/null 2>&1 || {
+    echo "stdout is not valid JSON: $HOOK_STDOUT"
+    return 1
+  }
+  local event_name
+  event_name=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.hookEventName')
+  [ "$event_name" = "PostToolUse" ] || {
+    echo "Expected hookSpecificOutput.hookEventName=PostToolUse, got: '$event_name'"
+    return 1
+  }
+  local ctx
+  ctx=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.additionalContext')
+  case "$ctx" in
+    *"$pattern"*) ;;
+    *)
+      echo "Pattern '$pattern' not found in additionalContext: $ctx"
+      return 1
+      ;;
+  esac
 }
