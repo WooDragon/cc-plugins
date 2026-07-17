@@ -74,7 +74,7 @@ publisher 每轮都要在 scratchpad 现写一个 HTML 生成脚本，四轮评�
   可写的内容是 ds: 注释行本身
 - **禁止**现场生成任何 HTML 片段或完整 report.html——这正是本次职责收缩要
   消灭的模式
-- **禁止**发明词汇表之外的 ds: 指令——`report.py`/`render.py` 对未知指令
+- **禁止**发明词汇表之外的 ds: 指令——`render.py` 对未知指令
   fail-loud 报错，不是 publisher 该做的临场发挥
 
 ---

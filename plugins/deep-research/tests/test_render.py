@@ -8,6 +8,8 @@ subprocess through the CLI, the same way a real Stage 7 delivery-gate
 invocation would run it.
 """
 
+import html
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import render  # noqa: E402
-from render_common import RenderError  # noqa: E402
+from render_common import RenderError, join_lines_prose  # noqa: E402
 from render_inline import inline_convert  # noqa: E402
 from _sanitize import sanitize_text  # noqa: E402
 
@@ -83,6 +85,73 @@ box -> box
 
 已归档内容说明。
 """
+
+
+# ============================================================================
+# Differential conservation helpers (TestConservationDifferential) --
+# deliberately independent of render.py's own tokenizer / render_inline.py's
+# href-purity logic, so a real second implementation is what's being
+# cross-checked against, not the same code path run twice.
+# ============================================================================
+
+# Fullwidth/CJK punctuation blocks a bare URL match should stop at (General
+# Punctuation U+3000-303F, Halfwidth/Fullwidth Forms U+FF00-FFEF) -- a
+# deny-list, the mirror-image approach of render_inline.py's CJK-ideograph
+# allow-list, but landing on the same practical truncation point.
+_NAIVE_BARE_URL_RE = re.compile(r"https?://[^\s　-〿＀-￯]+")
+_NAIVE_BRACKET_LINK_RE = re.compile(r"\]\(([^)]+)\)")
+_NAIVE_TRAILING_PUNCT_RE = re.compile(r"""[.,;:'")\]}>]+$""")
+
+
+def _naive_headings(md_text: str, level: int):
+    """Independent heading-text extractor: a plain per-line regex, not
+    render.py's stateful tokenizer. `level` is 2 or 3 (## / ###); the
+    negative lookahead keeps a level-2 match from also matching a
+    level-3 line."""
+    prefix = "#" * level
+    pattern = re.compile(r"^" + re.escape(prefix) + r"(?!#)\s+(.*?)\s*$")
+    out = []
+    for line in md_text.split("\n"):
+        m = pattern.match(line.strip())
+        if m:
+            out.append(m.group(1).strip())
+    return out
+
+
+def _naive_link_urls(md_text: str):
+    """Independent link-URL extractor: naive non-balanced bracket-link
+    capture plus a deny-list bare-URL regex, each independently stripped
+    of trailing ASCII punctuation -- not render_inline.py's balanced-paren
+    scan / CJK allow-list / paren-balance-aware trailing-punct stripper.
+    Returns a set (this is a set-membership differential check, not a
+    count)."""
+    urls = set()
+    for m in _NAIVE_BRACKET_LINK_RE.finditer(md_text):
+        urls.add(_NAIVE_TRAILING_PUNCT_RE.sub("", m.group(1).strip()))
+    for m in _NAIVE_BARE_URL_RE.finditer(md_text):
+        urls.add(_NAIVE_TRAILING_PUNCT_RE.sub("", m.group(0)))
+    return urls
+
+
+_BADGE_SPAN_RE = re.compile(r'\s*<span class="tag[^"]*">.*?</span>')
+_ANY_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _html_heading_texts(html_out: str, tag: str):
+    """Extract the visible text of every `<h{tag}>...</h{tag}>` in the
+    rendered output, with the credibility-badge span (if any) removed
+    first -- that span's own text is not part of the markdown heading and
+    must not be compared as if it were."""
+    out = []
+    for m in re.finditer(rf"<{tag}[^>]*>(.*?)</{tag}>", html_out, re.DOTALL):
+        inner = _BADGE_SPAN_RE.sub("", m.group(1))
+        inner = _ANY_TAG_RE.sub("", inner)
+        out.append(html.unescape(inner).strip())
+    return out
+
+
+def _html_hrefs(html_out: str):
+    return {html.unescape(m) for m in re.findall(r'href="([^"]*)"', html_out)}
 
 
 class TestSanitize(unittest.TestCase):
@@ -154,6 +223,112 @@ class TestHrefPurity(unittest.TestCase):
         # second <a> inside the outer one.
         out = inline_convert("[https://inner.example](https://outer.example)")
         self.assertEqual(out.count("<a "), 1)
+
+
+class TestHrefSchemeAllowlist(unittest.TestCase):
+    """Non-allow-listed URL schemes downgrade to plain text (label
+    survives, href discarded) instead of failing the whole render -- a
+    poisoned link from harvested source material shouldn't take the
+    report down, but it also must never reach an href."""
+
+    def test_javascript_scheme_downgrades_to_plain_text(self):
+        out = inline_convert("[click me](javascript:alert(1))")
+        self.assertNotIn("<a ", out)
+        self.assertNotIn("javascript:", out)
+        self.assertEqual(out, "click me")
+
+    def test_data_scheme_downgrades_to_plain_text(self):
+        out = inline_convert('[img](data:text/html,<script>alert(1)</script>)')
+        self.assertNotIn("<a ", out)
+        self.assertNotIn("data:", out)
+
+    def test_vbscript_scheme_downgrades_to_plain_text(self):
+        out = inline_convert("[x](vbscript:msgbox(1))")
+        self.assertNotIn("<a ", out)
+
+    def test_file_scheme_downgrades_to_plain_text(self):
+        out = inline_convert("[local](file:///etc/passwd)")
+        self.assertNotIn("<a ", out)
+        self.assertNotIn("file:", out)
+
+    def test_scheme_check_is_case_insensitive(self):
+        out = inline_convert("[x](JavaScript:alert(1))")
+        self.assertNotIn("<a ", out)
+
+    def test_http_https_mailto_remain_links(self):
+        self.assertIn("<a ", inline_convert("[a](http://example.com)"))
+        self.assertIn("<a ", inline_convert("[a](https://example.com)"))
+        self.assertIn("<a ", inline_convert("[a](mailto:test@example.com)"))
+
+    def test_relative_path_has_no_scheme_and_stays_a_link(self):
+        out = inline_convert("[rel](/a/b/c)")
+        self.assertIn('href="/a/b/c"', out)
+
+    def test_anchor_link_has_no_scheme_and_stays_a_link(self):
+        out = inline_convert("[jump](#section-1)")
+        self.assertIn('href="#section-1"', out)
+
+    def test_protocol_relative_url_has_no_scheme_and_stays_a_link(self):
+        out = inline_convert("[cdn](//cdn.example.com/x.js)")
+        self.assertIn('href="//cdn.example.com/x.js"', out)
+
+    def test_zero_width_spliced_scheme_still_caught(self):
+        # sanitize_text() strips zero-width characters *before* the scheme
+        # check runs, so "java<ZWSP>script:" can't dodge the allow-list by
+        # smuggling an invisible character into the scheme token.
+        out = inline_convert("[x](java​script:alert(1))")
+        self.assertNotIn("<a ", out)
+
+
+class TestGfmLinkTitleUnsupported(unittest.TestCase):
+    def test_double_quoted_title_fails_loud(self):
+        with self.assertRaises(RenderError):
+            inline_convert('[text](https://example.com "a title")')
+
+    def test_single_quoted_title_fails_loud(self):
+        with self.assertRaises(RenderError):
+            inline_convert("[text](https://example.com 'a title')")
+
+
+class TestPhysicalLineJoin(unittest.TestCase):
+    """_join_pairwise's boundary rule: a space is inserted at every
+    physical-line-join boundary except a CJK-ideograph <-> CJK-ideograph
+    one (correct Chinese typography has no inter-word spaces)."""
+
+    def test_bold_lead_plus_continuation_gets_a_space(self):
+        self.assertEqual(join_lines_prose(["**结论**", "可行，理由如下"]), "**结论** 可行，理由如下")
+
+    def test_sentence_final_ascii_period_plus_continuation_gets_a_space(self):
+        self.assertEqual(join_lines_prose(["Done.", "Next sentence."]), "Done. Next sentence.")
+
+    def test_sentence_final_fullwidth_period_plus_continuation_gets_a_space(self):
+        self.assertEqual(join_lines_prose(["第一句话结束。", "第二句延续"]), "第一句话结束。 第二句延续")
+
+    def test_cjk_to_cjk_boundary_gets_no_space(self):
+        self.assertEqual(join_lines_prose(["纯中文", "续行也是中文"]), "纯中文续行也是中文")
+
+    def test_ascii_alnum_boundary_still_gets_a_space(self):
+        self.assertEqual(join_lines_prose(["wrapped English", "continues here"]), "wrapped English continues here")
+
+    def test_list_item_wrap_with_bold_lead_continuation(self):
+        md = "# Title\n\n## Section\n\n- **要点**\n  续行内容\n"
+        out = render_html(md)
+        self.assertIn("<strong>要点</strong> 续行内容", out)
+
+
+class TestHorizontalRuleIgnored(unittest.TestCase):
+    def test_bare_dashes_line_produces_no_output_and_no_error(self):
+        md = "# Title\n\n## Section\n\nBefore.\n\n---\n\nAfter.\n"
+        out = render_html(md)
+        section = re.search(r"<section\b.*?</section>", out, re.DOTALL).group(0)
+        # The two paragraphs must be adjacent siblings -- no <hr>, and no
+        # stray "---" text node, sitting in the seam between them (the CSS
+        # in the surrounding template legitimately contains "---" as a
+        # comment-banner decoration, so the check is scoped to the section
+        # body, not the whole document).
+        self.assertIn("<p>Before.</p><p>After.</p>", section)
+        self.assertNotIn("<hr", section)
+        self.assertNotIn("---", section)
 
 
 class TestConservation(unittest.TestCase):
@@ -323,6 +498,23 @@ class TestFailLoud(unittest.TestCase):
         with self.assertRaises(RenderError):
             render_html(md)
 
+    def test_nested_unordered_list_rejected(self):
+        md = "# Title\n\n## Section\n\n- item one\n  - nested sub item\n- item two\n"
+        with self.assertRaises(RenderError):
+            render_html(md)
+
+    def test_nested_ordered_list_under_unordered_rejected(self):
+        md = "# Title\n\n## Section\n\n- item one\n  1. nested ordered item\n- item two\n"
+        with self.assertRaises(RenderError):
+            render_html(md)
+
+    def test_flat_list_with_unindented_next_item_is_not_nested(self):
+        # A non-indented "-" line is a legitimate next flat item, not a
+        # nested sub-list -- indentation is the only signal that
+        # distinguishes the two, so this must NOT raise.
+        md = "# Title\n\n## Section\n\n- item one\n- item two\n"
+        render_html(md)
+
 
 class TestCli(unittest.TestCase):
     def test_cli_writes_report_html_and_exits_zero(self):
@@ -348,6 +540,46 @@ class TestCli(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1)
             self.assertIn("error:", result.stderr)
+
+
+class TestConservationDifferential(unittest.TestCase):
+    """Cross-checks render.py's rendered output against a *second,
+    independently-written* extraction of headings and link URLs from the
+    raw markdown (see the helpers above) -- full-set equality, not a count
+    and not a spot-check. This is the differential-conservation guard
+    called for in cc-plugins#125 review follow-up: it does not reimplement
+    or gate on any runtime re-render/verify step (that mechanism was
+    retired -- see 3c63387/#125 history), it only adds this test-side
+    cross-check. Run once against the in-repo controlled fixture, once
+    against a real delivered report.md (read-only; its rendered output is
+    written under /private/tmp, never back into the research repo)."""
+
+    def _assert_conserved(self, md_text, html_out):
+        self.assertEqual(
+            set(_naive_headings(md_text, 2)), set(_html_heading_texts(html_out, "h2"))
+        )
+        self.assertEqual(
+            set(_naive_headings(md_text, 3)), set(_html_heading_texts(html_out, "h3"))
+        )
+        self.assertEqual(_naive_link_urls(md_text), _html_hrefs(html_out))
+
+    def test_controlled_fixture(self):
+        self._assert_conserved(_SAMPLE_MD, render_html(_SAMPLE_MD))
+
+    def test_real_delivered_report(self):
+        report_path = Path(
+            "/Users/woodragon/Work/research/projects/"
+            "企业ai网关治理-dlp与多租户落地调研/deliverables/final/report.md"
+        )
+        if not report_path.is_file():
+            self.skipTest(f"real delivered report fixture not present: {report_path}")
+        md_text = report_path.read_text(encoding="utf-8")  # read-only
+        html_out = render_html(md_text)
+
+        out_dir = Path(tempfile.mkdtemp(prefix="dr-render-conservation-", dir="/private/tmp"))
+        (out_dir / "report.html").write_text(html_out, encoding="utf-8")
+
+        self._assert_conserved(md_text, html_out)
 
 
 if __name__ == "__main__":

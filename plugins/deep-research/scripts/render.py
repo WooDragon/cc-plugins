@@ -40,17 +40,24 @@ Document shape:
 
 Block constructs:
   - Paragraphs: consecutive non-blank plain lines. Physical line joins use
-    one rule, applied identically everywhere: if the line boundary is
-    ASCII-alnum on both sides, join with a space; otherwise concatenate
-    directly (CJK prose is not artificially spaced).
+    one rule, applied identically everywhere: a CJK-ideograph boundary on
+    both sides concatenates directly (CJK prose isn't inter-word spaced);
+    every other boundary -- ASCII-alnum, a bold-lead run-on, sentence-final
+    punctuation -- gets a space (see render_common.py's `_join_pairwise`).
   - A line starting with "→" is always its own standalone one-line
     paragraph (citation / reasoning-chain / uncertainty annotation
     convention used throughout deep-research reports) -- it never merges
     with the paragraph or list before or after it.
+  - A bare `---` line (not in frontmatter position) is a horizontal-rule
+    marker: explicitly recognized and deliberately ignored -- it never
+    starts a block or leaks into a paragraph seam.
   - Blockquotes: consecutive `>`-prefixed lines, split into paragraphs on
     bare `>` separator lines. Render as `.callout` by default.
   - Unordered lists: `- item` (only the dash marker; `*`/`+` are not part
-    of the supported subset). Ordered lists: `1. item`.
+    of the supported subset). Ordered lists: `1. item`. Flat lists only --
+    a marker line indented deeper than the list it would continue (a
+    nested/sub-list) is outside the supported subset and fails loud rather
+    than being silently flattened or split.
   - List items may wrap across multiple physical lines: any non-blank line
     that doesn't itself start a new block (heading/table/blockquote/fence/
     `→`/a new list marker) is treated as a continuation of the previous
@@ -59,7 +66,9 @@ Block constructs:
   - Fenced code blocks (``` ... ```): content preserved verbatim as plain
     text (HTML-escaped, not linkified, not syntax highlighted).
   - `**bold**`, `` `code` ``, `[text](url)`, and bare `https?://` URLs are
-    the only supported inline spans (see render_inline.py for href purity).
+    the only supported inline spans (see render_inline.py for href purity
+    and href scheme safety). GFM's `[text](url "title")` title attribute
+    is not supported and fails loud.
 
 ------------------------------------------------------------------------
 `<!-- ds:name key=value ... -->` visual annotation vocabulary
@@ -262,7 +271,7 @@ def tokenize(lines):
         cur = {"kind": kind, "lines": [first_line], "directive": pending_directive}
         pending_directive = None
 
-    for raw in lines:
+    for line_no, raw in enumerate(lines, start=1):
         stripped = raw.rstrip("\r")
 
         if in_fence:
@@ -276,6 +285,27 @@ def tokenize(lines):
             continue
 
         s = stripped.strip()
+
+        # Nested list detection: a marker line that is itself indented
+        # deeper than the list it would continue is a nested/sub list --
+        # outside the supported subset (flat lists only). Without this
+        # check it silently mis-parses: a same-marker nested item gets
+        # flattened into a sibling top-level item, a different-marker one
+        # (e.g. "1." nested under "-") silently splits into two adjacent
+        # lists. Both are worse than fail-loud. A non-indented marker line
+        # is a legitimate next flat item, not nested -- indentation is the
+        # only signal that distinguishes the two.
+        if (
+            cur is not None
+            and cur["kind"] in ("ul", "ol")
+            and stripped != stripped.lstrip()
+            and classify_block_kind(s) in ("ul", "ol")
+        ):
+            raise RenderError(
+                f"line {line_no}: nested list item {s!r} is not in the "
+                "supported subset (flat lists only) -- flatten it to a "
+                "single-level list or use a ds: component instead"
+            )
 
         if s.startswith("<!--"):
             if _DS_PREFIX_RE.match(s):
@@ -320,6 +350,9 @@ def tokenize(lines):
             continue
 
         if s == "---":
+            # Horizontal-rule marker line -- explicitly recognized and
+            # deliberately ignored (never a block, never left to fall into
+            # a paragraph seam by accident).
             flush()
             continue
 
@@ -484,7 +517,10 @@ def main(argv=None) -> int:
     try:
         tmpl_text = load_template()
         html_out = render_report(md_path.read_text(encoding="utf-8"), tmpl_text)
-    except RenderError as e:
+    except (RenderError, OSError) as e:
+        # OSError covers a missing/unreadable template or report.md (e.g. a
+        # stale/relocated plugin cache) -- without it, that case surfaces as
+        # an unhandled traceback instead of the same clean CLI error path.
         print(f"error: {e}", file=sys.stderr)
         return 1
 

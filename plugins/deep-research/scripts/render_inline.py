@@ -2,11 +2,13 @@
 """render_inline.py -- inline markdown span conversion for render.py.
 
 Split out of render.py (module-size nudge) -- see render_common.py's
-docstring for the split rationale. This module owns the one part of the
-renderer with a real correctness hazard: href purity (module docstring
-section "href purity" in render.py), i.e. never letting a full-width prose
-annotation leak into an href, and never truncating a legitimate CJK path
-out of one.
+docstring for the split rationale. This module owns the two parts of the
+renderer with a real correctness/security hazard: href purity (module
+docstring section "href purity" in render.py), i.e. never letting a
+full-width prose annotation leak into an href, and never truncating a
+legitimate CJK path out of one; and href scheme safety, i.e. never handing
+the browser a `javascript:`/`data:`/`vbscript:`/`file:` etc. URL just
+because a poisoned external source stuck one in `[text](url)`.
 
 `[text](url)` links get their URL from a balanced-paren scan (the URL is
 whatever the markdown syntax's own `(` `)` pair delimits, verbatim,
@@ -15,12 +17,39 @@ matched against an ALLOW-list character class -- URL-legal ASCII plus the
 CJK Unified Ideographs ranges -- so full-width/CJK punctuation is simply
 not a class member and a match naturally stops there, with no separate
 punctuation deny-list to keep in sync.
+
+Href scheme safety: every URL (after `_sanitize.sanitize_text()` has
+already stripped zero-width/bidi-control characters -- this must happen
+*before* the scheme check, or a zero-width character spliced into
+"java<ZWSP>script:" would slip past a naive scheme match) is checked
+against a scheme allow-list (http/https/mailto, case-insensitive). A
+scheme-less URL -- relative path, `#anchor`, or protocol-relative `//` --
+has no scheme token at all and is allowed through unchanged; only a URL
+that *has* a scheme outside the allow-list is unsafe. An unsafe scheme
+never fails the render (a poisoned link in harvested source material
+shouldn't take the whole report down) -- it's downgraded to plain text:
+the visible label survives, the href is discarded.
 """
 
 import html
 import re
 
 from _sanitize import sanitize_text
+from render_common import RenderError
+
+# Scheme allow-list for link hrefs. Case-insensitive; checked against
+# whatever token _SCHEME_RE captures (empty capture => no scheme at all,
+# e.g. a relative path, `#anchor`, or protocol-relative `//`, which is
+# always safe).
+_SAFE_SCHEMES = frozenset({"http", "https", "mailto"})
+_SCHEME_RE = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*):")
+
+
+def _has_safe_scheme(url: str) -> bool:
+    m = _SCHEME_RE.match(url)
+    if not m:
+        return True  # no scheme token -- relative/anchor/protocol-relative
+    return m.group(1).lower() in _SAFE_SCHEMES
 
 # ALLOW-list of bare-URL characters: URL-legal ASCII plus CJK Unified
 # Ideographs (Basic block 一-鿿, Extension A 㐀-䶿). Full-width/CJK
@@ -28,6 +57,13 @@ from _sanitize import sanitize_text
 _BARE_URL_CHARS = r"A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%一-鿿㐀-䶿"
 _BARE_URL_RE = re.compile(r"https?://[" + _BARE_URL_CHARS + r"]+")
 _URL_TRAILING_PUNCT = ".,;:]}>'\""
+
+# GFM's `[text](url "title")` title-attribute syntax is outside the
+# supported subset. Detected specifically so it fails loud with a precise
+# message instead of falling through to the balanced-paren scanner (which
+# stops at the whitespace before the quote and mangles the rest character
+# by character into garbled plain text).
+_LINK_TITLE_RE = re.compile(r'[^\s()]+\s+(?:"[^"]*"|\'[^\']*\')\s*\)')
 
 
 def _strip_url_trailing_punct(url: str) -> str:
@@ -73,6 +109,15 @@ def _scan_balanced_url(s: str, start: int):
 
 def _render_link(label_raw: str, url_raw: str, allow_links: bool, label_is_url: bool = False) -> str:
     url = sanitize_text(url_raw)
+    if not _has_safe_scheme(url):
+        # Non-allow-listed scheme (javascript:/data:/vbscript:/file:/...):
+        # downgrade to plain text rather than fail-loud -- a poisoned
+        # external link shouldn't take down the whole render, but it also
+        # must never reach an href. Keep whatever visible text the source
+        # had; drop the URL entirely.
+        if label_is_url or not label_raw:
+            return html.escape(url, quote=True)
+        return inline_convert(label_raw, allow_links=allow_links)
     href = html.escape(url, quote=True)
     if label_is_url or not label_raw:
         label = href
@@ -103,6 +148,13 @@ def inline_convert(text: str, allow_links: bool = True) -> str:
                     out.append(_render_link(text[i + 1:close], url, allow_links=False))
                     i = end
                     continue
+                title_m = _LINK_TITLE_RE.match(text, close + 2)
+                if title_m:
+                    raise RenderError(
+                        "GFM link title syntax `[text](url \"title\")` is not "
+                        "supported (only bare `[text](url)`): "
+                        f"{text[i:title_m.end()]!r}"
+                    )
 
         if allow_links:
             m = _BARE_URL_RE.match(text, i)

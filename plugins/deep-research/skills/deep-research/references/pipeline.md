@@ -141,7 +141,7 @@ fetch-report 必填字段：tier 分层（T1/T2/T3）、翻页统计、错误汇
 **HTML 渲染子步骤**：Delivery 定稿（report.md 等已落盘 `deliverables/final/`）后，report.md → report.html 是**确定性变换**，由插件内置的 `scripts/render.py` 执行（stdlib-only，零时间戳/零随机，同一份 report.md 渲染任意次都 byte-identical），不再由 publisher agent 现场生成 HTML（ADR：[research#47](https://github.com/WooDragon/research/issues/47) / [cc-plugins#125](https://github.com/WooDragon/cc-plugins/issues/125)）。流程分两步：
 
 1. **可选的一次性标注**：analyst（生成 report.md 时顺手标注）或 Lead 按需 spawn `deep-research:research-publisher`（现职责已收缩为「视觉注释建议者」），在 report.md 中产出/调整 `<!-- ds:xxx -->` 注释行（词汇表见 `assets/report-html-guide.md`）——这是判断活，一次性，不产生 HTML。不标注也完全可以，render.py 的默认映射（`##`/`###`→section、表格→table-wrap、列表→ul/ol、blockquote→callout）本身就是合格产物。
-2. **确定性渲染**：Lead 用发现命令解析出 `render.py` 绝对路径（沿用 SKILL.md 的 harvest.py 路径发现模式：`find ~/.claude/plugins -path '*/deep-research/scripts/render.py' 2>/dev/null | head -1`），执行 `python3 <render.py 绝对路径> deliverables/final/report.md`（成功写出同目录 `report.html`；失败 exit 1 并打印 fail-loud 错误，需修正 report.md 或 ds: 标注后复渲，不静默降级）。
+2. **确定性渲染**：Lead 用发现命令解析出 `render.py` 绝对路径（沿用 SKILL.md 的 harvest.py 路径发现模式：`find ~/.claude/plugins -path '*/deep-research/scripts/render.py' 2>/dev/null | sort -V | tail -1`——多插件版本缓存（marketplace cache 下 `deep-research/<version>/`）共存时须钉最新版本，否则 byte-identical 复渲门可能对陈旧 render.py 误判），执行 `python3 <render.py 绝对路径> deliverables/final/report.md`（成功写出同目录 `report.html`；失败 exit 1 并打印 fail-loud 错误，需修正 report.md 或 ds: 标注后复渲，不静默降级）。
 
 **delivery 门（两态，重渲即校验，零新增机制）**：
 - **首渲**（`report.html` 尚未纳入版本控制）：`render.py` 成功 + `[ -s deliverables/final/report.html ]`（非空）+ `git add deliverables/final/report.html` 建立基线
