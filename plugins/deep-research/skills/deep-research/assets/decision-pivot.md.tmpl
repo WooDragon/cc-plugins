@@ -1,0 +1,96 @@
+<!--
+decision-pivot-N.md — 判据锚点变更记录（Decision Pivot track）
+
+性质：不是 supplement 式补缺（supplement 收窄于主 track 判据之内、不构成新判据来源），
+而是**推翻主 track 部分判据前提**的锚点变更。自本文件 sign-off 起，本文件与
+research-goal.md（+ 更早的 decision-pivot-*.md，如有）共同构成 cite 回链基准；
+冲突处以时间最新的 pivot 为准。research-goal.md 顶部应加 Pivot 声明回链本文件。
+
+必填契约（cc-plugins#126 / research#48）：本文件必须含「## 废止短语清单」段，
+枚举旧判据在交付物里的现行口吻关键短语——这是本 pivot 落盘后对
+deliverables/** 做确定性 grep 核销的锚点。未列全，本 pivot 不算 signed-off
+（`scripts/pivot_scan.py --check-signoff` 机械校验此项，不是主观裁量）。
+下方两处示例 bullet（短语 1/短语 2）是未替换的模板占位符，脚本会拒绝
+将其计为有效短语——必须替换为真实短语，仅删除示例块留空同样不算列全。
+
+`## signed_off` 段的两个 checkbox 须保持 `- [ ] <marker 文本>` 这一锚定
+格式（checkbox 紧跟 bullet 行首，marker 文本紧随其后），机械校验按此
+形状匹配，改动措辞前先确认与脚本 `_ALIGNMENT_CHECKLIST_MARKER` /
+`_SIGNOFF_CHECKLIST_MARKER` 常量一致。
+-->
+
+# 判据锚点变更 {N} — {一句话概括本次变更}
+
+## 变更动因（{YYYY-MM-DD} 用户决策原文要点）
+
+<!-- 逐条列出触发本次判据变更的用户决策原文要点，编号列表，每条一个独立决策点。 -->
+
+1. [待填写]
+
+## primary_job（变更后）
+
+<!-- 若本次变更未触及 primary_job，写"不变，见 research-goal.md"；若变更，
+     沿用 research-goal.md.tmpl 的 JTBD 格式重述。 -->
+
+[待填写]
+
+## goal（判据正面，变更/替换主 track goal 中受影响的部分）
+
+<!-- 一行起。只写"新判据"，不重复未受影响的旧判据——那部分继续以
+     research-goal.md（+ 更早 pivot）为准。 -->
+
+- [待填写]
+
+## non_goals（判据反面，变更后）
+
+<!--
+两类操作都可能出现，可并存：
+  - "废止"：显式指出废止主 track / 更早 pivot 的哪一条 non_goal（编号或原句引用），
+    并说明废止理由。
+  - "新增"：本次变更新增的 non_goal。
+-->
+
+- **废止**主 track / pivot-{M} non_goals 第 {X} 条（"{原句}"）—— [废止理由]
+- **新增**：[待填写]
+
+## 废止短语清单
+
+<!--
+用途：本段是 pivot 落盘后对 deliverables/** 做确定性 grep 核销的唯一锚点
+（`scripts/pivot_scan.py --scan`）。逐条枚举「旧判据在交付物中的现行口吻
+关键短语」——不是抽象概念复述，是能直接 grep 命中交付物原文的具体短语。
+
+填写要求：
+  - 每条一个短语，用 bullet（"- 短语"）格式，机器按此逐行解析；不要嵌套、
+    不要把多个短语写进一个 bullet。
+  - 短语必须覆盖上面「变更动因」「goal」「non_goals」三段废止的每一条旧
+    判据在交付物里可能出现的现行口吻措辞（标题/摘要句/正文断言均算）。
+  - 一条旧判据在交付物里可能有多种措辞变体，都要列出，避免漏网。
+  - 未列全 = 本 pivot 未生效——`--check-signoff` 判 exit 1，Stage 6 不认。
+
+示例（仅供格式参考，非真实短语，填写时删除本示例块）：
+  - <此处填旧判据在交付物中的现行口吻短语，如"需拆分多 gateway 落地">
+  - <此处填旧判据在交付物中的现行口吻短语，如"待 Lead 裁决">
+-->
+
+- [待填写：短语 1]
+- [待填写：短语 2]
+
+## 研究类型
+
+<!-- selection（N 个互斥方案择一）| non-selection（综述/趋势/事实核验等）。
+     通常沿用主 track 研究类型，除非本次变更本身改变了研究类型。 -->
+
+[selection | non-selection]
+
+## signed_off
+
+<!-- 用户对齐确认。未 sign-off 不生效，不触发下游管线动作。 -->
+
+- [ ] 用户已确认决策变更/对齐状态（原文要点见「变更动因」）
+- **确认日期**：[YYYY-MM-DD]
+- [ ] 废止短语清单已列全（缺项则本 pivot 未生效）
+- **效力**：本文件是判据锚点变更，非补充采集；G3 证伪审计与 Stage 6 审阅的
+  cite 回链自本日期起以 research-goal.md + 此前全部 decision-pivot-*.md +
+  本文件的并集为准，冲突处以本文件（时间最新）为准。
+- **触发的管线动作**：[待填写：本次变更触发的补采/重构/审阅动作]

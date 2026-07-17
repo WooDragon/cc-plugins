@@ -8,8 +8,9 @@
 |------|------|----------|
 | `project-claude-md.tmpl` | 项目 CLAUDE.md 模板 | 创建新项目时复制到项目根目录并填充占位符 |
 | `research-goal.md.tmpl` | 研究根本目标锚模板（元原则 0 载体） | 创建新项目时复制到 `intake/requirements/research-goal.md`；G0 与用户对齐后填充 primary_job + Non-Goals + sign-off |
+| `decision-pivot.md.tmpl` | 判据锚点变更记录模板（含必填「废止短语清单」段） | 判据变更时复制到 `intake/requirements/decision-pivot-N.md`；废止短语清单是 `scripts/pivot_scan.py` 确定性核销的锚点，未列全不算 signed-off（cc-plugins#126） |
 | `project-gitignore.tmpl` | 项目 .gitignore 模板 | 创建新项目时复制为 `.gitignore` |
-| `review-rubric.md` | 审阅 5 维度评分细则 | reviewer (mode=review) 在 Validation Stage 参照 |
+| `review-rubric.md` | 审阅 5 评分维度 + 维度6 作废集核销（质性，非评分） | reviewer (mode=review) 在 Validation Stage 参照 |
 | `sufficiency-rubric.md` | 充分性 8 维度评分细则（维度 7 假设审计 / 维度 8 证伪审计 + G1 候选集完备性） | reviewer (mode=sufficiency) 在 G1/G2/G3 参照 |
 | `fetch-report.md.tmpl` | 采集报告模板（含候选集完备性字段，仅选型类） | harvester 在 Acquisition 后产出，供 G1 决策 |
 | `deliverable-matrix.md` | 报告交付物矩阵 | Lead 在 Delivery Stage 参照，确定最终输出结构 |

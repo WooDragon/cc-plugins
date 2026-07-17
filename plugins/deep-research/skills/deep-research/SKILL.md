@@ -36,7 +36,7 @@ description: 结构化深度研究框架，7-Stage 管线 + 角色专业化 suba
 
 - **research-harvester**：Stage 2 Acquisition + Stage 3 Sanitization（同一 Task 内串行，共享文件上下文）。负责多模型采集与脱敏，主路径调用 harvest.py（见下）。
 - **research-analyst**：Stage 4 Decomposition（域拆解）+ Stage 5 Synthesis（与 Lead 协作，跨域综合）。
-- **research-reviewer**：mode=sufficiency 时执行 G1/G2/G3 三道 Sufficiency Gate；mode=review 时执行 Stage 6 Validation 的 5 维度审阅。
+- **research-reviewer**：mode=sufficiency 时执行 G1/G2/G3 三道 Sufficiency Gate；mode=review 时执行 Stage 6 Validation 的 6 维度审阅。
 - **research-publisher**：Stage 7 Delivery 末端的可选视觉注释建议者，不再渲染 HTML——渲染是确定性变换，统一由插件内置的 `scripts/render.py` 执行。Lead 按需 spawn 此 subagent 在 report.md 中产出/调整 `<!-- ds:xxx -->` 视觉标注（词汇表见 `assets/report-html-guide.md`），不标注也可直接渲染（默认映射即合格产物）。model 继承 frontmatter=sonnet。
 
 G0（需求门）不派 subagent——由 Lead 在主上下文与用户对齐 primary_job/Non-Goals，这是全程唯一引入"模型外信号"的环节。**绝对规则**：Lead（主 session）对 `pipeline/**`、`deliverables/**` 下的文件只允许持有路径指针，禁止读取其内容，物理焊死靠 PreToolUse `read_guard` hook（详见 `references/context-economics.md`）。Stage 7 Delivery 主体（report.md/executive_summary.md 等落盘）不再由 Lead 在主上下文生成——Lead 只出 report-spec（大纲+要点+引用指针），交由 research-analyst 按 spec 生成落盘，生成后再 spawn research-reviewer 做 no-new-facts 语义核验，Lead 只据 receipt 裁决；末端的 report.html 渲染是确定性变换，由插件内置的 `scripts/render.py` 执行（不再是 agent 生成活），research-publisher 仅按需承接可选的 ds: 视觉标注。Stage 8 Landing（experimental）同理由 Lead 出对比指令、research-analyst 执行落地回填，Lead 只持 delta receipt。
@@ -114,7 +114,7 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/create-research-project.sh "研究主题" --type d
 
 ## 模板（assets/）
 
-Gate 评分细则：`assets/review-rubric.md`（5 维度审阅）、`assets/sufficiency-rubric.md`（8 维度充分性，含假设审计/证伪审计）。项目初始化：`assets/project-claude-md.tmpl`、`assets/project-gitignore.tmpl`、`assets/research-goal.md.tmpl`。交付物：`assets/deliverable-matrix.md`、`assets/deliverables-index.md.tmpl`、`assets/fetch-report.md.tmpl`、`assets/report-shell.html.tmpl`（report.html house style 模板，由 `scripts/render.py` 填充）、`assets/report-html-guide.md`（HTML 渲染注释词汇表，`<!-- ds:xxx -->` 指令与组件类的对应关系，analyst/publisher 标注时参照）。数据处理：`assets/redact.py.tmpl`。落地回填（experimental）：`assets/landing-feedback.md.tmpl`。完整清单见 `assets/INDEX.md`。
+Gate 评分细则：`assets/review-rubric.md`（审阅 5 评分维度 + 维度6 作废集核销，质性）、`assets/sufficiency-rubric.md`（8 维度充分性，含假设审计/证伪审计）。项目初始化：`assets/project-claude-md.tmpl`、`assets/project-gitignore.tmpl`、`assets/research-goal.md.tmpl`。交付物：`assets/deliverable-matrix.md`、`assets/deliverables-index.md.tmpl`、`assets/fetch-report.md.tmpl`、`assets/report-shell.html.tmpl`（report.html house style 模板，由 `scripts/render.py` 填充）、`assets/report-html-guide.md`（HTML 渲染注释词汇表，`<!-- ds:xxx -->` 指令与组件类的对应关系，analyst/publisher 标注时参照）。数据处理：`assets/redact.py.tmpl`。落地回填（experimental）：`assets/landing-feedback.md.tmpl`。完整清单见 `assets/INDEX.md`。
 
 ## 依赖前置
 

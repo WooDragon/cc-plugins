@@ -1,6 +1,6 @@
 # 质量门控机制
 
-本文件定义 G0 需求门、三级 verdict、Sufficiency 裁决（含 RECYCLE）、双安全阀、Sufficiency Gate rubric 和审阅 5 维度。设计参考了 plan-review hook 的对抗审阅模式；G0 门与双环/反驳维度由「框架演进调研」落地（借 JTBD / Stage-Gate / 双环学习 / Einstellung Effect 研究）。
+本文件定义 G0 需求门、三级 verdict、Sufficiency 裁决（含 RECYCLE）、双安全阀、Sufficiency Gate rubric 和审阅 6 维度。设计参考了 plan-review hook 的对抗审阅模式；G0 门与双环/反驳维度由「框架演进调研」落地（借 JTBD / Stage-Gate / 双环学习 / Einstellung Effect 研究）。
 
 ---
 
@@ -169,9 +169,11 @@ GATE_VERDICT: G<N> PASS|FAIL|RECYCLE
 
 机械门与 Sufficiency 评分是**与**关系：机械门 FAIL 直接阻塞，不进入评分；机械门 PASS/N/A 后仍须过既有覆盖度/时效性/可信度/双语平衡评分。
 
-## 审阅 5 维度（mode=review）
+## 审阅 6 维度（mode=review）
 
-reviewer 执行 Validation Stage 时使用：
+reviewer 执行 Validation Stage 时使用。维度 1-5 是 1-5 评分的「审阅」维度；
+维度 6（作废集核销）是存在 decision-pivot 时的附加质性检查，非评分、不计入
+加权平均，详见下方「作废集核销检查」章节：
 
 | 维度 | 说明 | 评估要点 |
 |------|------|----------|
@@ -182,6 +184,18 @@ reviewer 执行 Validation Stage 时使用：
 | 可追溯性 (Traceability) | 结论是否能追溯到具体信息源 | pipeline 引用完整性 |
 
 每维度 1-5 分，审阅报告必须包含每维度评分和具体问题。
+
+## 作废集核销检查（Stage 6，存在 decision-pivot 时适用）
+
+> **适用条件**：仅当项目 `intake/requirements/` 下存在至少一份 `decision-pivot-*.md` 时触发。无 pivot 的项目此项 **N/A**，不强制。机制详见 [pipeline.md](./pipeline.md)「decision-pivot 作废集核销」、脚本 `scripts/pivot_scan.py`，设计权威 [research#48](https://github.com/WooDragon/research/issues/48)。
+
+质性检查（非 1-5 评分，即上方 6 维度中的维度 6，附加于评分维度 1-5），Stage 6 触发，规则：
+
+- **前置条件**：pivot 必须已通过 `pivot_scan.py --check-signoff`（废止短语清单已列全且非纯占位符 + signed_off 段「用户已确认决策变更/对齐状态」与「废止短语清单已列全」两个 checkbox 均已打勾）。未通过 check-signoff 的 pivot 不算生效，本检查不适用，但 reviewer 须在报告中标注「pivot 未 signed-off，作废集核销待补」。
+- **核销对象是盘上 TSV，不是现场重算**：`pivot_scan.py --scan` 产出的工单落盘于 `pipeline/verification/pivot-worklist-<pivot 文件名 stem>.tsv`（4 列：`文件:行` / 命中短语 / 该行内容 / 分类）——Stage 6 核销的权威依据是这份文件本身，reviewer 直接读取盘上 TSV，不是每轮重新跑 scan 凭内存印象判断。
+- **逐行核销，不许抽样**：对 TSV **每一行**逐条核验：① 第 4 列分类已回填（历史留档合法 / 现行口吻必改）；② 判为「现行口吻必改」的行，对应文件/行已实际修订为新判据口吻，不再是旧判据措辞。这是确定性清单核对，不是整体印象判断——工单有 N 行，回传时须明确 N 行各自的处理状态，不得凭抽样撞见几行就下结论（这正是此前四轮评审各剥一层的病灶）。
+- **未核销 → 不得 APPROVED**：TSV 中存在第 4 列为空、或「现行口吻必改」未实际修订的行 → Stage 6 verdict 不得为 `APPROVED`，至少 `NEEDS REVISION`；未核销行比例高、或涉及报告核心结论/标题/摘要层 → `REJECTED`。
+- 扣分/定级细则见 [review-rubric.md](../assets/review-rubric.md)「作废集核销」。
 
 ## 对抗审阅流程
 
