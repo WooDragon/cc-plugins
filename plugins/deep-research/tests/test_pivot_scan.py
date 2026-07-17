@@ -2,11 +2,15 @@
 扫描工具 (cc-plugins#126, 设计权威 research#48). Two contracts covered:
 
   1. --check-signoff: a pivot file is not "signed off" unless it has a
-     non-empty "## 废止短语清单" section AND the signed_off section's
-     "废止短语清单已列全" checkbox is ticked.
+     non-empty "## 废止短语清单" section (with at least one non-placeholder
+     bullet) AND the signed_off section's two checkboxes are both ticked:
+     "用户已确认决策变更/对齐状态" and "废止短语清单已列全" -- both anchored
+     to a bullet line's checkbox syntax, not just substring presence anywhere
+     in the file.
   2. --scan: the worklist it produces must be limited to deliverables/** +
-     root CLAUDE.md/README.md, exclude intake/requirements/** and
-     pipeline/**, and be byte-identical across repeated runs.
+     root CLAUDE.md/README.md, exclude intake/requirements/**, pipeline/**
+     and symlinks, be byte-identical across repeated runs, and land on disk
+     as a 4-column TSV under pipeline/verification/ (or --out override).
 """
 
 import subprocess
@@ -20,10 +24,16 @@ import pivot_scan  # noqa: E402
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "pivot_scan.py"
 
+_DEFAULT_ALIGNMENT_LINE = "- [x] 用户已确认决策变更/对齐状态（原文要点见「变更动因」）"
 
-def _pivot(abrogation_section: str, signoff_checkbox: str) -> str:
+
+def _pivot(
+    abrogation_section: str,
+    signoff_checkbox: str,
+    alignment_checkbox: str = _DEFAULT_ALIGNMENT_LINE,
+) -> str:
     """Build a minimal pivot.md body with the given 废止短语清单 section body
-    and signed_off checkbox line, mirroring decision-pivot.md.tmpl shape."""
+    and signed_off checkbox lines, mirroring decision-pivot.md.tmpl shape."""
     return f"""# 判据锚点变更 1 — 测试用例
 
 ## 变更动因（2026-07-17 用户决策原文要点）
@@ -48,14 +58,16 @@ non-selection
 
 ## signed_off
 
-- **对齐状态**：[x] 用户已确认
+{alignment_checkbox}
 - **确认日期**：2026-07-17
 {signoff_checkbox}
 - **效力**：测试
 """
 
 
-def _pivot_without_abrogation_section(signoff_checkbox: str) -> str:
+def _pivot_without_abrogation_section(
+    signoff_checkbox: str, alignment_checkbox: str = _DEFAULT_ALIGNMENT_LINE
+) -> str:
     """Same shape as _pivot() but with the "## 废止短语清单" heading itself
     entirely absent (not just empty) -- covers the "section missing" branch
     distinct from "section present but empty"."""
@@ -79,7 +91,7 @@ non-selection
 
 ## signed_off
 
-- **对齐状态**：[x] 用户已确认
+{alignment_checkbox}
 - **确认日期**：2026-07-17
 {signoff_checkbox}
 - **效力**：测试
@@ -127,6 +139,134 @@ class TestCheckSignoff(unittest.TestCase):
         self.assertEqual(pivot_scan.check_signoff(text), [])
 
 
+class TestCheckSignoffPlaceholderRejection(unittest.TestCase):
+    """A pivot copied from the template but never edited must not pass
+    check-signoff just because its placeholder bullets happen to be
+    non-empty strings -- placeholder text is not a user-supplied phrase."""
+
+    def test_bracketed_placeholder_only_list_fails(self):
+        text = _pivot(
+            "- [待填写：短语 1]\n- [待填写：短语 2]",
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+        )
+        failures = pivot_scan.check_signoff(text)
+        self.assertTrue(any("仅含未替换的模板占位符" in f for f in failures))
+
+    def test_angle_bracket_placeholder_only_list_fails(self):
+        text = _pivot(
+            '- <此处填旧判据在交付物中的现行口吻短语，如"需拆分多 gateway 落地">',
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+        )
+        failures = pivot_scan.check_signoff(text)
+        self.assertTrue(any("仅含未替换的模板占位符" in f for f in failures))
+
+    def test_todo_tbd_placeholder_only_list_fails(self):
+        text = _pivot(
+            "- TODO\n- TBD 待补充",
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+        )
+        failures = pivot_scan.check_signoff(text)
+        self.assertTrue(any("仅含未替换的模板占位符" in f for f in failures))
+
+    def test_mixed_placeholder_and_real_phrase_passes_on_real_phrase_alone(self):
+        """One real phrase alongside leftover placeholder bullets is enough
+        to pass -- placeholders are filtered, not treated as poison for the
+        whole section."""
+        text = _pivot(
+            "- [待填写：短语 1]\n- 需拆分多 gateway 落地",
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+        )
+        self.assertEqual(pivot_scan.check_signoff(text), [])
+        self.assertEqual(
+            pivot_scan.parse_abrogated_phrases(text), ["需拆分多 gateway 落地"]
+        )
+
+
+class TestCheckSignoffDualCheckbox(unittest.TestCase):
+    """Both signed_off checkboxes must be ticked -- ticking only one is not
+    sufficient sign-off."""
+
+    def test_alignment_checkbox_unchecked_fails_even_if_abrogation_checked(self):
+        text = _pivot(
+            "- 需拆分多 gateway 落地",
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+            alignment_checkbox="- [ ] 用户已确认决策变更/对齐状态（原文要点见「变更动因」）",
+        )
+        failures = pivot_scan.check_signoff(text)
+        self.assertTrue(
+            any("用户已确认决策变更/对齐状态" in f and "未打勾" in f for f in failures)
+        )
+
+    def test_abrogation_checkbox_unchecked_fails_even_if_alignment_checked(self):
+        text = _pivot(
+            "- 需拆分多 gateway 落地",
+            "- [ ] 废止短语清单已列全（缺项则本 pivot 未生效）",
+            alignment_checkbox="- [x] 用户已确认决策变更/对齐状态（原文要点见「变更动因」）",
+        )
+        failures = pivot_scan.check_signoff(text)
+        self.assertTrue(any("废止短语清单已列全" in f and "未打勾" in f for f in failures))
+
+    def test_alignment_checkbox_line_entirely_missing_fails(self):
+        text = _pivot(
+            "- 需拆分多 gateway 落地",
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+            alignment_checkbox="- **对齐状态**：用户已确认（无 checkbox 语法）",
+        )
+        failures = pivot_scan.check_signoff(text)
+        self.assertTrue(
+            any(
+                "缺少「用户已确认决策变更/对齐状态」勾选项" in f
+                for f in failures
+            )
+        )
+
+    def test_both_checked_passes(self):
+        text = _pivot(
+            "- 需拆分多 gateway 落地",
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+            alignment_checkbox="- [x] 用户已确认决策变更/对齐状态（原文要点见「变更动因」）",
+        )
+        self.assertEqual(pivot_scan.check_signoff(text), [])
+
+
+class TestCheckboxAnchoring(unittest.TestCase):
+    """The checkbox marker must be anchored to the bullet's own checkbox
+    syntax -- a note line or malformed bracket sequence that merely contains
+    the marker substring must not be mistaken for a real, ticked checkbox."""
+
+    def test_marker_text_in_prose_note_does_not_count_as_checked(self):
+        text = _pivot(
+            "- 需拆分多 gateway 落地",
+            (
+                "- 备注：废止短语清单已列全的判定标准见上文\n"
+                "- [ ] 废止短语清单已列全（缺项则本 pivot 未生效）"
+            ),
+        )
+        failures = pivot_scan.check_signoff(text)
+        self.assertTrue(any("未打勾" in f for f in failures))
+
+    def test_malformed_double_bracket_checkbox_does_not_count_as_checked(self):
+        text = _pivot(
+            "- 需拆分多 gateway 落地",
+            "- [[x]] 废止短语清单已列全（缺项则本 pivot 未生效）",
+        )
+        failures = pivot_scan.check_signoff(text)
+        self.assertTrue(
+            any("缺少「废止短语清单已列全」勾选项" in f for f in failures)
+        )
+
+    def test_marker_inside_html_comment_does_not_count_as_checked(self):
+        text = _pivot(
+            "- 需拆分多 gateway 落地",
+            (
+                "<!-- - [x] 废止短语清单已列全（示例注释，非真实勾选） -->\n"
+                "- [ ] 废止短语清单已列全（缺项则本 pivot 未生效）"
+            ),
+        )
+        failures = pivot_scan.check_signoff(text)
+        self.assertTrue(any("未打勾" in f for f in failures))
+
+
 class TestParseAbrogatedPhrases(unittest.TestCase):
     def test_html_comment_lines_are_not_treated_as_bullets(self):
         text = """## 废止短语清单
@@ -146,6 +286,24 @@ class TestParseAbrogatedPhrases(unittest.TestCase):
             ["真实短语一", "真实短语二"],
         )
 
+    def test_column_zero_bullet_inside_html_comment_is_not_collected(self):
+        """A bullet at column 0 (no leading indent) inside an HTML comment
+        block would slip past a naive `_BULLET_RE` check -- must still be
+        excluded because it's commentary, not a real user-filled phrase."""
+        text = """## 废止短语清单
+
+<!--
+- 顶格短语示例（应被忽略）
+-->
+
+- 真实短语一
+
+## signed_off
+"""
+        self.assertEqual(
+            pivot_scan.parse_abrogated_phrases(text), ["真实短语一"]
+        )
+
     def test_section_absent_returns_none(self):
         self.assertIsNone(pivot_scan.parse_abrogated_phrases("# no sections here"))
 
@@ -163,6 +321,31 @@ class TestParseAbrogatedPhrases(unittest.TestCase):
             pivot_scan.parse_abrogated_phrases(text), ["真实短语一"]
         )
 
+    def test_unrelated_heading_sharing_prefix_is_not_matched(self):
+        """`startswith` used to be too loose: a heading like `废止短语清单
+        已被废止说明` shares the literal prefix but means something entirely
+        different (a note *about* a past abrogation list, not the list
+        itself) -- it must not be treated as the 废止短语清单 section."""
+        text = """## 废止短语清单已被废止说明
+
+- 不应被当成废止短语
+
+## signed_off
+"""
+        self.assertIsNone(pivot_scan.parse_abrogated_phrases(text))
+
+    def test_placeholder_bullets_are_filtered_out(self):
+        text = """## 废止短语清单
+
+- [待填写：短语 1]
+- 真实短语
+- <占位符尖括号示例>
+- TODO
+
+## signed_off
+"""
+        self.assertEqual(pivot_scan.parse_abrogated_phrases(text), ["真实短语"])
+
 
 class TestHeadingVariantConsistency(unittest.TestCase):
     """check-signoff and scan must reach the same conclusion for a pivot
@@ -171,7 +354,7 @@ class TestHeadingVariantConsistency(unittest.TestCase):
     so there is exactly one matcher to keep in sync."""
 
     def _pivot_with_suffixed_heading(self) -> str:
-        return """# 判据锚点变更 1 — 测试用例
+        return f"""# 判据锚点变更 1 — 测试用例
 
 ## 变更动因（2026-07-17 用户决策原文要点）
 
@@ -196,7 +379,7 @@ non-selection
 
 ## signed_off
 
-- **对齐状态**：[x] 用户已确认
+{_DEFAULT_ALIGNMENT_LINE}
 - **确认日期**：2026-07-17
 - [x] 废止短语清单已列全（缺项则本 pivot 未生效）
 - **效力**：测试
@@ -257,6 +440,20 @@ class TestCheckSignoffCli(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 1)
+
+    def test_exit_1_when_only_placeholder_phrases_present(self):
+        text = _pivot(
+            "- [待填写：短语 1]",
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+        )
+        pivot_path = self._write_pivot(text)
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPT), "--check-signoff", pivot_path],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("占位符", result.stderr)
 
     def test_exit_0_when_fully_compliant(self):
         text = _pivot(
@@ -422,6 +619,97 @@ class TestScanWorklist(unittest.TestCase):
         )
 
 
+class TestScanWorklistDiskOutput(unittest.TestCase):
+    """--scan must land the worklist on disk (Stage 6 core-out target),
+    default path pipeline/verification/pivot-worklist-<stem>.tsv, with
+    --out able to override it. Content on disk must match stdout exactly."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+
+        self.pivot_text = _pivot(
+            "- 需拆分多 gateway 落地",
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+        )
+        final_dir = self.root / "deliverables" / "final"
+        final_dir.mkdir(parents=True)
+        (final_dir / "x.md").write_text(
+            "仍需拆分多 gateway 落地\n", encoding="utf-8"
+        )
+
+    def test_default_worklist_path_created_with_matching_content(self):
+        pivot_path = self.root / "decision-pivot-1.md"
+        pivot_path.write_text(self.pivot_text, encoding="utf-8")
+        cmd = [
+            sys.executable,
+            str(_SCRIPT),
+            "--scan",
+            str(pivot_path),
+            "--root",
+            str(self.root),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+
+        expected_path = (
+            self.root / "pipeline" / "verification" / "pivot-worklist-decision-pivot-1.tsv"
+        )
+        self.assertTrue(expected_path.is_file())
+        on_disk = expected_path.read_text(encoding="utf-8")
+        self.assertEqual(on_disk.rstrip("\n"), result.stdout.rstrip("\n"))
+        self.assertIn(str(expected_path), result.stderr)
+
+    def test_out_flag_overrides_default_path(self):
+        pivot_path = self.root / "decision-pivot-1.md"
+        pivot_path.write_text(self.pivot_text, encoding="utf-8")
+        custom_out = self.root / "custom-dir" / "worklist.tsv"
+        cmd = [
+            sys.executable,
+            str(_SCRIPT),
+            "--scan",
+            str(pivot_path),
+            "--root",
+            str(self.root),
+            "--out",
+            str(custom_out),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(custom_out.is_file())
+
+        default_path = (
+            self.root / "pipeline" / "verification" / "pivot-worklist-decision-pivot-1.tsv"
+        )
+        self.assertFalse(default_path.exists())
+
+    def test_worklist_file_has_four_column_schema(self):
+        pivot_path = self.root / "decision-pivot-1.md"
+        pivot_path.write_text(self.pivot_text, encoding="utf-8")
+        cmd = [
+            sys.executable,
+            str(_SCRIPT),
+            "--scan",
+            str(pivot_path),
+            "--root",
+            str(self.root),
+        ]
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+        worklist_path = (
+            self.root / "pipeline" / "verification" / "pivot-worklist-decision-pivot-1.tsv"
+        )
+        lines = worklist_path.read_text(encoding="utf-8").splitlines()
+        self.assertTrue(lines)
+        for line in lines:
+            fields = line.split("\t")
+            self.assertEqual(len(fields), 4)
+            file_line, phrase, content, classification = fields
+            self.assertIn(":", file_line)
+            self.assertEqual(classification, "")
+
+
 class TestScanFailLoudMessages(unittest.TestCase):
     """scan_worklist must fail loud with a message that distinguishes the
     two dirty states -- "section missing" is not the same failure as
@@ -446,6 +734,12 @@ class TestScanFailLoudMessages(unittest.TestCase):
         with self.assertRaises(pivot_scan.PivotScanError) as ctx:
             pivot_scan.scan_worklist(text, self.root)
         self.assertIn("废止短语段存在但为空", str(ctx.exception))
+        self.assertIn("拒绝产出空工单", str(ctx.exception))
+
+    def test_placeholder_only_section_refuses_silent_worklist(self):
+        text = _pivot("- [待填写：短语 1]", "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）")
+        with self.assertRaises(pivot_scan.PivotScanError) as ctx:
+            pivot_scan.scan_worklist(text, self.root)
         self.assertIn("拒绝产出空工单", str(ctx.exception))
 
 
@@ -480,10 +774,54 @@ class TestScanExcludesRenderedHtml(unittest.TestCase):
         self.assertFalse(any(p.endswith(".html") for p in paths))
 
 
+class TestScanExcludesSymlinks(unittest.TestCase):
+    """A symlink inside deliverables/ pointing outside the project must not
+    be followed by rglob -- scan is scoped to the project, not wherever a
+    symlink happens to point."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.pivot_text = _pivot(
+            "- 需拆分多 gateway 落地",
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+        )
+
+    def test_symlinked_md_file_in_deliverables_is_not_scanned(self):
+        final_dir = self.root / "deliverables" / "final"
+        final_dir.mkdir(parents=True)
+
+        outside_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(outside_dir, ignore_errors=True))
+        outside_file = outside_dir / "outside.md"
+        outside_file.write_text("仍需拆分多 gateway 落地\n", encoding="utf-8")
+
+        symlink_path = final_dir / "linked.md"
+        symlink_path.symlink_to(outside_file)
+
+        hits = pivot_scan.scan_worklist(self.pivot_text, self.root)
+        paths = {h[0] for h in hits}
+        self.assertNotIn("deliverables/final/linked.md", paths)
+
+    def test_symlinked_root_claude_md_is_not_scanned(self):
+        outside_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(outside_dir, ignore_errors=True))
+        outside_file = outside_dir / "outside-claude.md"
+        outside_file.write_text("需拆分多 gateway 落地\n", encoding="utf-8")
+
+        (self.root / "CLAUDE.md").symlink_to(outside_file)
+
+        hits = pivot_scan.scan_worklist(self.pivot_text, self.root)
+        paths = {h[0] for h in hits}
+        self.assertNotIn("CLAUDE.md", paths)
+
+
 class TestFormatWorklistEscaping(unittest.TestCase):
     """A hit line that itself contains a literal tab (e.g. a markdown table
     row) must not be allowed to inject an extra TSV column and desync the
-    4-field row contract that Stage 6 core-out relies on."""
+    4-field row contract that Stage 6 core-out relies on. The phrase column
+    is user-supplied free text too and needs the same protection."""
 
     def test_literal_tab_in_line_content_is_escaped(self):
         hits = [("deliverables/final/x.md", 3, "需拆分多 gateway 落地", "| a\t仍需拆分多 gateway 落地 |")]
@@ -502,6 +840,14 @@ class TestFormatWorklistEscaping(unittest.TestCase):
         # the escaped output must remain a single line for this hit.
         self.assertEqual(len(output.splitlines()), 1)
         self.assertIn("\\n", output)
+
+    def test_literal_tab_in_phrase_column_is_escaped(self):
+        hits = [("CLAUDE.md", 1, "短语\t含tab", "行内容不含tab")]
+        output = pivot_scan._format_worklist(hits)
+        fields = output.split("\t")
+        self.assertEqual(len(fields), 4)
+        self.assertEqual(output.count("\t"), 3)
+        self.assertIn("短语\\t含tab", fields[1])
 
 
 if __name__ == "__main__":

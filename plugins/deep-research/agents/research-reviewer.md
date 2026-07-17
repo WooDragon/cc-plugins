@@ -110,9 +110,9 @@ receipt。
 
 项目 `intake/requirements/` 下存在 `decision-pivot-*.md` 且已通过 `pivot_scan.py --check-signoff` 时，Stage 6 审阅**必须**附加执行：
 
-1. 拿到（或自行跑）`scripts/pivot_scan.py --scan <pivot.md> --root <project_dir>` 产出的工单——逐命中 `文件:行 + 命中短语 + 该行内容 + 分类`。
-2. 对工单**每一条命中逐项核验**（不许抽样撞见）：分类是否已判定（历史留档合法 / 现行口吻必改）+「现行口吻必改」项对应位置是否已实际修订为新判据口吻。
-3. 存在未分类、或「现行口吻必改」未实际修订的命中 → verdict 不得为 `APPROVED`；审阅报告问题清单须逐条列出未核销命中（`文件:行` + 命中短语 + 应属分类）。
+1. 读取（或自行跑 `scripts/pivot_scan.py --scan <pivot.md> --root <project_dir>` 生成）盘上工单 `pipeline/verification/pivot-worklist-<pivot 文件名 stem>.tsv`——4 列 TSV：`文件:行` \t 命中短语 \t 该行内容 \t 分类。核销依据是这份**盘上文件**，不是每轮凭内存重新判断。
+2. 对 TSV **每一行逐项核验**（不许抽样撞见）：第 4 列分类是否已回填（历史留档合法 / 现行口吻必改）+「现行口吻必改」行对应位置是否已实际修订为新判据口吻。
+3. 存在第 4 列为空、或「现行口吻必改」未实际修订的行 → verdict 不得为 `APPROVED`；审阅报告问题清单须逐条列出未核销行（`文件:行` + 命中短语 + 应属分类）。
 4. pivot 未过 `--check-signoff`（不算生效）→ 本轮不执行核销，但须在报告中标注「pivot 未 signed-off，作废集核销待补」，不得静默跳过不提。
 
 ## Verdict 规则

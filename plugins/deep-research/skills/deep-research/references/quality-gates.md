@@ -189,9 +189,10 @@ reviewer 执行 Validation Stage 时使用：
 
 质性检查（非 1-5 评分，附加于上方 5 维度审阅），Stage 6 触发，规则：
 
-- **前置条件**：pivot 必须已通过 `pivot_scan.py --check-signoff`（废止短语清单已列全 + signed_off 勾选已打勾）。未通过 check-signoff 的 pivot 不算生效，本检查不适用，但 reviewer 须在报告中标注「pivot 未 signed-off，作废集核销待补」。
-- **逐项核销，不许抽样**：reviewer 据 `pivot_scan.py --scan` 产出的工单，对**每一条命中**逐条核验：① 分类已判定（历史留档合法 / 现行口吻必改）；② 判为「现行口吻必改」的命中，对应文件/行已实际修订为新判据口吻，不再是旧判据措辞。这是确定性清单核对，不是整体印象判断——工单有 N 条命中，回传时须明确 N 条各自的处理状态，不得凭抽样撞见几条就下结论（这正是此前四轮评审各剥一层的病灶）。
-- **未核销 → 不得 APPROVED**：工单中存在未分类、或「现行口吻必改」未实际修订的命中 → Stage 6 verdict 不得为 `APPROVED`，至少 `NEEDS REVISION`；未核销命中比例高、或涉及报告核心结论/标题/摘要层 → `REJECTED`。
+- **前置条件**：pivot 必须已通过 `pivot_scan.py --check-signoff`（废止短语清单已列全且非纯占位符 + signed_off 段「用户已确认决策变更/对齐状态」与「废止短语清单已列全」两个 checkbox 均已打勾）。未通过 check-signoff 的 pivot 不算生效，本检查不适用，但 reviewer 须在报告中标注「pivot 未 signed-off，作废集核销待补」。
+- **核销对象是盘上 TSV，不是现场重算**：`pivot_scan.py --scan` 产出的工单落盘于 `pipeline/verification/pivot-worklist-<pivot 文件名 stem>.tsv`（4 列：`文件:行` / 命中短语 / 该行内容 / 分类）——Stage 6 核销的权威依据是这份文件本身，reviewer 直接读取盘上 TSV，不是每轮重新跑 scan 凭内存印象判断。
+- **逐行核销，不许抽样**：对 TSV **每一行**逐条核验：① 第 4 列分类已回填（历史留档合法 / 现行口吻必改）；② 判为「现行口吻必改」的行，对应文件/行已实际修订为新判据口吻，不再是旧判据措辞。这是确定性清单核对，不是整体印象判断——工单有 N 行，回传时须明确 N 行各自的处理状态，不得凭抽样撞见几行就下结论（这正是此前四轮评审各剥一层的病灶）。
+- **未核销 → 不得 APPROVED**：TSV 中存在第 4 列为空、或「现行口吻必改」未实际修订的行 → Stage 6 verdict 不得为 `APPROVED`，至少 `NEEDS REVISION`；未核销行比例高、或涉及报告核心结论/标题/摘要层 → `REJECTED`。
 - 扣分/定级细则见 [review-rubric.md](../assets/review-rubric.md)「作废集核销」。
 
 ## 对抗审阅流程

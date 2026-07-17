@@ -10,6 +10,13 @@ research-goal.md（+ 更早的 decision-pivot-*.md，如有）共同构成 cite 
 枚举旧判据在交付物里的现行口吻关键短语——这是本 pivot 落盘后对
 deliverables/** 做确定性 grep 核销的锚点。未列全，本 pivot 不算 signed-off
 （`scripts/pivot_scan.py --check-signoff` 机械校验此项，不是主观裁量）。
+下方两处示例 bullet（短语 1/短语 2）是未替换的模板占位符，脚本会拒绝
+将其计为有效短语——必须替换为真实短语，仅删除示例块留空同样不算列全。
+
+`## signed_off` 段的两个 checkbox 须保持 `- [ ] <marker 文本>` 这一锚定
+格式（checkbox 紧跟 bullet 行首，marker 文本紧随其后），机械校验按此
+形状匹配，改动措辞前先确认与脚本 `_ALIGNMENT_CHECKLIST_MARKER` /
+`_SIGNOFF_CHECKLIST_MARKER` 常量一致。
 -->
 
 # 判据锚点变更 {N} — {一句话概括本次变更}
@@ -80,7 +87,7 @@ deliverables/** 做确定性 grep 核销的锚点。未列全，本 pivot 不算
 
 <!-- 用户对齐确认。未 sign-off 不生效，不触发下游管线动作。 -->
 
-- **对齐状态**：[ ] 用户已确认决策变更（原文要点见「变更动因」）
+- [ ] 用户已确认决策变更/对齐状态（原文要点见「变更动因」）
 - **确认日期**：[YYYY-MM-DD]
 - [ ] 废止短语清单已列全（缺项则本 pivot 未生效）
 - **效力**：本文件是判据锚点变更，非补充采集；G3 证伪审计与 Stage 6 审阅的
