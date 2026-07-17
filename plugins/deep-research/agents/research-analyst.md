@@ -92,7 +92,7 @@ color: blue
 2. 按 spec + 盘上 `pipeline/4_extracted/`（只读）渲染 `deliverables/final/report.md`、`executive_summary.md`（及按需的 references.md / INDEX.md）
 3. 回传 Lead `{落盘路径, 机械门 receipt}`，**不回传生成内容全文**
 
-> report.html 仍归 research-publisher 生成（VIEW 层派生），analyst 只产 `.md` 终稿，不碰 HTML。生成落盘后 Lead 会 spawn 轻量 reviewer 做 no-new-facts 语义核验（见 pipeline.md Stage 7）。
+> report.html 由插件内置的确定性渲染器 `scripts/render.py` 生成（VIEW 层派生），analyst 只产 `.md` 终稿，不碰 HTML。生成 report.md 时可顺手加上 `<!-- ds:xxx -->` 视觉标注（词汇表见 `assets/report-html-guide.md`）——这是可选的一次性判断活，不标注也可直接渲染；不标注时不必等 render.py 跑完就可继续。生成落盘后 Lead 会 spawn 轻量 reviewer 做 no-new-facts 语义核验（见 pipeline.md Stage 7）。
 
 ### 模式 4: Stage 8 Landing（experimental，落地回填执行者）
 

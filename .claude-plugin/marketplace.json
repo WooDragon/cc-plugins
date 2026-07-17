@@ -51,8 +51,8 @@
     },
     {
       "name": "deep-research",
-      "description": "Deep research framework — 7-Stage pipeline + role-specialized subagents (harvester/analyst/reviewer/publisher) + multi-model harvest & citation-verification gate",
-      "version": "1.14.0",
+      "description": "Deep research framework — 7-Stage pipeline + role-specialized subagents (harvester/analyst/reviewer/publisher) + multi-model harvest & citation-verification gate + deterministic report.md -> report.html renderer",
+      "version": "1.15.0",
       "author": {
         "name": "WooDragon"
       },

@@ -134,6 +134,8 @@ from harvest_safety import (  # re-export: safety layer moved to its own module
     _guarded_getaddrinfo,
 )
 
+from _sanitize import sanitize_text  # anti-injection cleaner shared with render.py
+
 
 def resolve_local_path(local_dir, rel_path):
     """Sandbox check on the *resolved* final path, not the join operation --
@@ -1227,7 +1229,12 @@ def write_fetch_report_local(raw_dir, queries, fetched_pages, journal, goal_text
     lines.append("")
     lines.append("## 抓取页面")
     for p in fetched_pages:
-        lines.append(f"- [{p['title'] or p['url']}]({p['url']}) ({p['chars']} chars)")
+        # p['title'] is an untrusted external search-result label -- sanitize
+        # before it lands in a checked-in artifact (zero-width/bidi-control
+        # stripping + quote-spoof normalization, same cleaner render.py runs
+        # its own output through; see _sanitize.py).
+        title = sanitize_text(p["title"]) or p["url"]
+        lines.append(f"- [{title}]({p['url']}) ({p['chars']} chars)")
 
     (raw_dir / "fetch-report.md").write_text("\n".join(lines), encoding="utf-8")
 
