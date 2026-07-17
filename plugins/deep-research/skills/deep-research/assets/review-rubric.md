@@ -1,6 +1,6 @@
 # 审阅 5 维度评分细则
 
-对应 Validation Stage（mode=review）。每维度 1-5 分。
+对应 Validation Stage（mode=review）。维度 1-5 每维度 1-5 分；维度 6（作废集核销）是存在 decision-pivot 时的附加质性检查，非评分、不计入加权平均，见文末。
 
 ---
 
@@ -104,4 +104,26 @@
 
 ---
 
-**关联文件**：[quality-gates.md](../references/quality-gates.md) · 见 deep-research 插件的 research-reviewer subagent
+## 6. 作废集核销 (Abrogation-Set Reconciliation)
+
+**定义**：项目存在 `decision-pivot-*.md` 时，其「废止短语清单」经 `scripts/pivot_scan.py --scan` 产出的工单，每条命中是否已完成二分类（历史留档合法 / 现行口吻必改）+「现行口吻必改」项是否已实际修订。对抗此前「Stage 6 抽样撞见旧判据残留」的评审挤牙膏模式（PR #46 四轮评审各剥一层才收敛）。
+
+**适用**：仅当项目存在至少一份 `decision-pivot-*.md` 且已通过 `--check-signoff` 时适用；无 pivot 或 pivot 未 signed-off 的项目此项 **N/A**（非评分维度，不计入 5 维度加权平均）。
+
+**裁决规则**（质性，非 1-5 评分，二元判定）：
+
+| 判定 | 条件 |
+|------|------|
+| 通过 | 工单全部命中已核销：逐条分类已判定，且「现行口吻必改」项对应位置已实际修订为新判据口吻 |
+| 不通过 | 存在任一命中未分类，或「现行口吻必改」项未实际修订仍是旧判据口吻 |
+
+**常见扣分项**（计入对应主维度，通常是准确性和完整性）：
+- 工单命中未逐条核对，仅抽样检查几条就下结论（-2，准确性）——违反「逐项核销，不许抽样」的核心要求
+- 「现行口吻必改」命中在标题/摘要/必知事实等显著位置未修订（-2，准确性 + 完整性）——旧判据残留在读者最先看到的位置，误导性最强
+- 「现行口吻必改」命中在正文深处未修订（-1，完整性）
+- 分类判定本身有误（把「现行口吻必改」误判为「历史留档合法」而放过）（-1，准确性）
+- pivot 未过 `--check-signoff` 却未在审阅报告中标注（-1，可追溯性）
+
+---
+
+**关联文件**：[quality-gates.md](../references/quality-gates.md)「作废集核销检查」· `scripts/pivot_scan.py` · 见 deep-research 插件的 research-reviewer subagent

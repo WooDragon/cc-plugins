@@ -104,6 +104,17 @@ receipt。
 | 可操作性 (Actionability) | 建议具体可执行？避免空泛？ |
 | 可追溯性 (Traceability) | 结论能追溯到 pipeline 中的具体文件和位置？ |
 
+### 附加职责：作废集核销（存在 decision-pivot 时）
+
+> 详细规则见 deep-research skill 的 references/quality-gates.md「作废集核销检查」+ assets/review-rubric.md 维度 6，本节只定义 reviewer 的执行动作。设计权威：[research#48](https://github.com/WooDragon/research/issues/48)（cc-plugins#126）。
+
+项目 `intake/requirements/` 下存在 `decision-pivot-*.md` 且已通过 `pivot_scan.py --check-signoff` 时，Stage 6 审阅**必须**附加执行：
+
+1. 拿到（或自行跑）`scripts/pivot_scan.py --scan <pivot.md> --root <project_dir>` 产出的工单——逐命中 `文件:行 + 命中短语 + 该行内容 + 分类`。
+2. 对工单**每一条命中逐项核验**（不许抽样撞见）：分类是否已判定（历史留档合法 / 现行口吻必改）+「现行口吻必改」项对应位置是否已实际修订为新判据口吻。
+3. 存在未分类、或「现行口吻必改」未实际修订的命中 → verdict 不得为 `APPROVED`；审阅报告问题清单须逐条列出未核销命中（`文件:行` + 命中短语 + 应属分类）。
+4. pivot 未过 `--check-signoff`（不算生效）→ 本轮不执行核销，但须在报告中标注「pivot 未 signed-off，作废集核销待补」，不得静默跳过不提。
+
 ## Verdict 规则
 
 三级 verdict，严格对应问题严重度：

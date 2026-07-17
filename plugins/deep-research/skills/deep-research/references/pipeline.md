@@ -123,6 +123,17 @@ fetch-report 必填字段：tier 分层（T1/T2/T3）、翻页统计、错误汇
 
 5 维度审阅：准确性、完整性、逻辑性、可操作性、可追溯性。verdict 规则见 [quality-gates.md](./quality-gates.md)。
 
+### decision-pivot 作废集核销（cc-plugins#126 / [research#48](https://github.com/WooDragon/research/issues/48)，存在 pivot 时适用于 Stage 6）
+
+判据锚点变更（`intake/requirements/decision-pivot-*.md`，模板 [decision-pivot.md.tmpl](../assets/decision-pivot.md.tmpl)）不是补充采集，是**推翻主 track 部分判据前提**的锚点变更；旧判据一旦被废止，交付物里残留的旧判据口吻若不核销，会误导读者。此前的核销方式是 Stage 6 审阅「抽样撞见」——四轮外部评审各剥一层才收敛（PR #46 的实测教训）。根因是工件残缺：只声明新裁决的 pivot 文件缺「被作废判据的枚举」，dirty set 无法机械计算。现改为工件契约补全 + 确定性扫描：
+
+1. **pivot 落盘**：Lead 与用户对齐决策变更后，按模板产出 `decision-pivot-N.md`，**必须**填写「废止短语清单」段——枚举旧判据在交付物里的现行口吻关键短语。
+2. **`pivot_scan.py --check-signoff`**：跑 `python3 <scripts/pivot_scan.py 绝对路径> --check-signoff <pivot.md>` 校验「废止短语清单」段非空 + signed_off 段「废止短语清单已列全」勾选项已打勾。**exit 1 时本 pivot 不算 signed-off**——不触发下游任何管线动作（不进 supplement 补采、不进 Stage 6 核销），补全清单后重跑直至 exit 0。
+3. **`pivot_scan.py --scan` 出工单**：check-signoff 通过后跑 `python3 <scripts/pivot_scan.py 绝对路径> --scan <pivot.md> --root <project_dir>`，对 `deliverables/**` + 项目根 `CLAUDE.md`/`README.md` 做确定性 grep（`intake/requirements/**`、`pipeline/**` 显式不扫，理由见脚本 docstring），产出逐命中工单（`文件:行` + 命中短语 + 该行内容 + 待填分类）。
+4. **工单二分类走 haiku 档**：每条命中判断「历史留档合法」（如附录留档、Correction Record 里刻意保留的旧结论）还是「现行口吻必改」（正文仍以旧判据口吻陈述、误导读者）——这是确定性 grep 命中后的规则化分类，不涉及生成或深度理解，按上下文经济学派 haiku 档执行（[research#48](https://github.com/WooDragon/research/issues/48) 原文：「haiku 档即可」）。
+5. **修订落笔走 sonnet 档**：「现行口吻必改」项的实际改写——理解上下文、把措辞改写到吻合新判据——是生产落地活，不给 haiku，仍按 sonnet 档执行（analyst 承接）。
+6. **Stage 6 逐项核销**：reviewer 在 Validation 审阅时，对工单的**每一条命中**逐项核验分类已判定 + 「现行口吻必改」项已实际修订，取代此前的抽样撞见——细则见 [quality-gates.md](./quality-gates.md)「作废集核销检查」与 `assets/review-rubric.md`。
+
 ### Stage 7: Delivery（Lead 出 spec + analyst 生成 + reviewer 语义核验）
 
 | 项 | 说明 |
