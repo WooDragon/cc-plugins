@@ -29,8 +29,12 @@
       分类留空是有意设计：机器只产出确定性命中集，"历史留档合法" vs
       "现行口吻必改" 是语义判断，本脚本不越界代劳。
 
+      「该行内容」列若含字面 tab/换行会被转义为 `\t`/`\n`（防 md 表格行
+      撑破 TSV 列对齐，见 `_escape_tsv_field`），其余三列不含这类字符。
+
       **扫描范围**（issue #48 方案原文 + plan 低成本扩张）：
-        - `deliverables/**`（全部子目录，含 draft/final 等，递归）
+        - `deliverables/**` 下的 `.md` 文件（全部子目录，含 draft/final
+          等，递归；只扫散文档，不扫其他后缀）
         - 项目根目录下的 `CLAUDE.md`、`README.md`（仅根目录，非递归）
 
       **显式不扫描**（各有既定理由，不是遗漏）：
@@ -40,6 +44,10 @@
           惯例，不是需要核销的现行口吻污染；扫描它们只会产生噪声工单。
         - `pipeline/**`：机器中间产物（原始/脱敏/结构化/综合数据），不
           是面向读者的现行结论口吻，同样不在核销范围。
+        - `deliverables/**` 下的非 `.md` 文件，尤其是 `report.html`：
+          render.py 的确定性渲染产物（f(report.md)，cc-plugins#125/#130），
+          手改它是错的——改 `.md` 后重渲即自动同步，html 不是独立的"现行
+          口吻"来源，纳入扫描只会制造无法核销的重复工单。
 
       输出确定性：命中按 (文件相对路径, 行号, 短语) 排序，零时间戳/零
       随机——同一输入跑任意次字节级一致。
@@ -91,6 +99,18 @@ def _split_sections(text):
     return sections
 
 
+def _match_abrogation_heading(heading_text: str) -> bool:
+    """判断某 `## ` 标题文本是否为「废止短语清单」标题。
+
+    check-signoff 与 scan 必须对同一份 pivot 文件得出同一结论——两者共用
+    本函数（经由 `parse_abrogated_phrases`），不允许各自实现一份匹配逻辑
+    再悄悄跑偏。匹配规则：以 `_ABROGATION_HEADING` 开头即算命中，允许附加
+    后缀（如 `废止短语清单（附注）`）；heading_text 已经过 `_H2_RE` 捕获，
+    天然去除了 `##` 前缀与行首尾空白。
+    """
+    return heading_text.startswith(_ABROGATION_HEADING)
+
+
 def parse_abrogated_phrases(text):
     """提取「废止短语清单」段下的 bullet 短语列表。
 
@@ -99,7 +119,7 @@ def parse_abrogated_phrases(text):
     （它们不以 `- ` 开头）。
     """
     for heading, body in _split_sections(text):
-        if heading == _ABROGATION_HEADING:
+        if _match_abrogation_heading(heading):
             phrases = []
             for line in body:
                 m = _BULLET_RE.match(line)
@@ -162,7 +182,7 @@ def _scan_scope_files(root: Path):
 
     deliverables = root / _SCAN_DELIVERABLES_DIR
     if deliverables.is_dir():
-        for p in deliverables.rglob("*"):
+        for p in deliverables.rglob("*.md"):
             if p.is_file():
                 files.append(p)
 
@@ -181,10 +201,14 @@ def scan_worklist(pivot_text: str, root: Path):
     非 UTF-8 文本文件（如二进制附件）静默跳过，不算扫描失败。
     """
     phrases = parse_abrogated_phrases(pivot_text)
-    if not phrases:
+    if phrases is None:
         raise PivotScanError(
-            "废止短语清单为空或不存在，无法扫描；先用 --check-signoff 确认"
+            "缺少 `## 废止短语清单` 段，无法扫描；先用 --check-signoff 确认"
             " pivot 文件已列全废止短语"
+        )
+    if len(phrases) == 0:
+        raise PivotScanError(
+            "废止短语段存在但为空，拒绝产出空工单（空结果会被误读为传播干净）"
         )
 
     hits = []
@@ -203,9 +227,20 @@ def scan_worklist(pivot_text: str, root: Path):
     return hits
 
 
+def _escape_tsv_field(text: str) -> str:
+    """转义字段内的 tab/换行，防止破坏 4 列 TSV 结构。
+
+    交付物原文（如 md 表格行）可能含字面 tab，未转义会撑破下游按 `\\t`
+    切分的列对齐——工单是给人工核销读的，列错位比字面 `\\t`/`\\n` 更难
+    发现、更容易误判分类。
+    """
+    return text.replace("\t", "\\t").replace("\n", "\\n")
+
+
 def _format_worklist(hits):
     return "\n".join(
-        f"{rel}:{lineno}\t{phrase}\t{line}\t" for rel, lineno, phrase, line in hits
+        f"{rel}:{lineno}\t{phrase}\t{_escape_tsv_field(line)}\t"
+        for rel, lineno, phrase, line in hits
     )
 
 
