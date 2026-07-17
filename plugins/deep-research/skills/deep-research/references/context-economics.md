@@ -65,7 +65,7 @@
 | 域拆解、事实提取 | research-analyst | 分析类工作 |
 | 跨域综合、洞察生成 | research-analyst + Lead | 综合类工作 |
 | Sufficiency Gate 评估 | research-reviewer (mode=sufficiency) | 充分性评估 |
-| 5 维度审阅 | research-reviewer (mode=review) | 质量审阅 |
+| 6 维度审阅 | research-reviewer (mode=review) | 质量审阅 |
 | 战略决策、Stage 回退、不可委托的连贯思考 | Lead session | 主上下文 |
 
 ## 搜索工具链

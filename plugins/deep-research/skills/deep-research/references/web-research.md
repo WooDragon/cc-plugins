@@ -139,7 +139,7 @@ harvester 在同一 Task 内串行执行（与 Acquisition 共享文件上下文
 
 ## Stage 6-7: Validation + Delivery
 
-- Validation（reviewer, mode=review）：5 维度审阅
+- Validation（reviewer, mode=review）：6 维度审阅
 - Delivery（Lead）：最终报告输出到 `deliverables/final/`
 
 ### 目标引用量

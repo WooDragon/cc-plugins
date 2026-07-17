@@ -710,6 +710,89 @@ class TestScanWorklistDiskOutput(unittest.TestCase):
             self.assertEqual(classification, "")
 
 
+class TestScanOverwriteProtection(unittest.TestCase):
+    """--scan must not silently clobber a worklist TSV that already carries
+    human-filled classifications in column 4 -- rescanning after a pivot
+    file gets a new phrase, or after deliverables/ content shifts, must not
+    erase completed 人工核销 work. --force opts back into overwriting."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+
+        self.pivot_text = _pivot(
+            "- 需拆分多 gateway 落地",
+            "- [x] 废止短语清单已列全（缺项则本 pivot 未生效）",
+        )
+        final_dir = self.root / "deliverables" / "final"
+        final_dir.mkdir(parents=True)
+        (final_dir / "x.md").write_text(
+            "仍需拆分多 gateway 落地\n", encoding="utf-8"
+        )
+        self.pivot_path = self.root / "decision-pivot-1.md"
+        self.pivot_path.write_text(self.pivot_text, encoding="utf-8")
+        self.worklist_path = (
+            self.root / "pipeline" / "verification" / "pivot-worklist-decision-pivot-1.tsv"
+        )
+
+    def _cmd(self, extra_args=None):
+        cmd = [
+            sys.executable,
+            str(_SCRIPT),
+            "--scan",
+            str(self.pivot_path),
+            "--root",
+            str(self.root),
+        ]
+        return cmd + (extra_args or [])
+
+    def test_rescan_refuses_to_overwrite_worklist_with_filled_classification(self):
+        self.worklist_path.parent.mkdir(parents=True, exist_ok=True)
+        pre_existing = "deliverables/final/x.md:1\t需拆分多 gateway 落地\t仍需拆分多 gateway 落地\t历史留档合法\n"
+        self.worklist_path.write_text(pre_existing, encoding="utf-8")
+
+        result = subprocess.run(self._cmd(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("拒绝静默覆盖", result.stderr)
+        self.assertIn("--force", result.stderr)
+        self.assertEqual(
+            self.worklist_path.read_text(encoding="utf-8"), pre_existing
+        )
+
+    def test_force_flag_overwrites_worklist_with_filled_classification(self):
+        self.worklist_path.parent.mkdir(parents=True, exist_ok=True)
+        pre_existing = "deliverables/final/x.md:1\t需拆分多 gateway 落地\t仍需拆分多 gateway 落地\t历史留档合法\n"
+        self.worklist_path.write_text(pre_existing, encoding="utf-8")
+
+        result = subprocess.run(self._cmd(["--force"]), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0)
+        on_disk = self.worklist_path.read_text(encoding="utf-8")
+        self.assertNotEqual(on_disk, pre_existing)
+        self.assertIn("deliverables/final/x.md:1", on_disk)
+
+    def test_rescan_overwrites_worklist_with_all_empty_classifications(self):
+        self.worklist_path.parent.mkdir(parents=True, exist_ok=True)
+        unclassified = "deliverables/final/x.md:1\t需拆分多 gateway 落地\t仍需拆分多 gateway 落地\t\n"
+        self.worklist_path.write_text(unclassified, encoding="utf-8")
+
+        result = subprocess.run(self._cmd(), capture_output=True, text=True)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(
+            self.worklist_path.read_text(encoding="utf-8").rstrip("\n"),
+            result.stdout.rstrip("\n"),
+        )
+
+    def test_scan_to_nonexistent_worklist_path_needs_no_force(self):
+        self.assertFalse(self.worklist_path.exists())
+        result = subprocess.run(self._cmd(), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(self.worklist_path.is_file())
+
+
 class TestScanFailLoudMessages(unittest.TestCase):
     """scan_worklist must fail loud with a message that distinguishes the
     two dirty states -- "section missing" is not the same failure as

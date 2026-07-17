@@ -73,8 +73,15 @@ Stage 6 从抽样撞见变对盘上工单文件的逐行核销。
       输出确定性：命中按 (文件相对路径, 行号, 短语) 排序，零时间戳/零
       随机——同一输入跑任意次字节级一致（stdout 与落盘文件皆然）。
 
-退出码：--check-signoff 不满足 / --scan 找不到可扫描的短语清单 / 参数错误
-均 exit 1，stderr 给出可读原因；正常路径 exit 0。
+      **落盘覆盖保护**：目标 TSV 若已存在且第 4 列（分类）至少一行非空
+      ——说明人工已对该工单做过回填——默认拒绝静默覆盖，stderr 报错并
+      exit 1，不写盘；加 `--force` 显式覆盖。本工具通篇的立场是消灭静默
+      丢失（空工单 fail-loud、越界文件不扫），落盘覆盖同理：机器重扫产出
+      的新工单不能无声吞掉人工已完成的分类判断，二者是同一条纪律的两面。
+
+退出码：--check-signoff 不满足 / --scan 找不到可扫描的短语清单 / --scan
+落盘目标已含人工回填分类且未加 --force / 参数错误均 exit 1，stderr 给出
+可读原因；正常路径 exit 0。
 """
 import argparse
 import re
@@ -377,6 +384,28 @@ def _default_worklist_path(root: Path, pivot_path: Path) -> Path:
     return root.joinpath(*_WORKLIST_SUBDIR, f"pivot-worklist-{pivot_path.stem}.tsv")
 
 
+def _existing_worklist_has_classifications(path: Path) -> bool:
+    """判断磁盘上已存在的工单 TSV 是否含有任一非空分类（第 4 列）。
+
+    落盘前的覆盖保护 check：目标 TSV 若已经历过人工回填分类，--scan 重扫
+    默认不得静默覆盖那些回填——这与本模块"空工单 fail-loud"是同一条纪律
+    的两面（见模块 docstring「落盘覆盖保护」）。文件不存在、或存在但内容
+    为空、或全部分类列均为空（尚未被人工回填过），均视为可安全覆盖，
+    返回 False。
+    """
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for line in content.splitlines():
+        if not line:
+            continue
+        fields = line.split("\t")
+        if len(fields) >= 4 and fields[3].strip():
+            return True
+    return False
+
+
 def _read_pivot(path_str: str) -> str:
     path = Path(path_str)
     try:
@@ -414,6 +443,11 @@ def main(argv=None):
             "（默认 <root>/pipeline/verification/pivot-worklist-<pivot文件名stem>.tsv）"
         ),
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="--scan 显式覆盖已含人工回填分类的目标工单（默认拒绝静默覆盖，见模块 docstring）",
+    )
     args = parser.parse_args(argv)
 
     if args.check_signoff and args.scan:
@@ -448,6 +482,13 @@ def main(argv=None):
                 if args.out
                 else _default_worklist_path(root, Path(args.scan))
             )
+            if not args.force and _existing_worklist_has_classifications(out_path):
+                print(
+                    f"错误: 目标工单已含人工回填分类，拒绝静默覆盖"
+                    f"（用 --force 覆盖或 --out 另存）: {out_path}",
+                    file=sys.stderr,
+                )
+                return 1
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(output + ("\n" if output else ""), encoding="utf-8")
             print(f"工单已落盘: {out_path}", file=sys.stderr)
