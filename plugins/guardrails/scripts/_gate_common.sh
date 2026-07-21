@@ -28,29 +28,68 @@ _gate_bypass_on() {
   [ "${!1:-0}" = "1" ]
 }
 
+# _gate_in_tree <root> <path> — 判定 path 的真实物理路径（跟随 symlink）
+# 是否落在 root 的物理树内。返回 0 表示在树内（放行扫描），非 0 表示越界
+# 或解析失败（跳过）。零新二进制依赖，用已有的 perl Cwd::abs_path 解析。
+_gate_in_tree() {
+  local root="$1" path="$2"
+  [ -n "$root" ] && [ -n "$path" ] || return 1
+  command -v perl >/dev/null 2>&1 || return 1
+  local rp_root rp_path
+  rp_root=$(perl -MCwd=abs_path -e 'my $p=abs_path($ARGV[0]); print $p if defined $p' "$root" 2>/dev/null) || return 1
+  rp_path=$(perl -MCwd=abs_path -e 'my $p=abs_path($ARGV[0]); print $p if defined $p' "$path" 2>/dev/null) || return 1
+  [ -n "$rp_root" ] && [ -n "$rp_path" ] || return 1
+  case "$rp_path" in
+    "$rp_root"/*|"$rp_root") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # _gate_instruction_files <root> — 枚举 <root> 树下的 agent 指令文件，一行
 # 一个绝对/相对路径输出到 stdout。纯只读函数，无副作用。
 #
-# 文件名白名单（递归覆盖子目录，maxdepth 6）：
-#   CLAUDE.md AGENTS.md GEMINI.md .cursorrules .clinerules .windsurfrules
-#   .github/copilot-instructions.md .cursor/rules/*.mdc
+# 文件名白名单（递归覆盖子目录，maxdepth 6；也扫 symlink，经越界校验）：
+#   CLAUDE.md CLAUDE.local.md AGENTS.md AGENT.md GEMINI.md
+#   .cursorrules .continuerules .clinerules .windsurfrules
+#   .roorules .roorules-* .roo/rules/* .roo/rules-*/*
+#   .clinerules/*.md .clinerules/*.txt
+#   .windsurf/rules/*.md .devin/rules/*.md .continue/rules/*.md
+#   .github/copilot-instructions.md .github/instructions/*.instructions.md
+#   .cursor/rules/*.mdc
 # 排除目录：.git node_modules vendor dist web/dist（用 -prune，不下探）。
+# symlink 目标若指向 cwd 树外则跳过（防扫描逸出工作区）。
 _gate_instruction_files() {
   local root="$1"
   [ -n "$root" ] && [ -d "$root" ] || return 0
   find "$root" -maxdepth 6 \
     \( -path "*/.git" -o -path "*/node_modules" -o -path "*/vendor" \
        -o -path "*/dist" -o -path "*/web/dist" \) -prune -o \
-    -type f \( \
+    \( -type f -o -type l \) \( \
       -name 'CLAUDE.md' -o \
+      -name 'CLAUDE.local.md' -o \
       -name 'AGENTS.md' -o \
+      -name 'AGENT.md' -o \
       -name 'GEMINI.md' -o \
       -name '.cursorrules' -o \
+      -name '.continuerules' -o \
       -name '.clinerules' -o \
       -name '.windsurfrules' -o \
+      -name '.roorules' -o \
+      -name '.roorules-*' -o \
+      -path '*/.roo/rules/*' -o \
+      -path '*/.roo/rules-*/*' -o \
+      -path '*/.clinerules/*.md' -o \
+      -path '*/.clinerules/*.txt' -o \
+      -path '*/.windsurf/rules/*.md' -o \
+      -path '*/.devin/rules/*.md' -o \
+      -path '*/.continue/rules/*.md' -o \
       -path '*/.github/copilot-instructions.md' -o \
+      -path '*/.github/instructions/*.instructions.md' -o \
       -path '*/.cursor/rules/*.mdc' \
-    \) -print 2>/dev/null
+    \) -print 2>/dev/null \
+  | while IFS= read -r f; do
+      _gate_in_tree "$root" "$f" && printf '%s\n' "$f"
+    done
 }
 
 # _gate_scan_hidden <file> — 用 perl 逐行扫隐藏 Unicode 码点，命中输出

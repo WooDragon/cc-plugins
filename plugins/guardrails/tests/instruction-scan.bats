@@ -181,3 +181,134 @@ teardown() {
   run_instruction_scan
   assert_silent
 }
+
+# ============================================================
+# New whitelist entries (v1.3.0)
+# ============================================================
+
+@test "whitelist: CLAUDE.local.md with hidden char → hit" {
+  write_hidden_char_file "$WORKROOT/CLAUDE.local.md" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains "CLAUDE.local.md"
+}
+
+@test "whitelist: AGENT.md with hidden char → hit" {
+  write_hidden_char_file "$WORKROOT/AGENT.md" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains "AGENT.md"
+}
+
+@test "whitelist: .continuerules with hidden char → hit" {
+  write_hidden_char_file "$WORKROOT/.continuerules" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".continuerules"
+}
+
+@test "whitelist: .roorules with hidden char → hit" {
+  write_hidden_char_file "$WORKROOT/.roorules" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".roorules"
+}
+
+@test "whitelist: .roorules-code with hidden char → hit" {
+  write_hidden_char_file "$WORKROOT/.roorules-code" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".roorules-code"
+}
+
+@test "whitelist: .roo/rules/x.md with hidden char → hit" {
+  mkdir -p "$WORKROOT/.roo/rules"
+  write_hidden_char_file "$WORKROOT/.roo/rules/x.md" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".roo/rules/x.md"
+}
+
+@test "whitelist: .roo/rules-code/x.md with hidden char → hit" {
+  mkdir -p "$WORKROOT/.roo/rules-code"
+  write_hidden_char_file "$WORKROOT/.roo/rules-code/x.md" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".roo/rules-code/x.md"
+}
+
+@test "whitelist: .clinerules/x.md with hidden char → hit" {
+  mkdir -p "$WORKROOT/.clinerules"
+  write_hidden_char_file "$WORKROOT/.clinerules/x.md" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".clinerules/x.md"
+}
+
+@test "whitelist: .clinerules/y.txt with hidden char → hit" {
+  mkdir -p "$WORKROOT/.clinerules"
+  write_hidden_char_file "$WORKROOT/.clinerules/y.txt" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".clinerules/y.txt"
+}
+
+@test "whitelist: .windsurf/rules/w.md with hidden char → hit" {
+  mkdir -p "$WORKROOT/.windsurf/rules"
+  write_hidden_char_file "$WORKROOT/.windsurf/rules/w.md" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".windsurf/rules/w.md"
+}
+
+@test "whitelist: .devin/rules/d.md with hidden char → hit" {
+  mkdir -p "$WORKROOT/.devin/rules"
+  write_hidden_char_file "$WORKROOT/.devin/rules/d.md" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".devin/rules/d.md"
+}
+
+@test "whitelist: .continue/rules/c.md with hidden char → hit" {
+  mkdir -p "$WORKROOT/.continue/rules"
+  write_hidden_char_file "$WORKROOT/.continue/rules/c.md" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".continue/rules/c.md"
+}
+
+@test "whitelist: .github/instructions/api.instructions.md with hidden char → hit" {
+  mkdir -p "$WORKROOT/.github/instructions"
+  write_hidden_char_file "$WORKROOT/.github/instructions/api.instructions.md" 200B
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains ".github/instructions/api.instructions.md"
+}
+
+# ============================================================
+# Symlink boundary validation (v1.3.0)
+# ============================================================
+
+@test "symlink: CLAUDE.md -> in-tree target with hidden char → hit" {
+  mkdir -p "$WORKROOT/sub"
+  write_hidden_char_file "$WORKROOT/sub/actual.md" 200B
+  ln -s "$WORKROOT/sub/actual.md" "$WORKROOT/CLAUDE.md"
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_session_start_alert_contains "CLAUDE.md"
+}
+
+@test "symlink: CLAUDE.md -> out-of-tree target → silent" {
+  write_hidden_char_file "$TEST_TEMP_DIR/outside.md" 200B
+  ln -s "$TEST_TEMP_DIR/outside.md" "$WORKROOT/CLAUDE.md"
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_silent
+}
+
+@test "symlink: dangling CLAUDE.md -> nonexistent target → silent" {
+  ln -s "$WORKROOT/nonexistent.md" "$WORKROOT/CLAUDE.md"
+  INPUT=$(build_session_start_input cwd="$WORKROOT")
+  run_instruction_scan
+  assert_silent
+}
