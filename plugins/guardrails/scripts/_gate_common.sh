@@ -45,10 +45,12 @@ _gate_in_tree() {
   esac
 }
 
-# _gate_instruction_files <root> — 枚举 <root> 树下的 agent 指令文件，一行
-# 一个绝对/相对路径输出到 stdout。纯只读函数，无副作用。
+# _gate_instruction_candidates <root> — 枚举 <root> 树下所有匹配白名单文件名的
+# 候选（普通文件 + symlink，一行一路径到 stdout）。不做越界校验，是
+# _gate_instruction_files / _gate_symlink_escapes 的共同上游，让白名单只有一处
+# 定义。纯只读函数，无副作用。
 #
-# 文件名白名单（递归覆盖子目录，maxdepth 6；也扫 symlink，经越界校验）：
+# 文件名白名单（递归覆盖子目录，maxdepth 6；含 symlink）：
 #   CLAUDE.md CLAUDE.local.md AGENTS.md AGENT.md GEMINI.md
 #   .cursorrules .continuerules .clinerules .windsurfrules
 #   .roorules .roorules-* .roo/rules/* .roo/rules-*/*
@@ -57,8 +59,7 @@ _gate_in_tree() {
 #   .github/copilot-instructions.md .github/instructions/*.instructions.md
 #   .cursor/rules/*.mdc
 # 排除目录：.git node_modules vendor dist web/dist（用 -prune，不下探）。
-# symlink 目标若指向 cwd 树外则跳过（防扫描逸出工作区）。
-_gate_instruction_files() {
+_gate_instruction_candidates() {
   local root="$1"
   [ -n "$root" ] && [ -d "$root" ] || return 0
   find "$root" -maxdepth 6 \
@@ -86,10 +87,44 @@ _gate_instruction_files() {
       -path '*/.github/copilot-instructions.md' -o \
       -path '*/.github/instructions/*.instructions.md' -o \
       -path '*/.cursor/rules/*.mdc' \
-    \) -print 2>/dev/null \
-  | while IFS= read -r f; do
-      _gate_in_tree "$root" "$f" && printf '%s\n' "$f"
-    done
+    \) -print 2>/dev/null
+  return 0
+}
+
+# _gate_instruction_files <root> — 枚举 <root> 树下真实物理路径落在树内的 agent
+# 指令文件，一行一路径到 stdout。纯只读函数，无副作用。越界 symlink（目标在
+# cwd 树外）被排除，改由 _gate_symlink_escapes 单独告警。
+_gate_instruction_files() {
+  local root="$1"
+  [ -n "$root" ] && [ -d "$root" ] || return 0
+  while IFS= read -r f; do
+    _gate_in_tree "$root" "$f" && printf '%s\n' "$f"
+  done < <(_gate_instruction_candidates "$root")
+  return 0
+}
+
+# _gate_symlink_escapes <root> — 枚举命中白名单、且其 symlink 目标解析后落在
+# <root> 树外的指令文件，一行输出 "symlink路径 -> 解析目标"。纯只读函数：只解析
+# 路径，绝不打开/读取树外目标内容（不引入扫描逸出），只把"无法核验"这一事实
+# 显式化，消除静默盲区。悬空 symlink（目标解析失败）保持沉默，不报为越界。
+_gate_symlink_escapes() {
+  local root="$1"
+  [ -n "$root" ] && [ -d "$root" ] || return 0
+  command -v perl >/dev/null 2>&1 || return 0
+  local rp_root
+  rp_root=$(perl -MCwd=abs_path -e 'my $p=abs_path($ARGV[0]); print $p if defined $p' "$root" 2>/dev/null) || return 0
+  [ -n "$rp_root" ] || return 0
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -L "$f" ] || continue
+    local rp_path
+    rp_path=$(perl -MCwd=abs_path -e 'my $p=abs_path($ARGV[0]); print $p if defined $p' "$f" 2>/dev/null)
+    [ -n "$rp_path" ] || continue
+    case "$rp_path" in
+      "$rp_root"/*|"$rp_root") ;;
+      *) printf '%s -> %s\n' "$f" "$rp_path" ;;
+    esac
+  done < <(_gate_instruction_candidates "$root")
+  return 0
 }
 
 # _gate_scan_hidden <file> — 用 perl 逐行扫隐藏 Unicode 码点，命中输出

@@ -298,12 +298,26 @@ teardown() {
   assert_session_start_alert_contains "CLAUDE.md"
 }
 
-@test "symlink: CLAUDE.md -> out-of-tree target → silent" {
+@test "symlink: CLAUDE.md -> out-of-tree target (absolute) → escape alert, content NOT scanned" {
   write_hidden_char_file "$TEST_TEMP_DIR/outside.md" 200B
   ln -s "$TEST_TEMP_DIR/outside.md" "$WORKROOT/CLAUDE.md"
   INPUT=$(build_session_start_input cwd="$WORKROOT")
   run_instruction_scan
-  assert_silent
+  # Escape is surfaced (no longer silent) but the out-of-tree content is not
+  # opened, so no hidden-char hit ("U+200B") should leak into the report.
+  assert_session_start_alert_contains "工作区外"
+  assert_session_start_alert_not_contains "U+200B"
+}
+
+@test "symlink: CLAUDE.md -> out-of-tree target (relative ../) → escape alert" {
+  # monorepo-shaped: app/CLAUDE.md -> ../shared/CLAUDE.md, target outside cwd.
+  mkdir -p "$WORKROOT/app" "$TEST_TEMP_DIR/shared"
+  write_hidden_char_file "$TEST_TEMP_DIR/shared/CLAUDE.md" 200B
+  ln -s ../../shared/CLAUDE.md "$WORKROOT/app/CLAUDE.md"
+  INPUT=$(build_session_start_input cwd="$WORKROOT/app")
+  run_instruction_scan
+  assert_session_start_alert_contains "工作区外"
+  assert_session_start_alert_not_contains "U+200B"
 }
 
 @test "symlink: dangling CLAUDE.md -> nonexistent target → silent" {

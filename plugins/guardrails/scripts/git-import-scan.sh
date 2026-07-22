@@ -68,14 +68,31 @@ ${HITS}
 "
   done < <(_gate_instruction_files "$CWD")
 
-  # No hidden-char hit → stay silent.
-  [ -n "$REPORT" ] || return
+  # Out-of-tree symlinks: unverifiable content (never opened), surfaced rather
+  # than silently dropped. Symmetric with instruction-scan.sh.
+  ESCAPES=$(_gate_symlink_escapes "$CWD") || ESCAPES=""
 
-  MSG="[git-import-scan] 检测到 git/gh 导入动作（拉取/合并/切换等）后，当前工作区（${CWD}）的 agent 指令文件中检测到隐藏 Unicode 字符（零宽/双向控制/tag 字符/异常 BOM），存在指令注入风险，请人工核查："
+  # Nothing to report → stay silent.
+  [ -n "$REPORT" ] || [ -n "$ESCAPES" ] || return
 
-  MSG="${MSG}
+  MSG="[git-import-scan] 检测到 git/gh 导入动作（拉取/合并/切换等）后，当前工作区（${CWD}）的 agent 指令文件存在安全隐患，请人工核查："
+
+  if [ -n "$REPORT" ]; then
+    MSG="${MSG}
+
+隐藏 Unicode 字符（零宽/双向控制/tag 字符/异常 BOM），存在指令注入风险：
 
 ${REPORT}"
+  fi
+
+  if [ -n "$ESCAPES" ]; then
+    MSG="${MSG}
+
+以下指令文件是指向工作区外的 symlink，扫描器无法核验其内容，请人工审查目标：
+
+${ESCAPES}
+"
+  fi
 
   MSG_JSON=$(printf '%s' "$MSG" | jq -Rs .) || return
   printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":%s}}' "$MSG_JSON"

@@ -42,12 +42,31 @@ ${HITS}
 "
   done < <(_gate_instruction_files "$CWD")
 
-  # Nothing hit → stay silent.
-  [ -n "$REPORT" ] || return
+  # Out-of-tree symlinks: content is unverifiable (never opened, to avoid scan
+  # escape), so surface the fact rather than dropping it silently.
+  ESCAPES=$(_gate_symlink_escapes "$CWD") || ESCAPES=""
 
-  MSG="[instruction-scan] 检测到 agent 指令文件中存在隐藏 Unicode 字符（零宽/双向控制/tag 字符/异常 BOM），存在指令注入风险，请人工核查以下位置：
+  # Nothing to report → stay silent.
+  [ -n "$REPORT" ] || [ -n "$ESCAPES" ] || return
+
+  MSG="[instruction-scan] 检测到 agent 指令文件安全隐患，请人工核查："
+
+  if [ -n "$REPORT" ]; then
+    MSG="${MSG}
+
+隐藏 Unicode 字符（零宽/双向控制/tag 字符/异常 BOM），存在指令注入风险：
 
 ${REPORT}"
+  fi
+
+  if [ -n "$ESCAPES" ]; then
+    MSG="${MSG}
+
+以下指令文件是指向工作区外的 symlink，扫描器无法核验其内容，请人工审查目标：
+
+${ESCAPES}
+"
+  fi
 
   MSG_JSON=$(printf '%s' "$MSG" | jq -Rs .) || return
   printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}' "$MSG_JSON"
