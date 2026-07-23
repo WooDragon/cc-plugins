@@ -28,29 +28,103 @@ _gate_bypass_on() {
   [ "${!1:-0}" = "1" ]
 }
 
-# _gate_instruction_files <root> — 枚举 <root> 树下的 agent 指令文件，一行
-# 一个绝对/相对路径输出到 stdout。纯只读函数，无副作用。
+# _gate_in_tree <root> <path> — 判定 path 的真实物理路径（跟随 symlink）
+# 是否落在 root 的物理树内。返回 0 表示在树内（放行扫描），非 0 表示越界
+# 或解析失败（跳过）。零新二进制依赖，用已有的 perl Cwd::abs_path 解析。
+_gate_in_tree() {
+  local root="$1" path="$2"
+  [ -n "$root" ] && [ -n "$path" ] || return 1
+  command -v perl >/dev/null 2>&1 || return 1
+  local rp_root rp_path
+  rp_root=$(perl -MCwd=abs_path -e 'my $p=abs_path($ARGV[0]); print $p if defined $p' "$root" 2>/dev/null) || return 1
+  rp_path=$(perl -MCwd=abs_path -e 'my $p=abs_path($ARGV[0]); print $p if defined $p' "$path" 2>/dev/null) || return 1
+  [ -n "$rp_root" ] && [ -n "$rp_path" ] || return 1
+  case "$rp_path" in
+    "$rp_root"/*|"$rp_root") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# _gate_instruction_candidates <root> — 枚举 <root> 树下所有匹配白名单文件名的
+# 候选（普通文件 + symlink，一行一路径到 stdout）。不做越界校验，是
+# _gate_instruction_files / _gate_symlink_escapes 的共同上游，让白名单只有一处
+# 定义。纯只读函数，无副作用。
 #
-# 文件名白名单（递归覆盖子目录，maxdepth 6）：
-#   CLAUDE.md AGENTS.md GEMINI.md .cursorrules .clinerules .windsurfrules
-#   .github/copilot-instructions.md .cursor/rules/*.mdc
+# 文件名白名单（递归覆盖子目录，maxdepth 6；含 symlink）：
+#   CLAUDE.md CLAUDE.local.md AGENTS.md AGENT.md GEMINI.md
+#   .cursorrules .continuerules .clinerules .windsurfrules
+#   .roorules .roorules-* .roo/rules/* .roo/rules-*/*
+#   .clinerules/*.md .clinerules/*.txt
+#   .windsurf/rules/*.md .devin/rules/*.md .continue/rules/*.md
+#   .github/copilot-instructions.md .github/instructions/*.instructions.md
+#   .cursor/rules/*.mdc
 # 排除目录：.git node_modules vendor dist web/dist（用 -prune，不下探）。
-_gate_instruction_files() {
+_gate_instruction_candidates() {
   local root="$1"
   [ -n "$root" ] && [ -d "$root" ] || return 0
   find "$root" -maxdepth 6 \
     \( -path "*/.git" -o -path "*/node_modules" -o -path "*/vendor" \
        -o -path "*/dist" -o -path "*/web/dist" \) -prune -o \
-    -type f \( \
+    \( -type f -o -type l \) \( \
       -name 'CLAUDE.md' -o \
+      -name 'CLAUDE.local.md' -o \
       -name 'AGENTS.md' -o \
+      -name 'AGENT.md' -o \
       -name 'GEMINI.md' -o \
       -name '.cursorrules' -o \
+      -name '.continuerules' -o \
       -name '.clinerules' -o \
       -name '.windsurfrules' -o \
+      -name '.roorules' -o \
+      -name '.roorules-*' -o \
+      -path '*/.roo/rules/*' -o \
+      -path '*/.roo/rules-*/*' -o \
+      -path '*/.clinerules/*.md' -o \
+      -path '*/.clinerules/*.txt' -o \
+      -path '*/.windsurf/rules/*.md' -o \
+      -path '*/.devin/rules/*.md' -o \
+      -path '*/.continue/rules/*.md' -o \
       -path '*/.github/copilot-instructions.md' -o \
+      -path '*/.github/instructions/*.instructions.md' -o \
       -path '*/.cursor/rules/*.mdc' \
     \) -print 2>/dev/null
+  return 0
+}
+
+# _gate_instruction_files <root> — 枚举 <root> 树下真实物理路径落在树内的 agent
+# 指令文件，一行一路径到 stdout。纯只读函数，无副作用。越界 symlink（目标在
+# cwd 树外）被排除，改由 _gate_symlink_escapes 单独告警。
+_gate_instruction_files() {
+  local root="$1"
+  [ -n "$root" ] && [ -d "$root" ] || return 0
+  while IFS= read -r f; do
+    _gate_in_tree "$root" "$f" && printf '%s\n' "$f"
+  done < <(_gate_instruction_candidates "$root")
+  return 0
+}
+
+# _gate_symlink_escapes <root> — 枚举命中白名单、且其 symlink 目标解析后落在
+# <root> 树外的指令文件，一行输出 "symlink路径 -> 解析目标"。纯只读函数：只解析
+# 路径，绝不打开/读取树外目标内容（不引入扫描逸出），只把"无法核验"这一事实
+# 显式化，消除静默盲区。悬空 symlink（目标解析失败）保持沉默，不报为越界。
+_gate_symlink_escapes() {
+  local root="$1"
+  [ -n "$root" ] && [ -d "$root" ] || return 0
+  command -v perl >/dev/null 2>&1 || return 0
+  local rp_root
+  rp_root=$(perl -MCwd=abs_path -e 'my $p=abs_path($ARGV[0]); print $p if defined $p' "$root" 2>/dev/null) || return 0
+  [ -n "$rp_root" ] || return 0
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -L "$f" ] || continue
+    local rp_path
+    rp_path=$(perl -MCwd=abs_path -e 'my $p=abs_path($ARGV[0]); print $p if defined $p' "$f" 2>/dev/null)
+    [ -n "$rp_path" ] || continue
+    case "$rp_path" in
+      "$rp_root"/*|"$rp_root") ;;
+      *) printf '%s -> %s\n' "$f" "$rp_path" ;;
+    esac
+  done < <(_gate_instruction_candidates "$root")
+  return 0
 }
 
 # _gate_scan_hidden <file> — 用 perl 逐行扫隐藏 Unicode 码点，命中输出

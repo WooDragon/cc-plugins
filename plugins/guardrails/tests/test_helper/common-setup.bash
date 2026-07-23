@@ -414,6 +414,26 @@ assert_session_start_alert_contains() {
   esac
 }
 
+# assert_session_start_alert_not_contains <pattern> — companion to the above:
+# the emitted alert must NOT contain <pattern>. Used to prove out-of-tree
+# symlink content is never scanned (its hidden codepoints must not leak into
+# the report). Requires a valid SessionStart alert to already be present.
+assert_session_start_alert_not_contains() {
+  local pattern="$1"
+  echo "$HOOK_STDOUT" | jq . >/dev/null 2>&1 || {
+    echo "stdout is not valid JSON: $HOOK_STDOUT"
+    return 1
+  }
+  local ctx
+  ctx=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.additionalContext')
+  case "$ctx" in
+    *"$pattern"*)
+      echo "Pattern '$pattern' unexpectedly found in additionalContext: $ctx"
+      return 1
+      ;;
+  esac
+}
+
 # --- Input Construction (git-import-scan) ---
 
 # build_post_bash_input command=X cwd=Y [session_id=Z] — PostToolUse:Bash
