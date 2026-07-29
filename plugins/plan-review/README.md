@@ -14,6 +14,51 @@ claude plugin add plan-review@WooDragon-cc-plugins
 claude --plugin-dir ~/.claude/dev-plugins/plan-review
 ```
 
+## Architecture
+
+```
+scripts/
+  plan-review.sh              Orchestrator: guards → counters → dual safety valves →
+                               pre-check → prompt assembly → retry driver → verdict branching
+  lib/
+    common.sh                 Logging helpers, backfill_engine_err, allow_with_reason, plan_hash
+    plan-source.sh            Transcript triple-gated lookup + extraction chain +
+                               RESOLVE_REASON tri-state messaging
+    verdict.sh                Verdict extraction + APPROVE/CONCERNS/REJECT feedback rendering
+    manifest.sh               Dispatch Manifest detection + MANIFEST_EXAMPLE + JSON serialization
+    engines/
+      agy.sh                   engine_probe/invoke/extract for the default gemini (agy CLI) engine
+      claude.sh                engine_probe/invoke/extract for REVIEW_ENGINE=claude
+      codex.sh                 engine_probe/invoke/extract for REVIEW_ENGINE=codex, plus an
+                                engine_err_filter privacy-redaction hook
+      rest.sh                  REST SSE fallback (see "Engine interface" below)
+  assets/
+    review-system-prompt.md   SYSTEM_INSTRUCTIONS prompt text (pure data, no shell logic)
+  dispatch-check.sh           Layer 2 hook — Agent/Task dispatch-parameter enforcement
+  precompact-review.sh        PreCompact hook — plan recovery across compaction
+```
+
+### Engine interface
+
+Each review engine implements three hooks that the orchestrator calls uniformly:
+
+- **`engine_probe`** — called once, outside the retry loop: check the CLI is present, resolve
+  model variables, and prepare any one-off temp resources. Returns non-zero if unusable.
+- **`engine_invoke`** — called once per retry round: run the CLI, write raw output to
+  `$ENGINE_OUT`, set `engine_exit`.
+- **`engine_extract`** — read `$ENGINE_OUT` and set `REVIEW` to the review text. Verdict parsing
+  happens later, in `lib/verdict.sh` — engines never see it.
+
+Adding a new engine means adding one `lib/engines/<name>.sh` file that implements these three
+functions, then adding one line to the orchestrator's engine whitelist `case` in `plan-review.sh`
+— no other file needs to change.
+
+`rest.sh` is the exception: it is a fallback channel, not a fourth first-class engine. It only
+activates after the CLI retry budget is exhausted, and it always runs alongside whichever engine
+was already sourced in the same process — so its functions use a `rest_` prefix instead of
+implementing the three-hook interface, to avoid colliding with the active engine's own function
+names.
+
 ## Environment Variables
 
 ### `plan-review.sh` (ExitPlanMode adversarial review)
@@ -63,7 +108,7 @@ on that second call permits execution.
 
 ## Review Criteria
 
-Nine criteria — authoritative text lives in `SYSTEM_INSTRUCTIONS` inside `scripts/plan-review.sh`.
+Nine criteria — authoritative text lives in `scripts/assets/review-system-prompt.md`.
 
 | # | Criterion | Focus |
 |---|-----------|-------|

@@ -31,11 +31,24 @@ plugins/
   plan-review/                    # 对抗性审阅插件
     .claude-plugin/plugin.json    # 插件元数据
     hooks/hooks.json              # PreToolUse + PreCompact hook 声明
-    scripts/plan-review.sh        # 核心脚本（ExitPlanMode 拦截 + Layer 1 manifest 检查）
-    scripts/dispatch-check.sh     # Layer 2 hook（Agent/Task 调度参数强制）
-    scripts/precompact-review.sh  # PreCompact hook（compaction 恢复）
-    tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 主测试套件（含 Dispatch Manifest、codex 引擎）
+    scripts/
+      plan-review.sh             # 编排器：守卫→计数→双安全阀→预检→prompt 组装→重试驱动→verdict 分支
+      lib/
+        common.sh                # 日志三件套 + backfill_engine_err + allow_with_reason + plan_hash
+        plan-source.sh           # transcript 反查三重安全门 + 提取链 + RESOLVE_REASON 三态文案
+        verdict.sh               # verdict 提取 + APPROVE/CONCERNS/REJECT 三种反馈渲染
+        manifest.sh              # Manifest 检测三函数 + MANIFEST_EXAMPLE + JSON 序列化
+        engines/                 # 引擎三钩子接口（engine_probe/engine_invoke/engine_extract）
+          agy.sh                 # gemini 引擎（默认，agy CLI，含 JSON 文本切片 + conversation 复用）
+          claude.sh              # REVIEW_ENGINE=claude
+          codex.sh               # REVIEW_ENGINE=codex（含 engine_err_filter 隐私过滤钩子）
+          rest.sh                # REST SSE 降级通道（rest_ 前缀独立函数，不实现三钩子）
+      assets/
+        review-system-prompt.md  # SYSTEM_INSTRUCTIONS 提示词正文（纯数据）
+      dispatch-check.sh          # Layer 2 hook（Agent/Task 调度参数强制）
+      precompact-review.sh       # PreCompact hook（compaction 恢复）
+    tests/                        # BDD 测试套件（bats-core，205 个测试用例）
+      plan-review.bats            # 主测试套件（191 个，含 Dispatch Manifest、codex 引擎）
       dispatch-check.bats         # 14 个测试用例（Layer 2 hook）
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
