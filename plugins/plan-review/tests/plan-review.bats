@@ -3615,3 +3615,92 @@ MOCK_EOF
   [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
   [[ "$HOOK_STDOUT" == *"prompt asset truncated"* ]]
 }
+
+# --- Engine-lib bootstrap (second bootstrap block: lib/engines/*.sh) ---
+#
+# The first bootstrap block above (lib/common.sh, lib/plan-source.sh,
+# lib/manifest.sh, lib/verdict.sh) went through the `[ -s ]` + `_source_lib`
+# hardening in PR #145. The engine libs (lib/engines/rest.sh + the
+# REVIEW_ENGINE-selected lib, e.g. agy.sh) are sourced in a SECOND, separate
+# bootstrap block further down in the script and had NOT been hardened the
+# same way — REVIEW_ENGINE is unset in these tests, which the case statement
+# resolves to the `*` fallback (agy.sh), so these tests corrupt
+# lib/engines/agy.sh to hit that path.
+#
+# Same REVIEW_DRY_RUN=1 safety-belt rationale as the first bootstrap block:
+# this guard fires and exits before the script ever reaches the
+# engine-invocation section, so dry-run cannot influence these assertions —
+# it only prevents a real engine CLI call if the guard ever regresses.
+
+# bootstrap: engine lib file exists but is empty (zero bytes) — passes the
+# old `[ -f ]` existence check clean, `source` of an empty file "succeeds"
+# (sourcing zero bytes is valid bash, exit 0), and the very next call to a
+# helper the lib was supposed to define (e.g. engine_probe) dies with
+# "command not found" (exit 127), no allow JSON ever printed — silent
+# fail-closed. This is the same gap class PR #145 closed for the first
+# bootstrap block; this test proves the second block (engine libs) is
+# hardened identically.
+@test "bootstrap: empty engine lib file → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  : > "${COPY_SCRIPT_DIR}/lib/engines/agy.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}
+
+# bootstrap: engine lib file EXISTS and is non-empty (passes `[ -s ]`) but has
+# a real bash syntax error — `source` itself fails even though the
+# existence/non-emptiness check does not. Proves the engine-lib bootstrap
+# block routes through `_source_lib` (fail-open on source failure) instead of
+# a bare `source "$LIB_ENGINE_SELECTED"` that would let `set -e` kill the
+# script with no allow JSON ever emitted.
+@test "bootstrap: syntax-broken engine lib file → allow JSON with WARNING (source fails, not missing)" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  # Unbalanced quote + stray paren: guaranteed bash syntax error, file still
+  # exists and is readable.
+  printf '%s\n' 'this is " not valid bash (' >> "${COPY_SCRIPT_DIR}/lib/engines/agy.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"failed to load"* ]]
+}
+
+# bootstrap: engine lib file missing entirely → allow + [WARNING]. The first
+# bootstrap block's missing-lib test (above) only exercises
+# lib/manifest.sh, which lives in the FIRST loop — it never proves the
+# SECOND loop (lib/engines/rest.sh + the selected engine lib) still guards
+# non-existence too, so this is not redundant with it.
+@test "bootstrap: missing engine lib file → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  rm -f "${COPY_SCRIPT_DIR}/lib/engines/agy.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}
+
+# bootstrap: rest.sh (the OTHER lib in the engine-lib loop, sourced
+# unconditionally regardless of REVIEW_ENGINE) empty → allow + [WARNING].
+# Covers the loop iterating over $LIB_REST specifically, not just the
+# REVIEW_ENGINE-selected lib.
+@test "bootstrap: empty rest.sh lib file → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  : > "${COPY_SCRIPT_DIR}/lib/engines/rest.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}

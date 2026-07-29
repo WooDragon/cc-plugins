@@ -101,7 +101,9 @@ _source_lib "$LIB_COMMON"
 _source_lib "$LIB_PLAN_SOURCE"
 _source_lib "$LIB_MANIFEST"
 _source_lib "$LIB_VERDICT"
-unset -f _source_lib
+# NOTE: `unset -f _source_lib` deliberately deferred until after the engine
+# libs (rest.sh + the selected engine) are sourced further down — this
+# function is reused there too, see the second bootstrap block below.
 
 # --- Engine temp-resource cleanup registry (MUST be declared before trap
 #     registration below): engines (codex's workdir/prompt/err) and the REST
@@ -187,18 +189,24 @@ LIB_REST="$LIB_ENGINES_DIR/rest.sh"
 LIB_ENGINE_SELECTED="$LIB_ENGINES_DIR/$ENGINE_LIB"
 
 for _lib in "$LIB_REST" "$LIB_ENGINE_SELECTED"; do
-  if [ ! -f "$_lib" ]; then
-    echo "plan-review: missing lib file $_lib, allowing." >&2
-    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] lib file missing, plan-review skipped"}}'
+  # Same `-s` rationale as the first bootstrap block above: an empty file
+  # passes `-f` clean, `source` "succeeds" on zero bytes, and the first call
+  # into a helper this lib was supposed to define (e.g. engine_probe) then
+  # dies with "command not found" (exit 127) — silent fail-closed, no allow
+  # JSON. `-s` catches missing AND empty in one test.
+  if [ ! -s "$_lib" ]; then
+    echo "plan-review: lib file missing or empty: $_lib, allowing." >&2
+    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] lib file missing or empty, plan-review skipped"}}'
     exit 0
   fi
 done
 unset _lib
 
 # shellcheck source=lib/engines/rest.sh
-source "$LIB_REST"
+_source_lib "$LIB_REST"
 # shellcheck disable=SC1090  # dynamic path — engine chosen by the whitelisted case above
-source "$LIB_ENGINE_SELECTED"
+_source_lib "$LIB_ENGINE_SELECTED"
+unset -f _source_lib
 
 # --- Unified field extraction (single jq fork, reused by guards + logging) ---
 # Pre-initialize so set -u won't fire if read fails (e.g. empty/malformed INPUT).
