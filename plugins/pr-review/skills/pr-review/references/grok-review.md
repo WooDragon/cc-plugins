@@ -17,6 +17,31 @@ scripts/grok-review.sh <PR> --followup "<复核指令>" [--since <ref>] [--sessi
 
 不带 `--repo` 时自动用当前仓库。首轮与复核轮是两条独立路径，机制见下方"多轮 session 复用"。
 
+## 派发 A 模板（子任务 prompt）
+
+主线把「取评审」派给子任务时复制本块，替换 `<PR>` 与复核指令文本，其余原样。`${CLAUDE_PLUGIN_ROOT}` 在 subagent 正文里不展开，故模板自带路径解析命令。
+
+```text
+用 grok 评审 PR <PR>，取回评审结果。
+
+执行步骤：
+1. 解析脚本路径：
+   REVIEW=$(find ~/.claude/plugins -path '*/pr-review/skills/pr-review/scripts/grok-review.sh' 2>/dev/null | head -1)
+2. 在当前工作区（即被评审 PR 所在的仓库 checkout）前台执行：
+   "$REVIEW" <PR>
+   复核轮改用： "$REVIEW" <PR> --followup "<复核指令文本>"
+
+约束：
+- 前台同步执行：禁止 run_in_background / Monitor / nohup 等任何后台化手段，脚本未退出不得返回。脚本只把评审正文打到 stdout、不落盘，提前返回即丢失本轮产物，只能重跑。需要分段时是拿到完整输出后分段整理，不是分段回传进度。
+- 范围围栏：只跑脚本、只整理其输出。不改代码、不 commit、不 push、不动 PR 状态。
+- 输出即产物：最终返回消息本身就是下列摘要，不写完成说明或元总结。
+
+返回格式，每条 finding 一行：
+  [严重度] 文件:行 — 问题一句话 — grok 给出的依据或建议一句话
+严重度取 Critical / Major / Minor。grok 判定无问题时回传 LGTM 及其原话理由。
+脚本非零退出时，回传退出码与 stderr 末段原文，不自行重试、不改用其他评审方式。
+```
+
 ## 参数语义
 
 | 参数 | 说明 | 默认 |

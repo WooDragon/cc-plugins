@@ -17,16 +17,37 @@ description: |
 
 ## 执行分工（主线只研判裁决）
 
-本 skill 的机械性工作默认交给子任务（subagent）处理，主线只保留裁决：
+本 skill 的机械性工作默认交给子任务（subagent）处理，主线只做逐条研判「这条 finding 站不站得住」+ 决定改哪。
 
-- **交给子任务**：跑 `grok-review.sh`、通读全量/增量 diff 与 grok 原始输出、按 finding 逐条读码定位。子任务回传**结构化 finding 摘要**（每条 `文件:行` + 问题 + 严重度 + 定位依据），不把原始 dump 灌进主线上下文。
-- **主线只做**：逐条研判「这条 finding 站不站得住」+ 决定改哪。
-- session 状态本就落盘（state file），复核轮子任务用同一 session 续接，主线不必吃全量 diff。
-- 派发子任务时把这四条写进它的 prompt：
-  1. **输出即产物**——最终返回消息本身就是 finding 摘要，不写完成说明或元总结；
-  2. **范围围栏**——只评审、只定位，不改代码；
-  3. **渐进产出**——大 diff 分段读、尽早吐中间进展，避免长时间无输出；
-  4. **定稿纪律**——据以改码的结论只采信完整定稿摘要，不采信中间回传。
+派发分两类，各自的约束无条件成立——派发时按「派的是哪类活」整组取用，不在规则内部做二选一判断。
+
+### 派发 A —— 取评审
+
+跑 `grok-review.sh`，回传结构化 finding 摘要（每条 `文件:行` + 问题 + 严重度 + 依据）。写进子任务 prompt 的三条约束：
+
+1. **输出即产物**——最终返回消息本身就是摘要，不写完成说明或元总结；
+2. **范围围栏**——只跑脚本、只整理其输出，不改代码、不 commit、不 push、不动 PR 状态；
+3. **前台同步执行**——禁止 `run_in_background`、Monitor、`nohup` 等后台化手段，`grok-review.sh` 未退出不得返回。
+
+第 3 条与「尽早吐中间进展」的通行做法**相反**，原因在脚本形态：`grok-review.sh` 只把评审正文流式打到 stdout、不落盘（state file 只存 SID/MODEL/EFFORT/CWD/BASE_SHA），子任务提前返回即丢失本轮产物，只能重跑。需要分段时是「拿到完整输出后分段整理」，不是分段回传进度。
+
+可复制的完整 prompt 模板（含脚本路径解析）见 `references/grok-review.md`「派发 A 模板」——填 PR 号与 followup 文本即可。
+
+### 派发 B —— 定位素材
+
+通读全量/增量 diff、按 finding 逐条读码定位，回传定位结论（finding → `文件:行` + 依据）。写进子任务 prompt 的三条约束：
+
+1. **输出即产物**——最终返回消息本身就是定位结论，不写完成说明或元总结；
+2. **范围围栏**——只读码定位，不改代码；
+3. **渐进产出**——大 diff 分段读、尽早吐中间进展，防 watchdog stall。
+
+派发 B 是调研、自身持续产出文本，第 3 条在此按常规成立。
+
+### 主线
+
+两类子任务都不把原始 dump 灌进主线上下文。主线侧另有一条**定稿纪律**：据以改码的结论只采信子任务的完整定稿返回，不采信中间片段——这条约束派发端自己，不写进子任务 prompt。
+
+session 状态本就落盘（state file），复核轮的派发 A 用同一 session 续接，主线不必吃全量 diff。
 
 例外（不必卸载）：PR 极小、单文件、diff 一屏内可尽收——主线直接研判更省往返。
 
@@ -45,11 +66,7 @@ description: |
 
 **cwd 必须是被评审 PR 所在的仓库工作区**——脚本按 `git rev-parse --show-toplevel` 钉死 session 身份、按 cwd 取增量 diff，不是"不依赖 cwd"。结果直接打印到终端，不发 PR 评论。参数细节、工作原理、故障排查见 `references/grok-review.md`。
 
-**派发给子任务时的路径发现**：`${CLAUDE_PLUGIN_ROOT}` 在 subagent 正文里不展开，主线先解析出绝对路径再写进子任务指令：
-
-```bash
-find ~/.claude/plugins -path '*/pr-review/skills/pr-review/scripts/grok-review.sh' 2>/dev/null | head -1
-```
+**派发给子任务时的路径发现**：`${CLAUDE_PLUGIN_ROOT}` 在 subagent 正文里不展开。解析命令已内置于 `references/grok-review.md`「派发 A 模板」，复制该模板即可——路径解析只留这一处，避免主线与模板各解析一次形成双轨。
 
 **对抗式多轮复评**：首轮 `grok-review.sh <PR>` 全量评审建 session；之后每轮 Claude 研判 grok 意见、改代码，再用 `grok-review.sh <PR> --followup "<复核指令>"` 续接同一 session、只发复核指令 + 本轮增量 diff（不重发首轮全量），循环到 grok LGTM。三轮示例：
 

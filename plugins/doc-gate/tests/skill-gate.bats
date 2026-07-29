@@ -474,38 +474,53 @@ teardown() {
 # Writing-standards injection (standards_ref)
 # ============================================================
 
-@test "standards_ref: normal deny → summary + absolute existing writing-standards.md path" {
+@test "standards_ref: normal deny → imperative + absolute existing writing-standards.md path" {
   INPUT=$(build_edit_input file_path=/project/docs/guide.md)
   run_gate
   assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"表述规范核心摘要"* ]]
-  [[ "$reason" == *"豁免条款"* ]]
+  [[ "$reason" == *"撰写或改写任何叙述性段落前"* ]]
   local path_line standards_path
-  path_line=$(printf '%s' "$reason" | grep -F '写文档前先读取完整条文')
+  path_line=$(printf '%s' "$reason" | grep -F '权威条文')
   standards_path="${path_line#*：}"
   [[ "$standards_path" == /* ]]
   [ -f "$standards_path" ]
 }
 
-@test "standards_ref: global CLAUDE.md deny → summary + absolute existing writing-standards.md path" {
+@test "standards_ref: global CLAUDE.md deny → imperative + absolute existing writing-standards.md path" {
   export HOME="${TEST_TEMP_DIR}/mock_home"
   INPUT=$(build_edit_input file_path="${HOME}/.claude/CLAUDE.md")
   run_gate
   assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"表述规范核心摘要"* ]]
-  [[ "$reason" == *"豁免条款"* ]]
+  [[ "$reason" == *"撰写或改写任何叙述性段落前"* ]]
   local path_line standards_path
-  path_line=$(printf '%s' "$reason" | grep -F '写文档前先读取完整条文')
+  path_line=$(printf '%s' "$reason" | grep -F '权威条文')
   standards_path="${path_line#*：}"
   [[ "$standards_path" == /* ]]
   [ -f "$standards_path" ]
 }
 
-@test "standards_ref: unresolvable candidates → summary only, no writing-standards.md reference" {
+# Regression guard for issue #139: a readable item digest makes the model feel it
+# already knows the rules and skip the authoritative file. The deny message must
+# never carry item content — only the imperative + the path.
+@test "standards_ref: deny message carries no item digest (no false satiety)" {
+  INPUT=$(build_edit_input file_path=/project/docs/guide.md)
+  run_gate
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" != *"表述规范核心摘要"* ]]
+  [[ "$reason" != *"一句一事"* ]]
+  [[ "$reason" != *"术语统一"* ]]
+  [[ "$reason" != *"三要素"* ]]
+  [[ "$reason" != *"助动词受控"* ]]
+  [[ "$reason" != *"豁免条款"* ]]
+}
+
+@test "standards_ref: unresolvable candidates → imperative only, never a broken path" {
   local iso_dir="${TEST_TEMP_DIR}/isolated"
   mkdir -p "$iso_dir/scripts"
   cp "${BATS_TEST_DIRNAME}/../scripts/skill-gate.sh" "$iso_dir/scripts/skill-gate.sh"
@@ -527,8 +542,10 @@ teardown() {
   assert_deny_json
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"表述规范核心摘要"* ]]
-  [[ "$reason" != *"writing-standards.md"* ]]
+  [[ "$reason" == *"撰写或改写任何叙述性段落前"* ]]
+  # The reference filename stays (it is the actionable pointer post-#139); what
+  # must never appear is a constructed path that does not resolve.
+  [[ "$reason" != *"权威条文"* ]]
   [[ "$reason" != *"${iso_dir}"* ]]
   [[ "$reason" != *"${empty_root}"* ]]
 }

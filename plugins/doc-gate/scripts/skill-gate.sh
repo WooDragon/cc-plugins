@@ -102,14 +102,12 @@ _main() {
   # fallback whenever the variable is merely *set*, so a stale or wrong root
   # would suppress the script-relative retry. If no candidate resolves to an
   # existing file, emit the summary alone — never a broken path.
+  # Deliberately NO item summary here (issue #139): a readable digest makes the
+  # model feel it already knows the rules and skip the authoritative file, so the
+  # self-check passes on rules it never read. Emit the imperative + the path only.
   local standards_ref="
 
-表述规范核心摘要：
-- 一句一事：每句只承载一个主要动作或陈述
-- 术语统一：同一事物全文用同一术语，不换词
-- 程序性文本三要素：条件、动作、预期结果均须明确
-- 助动词受控：应/宜/可/不应，不混用\"建议\"\"尽量\"等模糊强度词
-- 豁免条款：代码、命令、标识符、产品名、法律文本、引文、路径原样保留，不得为符合规范而改写"
+表述规范：撰写或改写任何叙述性段落前，须读取 doc-maintenance 的 references/writing-standards.md，按其原文判据逐条自查。本消息不复述条目——判据只有那一份权威版本。"
 
   local standards_rel="skills/doc-maintenance/references/writing-standards.md"
   local standards_self=""
@@ -126,7 +124,7 @@ _main() {
   if [ -n "$standards_path" ]; then
     standards_ref="${standards_ref}
 
-写文档前先读取完整条文（正反例、豁免边界、语种适用）：${standards_path}"
+权威条文（正反例、豁免边界、语种适用）：${standards_path}"
   fi
 
   # Deny — global config gets the highest-strength message + distinct log reason.
