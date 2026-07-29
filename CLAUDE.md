@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 
 | 类型 | 名称 | 说明 |
 |------|------|------|
-| Plugin | plan-review | 对抗性审阅（Gemini/Claude） |
+| Plugin | plan-review | 对抗性审阅（Gemini/Claude/Codex） |
 | Plugin | ppt-press（4 skills） | PPT 全生命周期（init/create/deploy/manage） |
 | Plugin | doc-gate（1 skill + 3 hooks + 2 tools） | 文档编辑门禁 + 词法召回 |
 | Plugin | code-search（1 skill） | 代码搜索与符号导航方法论（纯 skill，零 hook） |
@@ -35,7 +35,7 @@ plugins/
     scripts/dispatch-check.sh     # Layer 2 hook（Agent/Task 调度参数强制）
     scripts/precompact-review.sh  # PreCompact hook（compaction 恢复）
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 109 个测试用例（含 Dispatch Manifest）
+      plan-review.bats            # 202 个测试用例（含 Dispatch Manifest、codex 引擎）
       dispatch-check.bats         # 14 个测试用例（Layer 2 hook）
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
@@ -106,7 +106,7 @@ plugins/
 
 | 插件 | 变量前缀/名称 | 权威文档 |
 |------|--------------|----------|
-| plan-review | `REVIEW_*`、`AGY_MODEL`、`CLAUDE_MODEL`、`GEMINI_MODEL`、`DISPATCH_CHECK_DISABLED` | [plugins/plan-review/README.md](plugins/plan-review/README.md#environment-variables) |
+| plan-review | `REVIEW_*`、`AGY_MODEL`、`CLAUDE_MODEL`、`GEMINI_MODEL`、`CODEX_BIN`、`CODEX_MODEL`、`DISPATCH_CHECK_DISABLED` | [plugins/plan-review/README.md](plugins/plan-review/README.md#environment-variables) |
 | doc-gate | `SKILL_GATE_*`、`RECALL_GATE_*` | [plugins/doc-gate/README.md](plugins/doc-gate/README.md#environment-variables) |
 | deep-research | `GATEWAY_API_KEY`、`TAVILY_API_KEY`、`JINA_API_KEY`（可选凭证） | [plugins/deep-research/README.md](plugins/deep-research/README.md#prerequisites) |
 | pr-review | `GROK_MODEL`、`GROK_EFFORT`、`XDG_STATE_HOME`（session 落盘根） | [plugins/pr-review/README.md](plugins/pr-review/README.md#prerequisites) |

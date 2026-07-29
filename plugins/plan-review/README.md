@@ -2,7 +2,7 @@
 
 Adversarial red-team review of implementation plans via cross-model consultation.
 
-When Claude calls `ExitPlanMode`, this plugin intercepts the call and sends the plan to a review engine (Gemini or Claude) for adversarial scrutiny. The reviewer can APPROVE, raise CONCERNS, or REJECT. On non-approval, feedback is returned to Claude for revision or rebuttal. After max rounds without consensus, the plan passes through for user arbitration.
+When Claude calls `ExitPlanMode`, this plugin intercepts the call and sends the plan to a review engine (Gemini, Claude, or Codex) for adversarial scrutiny. The reviewer can APPROVE, raise CONCERNS, or REJECT. On non-approval, feedback is returned to Claude for revision or rebuttal. After max rounds without consensus, the plan passes through for user arbitration.
 
 ## Installation
 
@@ -94,11 +94,13 @@ When `REVIEW_ENGINE=claude`, the script spawns `claude -p` with triple isolation
 When `REVIEW_ENGINE=codex`, the script spawns `codex exec` with a parallel set of isolation flags:
 
 1. **`-s read-only`** — sandbox policy; the reviewer process cannot write to disk
-2. **`-C <fresh empty temp dir>`** — the working root is a throwaway empty directory, not the user's project. The codex reviewer sees only the prompt, exactly like the `agy --sandbox` and `claude --tools ""` paths — its review is pure-text and it does not read project source
+2. **`-C <fresh empty temp dir>`** — the working root is a throwaway empty directory, not the user's project, so the reviewer does not read project source
 3. **`--ephemeral`** — no session files persisted to disk
 4. **`--skip-git-repo-check`** — required because the isolated temp dir is not a git repo
 
 The prompt is fed via stdin (no `ARG_MAX` limit, unlike the agy path which needs a 256KB guard), and the final message is captured via `-o <file>`.
+
+**Tool-surface caveat**: the four flags above constrain the file scope the reviewer sees; they do not disable codex's agent tool surface. Whether MCP servers or web search remain available to the reviewer follows the user's own `~/.codex/config.toml`. This differs from the `claude` engine, where `--tools ""` removes the tool surface outright. The plugin leaves codex's tool configuration to the user rather than overriding it — silently rewriting a user's engine config is the worse trade. Users who require a text-only reviewer should disable those tools in their codex configuration.
 
 **stderr handling**: `codex exec` echoes the entire prompt to stderr. Because of this, codex's stderr is deliberately **not** appended to the plan-review log (unlike the other engines) — doing so would duplicate the full prompt into the log file. On a failed call, only a filtered diagnostic is written to the log: the banner plus trailing `warning:`/`ERROR:` lines, with any line matching the prompt stripped out, truncated to 500 chars.
 
@@ -124,7 +126,7 @@ This lowers 429 frequency and quota consumption on multi-round negotiations. The
 
 ## Privacy Notice
 
-This plugin sends the following data to the configured review engine (Gemini API or Anthropic API):
+This plugin sends the following data to the configured review engine — the Gemini API, the Anthropic API, or, when `REVIEW_ENGINE=codex`, whichever provider the user's `~/.codex/config.toml` selects:
 
 - **Global CLAUDE.md** — first 3KB of `~/.claude/CLAUDE.md`
 - **Project CLAUDE.md** — first 8KB of `$CWD/CLAUDE.md`

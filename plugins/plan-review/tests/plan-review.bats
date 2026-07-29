@@ -3296,3 +3296,41 @@ Sanitized fine."
   [[ "$HOOK_STDOUT" != *"engines-failed"* ]]
   [[ "$HOOK_STDERR" != *"not valid UTF-8"* ]]
 }
+
+# fixture: reset_leaky_env must clear every env var a developer shell might
+# export. Regression guard — the codex vars were missed when the codex engine
+# landed, and with CODEX_MODEL exported the "codex: CODEX_MODEL empty → no -m"
+# case failed outright. Asserting `-z` on the vars as they stand after
+# common_setup would prove nothing (a clean shell passes either way), so this
+# pollutes first and calls reset_leaky_env directly.
+@test "fixture: reset_leaky_env clears developer-shell env leakage" {
+  export CODEX_BIN="/nonexistent/codex"
+  export CODEX_MODEL="leaked-model"
+  export MOCK_CODEX_STRICT_UTF8=1
+  export MOCK_CODEX_NO_SECOND_DASHES=1
+  export MOCK_CODEX_EXTRA_BLANK=1
+  export REVIEW_API_URL="http://leaked.invalid"
+  export REVIEW_API_KEY="leaked-key"
+  export REVIEW_HOOK_BUDGET=1
+  export REVIEW_ENGINE_DEGRADE_TTL=1
+  export GEMINI_REVIEW_OFF=1
+  export GEMINI_DRY_RUN=1
+  export GEMINI_MAX_REVIEWS=1
+  export PLAN_REVIEW_RUNNING=1
+
+  reset_leaky_env
+
+  [ -z "${CODEX_BIN:-}" ]
+  [ -z "${CODEX_MODEL:-}" ]
+  [ -z "${MOCK_CODEX_STRICT_UTF8:-}" ]
+  [ -z "${MOCK_CODEX_NO_SECOND_DASHES:-}" ]
+  [ -z "${MOCK_CODEX_EXTRA_BLANK:-}" ]
+  [ -z "${REVIEW_API_URL:-}" ]
+  [ -z "${REVIEW_API_KEY:-}" ]
+  [ -z "${REVIEW_HOOK_BUDGET:-}" ]
+  [ -z "${REVIEW_ENGINE_DEGRADE_TTL:-}" ]
+  [ -z "${GEMINI_REVIEW_OFF:-}" ]
+  [ -z "${GEMINI_DRY_RUN:-}" ]
+  [ -z "${GEMINI_MAX_REVIEWS:-}" ]
+  [ -z "${PLAN_REVIEW_RUNNING:-}" ]
+}
