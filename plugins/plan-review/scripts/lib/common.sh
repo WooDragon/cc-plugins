@@ -1,6 +1,6 @@
 # lib/common.sh — shared logging + allow-helper + plan-hash primitives.
-# Sourced (not executed) by plan-review.sh. Requires LOG_FILE to already be
-# set by the caller before any of these functions are invoked.
+# Sourced (not executed) by plan-review.sh. Requires LOG_FILE and LOG_DIR to
+# already be set by the caller before any of these functions are invoked.
 #
 # bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
 
@@ -25,7 +25,7 @@ log_entry() {
 # payload + a key-schema summary so the true field layout can be inspected post-hoc.
 dump_payload() {
   local raw="$1" session="$2"
-  local dump_dir="${LOG_DIR}/payloads"
+  local dump_dir="${LOG_DIR:-$HOME/.claude/logs}/payloads"
   mkdir -p "$dump_dir" 2>/dev/null || return 0
   local stamp; stamp=$(date -u +"%Y%m%dT%H%M%SZ")
   local dump_file="${dump_dir}/exitplanmode-${session:-nosession}-${stamp}-$$.json"

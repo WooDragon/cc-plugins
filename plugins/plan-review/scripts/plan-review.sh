@@ -68,14 +68,32 @@ for _lib in "$LIB_COMMON" "$LIB_PLAN_SOURCE" "$LIB_MANIFEST" "$LIB_VERDICT"; do
 done
 unset _lib
 
-# shellcheck source=lib/common.sh
-source "$LIB_COMMON"
-# shellcheck source=lib/plan-source.sh
-source "$LIB_PLAN_SOURCE"
-# shellcheck source=lib/manifest.sh
-source "$LIB_MANIFEST"
-# shellcheck source=lib/verdict.sh
-source "$LIB_VERDICT"
+# --- Bootstrap: source with fail-open on syntax/read errors ---
+# `[ -f ]` above only proves the file EXISTS — a file that exists but has a
+# bash syntax error (or lost its read permission) still fails here. `source`'s
+# own exit status captures that case too: a syntax error inside the sourced
+# file does not abort the *parent* script's parsing, it only fails the
+# `source` command itself, so wrapping each call in `if ! source ...` is
+# sufficient — no per-file `bash -n` pre-check needed (that would fork bash
+# 4x on every single hook invocation to guard a vanishingly rare failure
+# mode). Same allow + [WARNING] shape as the existence check above, and must
+# `exit 0` immediately: none of these libs' helpers (e.g. allow_with_reason,
+# itself defined in lib/common.sh) can be assumed to exist once any one of
+# them fails to load.
+_source_lib() {
+  local _lib="$1"
+  # shellcheck disable=SC1090
+  if ! source "$_lib" 2>>"$LOG_FILE"; then
+    echo "plan-review: failed to source $_lib, allowing." >&2
+    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] lib file failed to load, plan-review skipped"}}'
+    exit 0
+  fi
+}
+_source_lib "$LIB_COMMON"
+_source_lib "$LIB_PLAN_SOURCE"
+_source_lib "$LIB_MANIFEST"
+_source_lib "$LIB_VERDICT"
+unset -f _source_lib
 
 # --- Cleanup trap (registered here, right after lib sourcing, so any early
 #     exit — including the pre-flight guards below — is covered; previously
@@ -336,6 +354,22 @@ fi
 if [ ! -f "$PROMPT_ASSET" ] || [ ! -s "$PROMPT_ASSET" ]; then
   echo "plan-review: missing/empty prompt asset $PROMPT_ASSET, allowing." >&2
   echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] prompt asset missing/empty, plan-review skipped"}}'
+  exit 0
+fi
+# Anchor check: `-s` only proves the file has SOME bytes — a truncated asset
+# (e.g. left as a single space or a lone newline by a bad edit) still passes
+# `-s` but carries no real reviewing instructions. `<verdict>` is the one
+# string this file MUST contain: it is the literal tag extract_verdict()
+# (lib/verdict.sh) greps the engine's response for — if the prompt asset
+# doesn't instruct the engine to emit that tag, no review response will ever
+# parse, silently degrading every verdict to the CONCERNS fallback instead of
+# failing open visibly. Reusing that same load-bearing string as the anchor
+# (rather than an arbitrary section heading that could be renamed with zero
+# functional impact) means this check can only pass if the asset still does
+# the one thing the rest of the pipeline actually depends on.
+if ! grep -qF '<verdict>' "$PROMPT_ASSET"; then
+  echo "plan-review: prompt asset $PROMPT_ASSET missing <verdict> anchor (truncated?), allowing." >&2
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] prompt asset truncated, plan-review skipped"}}'
   exit 0
 fi
 SYSTEM_INSTRUCTIONS=$(tr -d '\r' < "$PROMPT_ASSET"; printf 'x')

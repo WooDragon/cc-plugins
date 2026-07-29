@@ -101,7 +101,7 @@ ${review}
 REVIEW_EOF
   )
 
-  feedback_json=$(echo "$feedback" | jq -Rs .)
+  feedback_json=$(printf '%s' "$feedback" | jq -Rs .)
 
   cat << EOF
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${feedback_json}}}

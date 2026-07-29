@@ -3365,3 +3365,86 @@ Sanitized fine."
   [ -z "${CODEX_MODEL:-}" ]
   [ -z "${CODEX_BIN:-}" ]
 }
+
+# =============================================================================
+# Bootstrap fail-open coverage (PR #145 review fixes)
+#
+# These exercise plan-review.sh's own bootstrap guards — lib-file existence,
+# lib-file sourceability, and prompt-asset presence/content — which resolve
+# paths relative to the script's own location (SCRIPT_DIR via BASH_SOURCE)
+# and are therefore NOT reachable by env-var overrides. `setup_script_copy` /
+# `run_hook_copy` (test_helper/common-setup.bash) copy the whole scripts/
+# tree into an isolated TEST_TEMP_DIR so these files can be deleted/corrupted
+# without ever touching the real repo tree; common_teardown's `rm -rf
+# "$TEST_TEMP_DIR"` cleans the copy up automatically.
+# =============================================================================
+
+# bootstrap: missing lib/*.sh file → allow + [WARNING], never a silent hang
+# or fail-closed deny.
+@test "bootstrap: missing lib file → allow JSON with WARNING" {
+  setup_script_copy
+  rm -f "${COPY_SCRIPT_DIR}/lib/manifest.sh"
+
+  run_hook_copy
+
+  assert_allowed
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}
+
+# bootstrap: a lib file EXISTS (passes `[ -f ]`) but has a real bash syntax
+# error — `source` itself fails even though the existence check does not.
+# This is the gap Fix 2 closes: previously the script would abort mid-parse
+# with no allow JSON emitted at all (silent hook failure).
+@test "bootstrap: syntax-broken lib file → allow JSON with WARNING (source fails, not missing)" {
+  setup_script_copy
+  # Unbalanced quote + stray paren: guaranteed bash syntax error, file still
+  # exists and is readable.
+  printf '%s\n' 'this is " not valid bash (' >> "${COPY_SCRIPT_DIR}/lib/manifest.sh"
+
+  run_hook_copy
+
+  assert_allowed
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"failed to load"* ]]
+}
+
+# bootstrap: prompt asset file missing entirely → allow + [WARNING].
+@test "bootstrap: missing prompt asset → allow JSON with WARNING" {
+  setup_script_copy
+  rm -f "${COPY_SCRIPT_DIR}/assets/review-system-prompt.md"
+
+  run_hook_copy
+
+  assert_allowed
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"prompt asset missing/empty"* ]]
+}
+
+# bootstrap: prompt asset present but zero bytes → allow + [WARNING].
+@test "bootstrap: empty prompt asset → allow JSON with WARNING" {
+  setup_script_copy
+  : > "${COPY_SCRIPT_DIR}/assets/review-system-prompt.md"
+
+  run_hook_copy
+
+  assert_allowed
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"prompt asset missing/empty"* ]]
+}
+
+# bootstrap: prompt asset truncated to a single whitespace byte — passes the
+# `-s` (non-empty) check but has no real reviewing instructions. This is
+# exactly the gap Fix 5's <verdict> anchor check closes: without it, a
+# truncated-to-whitespace asset would silently proceed to review with an
+# empty instruction set instead of failing open visibly.
+@test "bootstrap: prompt asset truncated to whitespace-only → allow JSON with WARNING (anchor check)" {
+  setup_script_copy
+  printf ' ' > "${COPY_SCRIPT_DIR}/assets/review-system-prompt.md"
+
+  run_hook_copy
+
+  assert_allowed
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"prompt asset truncated"* ]]
+}

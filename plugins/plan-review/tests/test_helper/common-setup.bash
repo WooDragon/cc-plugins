@@ -638,6 +638,48 @@ set_counter_value() {
   echo "${value}:${total}" > "${REVIEW_COUNTER_DIR}/.review-count-${session}"
 }
 
+# --- Isolated Script Copy (bootstrap fail-open scenarios) ---
+#
+# The bootstrap checks in plan-review.sh (missing/broken lib file, missing/
+# truncated prompt asset) resolve their own paths relative to the script's
+# own location (SCRIPT_DIR, via BASH_SOURCE) — they are not env-overridable.
+# To exercise "file missing" / "file broken" without ever touching the real
+# repo tree, copy the whole scripts/ directory into an isolated temp dir and
+# run the COPY instead. `common_teardown`'s `rm -rf "$TEST_TEMP_DIR"` cleans
+# this up automatically since the copy lives under TEST_TEMP_DIR.
+
+# setup_script_copy
+#   Copies scripts/ (plan-review.sh + lib/ + assets/) into
+#   TEST_TEMP_DIR/script-copy. Sets COPY_SCRIPT_DIR (the copied scripts/
+#   root) and COPY_HOOK_SCRIPT (the copied plan-review.sh). Safe to call more
+#   than once per test (recreates from scratch each time).
+setup_script_copy() {
+  local src="${BATS_TEST_DIRNAME}/../scripts"
+  COPY_SCRIPT_DIR="${TEST_TEMP_DIR}/script-copy"
+  rm -rf "$COPY_SCRIPT_DIR"
+  cp -R "$src" "$COPY_SCRIPT_DIR"
+  COPY_HOOK_SCRIPT="${COPY_SCRIPT_DIR}/plan-review.sh"
+}
+
+# run_hook_copy
+#   Like run_hook, but executes COPY_HOOK_SCRIPT instead of the production
+#   HOOK_SCRIPT. Requires setup_script_copy to have been called first.
+#   Sets: HOOK_STDOUT, HOOK_STDERR, HOOK_EXIT
+run_hook_copy() {
+  local input="${INPUT:-$(build_input)}"
+
+  HOOK_STDOUT=""
+  HOOK_STDERR=""
+  HOOK_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  HOOK_STDOUT=$(bash "$COPY_HOOK_SCRIPT" <<< "$input" 2>"$stderr_file") || HOOK_EXIT=$?
+  HOOK_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
 # --- Run Hook ---
 
 # run_hook
