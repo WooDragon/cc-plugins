@@ -47,6 +47,40 @@ EOF
   exit 0
 }
 
+# --- Engine stderr backfill: the orchestrator owns the CHANNEL ($ENGINE_ERR,
+#     allocated once in plan-review.sh as "${ENGINE_OUT}.err" for every
+#     engine), but each engine owns the CONTENT policy via its own
+#     $ENGINE_ERR_POLICY (set in its engine_probe()):
+#       "verbatim" (agy/claude) — non-empty $ENGINE_ERR is appended into
+#         LOG_FILE UNCONDITIONALLY, on success AND on failure. This mirrors
+#         the old inline `2>>"$LOG_FILE"` behavior exactly: success-path CLI
+#         warnings (deprecation notices, internal retries, near-limit
+#         throttle warnings) still land in the log. Backfilling only on
+#         failure would silently drop those — a regression, not a fix.
+#       "filtered" (codex) — codex's stderr echoes the FULL prompt (global +
+#         project CLAUDE.md + conversation + plan) before its real
+#         diagnostics, so the raw file must NEVER be appended wholesale.
+#         Only on failure ($1 != "0"), call the engine's own
+#         engine_err_filter() hook (if it defines one) and log ONLY its
+#         already-filtered, length-bounded return value.
+#     Deliberately does NOT truncate $ENGINE_ERR — the caller's capacity
+#     detection (grep for RESOURCE_EXHAUSTED|MODEL_CAPACITY) reads the same
+#     file immediately after this runs; it is naturally replaced next round
+#     by the engine's own `2>"$ENGINE_ERR"` redirection.
+backfill_engine_err() {
+  local exit_code="${1:-0}"
+  [ -s "${ENGINE_ERR:-}" ] || return 0
+  if [ "${ENGINE_ERR_POLICY:-verbatim}" = "filtered" ]; then
+    if [ "$exit_code" != "0" ] && declare -F engine_err_filter >/dev/null 2>&1; then
+      local diag
+      diag=$(engine_err_filter)
+      log_decision "codex-diag $(printf '%s' "$diag" | tr -d '\000-\037')"
+    fi
+  else
+    cat "$ENGINE_ERR" >> "$LOG_FILE" 2>/dev/null || true
+  fi
+}
+
 # --- Plan content hasher (portable: sha256sum > shasum > cksum POSIX fallback) ---
 # All branches pipe through awk '{print $1}' to strip filename/extra fields.
 plan_hash() {

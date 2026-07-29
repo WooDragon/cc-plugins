@@ -21,6 +21,11 @@ engine_probe() {
   # regardless of engine — claude receives SYSTEM_INSTRUCTIONS via its own
   # --system-prompt rail (agy/codex inject it inline into their own prompt).
   SYSTEM_PROMPT="$SYSTEM_INSTRUCTIONS"
+  # claude -p's stderr carries no prompt echo / privacy concern — the
+  # orchestrator may backfill it into LOG_FILE verbatim (see
+  # backfill_engine_err in lib/common.sh), unconditionally on both success
+  # and failure.
+  ENGINE_ERR_POLICY="verbatim"
   return 0
 }
 
@@ -42,7 +47,7 @@ engine_invoke() {
     --tools "" \
     --disable-slash-commands \
     --system-prompt "$SYSTEM_PROMPT" \
-    < "$PROMPT_FILE" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
+    < "$PROMPT_FILE" > "$ENGINE_OUT" 2>"$ENGINE_ERR" &
   ENGINE_PID=$!
   wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
   ENGINE_PID=""

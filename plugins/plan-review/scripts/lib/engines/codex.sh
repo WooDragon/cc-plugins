@@ -24,19 +24,23 @@ engine_probe() {
 
   # codex-only temp resources: a sandboxed workdir (-C target, deliberately NOT
   # the project cwd — codex runs read-only but there's no reason to hand it the
-  # real tree), a merged prompt file (system instructions + PROMPT_FILE's
+  # real tree) and a merged prompt file (system instructions + PROMPT_FILE's
   # dynamic content — kept SEPARATE from PROMPT_FILE itself so the REST
   # fallback's --rawfile read of PROMPT_FILE doesn't double-send the system
-  # instructions), and an isolated stderr capture (codex echoes the FULL
-  # prompt to stderr — see the diagnostic backfill in engine_invoke, never let
-  # this reach LOG_FILE wholesale). Registered into the generic cleanup arrays
-  # so the caller's trap reaps them without knowing their codex-private names.
+  # instructions). Registered into the generic cleanup arrays so the caller's
+  # trap reaps them without knowing their codex-private names.
+  # NOTE: $ENGINE_ERR is NOT declared here — it is a shared orchestrator-owned
+  # contract channel (plan-review.sh sets ENGINE_ERR="${ENGINE_OUT}.err" for
+  # every engine, and _cleanup hardcodes it alongside PROMPT_FILE/ENGINE_OUT),
+  # not a codex-private resource. codex only declares its CONTENT policy
+  # below (ENGINE_ERR_POLICY) because codex echoes the FULL prompt to stderr
+  # before its real diagnostics — see engine_err_filter() further down,
+  # which must never let that raw content reach LOG_FILE wholesale.
   CODEX_WORKDIR=$(mktemp -d)
   ENGINE_TMP_DIRS+=("$CODEX_WORKDIR")
   CODEX_PROMPT_FILE=$(mktemp)
   ENGINE_TMP_FILES+=("$CODEX_PROMPT_FILE" "${CODEX_PROMPT_FILE}.u8")
-  ENGINE_ERR="${ENGINE_OUT}.err"
-  ENGINE_TMP_FILES+=("$ENGINE_ERR")
+  ENGINE_ERR_POLICY="filtered"
 
   { printf '%s\n\n' "$SYSTEM_INSTRUCTIONS"; cat "$PROMPT_FILE"; } > "$CODEX_PROMPT_FILE"
   printf '\n' >> "$CODEX_PROMPT_FILE"
@@ -66,8 +70,10 @@ engine_probe() {
 
 # --- Actual call (called every round inside the retry loop). Writes raw
 #     output to $ENGINE_OUT, sets $engine_exit, maintains $ENGINE_PID so the
-#     caller's trap can kill it on hook timeout. On failure, backfills a
-#     privacy-filtered stderr diagnostic into LOG_FILE. ---
+#     caller's trap can kill it on hook timeout. $ENGINE_ERR (this round's
+#     raw stderr) is left in place for the orchestrator to dispatch per
+#     ENGINE_ERR_POLICY — see backfill_engine_err() in lib/common.sh and
+#     engine_err_filter() below, NOT handled inline here anymore. ---
 engine_invoke() {
   # Model id can contain spaces (see AGY_MODEL's default "Gemini 3.1 Pro
   # (High)" precedent) — must be an array, not ${VAR:+...} word-splitting.
@@ -80,55 +86,57 @@ engine_invoke() {
   ENGINE_PID=$!
   wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
   ENGINE_PID=""
+}
 
-  if [ "$engine_exit" != "0" ]; then
-    # --- Privacy boundary: codex echoes the FULL prompt to stderr before
-    # its real diagnostics (global CLAUDE.md + project CLAUDE.md + recent
-    # conversation + the plan). Never let ENGINE_ERR reach LOG_FILE
-    # wholesale — backfill only a filtered tail, two-layer defense:
-    #   Layer A (positional): locate the banner's SECOND "--------" line
-    #     (within the first 20 lines) followed by a line that is exactly
-    #     "user" — that marks where the echoed prompt begins; cut it out
-    #     using PROMPT_LINES (captured once, outside the retry loop) to
-    #     find where it ends, keeping the banner + the real tail after it.
-    #     Any of the three guards failing falls through to the fail-closed
-    #     `tail -n 20` branch, which still preserves diagnostics for
-    #     failures that happen before codex echoes anything (auth/network).
-    #   Layer B (content-based): grep -Fvxf strips any surviving line that
-    #     is byte-identical to a prompt line — this is what survives codex
-    #     version drift in line counts (banner shape / prompt line count
-    #     changing between versions).
-    # `|| true` on the ECHO_END lookup and the final pipe are MANDATORY:
-    # set -euo pipefail means a grep returning 1 (no match / everything
-    # filtered out) would otherwise kill the hook before it emits its
-    # decision JSON.
-    # LC_ALL=C on both greps (command-scoped, not exported — deliberately
-    # narrower than the LC_ALL=C prefix-assignment pattern avoided
-    # elsewhere in this file): CODEX_PROMPT_FILE embeds GLOBAL_MD/
-    # PROJECT_MD truncated by BYTE count (`head -c`), which can slice a
-    # multi-byte UTF-8 character in half. Under the active UTF-8 locale
-    # that makes grep abort with "illegal byte sequence" — silently
-    # emptying CODEX_DIAG (the trailing `|| true` hides the failure).
-    # Forcing the C locale makes grep treat input as raw bytes, matching
-    # this pipeline's real behavior anyway: -F is already a fixed-string
-    # byte match, and -x needs no locale-aware collation.
-    CODEX_DIAG=$(
-      ECHO_END=$(head -n 20 "$ENGINE_ERR" | grep -n '^--------$' | sed -n '2p' | cut -d: -f1) || true
-      NEXT_LINE=$(sed -n "$(( ${ECHO_END:-0} + 1 ))p" "$ENGINE_ERR" 2>/dev/null)
-      if [ -n "$ECHO_END" ] && [ "$ECHO_END" -le 20 ] && [ "$NEXT_LINE" = "user" ]; then
-        { head -n "$ECHO_END" "$ENGINE_ERR"
-          tail -n "+$(( ECHO_END + PROMPT_LINES + 2 ))" "$ENGINE_ERR"; }
-      else
-        tail -n 20 "$ENGINE_ERR"
-      fi \
-      | LC_ALL=C grep -Fvxf "$CODEX_PROMPT_FILE" \
-      | LC_ALL=C grep '[^[:space:]]' \
-      | head -c 500 || true
-    )
-    # tr -d '\000-\037': strip control chars, keep log single-line safe
-    # (mirrors the existing rest-debug body_prefix backfill).
-    log_decision "codex-diag $(printf '%s' "$CODEX_DIAG" | tr -d '\000-\037')"
-  fi
+# --- Privacy-filtered stderr diagnostic hook (ENGINE_ERR_POLICY=filtered).
+#     Called by the orchestrator's backfill_engine_err() (lib/common.sh)
+#     ONLY on failure — its stdout becomes the "codex-diag ..." log line.
+#     Reads $ENGINE_ERR (this round's raw stderr, still un-truncated at this
+#     point) and $CODEX_PROMPT_FILE / $PROMPT_LINES (set once in
+#     engine_probe(), outside the retry loop).
+#
+#     Privacy boundary: codex echoes the FULL prompt to stderr before its
+#     real diagnostics (global CLAUDE.md + project CLAUDE.md + recent
+#     conversation + the plan). Never let ENGINE_ERR reach LOG_FILE
+#     wholesale — return only a filtered tail, two-layer defense:
+#       Layer A (positional): locate the banner's SECOND "--------" line
+#         (within the first 20 lines) followed by a line that is exactly
+#         "user" — that marks where the echoed prompt begins; cut it out
+#         using PROMPT_LINES to find where it ends, keeping the banner +
+#         the real tail after it. Any of the three guards failing falls
+#         through to the fail-closed `tail -n 20` branch, which still
+#         preserves diagnostics for failures that happen before codex
+#         echoes anything (auth/network).
+#       Layer B (content-based): grep -Fvxf strips any surviving line that
+#         is byte-identical to a prompt line — this is what survives codex
+#         version drift in line counts (banner shape / prompt line count
+#         changing between versions).
+#     `|| true` on the ECHO_END lookup and the final pipe are MANDATORY:
+#     set -euo pipefail means a grep returning 1 (no match / everything
+#     filtered out) would otherwise kill the hook before it emits its
+#     decision JSON.
+#     LC_ALL=C on both greps (command-scoped, not exported — deliberately
+#     narrower than the LC_ALL=C prefix-assignment pattern avoided
+#     elsewhere in this file): CODEX_PROMPT_FILE embeds GLOBAL_MD/
+#     PROJECT_MD truncated by BYTE count (`head -c`), which can slice a
+#     multi-byte UTF-8 character in half. Under the active UTF-8 locale
+#     that makes grep abort with "illegal byte sequence" — silently
+#     emptying the diagnostic (the trailing `|| true` hides the failure).
+#     Forcing the C locale makes grep treat input as raw bytes, matching
+#     this pipeline's real behavior anyway: -F is already a fixed-string
+#     byte match, and -x needs no locale-aware collation. ---
+engine_err_filter() {
+  ECHO_END=$(head -n 20 "$ENGINE_ERR" | grep -n '^--------$' | sed -n '2p' | cut -d: -f1) || true
+  NEXT_LINE=$(sed -n "$(( ${ECHO_END:-0} + 1 ))p" "$ENGINE_ERR" 2>/dev/null)
+  if [ -n "$ECHO_END" ] && [ "$ECHO_END" -le 20 ] && [ "$NEXT_LINE" = "user" ]; then
+    { head -n "$ECHO_END" "$ENGINE_ERR"
+      tail -n "+$(( ECHO_END + PROMPT_LINES + 2 ))" "$ENGINE_ERR"; }
+  else
+    tail -n 20 "$ENGINE_ERR"
+  fi \
+  | LC_ALL=C grep -Fvxf "$CODEX_PROMPT_FILE" \
+  | LC_ALL=C grep '[^[:space:]]' \
+  | head -c 500 || true
 }
 
 # --- Read $ENGINE_OUT, set $REVIEW. Codex's -o output file is the raw review

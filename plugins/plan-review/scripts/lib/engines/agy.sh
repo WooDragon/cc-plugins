@@ -29,6 +29,10 @@ engine_probe() {
   # GEMINI_MODEL retained as the REST fallback's model id (OpenAI-compatible payload).
   GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"
   AGY_MODEL="${AGY_MODEL:-Gemini 3.1 Pro (High)}"
+  # agy's stderr carries no prompt echo / privacy concern — the orchestrator
+  # may backfill it into LOG_FILE verbatim (see backfill_engine_err in
+  # lib/common.sh), unconditionally on both success and failure.
+  ENGINE_ERR_POLICY="verbatim"
   return 0
 }
 
@@ -90,7 +94,7 @@ ${PLAN}"
 
   ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} agy --model "$AGY_MODEL" --sandbox --dangerously-skip-permissions \
     ${CONV_ARGS[@]+"${CONV_ARGS[@]}"} --output-format json \
-    -p "$AGY_PROMPT" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
+    -p "$AGY_PROMPT" > "$ENGINE_OUT" 2>"$ENGINE_ERR" &
   ENGINE_PID=$!
   wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
   ENGINE_PID=""

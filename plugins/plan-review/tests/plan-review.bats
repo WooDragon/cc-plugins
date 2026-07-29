@@ -3301,6 +3301,58 @@ Sanitized fine."
   [[ "$HOOK_STDERR" != *"not valid UTF-8"* ]]
 }
 
+# codex: 14. capacity exhausted + REST configured → fast break, same as agy/claude
+# (Issue #144 fix): codex's stderr never reached LOG_FILE wholesale (privacy
+# filter), so the old "grep LOG_FILE for RESOURCE_EXHAUSTED" capacity check only
+# caught codex by coincidence — whatever the 500-byte filtered codex-diag
+# excerpt happened to retain. Capacity detection now scans the raw $ENGINE_ERR
+# directly (see plan-review.sh), so codex behaves identically to agy/claude
+# regardless of what the privacy filter keeps or drops.
+# NOTE: this mock's capacity text is short enough to also survive inside the
+# filtered codex-diag excerpt — it exercises the "lucky" case (raw $ENGINE_ERR
+# and filtered LOG_FILE agree). See the "buried" test below for the case that
+# actually distinguishes the two.
+@test "codex: capacity exhausted + REST configured → fast break + REST used" {
+  export REVIEW_ENGINE="codex"
+  create_capacity_exhausted_codex
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nApproved via REST.'
+  INPUT=$(build_input)
+
+  run_hook
+  assert_ack_approve_json
+  [[ "$HOOK_STDERR" == *"skipping retry (REST fallback available)"* ]]
+  [[ "$HOOK_STDERR" == *"REST API fallback succeeded"* ]]
+  assert_log_contains "rest-skip=capacity-fast-break engine=codex"
+}
+
+# codex: 15. capacity exhausted (buried past the 500-byte privacy-filter
+# window) + REST configured → fast break still fires. Unlike test 14, the
+# capacity text here is truncated away by engine_err_filter()'s `head -c 500`
+# before it reaches LOG_FILE's codex-diag line — so this only passes if
+# capacity detection scans the RAW $ENGINE_ERR directly (the Issue #144 fix).
+# A pre-fix "grep LOG_FILE for RESOURCE_EXHAUSTED" check would find nothing
+# and fall through to the ordinary retry path instead of fast-breaking.
+@test "codex: capacity exhausted buried past privacy-filter window → fast break + REST used" {
+  export REVIEW_ENGINE="codex"
+  create_capacity_exhausted_codex_buried
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nApproved via REST.'
+  INPUT=$(build_input)
+
+  run_hook
+  assert_ack_approve_json
+  [[ "$HOOK_STDERR" == *"skipping retry (REST fallback available)"* ]]
+  [[ "$HOOK_STDERR" == *"REST API fallback succeeded"* ]]
+  assert_log_contains "rest-skip=capacity-fast-break engine=codex"
+  # Prove the buried capacity text really did NOT survive the privacy filter:
+  # codex-diag's logged excerpt must not contain the capacity marker.
+  run grep -F "codex-diag" "${REVIEW_LOG_DIR}/plan-review.log"
+  [[ "$output" != *"RESOURCE_EXHAUSTED"* ]]
+}
+
 # fixture: reset_leaky_env must clear every env var a developer shell might
 # export. Regression guard — the codex vars were missed when the codex engine
 # landed, and with CODEX_MODEL exported the "codex: CODEX_MODEL empty → no -m"

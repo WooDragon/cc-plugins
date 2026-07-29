@@ -126,8 +126,13 @@ ENGINE_TMP_DIRS=()
 #     an empty or already-gone target is a harmless no-op. Called on EXIT
 #     (normal), INT (Ctrl-C), TERM (framework hook timeout), and HUP (terminal
 #     disconnect). Idempotent — safe to call multiple times.
+#     ENGINE_ERR is a contract channel like PROMPT_FILE/ENGINE_OUT — the
+#     orchestrator allocates it (ENGINE_ERR="${ENGINE_OUT}.err", set once
+#     below) for EVERY engine, unconditionally, so it is hardcoded here
+#     rather than routed through the generic ENGINE_TMP_FILES registry (which
+#     is for engine-PRIVATE resources only, e.g. codex's sandboxed workdir).
 _cleanup() {
-  rm -f "${PROMPT_FILE:-}" "${ENGINE_OUT:-}"
+  rm -f "${PROMPT_FILE:-}" "${ENGINE_OUT:-}" "${ENGINE_ERR:-}"
   [ ${#ENGINE_TMP_FILES[@]} -eq 0 ] || rm -f "${ENGINE_TMP_FILES[@]}"
   [ ${#ENGINE_TMP_DIRS[@]}  -eq 0 ] || rmdir "${ENGINE_TMP_DIRS[@]}" 2>/dev/null || true
   ENGINE_TMP_FILES=()
@@ -517,6 +522,15 @@ else
   # process if the hook script itself is terminated (e.g. hook timeout SIGTERM).
   ENGINE_OUT=$(mktemp)
   ENGINE_STATUS="${ENGINE_OUT}.status"
+  # Orchestrator owns the stderr CHANNEL for every engine (agy/claude/codex
+  # alike) — allocated unconditionally here, not codex-private. Each engine
+  # redirects its own invocation's stderr into it (2>"$ENGINE_ERR") and
+  # declares, via $ENGINE_ERR_POLICY (set in its engine_probe()), what the
+  # orchestrator is allowed to do with the CONTENT: "verbatim" (agy/claude)
+  # backfills it into LOG_FILE unconditionally; "filtered" (codex) only logs
+  # a privacy-filtered excerpt on failure, via the engine's own
+  # engine_err_filter() hook — see backfill_engine_err() in lib/common.sh.
+  ENGINE_ERR="${ENGINE_OUT}.err"
   REVIEW=""
   HOOK_BUDGET="${REVIEW_HOOK_BUDGET:-595}"
 
@@ -547,8 +561,6 @@ else
       fi
     fi
     engine_exit=0
-    # Snapshot log position before call — used after failure to detect capacity-specific 429
-    log_pos_before=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
 
     # --- Call the sourced engine's invoke hook. agy's invoke may set
     #     _ENGINE_ABORT_RETRY=1 (oversized prompt, ARG_MAX defense) to signal
@@ -562,6 +574,13 @@ else
     if [ "$_ENGINE_ABORT_RETRY" = "1" ]; then
       break
     fi
+
+    # Backfill this round's $ENGINE_ERR into LOG_FILE per the engine's own
+    # $ENGINE_ERR_POLICY (see lib/common.sh) — unconditionally for
+    # "verbatim" engines (success and failure alike), failure-only and
+    # filtered for codex. Deliberately NOT skipped on failure: the capacity
+    # detection right below reads the raw (un-truncated) $ENGINE_ERR.
+    backfill_engine_err "$engine_exit"
 
     engine_extract
     : > "$ENGINE_OUT"
@@ -577,9 +596,16 @@ else
         # Detect capacity-exhausted 429 (MODEL_CAPACITY_EXHAUSTED via cloudcode-pa.googleapis.com).
         # These outages last minutes — the default 2s retry delay is useless;
         # a longer wait gives the server time to recover.
-        # Check only log bytes written during this attempt to avoid matching old entries.
-        if tail -c "+$((log_pos_before + 1))" "$LOG_FILE" 2>/dev/null \
-             | grep -qE "RESOURCE_EXHAUSTED|MODEL_CAPACITY" 2>/dev/null; then
+        # Scan this round's raw $ENGINE_ERR directly — NOT LOG_FILE. This is
+        # the fix for the codex fast-break bug: codex's raw stderr never
+        # reaches LOG_FILE wholesale (privacy filter, see engine_err_filter
+        # in lib/engines/codex.sh), so grepping LOG_FILE only ever caught
+        # this pattern for agy/claude by coincidence — codex's fast-break
+        # depended on the capacity keyword happening to survive the 500-byte
+        # filtered codex-diag excerpt. All three engines are treated
+        # identically here because $ENGINE_ERR always holds this round's
+        # complete, unfiltered stderr regardless of engine.
+        if grep -qE "RESOURCE_EXHAUSTED|MODEL_CAPACITY" "$ENGINE_ERR" 2>/dev/null; then
           _fail_reason="${REVIEW_ENGINE}: capacity exhausted (MODEL_CAPACITY_EXHAUSTED)"
           # Drop any cached conversation_id: the session on agy's side may be
           # invalid/unrecoverable after a capacity outage — don't resume onto it.
