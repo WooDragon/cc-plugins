@@ -103,6 +103,20 @@ _source_lib "$LIB_MANIFEST"
 _source_lib "$LIB_VERDICT"
 unset -f _source_lib
 
+# --- Engine temp-resource cleanup registry (MUST be declared before trap
+#     registration below): engines (codex's workdir/prompt/err) and the REST
+#     fallback (status/req) append their own private temp paths here instead
+#     of _cleanup hardcoding their names. Declaring these arrays here, before
+#     `trap` is registered, is load-bearing under `set -u` — if the script
+#     exits early (e.g. a pre-flight guard below, before any engine is even
+#     selected), the trap still fires and evaluates `${#ENGINE_TMP_FILES[@]}`;
+#     an array that was NEVER declared throws "unbound variable" there (unlike
+#     a scalar, which `${var:-}` protects even when undeclared), which would
+#     make the trap itself die and skip the `kill "$ENGINE_PID"` cleanup below
+#     it entirely.
+ENGINE_TMP_FILES=()
+ENGINE_TMP_DIRS=()
+
 # --- Cleanup trap (registered here, right after lib sourcing, so any early
 #     exit — including the pre-flight guards below — is covered; previously
 #     this trapped only after PROMPT_FILE=$(mktemp) much later in the script,
@@ -113,9 +127,11 @@ unset -f _source_lib
 #     (normal), INT (Ctrl-C), TERM (framework hook timeout), and HUP (terminal
 #     disconnect). Idempotent — safe to call multiple times.
 _cleanup() {
-  rm -f "${PROMPT_FILE:-}" "${ENGINE_OUT:-}" "${ENGINE_STATUS:-}" "${REQ_FILE:-}"
-  rm -f "${ENGINE_ERR:-}" "${CODEX_PROMPT_FILE:-}" "${CODEX_PROMPT_FILE:+${CODEX_PROMPT_FILE}.u8}"
-  [ -z "${CODEX_WORKDIR:-}" ] || rmdir "${CODEX_WORKDIR:-}" 2>/dev/null || true
+  rm -f "${PROMPT_FILE:-}" "${ENGINE_OUT:-}"
+  [ ${#ENGINE_TMP_FILES[@]} -eq 0 ] || rm -f "${ENGINE_TMP_FILES[@]}"
+  [ ${#ENGINE_TMP_DIRS[@]}  -eq 0 ] || rmdir "${ENGINE_TMP_DIRS[@]}" 2>/dev/null || true
+  ENGINE_TMP_FILES=()
+  ENGINE_TMP_DIRS=()
   [ -z "${ENGINE_PID:-}" ] || kill "${ENGINE_PID:-}" 2>/dev/null || true
 }
 trap '_cleanup' EXIT
@@ -127,6 +143,41 @@ REVIEW_DRY_RUN="${REVIEW_DRY_RUN:-${GEMINI_DRY_RUN:-0}}"
 REVIEW_MAX_ROUNDS="${REVIEW_MAX_ROUNDS:-${GEMINI_MAX_REVIEWS:-3}}"
 REVIEW_MAX_TOTAL_ROUNDS="${REVIEW_MAX_TOTAL_ROUNDS:-20}"
 REVIEW_ENGINE="${REVIEW_ENGINE:-gemini}"
+
+# --- Engine selection: whitelist case, never string-concat into a source
+#     path (REVIEW_ENGINE is externally controlled via env var — string
+#     concatenation into `source` would be a path-injection surface). This
+#     is the ONLY branch on REVIEW_ENGINE's value left in this file; adding a
+#     4th engine is "write lib/engines/<name>.sh, add one line here".
+#     NOTE: the `*)` fallback to agy.sh is CURRENT BEHAVIOR preserved as-is —
+#     an unrecognized REVIEW_ENGINE value (or the default "gemini") has
+#     always fallen through to the agy code path in the pre-refactor script,
+#     since only "claude" and "codex" were ever special-cased. Whether an
+#     unrecognized value should instead fail loudly is a separate, deliberate
+#     policy decision left to a follow-up — out of scope for this zero
+#     behavior-change refactor.
+case "$REVIEW_ENGINE" in
+  claude) ENGINE_LIB="claude.sh" ; ENGINE_CMD="claude" ;;
+  codex)  ENGINE_LIB="codex.sh"  ; ENGINE_CMD="${CODEX_BIN:-codex}" ;;
+  *)      ENGINE_LIB="agy.sh"    ; ENGINE_CMD="agy" ;;
+esac
+LIB_ENGINES_DIR="$SCRIPT_DIR/lib/engines"
+LIB_REST="$LIB_ENGINES_DIR/rest.sh"
+LIB_ENGINE_SELECTED="$LIB_ENGINES_DIR/$ENGINE_LIB"
+
+for _lib in "$LIB_REST" "$LIB_ENGINE_SELECTED"; do
+  if [ ! -f "$_lib" ]; then
+    echo "plan-review: missing lib file $_lib, allowing." >&2
+    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] lib file missing, plan-review skipped"}}'
+    exit 0
+  fi
+done
+unset _lib
+
+# shellcheck source=lib/engines/rest.sh
+source "$LIB_REST"
+# shellcheck disable=SC1090  # dynamic path — engine chosen by the whitelisted case above
+source "$LIB_ENGINE_SELECTED"
 
 # --- Unified field extraction (single jq fork, reused by guards + logging) ---
 # Pre-initialize so set -u won't fire if read fails (e.g. empty/malformed INPUT).
@@ -391,13 +442,10 @@ PROMPT_FILE=$(mktemp)
 
 # Engine-specific system injection: PROMPT_FILE holds dynamic content only,
 # regardless of engine. Each channel injects SYSTEM_INSTRUCTIONS on its own
-# rail: claude → --system-prompt; agy → inline concat; REST → messages[0].
+# rail: claude → --system-prompt (set in claude.sh's engine_probe); agy →
+# inline concat (agy.sh's engine_invoke); REST → messages[0] (rest.sh's
+# rest_invoke).
 : > "$PROMPT_FILE"
-if [ "$REVIEW_ENGINE" = "claude" ]; then
-  SYSTEM_PROMPT="$SYSTEM_INSTRUCTIONS"
-else
-  SYSTEM_PROMPT=""
-fi
 
 # Shared dynamic content: stable → volatile ordering
 cat >> "$PROMPT_FILE" << DYNEOF
@@ -430,29 +478,6 @@ if [ "$REVIEW_DRY_RUN" = "1" ]; then
   REVIEW="<verdict>APPROVE</verdict>
 [DRY-RUN] 审阅调用已跳过。"
 else
-  # --- Pre-flight: CLI existence check (permanent failure, no retry) ---
-  ENGINE_CMD="agy"
-  case "$REVIEW_ENGINE" in
-    claude) ENGINE_CMD="claude" ;;
-    codex)  ENGINE_CMD="${CODEX_BIN:-codex}" ;;
-  esac
-  if ! command -v "$ENGINE_CMD" >/dev/null 2>&1; then
-    log_decision "decision=allow reason=engine-not-found engine=$REVIEW_ENGINE"
-    allow_with_reason "[WARNING] REVIEW_ENGINE=$REVIEW_ENGINE but '$ENGINE_CMD' not found"
-  fi
-
-  # Engine model variables (outside retry loop, avoid repeat assignment)
-  if [ "$REVIEW_ENGINE" = "claude" ]; then
-    CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
-  elif [ "$REVIEW_ENGINE" = "codex" ]; then
-    # Empty CODEX_MODEL means inherit codex's own ~/.codex/config.toml default.
-    CODEX_MODEL="${CODEX_MODEL:-}"
-  else
-    # GEMINI_MODEL retained as the REST fallback's model id (OpenAI-compatible payload).
-    GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"
-    AGY_MODEL="${AGY_MODEL:-Gemini 3.1 Pro (High)}"
-  fi
-
   # Portable timeout: timeout (GNU/Homebrew) > gtimeout (coreutils) > none
   TIMEOUT_CMD=""
   if command -v timeout >/dev/null 2>&1; then
@@ -495,43 +520,13 @@ else
   REVIEW=""
   HOOK_BUDGET="${REVIEW_HOOK_BUDGET:-595}"
 
-  # codex-only temp resources: a sandboxed workdir (-C target, deliberately NOT
-  # the project cwd — codex runs read-only but there's no reason to hand it the
-  # real tree), a merged prompt file (system instructions + PROMPT_FILE's
-  # dynamic content — kept SEPARATE from PROMPT_FILE itself so the REST
-  # fallback's --rawfile read of PROMPT_FILE doesn't double-send the system
-  # instructions), and an isolated stderr capture (codex echoes the FULL
-  # prompt to stderr — see the diagnostic backfill below, never let this reach
-  # LOG_FILE wholesale). Declared as empty defaults unconditionally so set -u
-  # never fires on the gemini/claude paths, and created only when
-  # REVIEW_ENGINE=codex so those paths gain zero new mktemp calls.
-  CODEX_WORKDIR="" CODEX_PROMPT_FILE="" ENGINE_ERR="" PROMPT_LINES=0
-  if [ "$REVIEW_ENGINE" = "codex" ]; then
-    CODEX_WORKDIR=$(mktemp -d)
-    CODEX_PROMPT_FILE=$(mktemp)
-    ENGINE_ERR="${ENGINE_OUT}.err"
-    { printf '%s\n\n' "$SYSTEM_INSTRUCTIONS"; cat "$PROMPT_FILE"; } > "$CODEX_PROMPT_FILE"
-    printf '\n' >> "$CODEX_PROMPT_FILE"
-    # UTF-8 sanitation (codex-only — the other engines never see this file).
-    # GLOBAL_MD/PROJECT_MD are truncated by BYTE count (`head -c 3000` / `-c 8000`),
-    # which slices a multi-byte character in half whenever a CLAUDE.md is non-ASCII
-    # near the cut. codex hard-rejects such input — it does not degrade, it aborts:
-    #   "Failed to read prompt from stdin: input is not valid UTF-8 (invalid byte
-    #    at offset N). Convert it to UTF-8 and retry"
-    # …making REVIEW_ENGINE=codex unusable for anyone with a non-ASCII CLAUDE.md.
-    # `iconv -c` drops only the orphaned bytes and keeps every valid character.
-    # Guarded on iconv's presence and on success (`&& mv || rm`), so a missing or
-    # failing iconv degrades to the unsanitized file rather than an empty prompt.
-    if command -v iconv >/dev/null 2>&1; then
-      if iconv -f UTF-8 -t UTF-8 -c < "$CODEX_PROMPT_FILE" > "${CODEX_PROMPT_FILE}.u8" 2>/dev/null; then
-        mv -f "${CODEX_PROMPT_FILE}.u8" "$CODEX_PROMPT_FILE"
-      else
-        rm -f "${CODEX_PROMPT_FILE}.u8"
-      fi
-    fi
-    # Counted AFTER sanitation: PROMPT_LINES drives the diagnostic backfill's
-    # positional cut, which must match the file codex actually received.
-    PROMPT_LINES=$(wc -l < "$CODEX_PROMPT_FILE")
+  # --- Pre-flight: CLI existence check (permanent failure, no retry) + one-
+  #     time per-engine setup (model resolution, temp resource prep) —
+  #     delegated to the sourced engine's engine_probe(), called once outside
+  #     the retry loop below. ---
+  if ! engine_probe; then
+    log_decision "decision=allow reason=engine-not-found engine=$REVIEW_ENGINE"
+    allow_with_reason "[WARNING] REVIEW_ENGINE=$REVIEW_ENGINE but '$ENGINE_PROBE_REASON' not found"
   fi
 
   for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
@@ -554,240 +549,21 @@ else
     engine_exit=0
     # Snapshot log position before call — used after failure to detect capacity-specific 429
     log_pos_before=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
-    if [ "$REVIEW_ENGINE" = "claude" ]; then
-      # Strip Claude Code internal env vars to prevent recursive hook/plugin loading.
-      # Fragile (depends on internal implementation), but necessary: user authenticates
-      # via OAuth (claude login), no ANTHROPIC_API_KEY available, so claude -p is the
-      # only viable path. Triple isolation: --setting-sources local + PLAN_REVIEW_RUNNING
-      # + --tools "" (no tool calls = no PreToolUse events).
-      unset CLAUDECODE
-      unset CLAUDE_CODE_ENTRYPOINT
-      PLAN_REVIEW_RUNNING=1 ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} claude -p \
-        --model "$CLAUDE_MODEL" \
-        --setting-sources local \
-        --no-session-persistence \
-        --tools "" \
-        --disable-slash-commands \
-        --system-prompt "$SYSTEM_PROMPT" \
-        < "$PROMPT_FILE" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
-      ENGINE_PID=$!
-      wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
-      ENGINE_PID=""
-    elif [ "$REVIEW_ENGINE" = "codex" ]; then
-      # Model id can contain spaces (see AGY_MODEL's default "Gemini 3.1 Pro
-      # (High)" precedent above) — must be an array, not ${VAR:+...} word-splitting.
-      CODEX_MODEL_ARGS=()
-      [ -z "$CODEX_MODEL" ] || CODEX_MODEL_ARGS=(-m "$CODEX_MODEL")
-      ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} "$ENGINE_CMD" exec \
-        --skip-git-repo-check -s read-only --ephemeral --color never \
-        -C "$CODEX_WORKDIR" ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} \
-        -o "$ENGINE_OUT" - < "$CODEX_PROMPT_FILE" > /dev/null 2> "$ENGINE_ERR" &
-      ENGINE_PID=$!
-      wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
-      ENGINE_PID=""
 
-      if [ "$engine_exit" != "0" ]; then
-        # --- Privacy boundary: codex echoes the FULL prompt to stderr before
-        # its real diagnostics (global CLAUDE.md + project CLAUDE.md + recent
-        # conversation + the plan). Never let ENGINE_ERR reach LOG_FILE
-        # wholesale — backfill only a filtered tail, two-layer defense:
-        #   Layer A (positional): locate the banner's SECOND "--------" line
-        #     (within the first 20 lines) followed by a line that is exactly
-        #     "user" — that marks where the echoed prompt begins; cut it out
-        #     using PROMPT_LINES (captured once, outside the retry loop) to
-        #     find where it ends, keeping the banner + the real tail after it.
-        #     Any of the three guards failing falls through to the fail-closed
-        #     `tail -n 20` branch, which still preserves diagnostics for
-        #     failures that happen before codex echoes anything (auth/network).
-        #   Layer B (content-based): grep -Fvxf strips any surviving line that
-        #     is byte-identical to a prompt line — this is what survives codex
-        #     version drift in line counts (banner shape / prompt line count
-        #     changing between versions).
-        # `|| true` on the ECHO_END lookup and the final pipe are MANDATORY:
-        # set -euo pipefail means a grep returning 1 (no match / everything
-        # filtered out) would otherwise kill the hook before it emits its
-        # decision JSON.
-        # LC_ALL=C on both greps (command-scoped, not exported — deliberately
-        # narrower than the LC_ALL=C prefix-assignment pattern avoided
-        # elsewhere in this file): CODEX_PROMPT_FILE embeds GLOBAL_MD/
-        # PROJECT_MD truncated by BYTE count (`head -c`), which can slice a
-        # multi-byte UTF-8 character in half. Under the active UTF-8 locale
-        # that makes grep abort with "illegal byte sequence" — silently
-        # emptying CODEX_DIAG (the trailing `|| true` hides the failure).
-        # Forcing the C locale makes grep treat input as raw bytes, matching
-        # this pipeline's real behavior anyway: -F is already a fixed-string
-        # byte match, and -x needs no locale-aware collation.
-        CODEX_DIAG=$(
-          ECHO_END=$(head -n 20 "$ENGINE_ERR" | grep -n '^--------$' | sed -n '2p' | cut -d: -f1) || true
-          NEXT_LINE=$(sed -n "$(( ${ECHO_END:-0} + 1 ))p" "$ENGINE_ERR" 2>/dev/null)
-          if [ -n "$ECHO_END" ] && [ "$ECHO_END" -le 20 ] && [ "$NEXT_LINE" = "user" ]; then
-            { head -n "$ECHO_END" "$ENGINE_ERR"
-              tail -n "+$(( ECHO_END + PROMPT_LINES + 2 ))" "$ENGINE_ERR"; }
-          else
-            tail -n 20 "$ENGINE_ERR"
-          fi \
-          | LC_ALL=C grep -Fvxf "$CODEX_PROMPT_FILE" \
-          | LC_ALL=C grep '[^[:space:]]' \
-          | head -c 500 || true
-        )
-        # tr -d '\000-\037': strip control chars, keep log single-line safe
-        # (mirrors the existing rest-debug body_prefix backfill).
-        log_decision "codex-diag $(printf '%s' "$CODEX_DIAG" | tr -d '\000-\037')"
-      fi
-    else
-      # --- agy multi-round session reuse ---
-      # Read back a previously-captured agy conversation_id (if any) so this
-      # round can resume it instead of resending the full static prefix — the
-      # prefix (system instructions + GLOBAL_MD/PROJECT_MD/USER_REQ) already
-      # lives in agy's server-side session history, which lets the provider
-      # hit prompt cache on it. Validate strictly (36-char UUID) since a
-      # malformed/stale value would make `--conversation` resume garbage.
-      CONV_ID=$(cat "${CONV_FILE:-}" 2>/dev/null | tr 'A-F' 'a-f' || true)
-      [[ "$CONV_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || CONV_ID=""
-      CONV_ARGS=()
-      [ -z "$CONV_ID" ] || CONV_ARGS=(--conversation "$CONV_ID")
-
-      # agy does not read stdin as a prompt — must pass inline via -p. ANSI-C
-      # quoting ($'\n\n') for a real newline separator; a plain "\n" inside
-      # double quotes is a literal backslash-n, not a newline.
-      if [ -z "$CONV_ID" ]; then
-        # First round (no session to resume yet): send the full static+dynamic prompt.
-        AGY_PROMPT="$SYSTEM_INSTRUCTIONS"$'\n\n'"$(cat "$PROMPT_FILE")"
-      else
-        # Reuse round: static prefix already lives in agy's session history —
-        # resend only the volatile tail. Mirror the first-round Consultation
-        # Context framing (round number + "APPROVE if prior concerns addressed")
-        # so the reuse round carries the same negotiation semantics, not a bare
-        # plan dump. Resending the delta only (not the static context) is the
-        # point — it gets appended to session history, so duplicating context
-        # would cost tokens, not save them.
-        AGY_PROMPT="## Consultation Context
-This is round $((TOTAL_ROUNDS + 1)) of adversarial review.
-The plan author may have revised or added rebuttals since the previous round.
-Evaluate the CURRENT plan on its merits — if prior concerns have been addressed, APPROVE.
-
-## Plan to Review
-${PLAN}"
-      fi
-      # ARG_MAX defense: agy only accepts the prompt as a command-line argument,
-      # so an oversized prompt trips E2BIG. Treat this as a CLI failure and
-      # fall straight through to REST fallback rather than exec'ing a doomed command.
-      # Count BYTES, not characters: the ARG_MAX limit is byte-denominated, but
-      # ${#VAR} counts characters under a UTF-8 locale, so a CJK plan (3 bytes/
-      # char) would undercount ~3x and defeat the 256KB guard. `wc -c` counts
-      # bytes regardless of locale — one fork per hook invocation is negligible,
-      # and it sidesteps the LC_ALL=C prefix-assignment locale-leak footgun.
-      AGY_PROMPT_BYTES=$(printf '%s' "$AGY_PROMPT" | wc -c | tr -d ' ')
-      if [ "$AGY_PROMPT_BYTES" -gt 256000 ]; then
-        log_decision "agy-skip reason=prompt-too-large bytes=$AGY_PROMPT_BYTES"
-        REVIEW=""
-        _fail_reason="agy: prompt too large (${AGY_PROMPT_BYTES}B > 256000B), skipped to REST"
-        break
-      fi
-      ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} agy --model "$AGY_MODEL" --sandbox --dangerously-skip-permissions \
-        ${CONV_ARGS[@]+"${CONV_ARGS[@]}"} --output-format json \
-        -p "$AGY_PROMPT" > "$ENGINE_OUT" 2>>"$LOG_FILE" &
-      ENGINE_PID=$!
-      wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
-      ENGINE_PID=""
+    # --- Call the sourced engine's invoke hook. agy's invoke may set
+    #     _ENGINE_ABORT_RETRY=1 (oversized prompt, ARG_MAX defense) to signal
+    #     an immediate break BEFORE extraction/exit-code handling — mirroring
+    #     the pre-refactor inline `break`. A literal `break` inside the
+    #     function itself would be bash-version-dependent (verified: bash 3.2
+    #     propagates it to this loop, bash 5.x does not), so an explicit flag
+    #     is the only portable signal.
+    _ENGINE_ABORT_RETRY=0
+    engine_invoke
+    if [ "$_ENGINE_ABORT_RETRY" = "1" ]; then
+      break
     fi
-    if [ "$REVIEW_ENGINE" = "claude" ] || [ "$REVIEW_ENGINE" = "codex" ]; then
-      REVIEW=$(cat "$ENGINE_OUT" 2>/dev/null || true)
-    else
-      # --- agy JSON response unwrap (--output-format json) ---
-      # agy's JSON is NOT well-formed (the "response" field contains raw
-      # unescaped newlines), so jq/python json.loads chokes on it. Everything
-      # below is deliberate sed/awk text slicing — zero jq, zero python.
-      REVIEW=""
-      if [ "$engine_exit" = "0" ] && [ -s "$ENGINE_OUT" ]; then
-        # Capture the real conversation_id agy assigned (self-chosen server-side
-        # UUID; a client-invented one would not resume anything). `q` after the
-        # first match — no pipe, no SIGPIPE. Tolerate a lowercase-normalized id;
-        # persist is DEFERRED until response extraction succeeds (see below) so a
-        # broken envelope never leaves a CONV_FILE that the next round resumes.
-        NEW_CONV=$(sed -n '/"conversation_id"/{s/.*"conversation_id"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F-]\{36\}\)".*/\1/p;q;}' "$ENGINE_OUT" 2>/dev/null || true)
-        NEW_CONV=$(printf '%s' "$NEW_CONV" | tr 'A-F' 'a-f')
 
-        # Extract the "response" field value and unescape it. Deliberately NOT
-        # keyed to field order/position — scan forward from the "response":"
-        # marker and stop at the first UNESCAPED double-quote, so trailing keys
-        # (usage, etc.) after response in the object don't matter.
-        REVIEW=$(awk '
-          BEGIN { RS="\x01" }
-          {
-            s = $0
-            # Tolerate optional whitespace around the key colon
-            # ("response" : "...") — do not bet on the compact serialization.
-            if (match(s, /"response"[ \t]*:[ \t]*"/) == 0) { exit }
-            s = substr(s, RSTART + RLENGTH)
-            out = ""; i = 1; n = length(s)
-            while (i <= n) {
-              c = substr(s, i, 1)
-              if (c == "\\") {
-                i++
-                nc = substr(s, i, 1)
-                if (nc == "n") out = out "\n"
-                else if (nc == "t") out = out "\t"
-                else if (nc == "\"") out = out "\""
-                else if (nc == "\\") out = out "\\"
-                else if (nc == "r") out = out "\r"
-                else if (nc == "u") {
-                  # \uXXXX: Go encoding/json HTML-safe mode escapes <, >, & and
-                  # U+2028/U+2029 this way by default (XSS defense) — that set
-                  # is what agy actually emits, verified by reproduction. Any
-                  # other \uXXXX is passed through literally (backslash intact)
-                  # rather than silently dropped, so an unanticipated escape is
-                  # visibly wrong instead of corrupting the tag structure.
-                  hex = tolower(substr(s, i + 1, 4))
-                  if (hex == "003c") out = out "<"
-                  else if (hex == "003e") out = out ">"
-                  else if (hex == "0026") out = out "&"
-                  else if (hex == "2028" || hex == "2029") out = out "\n"
-                  else out = out "\\u" substr(s, i + 1, 4)
-                  i += 4
-                }
-                else out = out nc
-                i++
-              } else if (c == "\"") {
-                break
-              } else {
-                out = out c
-                i++
-              }
-            }
-            printf "%s", out
-          }
-        ' "$ENGINE_OUT" 2>/dev/null || true)
-
-        # Fallback: never hand the shell-wrapped JSON to the downstream verdict
-        # extractor — the raw envelope can contain echoed-back <verdict> tags
-        # from the prompt and cause a false match. Extraction failure = empty
-        # REVIEW, which the existing empty-response retry/REST path handles.
-        #
-        # CONV_FILE persist policy (only when we got a usable review): persisting
-        # a conversation_id from a call whose response we COULDN'T parse would
-        # make the next round resume a session we can't actually consume — so
-        # persist only on non-empty REVIEW, and drop any stale CONV_FILE on
-        # extract failure (the session may be shaped wrong / unusable this cycle).
-        if [ -n "$REVIEW" ]; then
-          if [[ "$NEW_CONV" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
-            printf '%s' "$NEW_CONV" > "${CONV_FILE}.tmp.$$" 2>/dev/null && mv -f "${CONV_FILE}.tmp.$$" "$CONV_FILE" 2>/dev/null || true
-            log_decision "agy-conversation id=$NEW_CONV reuse=$([ -n "$CONV_ID" ] && echo yes || echo no)"
-          fi
-          log_decision "agy-success"
-        else
-          rm -f "${CONV_FILE:-}"
-          log_decision "agy-response-extract-failed conv-cleared"
-        fi
-
-        # Usage observation (best-effort, never fatal if absent/unparseable).
-        # `q` after first match — consistent with the conversation_id sed, no
-        # pipe, no SIGPIPE.
-        AGY_IN=$(sed -n 's/.*"input_tokens"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p;/"input_tokens"/q' "$ENGINE_OUT" 2>/dev/null || true)
-        AGY_TOTAL=$(sed -n 's/.*"total_tokens"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p;/"total_tokens"/q' "$ENGINE_OUT" 2>/dev/null || true)
-        [ -z "$AGY_IN" ] && [ -z "$AGY_TOTAL" ] || log_decision "agy-usage in=${AGY_IN:-?} total=${AGY_TOTAL:-?}"
-      fi
-    fi
+    engine_extract
     : > "$ENGINE_OUT"
     if [ "$engine_exit" != "0" ]; then
       REVIEW=""
@@ -860,125 +636,9 @@ ${PLAN}"
     fi
     echo "plan-review: CLI exhausted, trying REST API fallback..." >&2
     log_decision "rest-start url=${REVIEW_API_URL:+(set)} key=${REVIEW_API_KEY:+(set)}"
-    REQ_FILE=$(mktemp)
-    # --rawfile (not --arg + $(cat ...)) reads PROMPT_FILE directly inside jq,
-    # keeping the large plan body off the command line entirely (no E2BIG risk
-    # on this side). messages[0]=system stays a stable prefix across rounds —
-    # prefix-cacheable by the upstream provider. stream:true enables SSE below.
-    jq -n --arg model "${GEMINI_MODEL:-gemini-3.1-pro-preview}" \
-          --arg sys "$SYSTEM_INSTRUCTIONS" \
-          --rawfile prompt "$PROMPT_FILE" \
-      '{ model: $model, messages: [{ role: "system", content: $sys }, { role: "user", content: $prompt }], max_tokens: 16000, temperature: 0.1, stream: true }' \
-      > "$REQ_FILE"
 
-    REST_TIMEOUT="${REVIEW_REST_TIMEOUT:-115}"
-    # Stall watchdog: aborts if the stream produces < 1 byte/s for this many
-    # seconds. Set well above legitimate TTFT (time-to-first-token) for
-    # reasoning models, which can sit silent for tens of seconds before the
-    # first SSE chunk arrives — too low a value misfires on a healthy stream.
-    STALL_TIMEOUT="${REVIEW_REST_STALL_TIMEOUT:-90}"
-    # Clamp to remaining budget: ensure curl self-terminates before hook
-    # timeout SIGTERM, preserving diagnostic log writes after curl completes.
-    # 3s margin for jq extraction + log_decision after curl returns.
-    remaining=$(( HOOK_BUDGET - SECONDS ))
-    (( remaining - 3 < REST_TIMEOUT )) && REST_TIMEOUT=$(( remaining - 3 ))
-    (( REST_TIMEOUT < 1 )) && REST_TIMEOUT=1
-    # -sS: -s suppresses progress meter, -S re-enables error messages (connection-level errors
-    # like "Failed to connect" would be silenced by -s alone, making raw_bytes=0 undiagnosable).
-    # --no-buffer: disable curl's output buffering so SSE chunks land in ENGINE_OUT as they
-    # arrive (only matters for anyone tailing the file live; parsing below still reads it
-    # after wait). --speed-limit/--speed-time: curl's own stall watchdog — abort (exit 28)
-    # if throughput drops below 1 byte/s for STALL_TIMEOUT seconds, independent of the
-    # outer TIMEOUT_CMD wall-clock cap.
-    # -w "%{http_code}": write HTTP status to stdout (redirected to ENGINE_STATUS); response
-    # body goes to ENGINE_OUT via -o. Read ENGINE_STATUS only AFTER wait completes.
-    ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $REST_TIMEOUT} curl -sS \
-      --no-buffer --speed-limit 1 --speed-time "$STALL_TIMEOUT" \
-      -X POST "${REVIEW_API_URL}/v1/chat/completions" \
-      -H "Content-Type: application/json" \
-      -H "Authorization: Bearer ${REVIEW_API_KEY}" \
-      -d @"$REQ_FILE" \
-      -o "$ENGINE_OUT" \
-      -w "%{http_code}" \
-      2>>"$LOG_FILE" > "$ENGINE_STATUS" &
-    ENGINE_PID=$!
-    curl_exit=0
-    wait "$ENGINE_PID" 2>/dev/null || curl_exit=$?
-    ENGINE_PID=""
-    rm -f "$REQ_FILE"; REQ_FILE=""
-
-    # Read status after wait — shell creates ENGINE_STATUS on redirect, content written by curl.
-    # Explicit empty check: command substitution strips trailing newlines, but file may be empty
-    # (connection-level failure before HTTP handshake) → use "000" as sentinel for no-response.
-    rest_http_status=$(cat "$ENGINE_STATUS" 2>/dev/null)
-    [ -z "$rest_http_status" ] && rest_http_status="000"
-
-    if [ "$curl_exit" = "28" ]; then
-      # Stall watchdog fired — the provider went silent mid-stream. Don't hand
-      # a truncated partial body to the SSE parser; treat as a clean failure.
-      log_decision "rest-stall-timeout curl_exit=28"
-      REVIEW=""
-      _fail_reason="${_fail_reason:+${_fail_reason}; }REST: stall timeout (curl exit 28, no data for ${STALL_TIMEOUT}s)"
-    else
-      # Non-SSE error bypass: a non-2xx status, or a bare JSON object body (error
-      # response, not an SSE stream), must skip the SSE parser — feeding an error
-      # JSON through the "data: " cleaning pipeline silently drops it and yields an
-      # empty REVIEW with no diagnosis.
-      # SIGPIPE-safe first-char probe: `tr <big-file | head -c 1` lets head close
-      # the pipe after 1 byte while tr is still streaming the whole body, so tr
-      # dies with SIGPIPE (141). Under `set -o pipefail` the pipeline inherits 141
-      # and `set -e` then kills the hook mid-REST-fallback — before any decision
-      # JSON is emitted — on any sizable body (a normal long review response is
-      # enough). Bounding the read with a leading `head -c 100` means no stage
-      # faces an unbounded producer, so nothing gets SIGPIPE; 100 bytes is ample
-      # to find the first non-space char (leading whitespace before '{'/'data:').
-      first_char=$(head -c 100 "$ENGINE_OUT" 2>/dev/null | tr -d '[:space:]' | head -c 1)
-      case "$rest_http_status" in
-        2[0-9][0-9]) is_2xx=1 ;;
-        *) is_2xx=0 ;;
-      esac
-      if [ "$is_2xx" = "0" ] || [ "$first_char" = "{" ]; then
-        REVIEW=""
-        # Only emit rest-debug when there is a body to describe. An empty body
-        # (connection-level failure before the HTTP handshake, status 000) has
-        # nothing to diagnose — [ -s ] guards against a bare "body_prefix=" line.
-        if [ -s "$ENGINE_OUT" ]; then
-          rest_error=$(jq -r '.error.message // empty' "$ENGINE_OUT" 2>/dev/null || true)
-          if [ -n "$rest_error" ]; then
-            log_decision "rest-debug api_error=$(printf '%s' "$rest_error" | head -c 200)"
-          else
-            # tr -d '\000-\037': strip control characters to keep log single-line safe
-            log_decision "rest-debug body_prefix=$(head -c 200 "$ENGINE_OUT" | tr -d '\000-\037')"
-          fi
-        fi
-      else
-        # SSE cleaning pipeline: strip the "data: " prefix, then parse each frame
-        # in isolation and join delta.content across chunks.
-        #   -R  : read each line as a raw string (not pre-parsed JSON), so ONE
-        #         malformed frame cannot abort the whole parse.
-        #   fromjson? : parse the line to JSON, but the trailing "?" swallows a
-        #         parse error on that single line and skips it — a truncated /
-        #         garbled mid-stream frame (transient gateway hiccup) drops just
-        #         itself instead of discarding every chunk after it. The old
-        #         "-rj '.choices...'" form fed the whole stream to jq at once, so
-        #         a single bad frame aborted parsing and SILENTLY truncated the
-        #         review (2>/dev/null || true hid the exit 5) — a partial body can
-        #         carry a stale verdict and wrongly approve. fromjson? also makes
-        #         the non-JSON "[DONE]" terminator a no-op; the explicit grep -v
-        #         below is kept as belt-and-suspenders and to document intent.
-        #   -j  : join output, no per-value newline — O(1) memory, streaming.
-        #   "// empty": role-only first frame / finish_reason-only last frame /
-        #         empty-choices usage tail carry no content key — skip, don't emit "null".
-        REVIEW=$(grep '^data: ' "$ENGINE_OUT" | sed 's/^data: //' | grep -v '^\[DONE\]' | jq -j -R 'fromjson? | .choices[0].delta.content // empty' 2>/dev/null || true)
-      fi
-
-      raw_bytes=$(wc -c < "$ENGINE_OUT" | tr -d ' ')
-      review_bytes=$(printf '%s' "$REVIEW" | wc -c | tr -d ' ')
-      log_decision "rest-result http=$rest_http_status raw_bytes=$raw_bytes review_bytes=$review_bytes"
-      if [ -z "$REVIEW" ]; then
-        _fail_reason="${_fail_reason:+${_fail_reason}; }REST: http=${rest_http_status} raw_bytes=${raw_bytes}"
-      fi
-    fi
+    rest_invoke
+    rest_extract
 
     : > "$ENGINE_OUT"
     [ -z "$REVIEW" ] || echo "plan-review: REST API fallback succeeded." >&2
