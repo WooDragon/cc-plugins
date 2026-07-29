@@ -60,9 +60,16 @@ LIB_VERDICT="$SCRIPT_DIR/lib/verdict.sh"
 PROMPT_ASSET="$SCRIPT_DIR/assets/review-system-prompt.md"
 
 for _lib in "$LIB_COMMON" "$LIB_PLAN_SOURCE" "$LIB_MANIFEST" "$LIB_VERDICT"; do
-  if [ ! -f "$_lib" ]; then
-    echo "plan-review: missing lib file $_lib, allowing." >&2
-    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] lib file missing, plan-review skipped"}}'
+  # `-s` (exists AND non-empty) catches both gaps in one test: a missing
+  # file fails `-f` already, but an empty file (or one gutted of all its
+  # function bodies) passes `-f` clean, then `source` "succeeds" (sourcing
+  # zero bytes is valid bash, exit 0) and the very next call to a helper
+  # defined in it — e.g. log_entry() a few lines below — dies with
+  # "command not found" (exit 127), no allow JSON ever printed. That is a
+  # silent fail-closed, the opposite of this script's stated contract.
+  if [ ! -s "$_lib" ]; then
+    echo "plan-review: lib file missing or empty: $_lib, allowing." >&2
+    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] lib file missing or empty, plan-review skipped"}}'
     exit 0
   fi
 done

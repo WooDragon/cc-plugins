@@ -3369,34 +3369,52 @@ Sanitized fine."
 # =============================================================================
 # Bootstrap fail-open coverage (PR #145 review fixes)
 #
-# These exercise plan-review.sh's own bootstrap guards — lib-file existence,
-# lib-file sourceability, and prompt-asset presence/content — which resolve
-# paths relative to the script's own location (SCRIPT_DIR via BASH_SOURCE)
-# and are therefore NOT reachable by env-var overrides. `setup_script_copy` /
-# `run_hook_copy` (test_helper/common-setup.bash) copy the whole scripts/
-# tree into an isolated TEST_TEMP_DIR so these files can be deleted/corrupted
-# without ever touching the real repo tree; common_teardown's `rm -rf
+# These exercise plan-review.sh's own bootstrap guards — lib-file existence
+# AND non-emptiness (single `-s` test), lib-file sourceability, and
+# prompt-asset presence/content — which resolve paths relative to the
+# script's own location (SCRIPT_DIR via BASH_SOURCE) and are therefore NOT
+# reachable by env-var overrides. `setup_script_copy` / `run_hook_copy`
+# (test_helper/common-setup.bash) copy the whole scripts/ tree into an
+# isolated TEST_TEMP_DIR so these files can be deleted/corrupted without
+# ever touching the real repo tree; common_teardown's `rm -rf
 # "$TEST_TEMP_DIR"` cleans the copy up automatically.
+#
+# Every test in this block sets REVIEW_DRY_RUN=1 as a safety belt (see the
+# comment above the first test for why) and asserts with assert_approve_json
+# rather than the weaker assert_allowed, so a regression that lets execution
+# fall through past the bootstrap guard is caught by a hookEventName/
+# permissionDecision mismatch instead of silently invoking a real engine CLI.
 # =============================================================================
 
 # bootstrap: missing lib/*.sh file → allow + [WARNING], never a silent hang
 # or fail-closed deny.
+#
+# REVIEW_DRY_RUN=1 is a safety belt, not the mechanism under test: the
+# bootstrap guard below fires and exits long before the script would ever
+# reach the engine-invocation section, so dry-run has no way to influence
+# this test's actual assertions. It exists purely so that if the guard ever
+# regresses (stops firing), this test fails on a wrong JSON/exit-code
+# assertion instead of silently placing a real call to agy/claude/codex.
 @test "bootstrap: missing lib file → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
   setup_script_copy
   rm -f "${COPY_SCRIPT_DIR}/lib/manifest.sh"
 
   run_hook_copy
 
-  assert_allowed
+  assert_approve_json
   [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
   [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
 }
 
-# bootstrap: a lib file EXISTS (passes `[ -f ]`) but has a real bash syntax
-# error — `source` itself fails even though the existence check does not.
-# This is the gap Fix 2 closes: previously the script would abort mid-parse
+# bootstrap: a lib file EXISTS and is non-empty (passes `[ -s ]`) but has a
+# real bash syntax error — `source` itself fails even though the
+# existence/non-emptiness check does not. This is the gap Fix 2 (of the PR
+# #145 first round) closes: previously the script would abort mid-parse
 # with no allow JSON emitted at all (silent hook failure).
+# See REVIEW_DRY_RUN note above the previous test — same rationale applies.
 @test "bootstrap: syntax-broken lib file → allow JSON with WARNING (source fails, not missing)" {
+  export REVIEW_DRY_RUN=1
   setup_script_copy
   # Unbalanced quote + stray paren: guaranteed bash syntax error, file still
   # exists and is readable.
@@ -3404,31 +3422,55 @@ Sanitized fine."
 
   run_hook_copy
 
-  assert_allowed
+  assert_approve_json
   [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
   [[ "$HOOK_STDOUT" == *"failed to load"* ]]
 }
 
+# bootstrap: lib file exists but is empty (zero bytes) — passes the old
+# `[ -f ]` existence check clean, `source` of an empty file "succeeds"
+# (exit 0, sourcing zero bytes is valid bash), and the very next call to a
+# helper defined in it dies with "command not found" (exit 127), no allow
+# JSON ever printed — a silent fail-closed, the opposite of this script's
+# contract. This is the gap the second-round PR #145 review found and
+# `[ ! -s ]` (existence AND non-emptiness in one test) closes.
+# See REVIEW_DRY_RUN note above the first bootstrap test — same rationale.
+@test "bootstrap: empty lib file → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  : > "${COPY_SCRIPT_DIR}/lib/manifest.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}
+
 # bootstrap: prompt asset file missing entirely → allow + [WARNING].
+# See REVIEW_DRY_RUN note above the first bootstrap test — same rationale.
 @test "bootstrap: missing prompt asset → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
   setup_script_copy
   rm -f "${COPY_SCRIPT_DIR}/assets/review-system-prompt.md"
 
   run_hook_copy
 
-  assert_allowed
+  assert_approve_json
   [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
   [[ "$HOOK_STDOUT" == *"prompt asset missing/empty"* ]]
 }
 
 # bootstrap: prompt asset present but zero bytes → allow + [WARNING].
+# See REVIEW_DRY_RUN note above the first bootstrap test — same rationale.
 @test "bootstrap: empty prompt asset → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
   setup_script_copy
   : > "${COPY_SCRIPT_DIR}/assets/review-system-prompt.md"
 
   run_hook_copy
 
-  assert_allowed
+  assert_approve_json
   [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
   [[ "$HOOK_STDOUT" == *"prompt asset missing/empty"* ]]
 }
@@ -3438,13 +3480,15 @@ Sanitized fine."
 # exactly the gap Fix 5's <verdict> anchor check closes: without it, a
 # truncated-to-whitespace asset would silently proceed to review with an
 # empty instruction set instead of failing open visibly.
+# See REVIEW_DRY_RUN note above the first bootstrap test — same rationale.
 @test "bootstrap: prompt asset truncated to whitespace-only → allow JSON with WARNING (anchor check)" {
+  export REVIEW_DRY_RUN=1
   setup_script_copy
   printf ' ' > "${COPY_SCRIPT_DIR}/assets/review-system-prompt.md"
 
   run_hook_copy
 
-  assert_allowed
+  assert_approve_json
   [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
   [[ "$HOOK_STDOUT" == *"prompt asset truncated"* ]]
 }
