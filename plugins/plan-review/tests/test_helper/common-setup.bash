@@ -52,10 +52,13 @@ common_setup() {
 # reset_leaky_env
 #   Unsets every env var a developer shell might export that would otherwise
 #   reshape a test run. Kept as its own function, separate from common_setup,
-#   for two reasons: the isolation becomes directly testable (common_setup
-#   cannot be re-invoked from a test body — its `mktemp -d` would leak a temp
-#   dir past teardown), and adding a fourth engine has one obvious place to
-#   register its vars. Pure unsets, no side effects, safe to call repeatedly.
+#   for two reasons: the isolation becomes directly testable without paying
+#   common_setup's side effects (re-entering it orphans the previous
+#   TEST_TEMP_DIR, since `mktemp -d` reassigns it and common_teardown only
+#   removes the last one — a caller that re-enters must rm the stale path
+#   itself, as the "common_setup calls reset_leaky_env" case does), and adding
+#   a fourth engine has one obvious place to register its vars. Pure unsets,
+#   no side effects, safe to call repeatedly.
 #
 #   Whenever the production script grows a new `${SOME_VAR:-default}` read,
 #   SOME_VAR belongs here.

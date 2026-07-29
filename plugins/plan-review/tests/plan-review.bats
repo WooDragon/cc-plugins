@@ -3317,6 +3317,9 @@ Sanitized fine."
   export GEMINI_DRY_RUN=1
   export GEMINI_MAX_REVIEWS=1
   export PLAN_REVIEW_RUNNING=1
+  export AGY_MODEL="leaked-agy-model"
+  export CLAUDE_MODEL="leaked-claude-model"
+  export GEMINI_MODEL="leaked-gemini-model"
 
   reset_leaky_env
 
@@ -3333,6 +3336,9 @@ Sanitized fine."
   [ -z "${GEMINI_DRY_RUN:-}" ]
   [ -z "${GEMINI_MAX_REVIEWS:-}" ]
   [ -z "${PLAN_REVIEW_RUNNING:-}" ]
+  [ -z "${AGY_MODEL:-}" ]
+  [ -z "${CLAUDE_MODEL:-}" ]
+  [ -z "${GEMINI_MODEL:-}" ]
 }
 
 # fixture: the call site, not just the helper. The case above stays green even
