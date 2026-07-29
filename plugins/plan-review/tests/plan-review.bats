@@ -2395,19 +2395,19 @@ Use Task( for analysis.
 # Prompt content integrity
 # ---------------------------------------------------------------------------
 @test "system-instructions: Testability criterion has structured sub-items" {
-  grep -q "Test strategy presence" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "E2E selector cascade" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "evidence-gated" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "Deletion completeness" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "3000 characters" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Test strategy presence" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "E2E selector cascade" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "evidence-gated" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Deletion completeness" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "3000 characters" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
 }
 
 @test "system-instructions: Scope Boundary has training-cutoff / version-identifier ground-truth directive" {
-  grep -q "GROUND TRUTH" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "verify against your memory" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "training knowledge has a cutoff" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "NOT common knowledge" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "never Critical" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "GROUND TRUTH" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "verify against your memory" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "training knowledge has a cutoff" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "NOT common knowledge" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "never Critical" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
 }
 
 # ---------------------------------------------------------------------------
@@ -2417,40 +2417,40 @@ Use Task( for analysis.
 # We assert the four gap-closing directives are present in SYSTEM_INSTRUCTIONS.
 # ---------------------------------------------------------------------------
 @test "system-instructions: Finding Quality Gate section present" {
-  grep -q "Finding Quality Gate" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Finding Quality Gate" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
 }
 
 @test "quality-gate: gap1 confidence threshold + drop-low-confidence directive" {
-  grep -q "Confidence" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "DROP" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Confidence" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "DROP" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
 }
 
 @test "quality-gate: gap1 gradient exit — low-confidence Critical kept as UNVERIFIED, not dropped" {
-  grep -q "UNVERIFIED" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "not REJECT" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "UNVERIFIED" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "not REJECT" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
 }
 
 @test "quality-gate: gap2 false-positive registry present" {
-  grep -q "False-positive registry" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -qi "never raise" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "False-positive registry" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -qi "never raise" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
 }
 
 @test "quality-gate: gap3 verdict-severity pre-flight self-check (prompt-layer, not body-scan)" {
-  grep -q "Verdict↔severity" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Verdict↔severity" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
   # Routing must remain verdict-only: the hook must NOT grep the body for severity tags
   ! grep -qE "grep[^|]*'\[Critical\]'" "${HOOK_SCRIPT:?Missing hook script}"
 }
 
 @test "quality-gate: gap4 severity calibration anti-drift" {
-  grep -q "Severity calibration" "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "never Major" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Severity calibration" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "never Major" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
 }
 
 @test "quality-gate: UNVERIFIED routes to CONCERNS in verdict rules + output format" {
   # CONCERNS bucket explicitly includes UNVERIFIED suspicions
-  grep -q "UNVERIFIED.*suspicion.*but no confirmed Critical\|including any .UNVERIFIED" "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "UNVERIFIED.*suspicion.*but no confirmed Critical\|including any .UNVERIFIED" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
   # output format documents the [Major] [UNVERIFIED] emission shape
-  grep -q '\[Major\] \[UNVERIFIED\]' "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q '\[Major\] \[UNVERIFIED\]' "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
 }
 
 # =============================================================================
@@ -2460,21 +2460,25 @@ Use Task( for analysis.
 #          (3) manifest detection path still passes through to engine (non-regression).
 # =============================================================================
 
-# 115. bash syntax check — quoted heredoc must have matching delimiters
+# 115. bash syntax check — quoted heredoc must have matching delimiters.
+# Covers the main hook script AND every lib/*.sh it sources (post-split):
+# a syntax error confined to a lib file would otherwise slip past this gate.
 @test "dispatch-economy: bash -n reports no syntax errors after heredoc refactor" {
-  run bash -n "${HOOK_SCRIPT:?Missing hook script}"
-  [ "$status" -eq 0 ]
+  while IFS= read -r -d '' f; do
+    run bash -n "$f"
+    [ "$status" -eq 0 ] || { echo "syntax error in $f: $output"; return 1; }
+  done < <(find "${BATS_TEST_DIRNAME}/../scripts" -name '*.sh' -print0)
 }
 
 # 116. Criterion 7 token presence — new prompt content has not been reverted
 @test "dispatch-economy: Criterion 7 tokens present in SYSTEM_INSTRUCTIONS" {
-  grep -q "Dispatch Economy"      "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "Full hoarding"         "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "Partial hoarding"      "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "Retrieval work"        "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "split-brain"           "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "Decision work"         "${HOOK_SCRIPT:?Missing hook script}"
-  grep -q "Implementation work"   "${HOOK_SCRIPT:?Missing hook script}"
+  grep -q "Dispatch Economy"      "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Full hoarding"         "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Partial hoarding"      "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Retrieval work"        "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "split-brain"           "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Decision work"         "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Implementation work"   "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
 }
 
 # 117. manifest detection survives prompt refactor — Task( + manifest reaches engine

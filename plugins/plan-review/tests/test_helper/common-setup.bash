@@ -9,6 +9,7 @@
 HOOK_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/plan-review.sh"
 PRECOMPACT_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/precompact-review.sh"
 DISPATCH_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/dispatch-check.sh"
+SYSTEM_PROMPT_FILE="${BATS_TEST_DIRNAME}/../scripts/assets/review-system-prompt.md"
 
 # --- Setup / Teardown ---
 
