@@ -25,6 +25,7 @@ npx skills add WooDragon/cc-plugins -g
 | [ppt-press](./plugins/ppt-press/) | Self-contained PPT publishing — scaffold + create + deploy + manage |
 | [code-search](./plugins/code-search/) | Code search & symbol navigation — pick the right tool by search intent |
 | [deep-research](./plugins/deep-research/) | Deep research framework — 7-Stage pipeline + role-specialized subagents + multi-model harvest & citation-verification gate |
+| [pr-review](./plugins/pr-review/) | AI review for open GitHub PRs — grok CLI local synchronous review (default, multi-round follow-up) + Copilot bot asynchronous review (optional) |
 
 ## Skills
 
@@ -37,6 +38,7 @@ npx skills add WooDragon/cc-plugins -g
 | [doc-maintenance](./plugins/doc-gate/skills/doc-maintenance/) | doc-gate | Document maintenance workflow with pre/post-flight checks |
 | [code-search](./plugins/code-search/skills/code-search/) | code-search | Pick the right search tool (ctags/ast-grep/grep) by intent |
 | [deep-research](./plugins/deep-research/skills/deep-research/) | deep-research | Router skill for the 7-stage research pipeline + quality gates |
+| [pr-review](./plugins/pr-review/skills/pr-review/) | pr-review | Review an open PR by number — grok (default) or Copilot bot backend |
 
 ## Basic Usage
 
@@ -69,3 +71,5 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/create-research-project.sh" "研究主题" -
 # then ask Claude Code a research question in that directory — the deep-research skill
 # auto-triggers and orchestrates harvester/analyst/reviewer subagents through the 7 stages
 ```
+
+**pr-review** — check out the PR's branch, then ask Claude Code to "评审 PR 123" / "grok review PR 123". The grok backend prints the review to your terminal and keeps a session so follow-up rounds only send the incremental diff; the Copilot backend is opt-in and posts back onto the PR instead.
