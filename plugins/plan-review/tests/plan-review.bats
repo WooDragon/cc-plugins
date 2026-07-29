@@ -3301,6 +3301,129 @@ Sanitized fine."
   [[ "$HOOK_STDERR" != *"not valid UTF-8"* ]]
 }
 
+# codex: 14. capacity exhausted + REST configured → fast break, same as agy/claude
+# (Issue #144 fix): codex's stderr never reached LOG_FILE wholesale (privacy
+# filter), so the old "grep LOG_FILE for RESOURCE_EXHAUSTED" capacity check only
+# caught codex by coincidence — whatever the 500-byte filtered codex-diag
+# excerpt happened to retain. Capacity detection now scans the raw $ENGINE_ERR
+# directly (see plan-review.sh), so codex behaves identically to agy/claude
+# regardless of what the privacy filter keeps or drops.
+# NOTE: this mock's capacity text is short enough to also survive inside the
+# filtered codex-diag excerpt — it exercises the "lucky" case (raw $ENGINE_ERR
+# and filtered LOG_FILE agree). See the "buried" test below for the case that
+# actually distinguishes the two.
+@test "codex: capacity exhausted + REST configured → fast break + REST used" {
+  export REVIEW_ENGINE="codex"
+  create_capacity_exhausted_codex
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nApproved via REST.'
+  INPUT=$(build_input)
+
+  run_hook
+  assert_ack_approve_json
+  [[ "$HOOK_STDERR" == *"skipping retry (REST fallback available)"* ]]
+  [[ "$HOOK_STDERR" == *"REST API fallback succeeded"* ]]
+  assert_log_contains "rest-skip=capacity-fast-break engine=codex"
+}
+
+# codex: 15. capacity exhausted (buried past the 500-byte privacy-filter
+# window) + REST configured → fast break still fires. Unlike test 14, the
+# capacity text here is truncated away by engine_err_filter()'s `head -c 500`
+# before it reaches LOG_FILE's codex-diag line — so this only passes if
+# capacity detection scans the RAW $ENGINE_ERR directly (the Issue #144 fix).
+# A pre-fix "grep LOG_FILE for RESOURCE_EXHAUSTED" check would find nothing
+# and fall through to the ordinary retry path instead of fast-breaking.
+@test "codex: capacity exhausted buried past privacy-filter window → fast break + REST used" {
+  export REVIEW_ENGINE="codex"
+  create_capacity_exhausted_codex_buried
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nApproved via REST.'
+  INPUT=$(build_input)
+
+  run_hook
+  assert_ack_approve_json
+  [[ "$HOOK_STDERR" == *"skipping retry (REST fallback available)"* ]]
+  [[ "$HOOK_STDERR" == *"REST API fallback succeeded"* ]]
+  assert_log_contains "rest-skip=capacity-fast-break engine=codex"
+  # Prove the buried capacity text really did NOT survive the privacy filter:
+  # codex-diag's logged excerpt must not contain the capacity marker. This
+  # assertion is only meaningful if the codex-diag line was actually written
+  # — without the `-n` check, a regressed backfill (or a broken filter that
+  # emits nothing) would leave $output empty and the `!= *"..."*` assertion
+  # would pass vacuously, "proving" nothing.
+  run grep -F "codex-diag" "${REVIEW_LOG_DIR}/plan-review.log"
+  [ -n "$output" ]
+  [[ "$output" != *"RESOURCE_EXHAUSTED"* ]]
+}
+
+# --- Fix (PR #146 review, Major): hook killed mid-invoke must not lose
+# this round's stderr. Pre-fix, _cleanup() only did `rm -f "$ENGINE_ERR"` on
+# every exit path (normal or signal) — a hook-timeout SIGTERM landing while
+# an engine call is in flight discarded that round's raw stderr entirely,
+# with zero trace ever reaching LOG_FILE. That is exactly the diagnostic a
+# maintainer needs most (the round that got killed, not the one that
+# finished). Runs the real hook script as a background process, waits for
+# the mock engine to actually start (ready-file handshake — no fixed sleep
+# guessing), sends SIGTERM to the hook itself (mirroring the framework's
+# 600s hook-timeout kill), and asserts _cleanup's defensive
+# `backfill_engine_err 143` call landed this round's stderr into LOG_FILE
+# before reaping the temp files.
+@test "cleanup: hook killed mid-invoke → this round's stderr still reaches LOG_FILE" {
+  local ready_file="${TEST_TEMP_DIR}/mock-agy-ready"
+  rm -f "$ready_file"
+  # Deliberately NOT the shared create_mock_engine helper: this mock must
+  # touch a ready-file and then block (sleep), which no existing generator
+  # supports. Unquoted heredoc so ${ready_file} interpolates at creation time.
+  cat > "${MOCK_BIN}/agy" << MOCK_EOF
+#!/bin/bash
+touch '${ready_file}'
+echo "MIDKILL-STDERR-MARKER: engine was killed mid-flight" >&2
+sleep 30
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/agy"
+
+  INPUT=$(build_input)
+  local out_file="${TEST_TEMP_DIR}/midkill.stdout"
+  local err_file="${TEST_TEMP_DIR}/midkill.stderr"
+
+  bash "$HOOK_SCRIPT" <<< "$INPUT" > "$out_file" 2> "$err_file" &
+  local hook_pid=$!
+
+  # Handshake: block until the mock has actually started (touched
+  # ready_file) instead of guessing a fixed startup delay — avoids a flake
+  # where SIGTERM arrives before engine_invoke even begins.
+  local waited=0
+  while [ ! -f "$ready_file" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  [ -f "$ready_file" ]
+
+  # The mock writes its stderr line immediately after touching ready_file,
+  # before its `sleep 30` — a small margin covers the write actually landing
+  # on disk (OS-buffered fd write, not an async race with the ready-file
+  # signal itself).
+  sleep 0.2
+
+  kill -TERM "$hook_pid" 2>/dev/null || true
+
+  # Wait for the hook process (and its trap-driven _cleanup) to actually
+  # exit, bounded so a stuck run fails fast instead of hanging the suite.
+  waited=0
+  while kill -0 "$hook_pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  if kill -0 "$hook_pid" 2>/dev/null; then
+    kill -KILL "$hook_pid" 2>/dev/null || true
+  fi
+  wait "$hook_pid" 2>/dev/null || true
+
+  assert_log_contains "MIDKILL-STDERR-MARKER: engine was killed mid-flight"
+}
+
 # fixture: reset_leaky_env must clear every env var a developer shell might
 # export. Regression guard — the codex vars were missed when the codex engine
 # landed, and with CODEX_MODEL exported the "codex: CODEX_MODEL empty → no -m"
@@ -3491,4 +3614,93 @@ Sanitized fine."
   assert_approve_json
   [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
   [[ "$HOOK_STDOUT" == *"prompt asset truncated"* ]]
+}
+
+# --- Engine-lib bootstrap (second bootstrap block: lib/engines/*.sh) ---
+#
+# The first bootstrap block above (lib/common.sh, lib/plan-source.sh,
+# lib/manifest.sh, lib/verdict.sh) went through the `[ -s ]` + `_source_lib`
+# hardening in PR #145. The engine libs (lib/engines/rest.sh + the
+# REVIEW_ENGINE-selected lib, e.g. agy.sh) are sourced in a SECOND, separate
+# bootstrap block further down in the script and had NOT been hardened the
+# same way — REVIEW_ENGINE is unset in these tests, which the case statement
+# resolves to the `*` fallback (agy.sh), so these tests corrupt
+# lib/engines/agy.sh to hit that path.
+#
+# Same REVIEW_DRY_RUN=1 safety-belt rationale as the first bootstrap block:
+# this guard fires and exits before the script ever reaches the
+# engine-invocation section, so dry-run cannot influence these assertions —
+# it only prevents a real engine CLI call if the guard ever regresses.
+
+# bootstrap: engine lib file exists but is empty (zero bytes) — passes the
+# old `[ -f ]` existence check clean, `source` of an empty file "succeeds"
+# (sourcing zero bytes is valid bash, exit 0), and the very next call to a
+# helper the lib was supposed to define (e.g. engine_probe) dies with
+# "command not found" (exit 127), no allow JSON ever printed — silent
+# fail-closed. This is the same gap class PR #145 closed for the first
+# bootstrap block; this test proves the second block (engine libs) is
+# hardened identically.
+@test "bootstrap: empty engine lib file → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  : > "${COPY_SCRIPT_DIR}/lib/engines/agy.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}
+
+# bootstrap: engine lib file EXISTS and is non-empty (passes `[ -s ]`) but has
+# a real bash syntax error — `source` itself fails even though the
+# existence/non-emptiness check does not. Proves the engine-lib bootstrap
+# block routes through `_source_lib` (fail-open on source failure) instead of
+# a bare `source "$LIB_ENGINE_SELECTED"` that would let `set -e` kill the
+# script with no allow JSON ever emitted.
+@test "bootstrap: syntax-broken engine lib file → allow JSON with WARNING (source fails, not missing)" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  # Unbalanced quote + stray paren: guaranteed bash syntax error, file still
+  # exists and is readable.
+  printf '%s\n' 'this is " not valid bash (' >> "${COPY_SCRIPT_DIR}/lib/engines/agy.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"failed to load"* ]]
+}
+
+# bootstrap: engine lib file missing entirely → allow + [WARNING]. The first
+# bootstrap block's missing-lib test (above) only exercises
+# lib/manifest.sh, which lives in the FIRST loop — it never proves the
+# SECOND loop (lib/engines/rest.sh + the selected engine lib) still guards
+# non-existence too, so this is not redundant with it.
+@test "bootstrap: missing engine lib file → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  rm -f "${COPY_SCRIPT_DIR}/lib/engines/agy.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}
+
+# bootstrap: rest.sh (the OTHER lib in the engine-lib loop, sourced
+# unconditionally regardless of REVIEW_ENGINE) empty → allow + [WARNING].
+# Covers the loop iterating over $LIB_REST specifically, not just the
+# REVIEW_ENGINE-selected lib.
+@test "bootstrap: empty rest.sh lib file → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  : > "${COPY_SCRIPT_DIR}/lib/engines/rest.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
 }

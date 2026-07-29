@@ -374,6 +374,93 @@ MOCK_EOF
   chmod +x "${MOCK_BIN}/codex"
 }
 
+# create_capacity_exhausted_codex
+#   Same stderr shape as create_failing_codex (banner + verbatim stdin echo),
+#   but the tail carries RESOURCE_EXHAUSTED instead of a generic error —
+#   reproduces a real capacity-exhausted codex failure. Exits 1, never
+#   writes the -o file.
+#   NOTE (Issue #144 postmortem): this generator reproduces the "lucky" side
+#   of the privacy filter — the capacity text is short enough that it still
+#   survives inside the filtered codex-diag excerpt (`head -c 500`), so a
+#   test built on it cannot distinguish "scans raw $ENGINE_ERR" from "scans
+#   the filtered LOG_FILE line" (both see the text here). A counterfactual
+#   run of this exact mock against the pre-fix commit still PASSES, proving
+#   it is not a real regression guard on its own. Kept for coverage of the
+#   lucky case (real codex failures are sometimes this short); paired with
+#   create_capacity_exhausted_codex_buried below for the unlucky case that
+#   actually exercises the fix.
+create_capacity_exhausted_codex() {
+  local args_file="${MOCK_BIN}/../.agy-args-codex"
+  cat > "${MOCK_BIN}/codex" << MOCK_EOF
+#!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
+{
+  echo "codex-cli 0.0.0-mock"
+  echo "--------"
+  echo "workdir: /tmp/mock"
+  echo "model: mock-model"
+  echo "provider: mock"
+  echo "approval: never"
+  echo "sandbox: read-only"
+  echo "reasoning effort: mock"
+  echo "reasoning summaries: mock"
+  echo "session: mock-session"
+  echo "--------"
+  echo "user"
+  cat
+  echo ""
+  echo "ERROR: RESOURCE_EXHAUSTED: model capacity exceeded"
+} >&2
+exit 1
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/codex"
+}
+
+# create_capacity_exhausted_codex_buried
+#   Same shape as create_capacity_exhausted_codex, but inserts ~800 bytes of
+#   diagnostic noise lines between the echoed prompt and the RESOURCE_EXHAUSTED
+#   line. engine_err_filter()'s final `head -c 500` truncates the filtered
+#   excerpt BEFORE it reaches the capacity text, so codex-diag in LOG_FILE
+#   never contains "RESOURCE_EXHAUSTED" — only the raw, unfiltered $ENGINE_ERR
+#   does. This is the "unlucky" side real codex failures can also produce
+#   (verbose diagnostic preambles before the actual error line), and it is the
+#   shape that actually falsifies "capacity detection greps LOG_FILE" (the
+#   pre-fix behavior) while passing "capacity detection greps raw $ENGINE_ERR"
+#   (the fix). The noise line's text is a synthetic placeholder that cannot
+#   collide byte-for-byte with any line of the real prompt (CODEX_PROMPT_FILE),
+#   so grep -Fvxf never strips it out before the byte-count truncation applies.
+create_capacity_exhausted_codex_buried() {
+  local args_file="${MOCK_BIN}/../.agy-args-codex"
+  cat > "${MOCK_BIN}/codex" << MOCK_EOF
+#!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
+{
+  echo "codex-cli 0.0.0-mock"
+  echo "--------"
+  echo "workdir: /tmp/mock"
+  echo "model: mock-model"
+  echo "provider: mock"
+  echo "approval: never"
+  echo "sandbox: read-only"
+  echo "reasoning effort: mock"
+  echo "reasoning summaries: mock"
+  echo "session: mock-session"
+  echo "--------"
+  echo "user"
+  cat
+  echo ""
+  i=0
+  while [ "\$i" -lt 12 ]; do
+    echo "diag-noise-placeholder-\${i}-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    i=\$((i + 1))
+  done
+  echo "ERROR: RESOURCE_EXHAUSTED: model capacity exceeded"
+} >&2
+exit 1
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/codex"
+}
+
 # create_mock_curl <response_body> [http_status]
 #   Creates an executable mock curl at MOCK_BIN/curl that:
 #   - writes <response_body> to the file specified by -o flag (curl -o behavior)
