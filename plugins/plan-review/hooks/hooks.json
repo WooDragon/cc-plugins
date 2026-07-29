@@ -1,5 +1,5 @@
 {
-  "description": "Adversarial red-team review on ExitPlanMode via Gemini or Claude engine",
+  "description": "Adversarial red-team review on ExitPlanMode via Gemini, Claude, or Codex engine",
   "hooks": {
     "PreToolUse": [
       {

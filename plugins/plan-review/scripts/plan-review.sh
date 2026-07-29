@@ -3,7 +3,7 @@
 #
 # Triggered when Plan agent calls ExitPlanMode (via PreToolUse matcher).
 # Flow (severity-aware adversarial consultation):
-#   ExitPlanMode called → hook intercepts → review engine (Gemini/Claude) reviews:
+#   ExitPlanMode called → hook intercepts → review engine (Gemini/Claude/Codex) reviews:
 #     APPROVE  → deny with review feedback (ack-deny); next ExitPlanMode allows (ack-round)
 #     CONCERNS → deny with feedback, increment ATTEMPT + TOTAL, Claude revises or rebuts
 #     REJECT   → deny with feedback, increment TOTAL only (ATTEMPT frozen), Critical must resolve

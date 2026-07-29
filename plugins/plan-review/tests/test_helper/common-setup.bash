@@ -43,26 +43,67 @@ common_setup() {
   # High timeout for tests (mock engines return instantly)
   export REVIEW_ENGINE_TIMEOUT=90
 
-  # Prevent recursive guard from firing
+  reset_leaky_env
+
+  # Remove any residual degraded state file from previous tests
+  rm -f "${REVIEW_COUNTER_DIR}/.gemini-degraded"
+}
+
+# reset_leaky_env
+#   Unsets every env var a developer shell might export that would otherwise
+#   reshape a test run. Kept as its own function, separate from common_setup,
+#   for two reasons: the isolation becomes directly testable without paying
+#   common_setup's side effects (re-entering it orphans the previous
+#   TEST_TEMP_DIR, since `mktemp -d` reassigns it and common_teardown only
+#   removes the last one — a caller that re-enters must rm the stale path
+#   itself, as the "common_setup calls reset_leaky_env" case does), and adding
+#   a fourth engine has one obvious place to register its vars. Pure unsets,
+#   no side effects, safe to call repeatedly.
+#
+#   Whenever the production script grows a new `${SOME_VAR:-default}` read,
+#   SOME_VAR belongs here.
+reset_leaky_env() {
+  # Recursive guard
   unset PLAN_REVIEW_RUNNING
 
-  # Prevent legacy env vars from leaking in
+  # Legacy env vars
   unset GEMINI_REVIEW_OFF
   unset GEMINI_DRY_RUN
   unset GEMINI_MAX_REVIEWS
 
-  # Prevent REST fallback env vars from leaking in
+  # REST fallback
   unset REVIEW_API_URL
   unset REVIEW_API_KEY
 
-  # Prevent hook budget override from leaking in
+  # Hook budget override
   unset REVIEW_HOOK_BUDGET
 
-  # Prevent degraded state TTL override from leaking in
+  # Degraded state TTL override
   unset REVIEW_ENGINE_DEGRADE_TTL
 
-  # Remove any residual degraded state file from previous tests
-  rm -f "${REVIEW_COUNTER_DIR}/.gemini-degraded"
+  # Per-engine model ids. None of these change control flow today, so an
+  # exported value breaks nothing at present — they are listed to keep this
+  # function matching the rule stated above rather than drifting into "the
+  # vars we happened to get burned by".
+  unset AGY_MODEL
+  unset CLAUDE_MODEL
+  unset GEMINI_MODEL
+
+  # codex engine. CODEX_BIN matters most: production resolves the binary as
+  # "${CODEX_BIN:-codex}", so a developer who exports it sends the codex cases
+  # at a REAL binary instead of MOCK_BIN/codex — which may hit the network,
+  # run slow, or pass for the wrong reason. CODEX_MODEL breaks the
+  # "empty → no -m flag" case outright.
+  unset CODEX_BIN
+  unset CODEX_MODEL
+
+  # Mock codex behavior switches — scoped per-test via `export` in the cases
+  # that need them. bats runs each test in its own subshell so they do not
+  # normally leak across cases, but a developer shell that exported one would
+  # silently reshape every codex case.
+  unset MOCK_CODEX_NO_SECOND_DASHES
+  unset MOCK_CODEX_EXTRA_BLANK
+  unset MOCK_CODEX_STRICT_UTF8
 }
 
 common_teardown() {
