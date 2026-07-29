@@ -12,6 +12,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 | Plugin | code-search（1 skill） | 代码搜索与符号导航方法论（纯 skill，零 hook） |
 | Plugin | deep-research（1 skill + 4 agents + 1 hook） | 7-Stage 深度研究管线 + 多模型采集引擎 + 引用验证门禁 |
 | Plugin | guardrails（2 hooks） | 代码规模提示（信息性）+ git push 防手滑（拦截误推 main/master，非防绕过安全边界） |
+| Plugin | pr-review（1 skill + 2 scripts） | 已开 PR 的 AI 评审：grok 本地同步评审（默认，含多轮对抗复评的 session 状态管理）+ Copilot bot 异步评审（可选） |
 
 ## 版本变更铁律
 
@@ -87,6 +88,16 @@ plugins/
     hooks/hooks.json             # SubagentStop → gate_check.py（G1 引用验证机械门禁，fail-open）
     skills/deep-research/        # SKILL.md 路由器 + references/（框架文档）+ assets/（模板）
     tests/                       # pytest 套件（harvest + gate_check）
+  pr-review/                     # 已开 PR 的 AI 评审插件（纯 skill，零 hook）
+    .claude-plugin/plugin.json   # 插件元数据（纯 skill）
+    skills/pr-review/
+      SKILL.md                   # 后端选择 + 执行分工 + grok 多轮复评流程
+      scripts/grok-review.sh     # grok CLI 本地同步评审（session 落盘 + 增量 diff + 工作区身份钉死）
+      scripts/copilot-review.sh  # gh 触发 Copilot bot（request / rerequest / status）
+      references/grok-review.md  # grok 后端参数、机制、故障排查
+      references/copilot-review.md # Copilot 后端三条路径（REST 首触 / GraphQL 重触 / 状态查询）
+    tests/grok-review.bats       # 60 个测试用例（stub grok/gh/uuidgen，git 用真实临时仓库）
+    README.md                    # 面向安装者说明
 ```
 
 ## 环境变量
@@ -98,6 +109,7 @@ plugins/
 | plan-review | `REVIEW_*`、`AGY_MODEL`、`CLAUDE_MODEL`、`GEMINI_MODEL`、`DISPATCH_CHECK_DISABLED` | [plugins/plan-review/README.md](plugins/plan-review/README.md#environment-variables) |
 | doc-gate | `SKILL_GATE_*`、`RECALL_GATE_*` | [plugins/doc-gate/README.md](plugins/doc-gate/README.md#environment-variables) |
 | deep-research | `GATEWAY_API_KEY`、`TAVILY_API_KEY`、`JINA_API_KEY`（可选凭证） | [plugins/deep-research/README.md](plugins/deep-research/README.md#prerequisites) |
+| pr-review | `GROK_MODEL`、`GROK_EFFORT`、`XDG_STATE_HOME`（session 落盘根） | [plugins/pr-review/README.md](plugins/pr-review/README.md#prerequisites) |
 
 敏感变量（如 `REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
 

@@ -1,0 +1,7 @@
+{
+  "name": "pr-review",
+  "description": "AI review for open GitHub PRs — grok CLI local synchronous review (default, with adversarial multi-round follow-up over a persisted session) + GitHub Copilot bot asynchronous review (optional)",
+  "version": "1.0.0",
+  "author": { "name": "WooDragon" },
+  "skills": ["./skills/pr-review"]
+}
