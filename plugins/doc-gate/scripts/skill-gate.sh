@@ -91,26 +91,43 @@ _main() {
   # GATE_DIR not writable → markers can't be created → dead-lock → fail-open
   [ -w "$GATE_DIR" ] || return
 
-  # Writing-standards summary appended to both deny branches below. Resolve an
-  # absolute references path so a subagent with an unknown cwd can still read
-  # it — never inject a relative path here (deny branch: unreadable path means
-  # the agent retries blind and may stall). Prefer CLAUDE_PLUGIN_ROOT; fall
-  # back to the script's own location (same convention as recall-gate.sh's
-  # TOOL_DIR). If neither resolves to an existing file, degrade to the
-  # summary alone — never emit a broken path.
-  local standards_ref=""
-  local standards_root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
-  local standards_path="${standards_root}/skills/doc-maintenance/references/writing-standards.md"
-  [ -f "$standards_path" ] && standards_ref="
+  # Writing-standards summary appended to both deny branches below. The summary
+  # is UNCONDITIONAL — it is the payload that must reach the agent; only the
+  # path reference is conditional. Resolve an absolute references path so a
+  # subagent with an unknown cwd can still read it — never inject a relative
+  # path here (deny branch: unreadable path means the agent retries blind and
+  # may stall). Try CLAUDE_PLUGIN_ROOT first, then the script's own location
+  # (same convention as recall-gate.sh's TOOL_DIR) — note this is a two-
+  # candidate loop, not `${CLAUDE_PLUGIN_ROOT:-fallback}`: that form skips the
+  # fallback whenever the variable is merely *set*, so a stale or wrong root
+  # would suppress the script-relative retry. If no candidate resolves to an
+  # existing file, emit the summary alone — never a broken path.
+  local standards_ref="
 
-表述规范核心摘要（详见 ${standards_path}）：
+表述规范核心摘要：
 - 一句一事：每句只承载一个主要动作或陈述
 - 术语统一：同一事物全文用同一术语，不换词
 - 程序性文本三要素：条件、动作、预期结果均须明确
 - 助动词受控：应/宜/可/不应，不混用\"建议\"\"尽量\"等模糊强度词
-- 豁免条款：代码、命令、标识符、产品名、法律文本、引文、路径原样保留，不得为符合规范而改写
+- 豁免条款：代码、命令、标识符、产品名、法律文本、引文、路径原样保留，不得为符合规范而改写"
 
-写文档前先读取上述路径获取完整条文（正反例、豁免边界、语种适用）。"
+  local standards_rel="skills/doc-maintenance/references/writing-standards.md"
+  local standards_self=""
+  standards_self=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd) || standards_self=""
+  local standards_path=""
+  local standards_cand
+  for standards_cand in "${CLAUDE_PLUGIN_ROOT:-}" "$standards_self"; do
+    [ -n "$standards_cand" ] || continue
+    if [ -f "${standards_cand}/${standards_rel}" ]; then
+      standards_path="${standards_cand}/${standards_rel}"
+      break
+    fi
+  done
+  if [ -n "$standards_path" ]; then
+    standards_ref="${standards_ref}
+
+写文档前先读取完整条文（正反例、豁免边界、语种适用）：${standards_path}"
+  fi
 
   # Deny — global config gets the highest-strength message + distinct log reason.
   local msg

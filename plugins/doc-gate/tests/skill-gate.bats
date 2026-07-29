@@ -469,3 +469,66 @@ teardown() {
   run_gate
   assert_allowed
 }
+
+# ============================================================
+# Writing-standards injection (standards_ref)
+# ============================================================
+
+@test "standards_ref: normal deny → summary + absolute existing writing-standards.md path" {
+  INPUT=$(build_edit_input file_path=/project/docs/guide.md)
+  run_gate
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"表述规范核心摘要"* ]]
+  [[ "$reason" == *"豁免条款"* ]]
+  local path_line standards_path
+  path_line=$(printf '%s' "$reason" | grep -F '写文档前先读取完整条文')
+  standards_path="${path_line#*：}"
+  [[ "$standards_path" == /* ]]
+  [ -f "$standards_path" ]
+}
+
+@test "standards_ref: global CLAUDE.md deny → summary + absolute existing writing-standards.md path" {
+  export HOME="${TEST_TEMP_DIR}/mock_home"
+  INPUT=$(build_edit_input file_path="${HOME}/.claude/CLAUDE.md")
+  run_gate
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"表述规范核心摘要"* ]]
+  [[ "$reason" == *"豁免条款"* ]]
+  local path_line standards_path
+  path_line=$(printf '%s' "$reason" | grep -F '写文档前先读取完整条文')
+  standards_path="${path_line#*：}"
+  [[ "$standards_path" == /* ]]
+  [ -f "$standards_path" ]
+}
+
+@test "standards_ref: unresolvable candidates → summary only, no writing-standards.md reference" {
+  local iso_dir="${TEST_TEMP_DIR}/isolated"
+  mkdir -p "$iso_dir/scripts"
+  cp "${BATS_TEST_DIRNAME}/../scripts/skill-gate.sh" "$iso_dir/scripts/skill-gate.sh"
+  cp "${BATS_TEST_DIRNAME}/../scripts/_doc_gate_exclude.sh" "$iso_dir/scripts/_doc_gate_exclude.sh"
+
+  local empty_root="${TEST_TEMP_DIR}/empty_plugin_root"
+  mkdir -p "$empty_root"
+
+  INPUT=$(build_edit_input file_path=/project/docs/guide.md)
+  HOOK_STDOUT=""
+  HOOK_STDERR=""
+  HOOK_EXIT=0
+  local stderr_file
+  stderr_file=$(mktemp)
+  HOOK_STDOUT=$(CLAUDE_PLUGIN_ROOT="$empty_root" bash "$iso_dir/scripts/skill-gate.sh" <<< "$INPUT" 2>"$stderr_file") || HOOK_EXIT=$?
+  HOOK_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"表述规范核心摘要"* ]]
+  [[ "$reason" != *"writing-standards.md"* ]]
+  [[ "$reason" != *"${iso_dir}"* ]]
+  [[ "$reason" != *"${empty_root}"* ]]
+}
