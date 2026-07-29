@@ -35,7 +35,7 @@ plugins/
     scripts/dispatch-check.sh     # Layer 2 hook（Agent/Task 调度参数强制）
     scripts/precompact-review.sh  # PreCompact hook（compaction 恢复）
     tests/                        # BDD 测试套件（bats-core）
-      plan-review.bats            # 202 个测试用例（含 Dispatch Manifest、codex 引擎）
+      plan-review.bats            # 主测试套件（含 Dispatch Manifest、codex 引擎）
       dispatch-check.bats         # 14 个测试用例（Layer 2 hook）
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）

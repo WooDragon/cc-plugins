@@ -3334,3 +3334,24 @@ Sanitized fine."
   [ -z "${GEMINI_MAX_REVIEWS:-}" ]
   [ -z "${PLAN_REVIEW_RUNNING:-}" ]
 }
+
+# fixture: the call site, not just the helper. The case above stays green even
+# if common_setup stops calling reset_leaky_env — it invokes the helper
+# directly. This one pollutes, re-enters common_setup, and asserts the vars
+# were cleared, so severing the call site turns it red.
+#
+# common_setup is not re-entrant for free: it runs `mktemp -d` and reassigns
+# TEST_TEMP_DIR, orphaning the previous one (common_teardown only removes
+# whatever TEST_TEMP_DIR points at last). The stale path is captured and
+# removed explicitly rather than left in /tmp.
+@test "fixture: common_setup calls reset_leaky_env" {
+  export CODEX_MODEL="leaked-model"
+  export CODEX_BIN="/nonexistent/codex"
+
+  local stale_temp_dir="$TEST_TEMP_DIR"
+  common_setup
+  rm -rf "$stale_temp_dir"
+
+  [ -z "${CODEX_MODEL:-}" ]
+  [ -z "${CODEX_BIN:-}" ]
+}

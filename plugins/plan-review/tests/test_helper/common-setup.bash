@@ -78,6 +78,14 @@ reset_leaky_env() {
   # Degraded state TTL override
   unset REVIEW_ENGINE_DEGRADE_TTL
 
+  # Per-engine model ids. None of these change control flow today, so an
+  # exported value breaks nothing at present — they are listed to keep this
+  # function matching the rule stated above rather than drifting into "the
+  # vars we happened to get burned by".
+  unset AGY_MODEL
+  unset CLAUDE_MODEL
+  unset GEMINI_MODEL
+
   # codex engine. CODEX_BIN matters most: production resolves the binary as
   # "${CODEX_BIN:-codex}", so a developer who exports it sends the codex cases
   # at a REAL binary instead of MOCK_BIN/codex — which may hit the network,

@@ -94,7 +94,7 @@ When `REVIEW_ENGINE=claude`, the script spawns `claude -p` with triple isolation
 When `REVIEW_ENGINE=codex`, the script spawns `codex exec` with a parallel set of isolation flags:
 
 1. **`-s read-only`** — sandbox policy; the reviewer process cannot write to disk
-2. **`-C <fresh empty temp dir>`** — the working root is a throwaway empty directory, not the user's project, so the reviewer does not read project source
+2. **`-C <fresh empty temp dir>`** — the working root is a throwaway empty directory, not the user's project. This relocates the working root; on its own it does not stop a tool from reaching paths outside that directory (see the tool-surface caveat below)
 3. **`--ephemeral`** — no session files persisted to disk
 4. **`--skip-git-repo-check`** — required because the isolated temp dir is not a git repo
 
