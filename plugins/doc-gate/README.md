@@ -149,6 +149,8 @@ The plugin bundles one skill (`skills/doc-maintenance/SKILL.md`) that provides s
 
 The skill also enforces graduated CLAUDE.md governance — global `~/.claude/CLAUDE.md` requires all four generalization criteria to pass; project-level CLAUDE.md uses them as guidelines.
 
+As of **v1.7.0**, the skill also carries a writing-standards reference (`references/writing-standards.md`) — an ambiguity layer (§A, hard constraints: one-statement-per-sentence, explicit subject, consistent terminology, controlled modal verbs, an exemption clause for code/commands/identifiers, and more) plus a typography layer (§B, mechanical rules such as CJK spacing and punctuation width, deferred to tooling once available). The CREATE/MODIFY checklists in §5.1/§5.2 reference it, and `skill-gate.sh`'s deny message now injects a condensed summary so the standard reaches an agent even before it reads the skill.
+
 ## Tests
 
 ```bash
@@ -173,6 +175,7 @@ python3 -m unittest tests/test_recall_gate.py -v
 
 See [GitHub Issues](https://github.com/WooDragon/cc-plugins/issues) for detailed change logs:
 
+- **v1.7.0** — Writing-standards reference added (`references/writing-standards.md`): an ambiguity layer (§A, STE-inspired hard constraints) and a typography layer (§B, mechanical/tool-deferrable); SKILL.md §5.1/§5.2 checklists gained corresponding checks; `skill-gate.sh` deny messages now inject a condensed summary with an absolute path to the full reference (#136)
 - **v1.6.0** — `*/deliverables/*` excluded from the gate (ADR-010 conflict: no legitimate pass-through path under subagent-scoped markers, 100% observed bypass); gate exclusion list intentionally diverges from the recall-gate corpus's `EXCLUDED_DIRS`, which still indexes deliverables (#124)
 - **v1.5.0** — Path exclusions collapsed to single source (`_doc_gate_exclude.sh`); added `pipeline/*` exclusion for deep-research intermediate artifacts, `deliverables/*` remains governed
 - **v1.2.1** — Root detection: CLAUDE.md co-occurrence anchor for monorepo support (#22)
