@@ -216,6 +216,122 @@ MOCK_EOF
   chmod +x "${MOCK_BIN}/${name}"
 }
 
+# create_mock_codex <output>
+#   Creates an executable mock at MOCK_BIN/codex reproducing the real `codex
+#   exec ... -o <file> -` contract: reads the prompt from stdin, writes
+#   <output> (the final agent message) to the file named by the `-o` flag,
+#   and echoes the REAL codex stderr shape to fd 2 (stdout is discarded by
+#   the production script's `> /dev/null`, so anything meant to be visible
+#   must go to stderr) — this is what the 1.6 diagnostic-backfill filter is
+#   tested against:
+#     line 1:      banner text
+#     line 2:      -------- (first)
+#     lines 3-10:  8 metadata lines
+#     line 11:     -------- (second) — omit via MOCK_CODEX_NO_SECOND_DASHES=1
+#     line 12:     user (extra blank line after it via MOCK_CODEX_EXTRA_BLANK=1)
+#     then:        the prompt, cat'd back verbatim from stdin
+#     then:        blank line + warning: + "ERROR: mock codex failure"
+#   Captures "$*" to .agy-args-codex (same convention as create_mock_engine;
+#   read it back with the existing `agy_args "codex"` helper). Always exits 0
+#   — pair with create_failing_codex for non-zero-exit scenarios.
+create_mock_codex() {
+  local output="$1"
+  local args_file="${MOCK_BIN}/../.agy-args-codex"
+  cat > "${MOCK_BIN}/codex" << MOCK_EOF
+#!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
+out_file=""
+prev=""
+for arg in "\$@"; do
+  if [ "\$prev" = "-o" ]; then out_file="\$arg"; fi
+  prev="\$arg"
+done
+# Slurp stdin once so it can be validated before being echoed back.
+_mock_stdin=\$(mktemp)
+cat > "\$_mock_stdin"
+# MOCK_CODEX_STRICT_UTF8=1 reproduces the real codex contract: it hard-rejects
+# non-UTF-8 stdin instead of degrading. Byte-truncated CLAUDE.md content
+# (head -c 3000 / -c 8000) can slice a multi-byte char in half, so without
+# sanitation the real binary aborts with exactly this class of error.
+if [ -n "\${MOCK_CODEX_STRICT_UTF8:-}" ] \\
+   && ! iconv -f UTF-8 -t UTF-8 < "\$_mock_stdin" >/dev/null 2>&1; then
+  echo "Failed to read prompt from stdin: input is not valid UTF-8 (invalid byte at offset 0). Convert it to UTF-8 and retry" >&2
+  rm -f "\$_mock_stdin"
+  exit 1
+fi
+{
+  echo "codex-cli 0.0.0-mock"
+  echo "--------"
+  echo "workdir: /tmp/mock"
+  echo "model: mock-model"
+  echo "provider: mock"
+  echo "approval: never"
+  echo "sandbox: read-only"
+  echo "reasoning effort: mock"
+  echo "reasoning summaries: mock"
+  echo "session: mock-session"
+  if [ -z "\${MOCK_CODEX_NO_SECOND_DASHES:-}" ]; then
+    echo "--------"
+  fi
+  echo "user"
+  if [ -n "\${MOCK_CODEX_EXTRA_BLANK:-}" ]; then
+    echo ""
+  fi
+  cat "\$_mock_stdin"
+  echo ""
+  echo "warning: mock warning line"
+  echo "ERROR: mock codex failure"
+} >&2
+rm -f "\$_mock_stdin"
+if [ -n "\$out_file" ]; then
+  cat > "\$out_file" << 'OUTPUT_EOF'
+${output}
+OUTPUT_EOF
+fi
+exit 0
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/codex"
+}
+
+# create_failing_codex <exit_code>
+#   Same stderr shape as create_mock_codex (banner + verbatim stdin echo +
+#   ERROR tail — honors the same MOCK_CODEX_NO_SECOND_DASHES / EXTRA_BLANK
+#   knobs), but exits with the given code and never writes to the -o file
+#   (mirrors a real crash: no final agent message was produced).
+create_failing_codex() {
+  local exit_code="$1"
+  local args_file="${MOCK_BIN}/../.agy-args-codex"
+  cat > "${MOCK_BIN}/codex" << MOCK_EOF
+#!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
+{
+  echo "codex-cli 0.0.0-mock"
+  echo "--------"
+  echo "workdir: /tmp/mock"
+  echo "model: mock-model"
+  echo "provider: mock"
+  echo "approval: never"
+  echo "sandbox: read-only"
+  echo "reasoning effort: mock"
+  echo "reasoning summaries: mock"
+  echo "session: mock-session"
+  if [ -z "\${MOCK_CODEX_NO_SECOND_DASHES:-}" ]; then
+    echo "--------"
+  fi
+  echo "user"
+  if [ -n "\${MOCK_CODEX_EXTRA_BLANK:-}" ]; then
+    echo ""
+  fi
+  cat
+  echo ""
+  echo "warning: mock warning line"
+  echo "ERROR: mock codex failure"
+} >&2
+exit ${exit_code}
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/codex"
+}
+
 # create_mock_curl <response_body> [http_status]
 #   Creates an executable mock curl at MOCK_BIN/curl that:
 #   - writes <response_body> to the file specified by -o flag (curl -o behavior)
