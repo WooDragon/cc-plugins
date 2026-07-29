@@ -18,10 +18,12 @@
 #   REVIEW_DRY_RUN=1             — skip engine call, synthetic APPROVE (fallback: GEMINI_DRY_RUN)
 #   REVIEW_MAX_ROUNDS=N          — max non-Critical consultation rounds, default 3 (fallback: GEMINI_MAX_REVIEWS)
 #   REVIEW_MAX_TOTAL_ROUNDS=N    — absolute max total rounds (incl. REJECT), default 20
-#   REVIEW_ENGINE=gemini         — review engine: "gemini" (default) or "claude"
+#   REVIEW_ENGINE=gemini         — review engine: "gemini" (default), "claude", or "codex"
 #   CLAUDE_MODEL=opus            — Claude engine model (default: opus)
 #   AGY_MODEL=<id>               — agy CLI model (default: Gemini 3.1 Pro (High))
 #   GEMINI_MODEL=<id>            — REST fallback model id (default: gemini-3.1-pro-preview)
+#   CODEX_BIN=<path>             — codex engine binary override (default: codex on PATH)
+#   CODEX_MODEL=<id>             — codex engine model (default: inherit ~/.codex/config.toml)
 #   REVIEW_ENGINE_TIMEOUT=N      — engine call timeout seconds (default: 595; needs timeout/gtimeout)
 #   REVIEW_REST_TIMEOUT=N        — REST API fallback curl timeout, default 115 (equals HOOK_BUDGET; clamp logic caps actual value to remaining-3)
 #   REVIEW_REST_STALL_TIMEOUT=N  — REST SSE stall watchdog seconds, default 90 (curl --speed-time)
@@ -661,6 +663,8 @@ PROMPT_FILE=$(mktemp)
 # and HUP (terminal disconnect). Idempotent — safe to call multiple times.
 _cleanup() {
   rm -f "$PROMPT_FILE" "${ENGINE_OUT:-}" "${ENGINE_STATUS:-}" "${REQ_FILE:-}"
+  rm -f "${ENGINE_ERR:-}" "${CODEX_PROMPT_FILE:-}" "${CODEX_PROMPT_FILE:+${CODEX_PROMPT_FILE}.u8}"
+  [ -z "${CODEX_WORKDIR:-}" ] || rmdir "${CODEX_WORKDIR}" 2>/dev/null || true
   [ -z "${ENGINE_PID:-}" ] || kill "$ENGINE_PID" 2>/dev/null || true
 }
 trap '_cleanup' EXIT
@@ -709,7 +713,10 @@ if [ "$REVIEW_DRY_RUN" = "1" ]; then
 else
   # --- Pre-flight: CLI existence check (permanent failure, no retry) ---
   ENGINE_CMD="agy"
-  [ "$REVIEW_ENGINE" != "claude" ] || ENGINE_CMD="claude"
+  case "$REVIEW_ENGINE" in
+    claude) ENGINE_CMD="claude" ;;
+    codex)  ENGINE_CMD="${CODEX_BIN:-codex}" ;;
+  esac
   if ! command -v "$ENGINE_CMD" >/dev/null 2>&1; then
     log_decision "decision=allow reason=engine-not-found engine=$REVIEW_ENGINE"
     allow_with_reason "[WARNING] REVIEW_ENGINE=$REVIEW_ENGINE but '$ENGINE_CMD' not found"
@@ -718,6 +725,9 @@ else
   # Engine model variables (outside retry loop, avoid repeat assignment)
   if [ "$REVIEW_ENGINE" = "claude" ]; then
     CLAUDE_MODEL="${CLAUDE_MODEL:-opus}"
+  elif [ "$REVIEW_ENGINE" = "codex" ]; then
+    # Empty CODEX_MODEL means inherit codex's own ~/.codex/config.toml default.
+    CODEX_MODEL="${CODEX_MODEL:-}"
   else
     # GEMINI_MODEL retained as the REST fallback's model id (OpenAI-compatible payload).
     GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"
@@ -765,6 +775,46 @@ else
   ENGINE_STATUS="${ENGINE_OUT}.status"
   REVIEW=""
   HOOK_BUDGET="${REVIEW_HOOK_BUDGET:-595}"
+
+  # codex-only temp resources: a sandboxed workdir (-C target, deliberately NOT
+  # the project cwd — codex runs read-only but there's no reason to hand it the
+  # real tree), a merged prompt file (system instructions + PROMPT_FILE's
+  # dynamic content — kept SEPARATE from PROMPT_FILE itself so the REST
+  # fallback's --rawfile read of PROMPT_FILE doesn't double-send the system
+  # instructions), and an isolated stderr capture (codex echoes the FULL
+  # prompt to stderr — see the diagnostic backfill below, never let this reach
+  # LOG_FILE wholesale). Declared as empty defaults unconditionally so set -u
+  # never fires on the gemini/claude paths, and created only when
+  # REVIEW_ENGINE=codex so those paths gain zero new mktemp calls.
+  CODEX_WORKDIR="" CODEX_PROMPT_FILE="" ENGINE_ERR="" PROMPT_LINES=0
+  if [ "$REVIEW_ENGINE" = "codex" ]; then
+    CODEX_WORKDIR=$(mktemp -d)
+    CODEX_PROMPT_FILE=$(mktemp)
+    ENGINE_ERR="${ENGINE_OUT}.err"
+    { printf '%s\n\n' "$SYSTEM_INSTRUCTIONS"; cat "$PROMPT_FILE"; } > "$CODEX_PROMPT_FILE"
+    printf '\n' >> "$CODEX_PROMPT_FILE"
+    # UTF-8 sanitation (codex-only — the other engines never see this file).
+    # GLOBAL_MD/PROJECT_MD are truncated by BYTE count (`head -c 3000` / `-c 8000`),
+    # which slices a multi-byte character in half whenever a CLAUDE.md is non-ASCII
+    # near the cut. codex hard-rejects such input — it does not degrade, it aborts:
+    #   "Failed to read prompt from stdin: input is not valid UTF-8 (invalid byte
+    #    at offset N). Convert it to UTF-8 and retry"
+    # …making REVIEW_ENGINE=codex unusable for anyone with a non-ASCII CLAUDE.md.
+    # `iconv -c` drops only the orphaned bytes and keeps every valid character.
+    # Guarded on iconv's presence and on success (`&& mv || rm`), so a missing or
+    # failing iconv degrades to the unsanitized file rather than an empty prompt.
+    if command -v iconv >/dev/null 2>&1; then
+      if iconv -f UTF-8 -t UTF-8 -c < "$CODEX_PROMPT_FILE" > "${CODEX_PROMPT_FILE}.u8" 2>/dev/null; then
+        mv -f "${CODEX_PROMPT_FILE}.u8" "$CODEX_PROMPT_FILE"
+      else
+        rm -f "${CODEX_PROMPT_FILE}.u8"
+      fi
+    fi
+    # Counted AFTER sanitation: PROMPT_LINES drives the diagnostic backfill's
+    # positional cut, which must match the file codex actually received.
+    PROMPT_LINES=$(wc -l < "$CODEX_PROMPT_FILE")
+  fi
+
   for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
     # Degraded-state skip: jump out of CLI retry immediately on first iteration.
     if (( engine_attempt == 1 )) && [ "$_gemini_skip_cli" = "1" ]; then
@@ -804,6 +854,67 @@ else
       ENGINE_PID=$!
       wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
       ENGINE_PID=""
+    elif [ "$REVIEW_ENGINE" = "codex" ]; then
+      # Model id can contain spaces (see AGY_MODEL's default "Gemini 3.1 Pro
+      # (High)" precedent above) — must be an array, not ${VAR:+...} word-splitting.
+      CODEX_MODEL_ARGS=()
+      [ -z "$CODEX_MODEL" ] || CODEX_MODEL_ARGS=(-m "$CODEX_MODEL")
+      ${TIMEOUT_CMD:+$TIMEOUT_CMD -k 5 $ENGINE_TIMEOUT} "$ENGINE_CMD" exec \
+        --skip-git-repo-check -s read-only --ephemeral --color never \
+        -C "$CODEX_WORKDIR" ${CODEX_MODEL_ARGS[@]+"${CODEX_MODEL_ARGS[@]}"} \
+        -o "$ENGINE_OUT" - < "$CODEX_PROMPT_FILE" > /dev/null 2> "$ENGINE_ERR" &
+      ENGINE_PID=$!
+      wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
+      ENGINE_PID=""
+
+      if [ "$engine_exit" != "0" ]; then
+        # --- Privacy boundary: codex echoes the FULL prompt to stderr before
+        # its real diagnostics (global CLAUDE.md + project CLAUDE.md + recent
+        # conversation + the plan). Never let ENGINE_ERR reach LOG_FILE
+        # wholesale — backfill only a filtered tail, two-layer defense:
+        #   Layer A (positional): locate the banner's SECOND "--------" line
+        #     (within the first 20 lines) followed by a line that is exactly
+        #     "user" — that marks where the echoed prompt begins; cut it out
+        #     using PROMPT_LINES (captured once, outside the retry loop) to
+        #     find where it ends, keeping the banner + the real tail after it.
+        #     Any of the three guards failing falls through to the fail-closed
+        #     `tail -n 20` branch, which still preserves diagnostics for
+        #     failures that happen before codex echoes anything (auth/network).
+        #   Layer B (content-based): grep -Fvxf strips any surviving line that
+        #     is byte-identical to a prompt line — this is what survives codex
+        #     version drift in line counts (banner shape / prompt line count
+        #     changing between versions).
+        # `|| true` on the ECHO_END lookup and the final pipe are MANDATORY:
+        # set -euo pipefail means a grep returning 1 (no match / everything
+        # filtered out) would otherwise kill the hook before it emits its
+        # decision JSON.
+        # LC_ALL=C on both greps (command-scoped, not exported — deliberately
+        # narrower than the LC_ALL=C prefix-assignment pattern avoided
+        # elsewhere in this file): CODEX_PROMPT_FILE embeds GLOBAL_MD/
+        # PROJECT_MD truncated by BYTE count (`head -c`), which can slice a
+        # multi-byte UTF-8 character in half. Under the active UTF-8 locale
+        # that makes grep abort with "illegal byte sequence" — silently
+        # emptying CODEX_DIAG (the trailing `|| true` hides the failure).
+        # Forcing the C locale makes grep treat input as raw bytes, matching
+        # this pipeline's real behavior anyway: -F is already a fixed-string
+        # byte match, and -x needs no locale-aware collation.
+        CODEX_DIAG=$(
+          ECHO_END=$(head -n 20 "$ENGINE_ERR" | grep -n '^--------$' | sed -n '2p' | cut -d: -f1) || true
+          NEXT_LINE=$(sed -n "$(( ${ECHO_END:-0} + 1 ))p" "$ENGINE_ERR" 2>/dev/null)
+          if [ -n "$ECHO_END" ] && [ "$ECHO_END" -le 20 ] && [ "$NEXT_LINE" = "user" ]; then
+            { head -n "$ECHO_END" "$ENGINE_ERR"
+              tail -n "+$(( ECHO_END + PROMPT_LINES + 2 ))" "$ENGINE_ERR"; }
+          else
+            tail -n 20 "$ENGINE_ERR"
+          fi \
+          | LC_ALL=C grep -Fvxf "$CODEX_PROMPT_FILE" \
+          | LC_ALL=C grep '[^[:space:]]' \
+          | head -c 500 || true
+        )
+        # tr -d '\000-\037': strip control chars, keep log single-line safe
+        # (mirrors the existing rest-debug body_prefix backfill).
+        log_decision "codex-diag $(printf '%s' "$CODEX_DIAG" | tr -d '\000-\037')"
+      fi
     else
       # --- agy multi-round session reuse ---
       # Read back a previously-captured agy conversation_id (if any) so this
@@ -861,7 +972,7 @@ ${PLAN}"
       wait "$ENGINE_PID" 2>/dev/null || engine_exit=$?
       ENGINE_PID=""
     fi
-    if [ "$REVIEW_ENGINE" = "claude" ]; then
+    if [ "$REVIEW_ENGINE" = "claude" ] || [ "$REVIEW_ENGINE" = "codex" ]; then
       REVIEW=$(cat "$ENGINE_OUT" 2>/dev/null || true)
     else
       # --- agy JSON response unwrap (--output-format json) ---

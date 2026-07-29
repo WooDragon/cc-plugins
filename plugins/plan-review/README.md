@@ -20,9 +20,11 @@ claude --plugin-dir ~/.claude/dev-plugins/plan-review
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REVIEW_ENGINE` | `gemini` | Review engine: `gemini` (routed through the local `agy` CLI) or `claude` (`claude -p` subprocess) |
+| `REVIEW_ENGINE` | `gemini` | Review engine: `gemini` (default, routed through the local `agy` CLI), `claude` (`claude -p` subprocess), or `codex` (`codex exec` subprocess) |
 | `AGY_MODEL` | `Gemini 3.1 Pro (High)` | Model id passed to the `agy` CLI when `REVIEW_ENGINE=gemini` |
 | `CLAUDE_MODEL` | `opus` | Claude model when `REVIEW_ENGINE=claude` |
+| `CODEX_BIN` | _(empty)_ | Path to the `codex` binary. Default: `codex` as resolved on `PATH`. Set this when codex is not on `PATH` |
+| `CODEX_MODEL` | _(empty)_ | Model id passed to `codex exec` when `REVIEW_ENGINE=codex`. Empty means inherit whatever `~/.codex/config.toml` specifies |
 | `GEMINI_MODEL` | `gemini-3.1-pro-preview` | Model id used only by the REST fallback payload (not the `agy` CLI path) |
 | `REVIEW_DISABLED` | `0` | Set `1` to bypass entirely |
 | `REVIEW_DRY_RUN` | `0` | Set `1` to skip engine call (synthetic APPROVE) |
@@ -86,6 +88,19 @@ When `REVIEW_ENGINE=claude`, the script spawns `claude -p` with triple isolation
 3. **`--tools ""`** — no tool calls = no PreToolUse events = no hook re-entry
 
 `unset CLAUDECODE` and `unset CLAUDE_CODE_ENTRYPOINT` prevent the subprocess from inheriting parent's internal state. This is implementation-dependent but necessary: user authenticates via OAuth (`claude login`), no `ANTHROPIC_API_KEY` available, making `claude -p` the only viable invocation path.
+
+## Engine Isolation (Codex)
+
+When `REVIEW_ENGINE=codex`, the script spawns `codex exec` with a parallel set of isolation flags:
+
+1. **`-s read-only`** — sandbox policy; the reviewer process cannot write to disk
+2. **`-C <fresh empty temp dir>`** — the working root is a throwaway empty directory, not the user's project. The codex reviewer sees only the prompt, exactly like the `agy --sandbox` and `claude --tools ""` paths — its review is pure-text and it does not read project source
+3. **`--ephemeral`** — no session files persisted to disk
+4. **`--skip-git-repo-check`** — required because the isolated temp dir is not a git repo
+
+The prompt is fed via stdin (no `ARG_MAX` limit, unlike the agy path which needs a 256KB guard), and the final message is captured via `-o <file>`.
+
+**stderr handling**: `codex exec` echoes the entire prompt to stderr. Because of this, codex's stderr is deliberately **not** appended to the plan-review log (unlike the other engines) — doing so would duplicate the full prompt into the log file. On a failed call, only a filtered diagnostic is written to the log: the banner plus trailing `warning:`/`ERROR:` lines, with any line matching the prompt stripped out, truncated to 500 chars.
 
 ## Session Reuse (agy, v1.2.0)
 

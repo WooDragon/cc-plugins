@@ -2975,3 +2975,324 @@ MOCK_INNER
   run_hook
   [ ! -f "${REVIEW_COUNTER_DIR}/.conversation-test-session" ]
 }
+
+# =============================================================================
+# codex engine (REVIEW_ENGINE=codex)
+# =============================================================================
+
+# codex: 1. APPROVE verdict → ack-deny, approve marker written
+@test "codex: APPROVE verdict → ack-deny, approve marker written" {
+  export REVIEW_ENGINE="codex"
+  create_mock_codex "<verdict>APPROVE</verdict>
+Looks solid."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_ack_approve_json
+  [ -f "${REVIEW_COUNTER_DIR}/.review-approved-test-session" ]
+}
+
+# codex: 2. CONCERNS verdict → deny, ATTEMPT/TOTAL counters correct
+@test "codex: CONCERNS verdict → deny, ATTEMPT/TOTAL incremented" {
+  export REVIEW_ENGINE="codex"
+  create_mock_codex "<verdict>CONCERNS</verdict>
+[Major] Missing error handling."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+}
+
+# codex: 3. REJECT verdict → deny, ATTEMPT reset to 0 (TOTAL still increments)
+@test "codex: REJECT verdict → deny, ATTEMPT reset to 0" {
+  export REVIEW_ENGINE="codex"
+  set_counter_value 2 test-session 2
+  create_mock_codex "<verdict>REJECT</verdict>
+[Critical] Fundamentally flawed approach."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 3 ]
+}
+
+# codex: 4. codex binary missing → fail-open allow + stderr/reason WARNING
+@test "codex: binary missing → fail-open allow with WARNING" {
+  export REVIEW_ENGINE="codex"
+  INPUT=$(build_input)
+
+  # Mirror the "engine: CLI not found" guard test: rebuild PATH excluding any
+  # directory that happens to have a real `codex` installed (this plugin repo
+  # ships a codex companion, so a real binary may well be on the dev PATH).
+  local clean_path="${MOCK_BIN}"
+  local orig_path="$PATH"
+  while IFS=: read -r -d: dir || [ -n "$dir" ]; do
+    if [ -d "$dir" ] && [ ! -x "${dir}/codex" ]; then
+      clean_path="${clean_path}:${dir}"
+    fi
+  done <<< "${orig_path}:"
+
+  export PATH="$clean_path"
+  run_hook
+  export PATH="$orig_path"
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
+  [[ "$reason" == *"not found"* ]]
+}
+
+# codex: 5. CODEX_BIN pointing at a binary OUTSIDE PATH → is actually used
+@test "codex: CODEX_BIN outside PATH → used directly" {
+  export REVIEW_ENGINE="codex"
+  local outside_dir="${TEST_TEMP_DIR}/outside-path"
+  mkdir -p "$outside_dir"
+  local saved_mock_bin="$MOCK_BIN"
+  MOCK_BIN="$outside_dir"
+  create_mock_codex "<verdict>APPROVE</verdict>
+Used the CODEX_BIN override."
+  MOCK_BIN="$saved_mock_bin"
+  export CODEX_BIN="${outside_dir}/codex"
+
+  # Sanity: the override binary must NOT be reachable via bare PATH lookup.
+  ! command -v codex >/dev/null 2>&1 || [ "$(command -v codex)" != "${outside_dir}/codex" ]
+
+  INPUT=$(build_input)
+  run_hook
+
+  assert_ack_approve_json
+}
+
+# codex: 6. CODEX_MODEL empty → no -m flag; CODEX_MODEL set → -m <value> present
+@test "codex: CODEX_MODEL empty → no -m; CODEX_MODEL set → -m <value> present" {
+  export REVIEW_ENGINE="codex"
+  create_mock_codex "<verdict>APPROVE</verdict>
+ok"
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+  [[ "$(agy_args codex)" != *"-m "* ]]
+
+  # New session_id: reusing test-session would just hit the ack-round guard
+  # (unchanged plan hash → allow without calling codex again).
+  export CODEX_MODEL="gpt-5.1-codex-max"
+  INPUT=$(build_input session_id=session-with-model)
+  run_hook
+  assert_ack_approve_json
+  [[ "$(agy_args codex)" == *"-m gpt-5.1-codex-max"* ]]
+}
+
+# codex: 7. non-zero exit → retry exhausted → REST fallback takes over
+@test "codex: non-zero exit → retry exhausted → REST fallback takes over" {
+  export REVIEW_ENGINE="codex"
+  create_failing_codex 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>APPROVE</verdict>\nApproved via REST.'
+  INPUT=$(build_input)
+  run_hook
+
+  assert_ack_approve_json
+  [[ "$HOOK_STDERR" == *"REST API fallback succeeded"* ]]
+}
+
+# codex: 8. empty response → retry then allow JSON with WARNING
+@test "codex: empty response → retry then allow JSON with WARNING" {
+  export REVIEW_ENGINE="codex"
+  create_mock_codex ""
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"[WARNING]"* ]]
+}
+
+# codex: 9. invocation args carry the isolation flags; -C is NOT the project cwd
+@test "codex: invocation args include isolation flags; -C differs from project cwd" {
+  export REVIEW_ENGINE="codex"
+  create_mock_codex "<verdict>APPROVE</verdict>
+ok"
+  INPUT=$(build_input cwd=/project/dir)
+  run_hook
+  assert_ack_approve_json
+
+  local args cwd_arg
+  args=$(agy_args codex)
+  [[ "$args" == *"-s read-only"* ]]
+  [[ "$args" == *"--ephemeral"* ]]
+  [[ "$args" == *"-C "* ]]
+
+  cwd_arg=$(printf '%s' "$args" | awk '{for(i=1;i<=NF;i++) if($i=="-C"){print $(i+1); exit}}')
+  [ -n "$cwd_arg" ]
+  [ "$cwd_arg" != "/project/dir" ]
+}
+
+# codex: 10. failure path → LOG_FILE has ERROR diagnostics, no prompt body leak
+@test "codex: failure path → LOG_FILE has ERROR diagnostics, no prompt body leak" {
+  export REVIEW_ENGINE="codex"
+  create_failing_codex 1
+  # SYSTEM_INSTRUCTIONS itself contains the literal phrase "missing error
+  # handling" — this falsifies a naive keyword-based ("contains 'error'")
+  # filter, since the real diagnostic ("ERROR: mock codex failure") also
+  # contains "error" and must survive while the prompt phrase must not.
+  INPUT=$(build_input plan="Plan with an error handling gap to review.")
+  run_hook
+
+  assert_deny_json
+  assert_log_contains "ERROR: mock codex failure"
+  run grep -F "missing error handling" "${REVIEW_LOG_DIR}/plan-review.log"
+  [ "$status" -ne 0 ]
+  run grep -F "Plan with an error handling gap to review." "${REVIEW_LOG_DIR}/plan-review.log"
+  [ "$status" -ne 0 ]
+}
+
+# codex: 11. banner drift (missing second --------) → fail-closed branch still filters prompt
+@test "codex: banner drift (no second dashes) → fail-closed branch, still no prompt leak" {
+  export REVIEW_ENGINE="codex"
+  export MOCK_CODEX_NO_SECOND_DASHES=1
+  create_failing_codex 1
+  INPUT=$(build_input plan="Plan with an error handling gap to review.")
+  run_hook
+
+  assert_deny_json
+  assert_log_contains "ERROR: mock codex failure"
+  run grep -F "missing error handling" "${REVIEW_LOG_DIR}/plan-review.log"
+  [ "$status" -ne 0 ]
+  run grep -F "Plan with an error handling gap to review." "${REVIEW_LOG_DIR}/plan-review.log"
+  [ "$status" -ne 0 ]
+}
+
+# codex: 12. line-count drift (extra blank line) → Layer B content filter saves it
+@test "codex: line-count drift (extra blank) → Layer B still strips prompt content" {
+  export REVIEW_ENGINE="codex"
+  export MOCK_CODEX_EXTRA_BLANK=1
+  create_failing_codex 1
+  INPUT=$(build_input plan="Plan with an error handling gap to review.")
+  run_hook
+
+  assert_deny_json
+  assert_log_contains "ERROR: mock codex failure"
+  run grep -F "missing error handling" "${REVIEW_LOG_DIR}/plan-review.log"
+  [ "$status" -ne 0 ]
+  run grep -F "Plan with an error handling gap to review." "${REVIEW_LOG_DIR}/plan-review.log"
+  [ "$status" -ne 0 ]
+}
+
+# codex: 13. retry cycle (fail then succeed) → temp resources reclaimed, no leftover prompt content
+@test "codex: retry cycle (fail then succeed) → no leftover temp file with prompt content" {
+  export REVIEW_ENGINE="codex"
+  # Ad-hoc flaky mock (create_flaky_engine's stdout-based contract doesn't
+  # fit codex's -o-file contract): fails attempt 1 (reproducing the real
+  # stderr shape), succeeds attempt 2 by writing to the -o file.
+  local state_file="${TEST_TEMP_DIR}/.codex-flaky-state"
+  local args_file="${MOCK_BIN}/../.agy-args-codex"
+  cat > "${MOCK_BIN}/codex" << MOCK_EOF
+#!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
+out_file=""
+prev=""
+for arg in "\$@"; do
+  if [ "\$prev" = "-o" ]; then out_file="\$arg"; fi
+  prev="\$arg"
+done
+if [ ! -f "${state_file}" ]; then
+  touch "${state_file}"
+  {
+    echo "codex-cli 0.0.0-mock"
+    echo "--------"
+    echo "workdir: /tmp/mock"
+    echo "model: mock-model"
+    echo "provider: mock"
+    echo "approval: never"
+    echo "sandbox: read-only"
+    echo "reasoning effort: mock"
+    echo "reasoning summaries: mock"
+    echo "session: mock-session"
+    echo "--------"
+    echo "user"
+    cat
+    echo ""
+    echo "warning: mock warning line"
+    echo "ERROR: mock codex failure"
+  } >&2
+  exit 1
+fi
+if [ -n "\$out_file" ]; then
+  cat > "\$out_file" << 'OUTPUT_EOF'
+<verdict>APPROVE</verdict>
+Recovered on retry.
+OUTPUT_EOF
+fi
+exit 0
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/codex"
+
+  INPUT=$(build_input plan="Unique-Marker-Plan-Content-For-Leak-Check")
+  run_hook
+  assert_ack_approve_json
+
+  # ENGINE_OUT and CODEX_WORKDIR are created once, OUTSIDE the retry loop —
+  # both attempts share them, so the (successful) second invocation's
+  # captured args still name the paths used throughout the whole cycle.
+  local args engine_out codex_workdir
+  args=$(agy_args codex)
+  engine_out=$(printf '%s' "$args" | awk '{for(i=1;i<=NF;i++) if($i=="-o"){print $(i+1); exit}}')
+  codex_workdir=$(printf '%s' "$args" | awk '{for(i=1;i<=NF;i++) if($i=="-C"){print $(i+1); exit}}')
+  [ -n "$engine_out" ]
+  [ -n "$codex_workdir" ]
+  [ ! -e "$engine_out" ]
+  [ ! -e "${engine_out}.err" ]
+  [ ! -d "$codex_workdir" ]
+
+  # Best-effort sweep of the shared mktemp parent dir (where CODEX_PROMPT_FILE
+  # — not derivable from captured args — also lived) for the plan's unique
+  # marker, bounded to files touched during this test to avoid false hits
+  # from unrelated concurrent temp files.
+  local tmp_parent
+  tmp_parent=$(dirname "$engine_out")
+  if [ -d "$tmp_parent" ]; then
+    run bash -c "find '$tmp_parent' -maxdepth 1 -type f -newer '$state_file' -exec grep -l 'Unique-Marker-Plan-Content-For-Leak-Check' {} + 2>/dev/null"
+    [ -z "$output" ]
+  fi
+}
+
+@test "codex: byte-truncated non-ASCII CLAUDE.md → prompt sanitized to valid UTF-8" {
+  export REVIEW_ENGINE="codex"
+  # Reproduce the real-world break: PROJECT_MD is read with `head -c 8000`,
+  # a BYTE cut. A CLAUDE.md whose 8000th byte lands inside a multi-byte
+  # character yields an orphaned lead byte in the merged prompt, and codex
+  # hard-rejects such stdin ("input is not valid UTF-8") rather than degrading.
+  # Without the iconv sanitation this test fails with engines-failed.
+  local proj_dir="${TEST_TEMP_DIR}/proj"
+  mkdir -p "$proj_dir"
+  # 7999 ASCII bytes, then a 3-byte CJK char → head -c 8000 keeps only its
+  # first byte (0xE4), producing an invalid sequence at the cut.
+  {
+    printf 'a%.0s' $(seq 1 7999)
+    printf '中文内容\n'
+  } > "${proj_dir}/CLAUDE.md"
+
+  # Sanity-check the fixture itself: the truncated slice MUST be invalid UTF-8,
+  # otherwise this test would pass vacuously.
+  run bash -c "head -c 8000 '${proj_dir}/CLAUDE.md' | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1"
+  [ "$status" -ne 0 ]
+
+  MOCK_CODEX_STRICT_UTF8=1 create_mock_codex "<verdict>APPROVE</verdict>
+Sanitized fine."
+  export MOCK_CODEX_STRICT_UTF8=1
+
+  INPUT=$(build_input cwd="$proj_dir" plan="Test plan content")
+  run_hook
+
+  # The mock rejects invalid stdin with exit 1 → hook would deny with
+  # engines-failed. Reaching the APPROVE ack-deny proves sanitation happened.
+  assert_ack_approve_json
+  [[ "$HOOK_STDOUT" != *"engines-failed"* ]]
+  [[ "$HOOK_STDERR" != *"not valid UTF-8"* ]]
+}
