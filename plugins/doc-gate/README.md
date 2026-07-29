@@ -149,7 +149,7 @@ The plugin bundles one skill (`skills/doc-maintenance/SKILL.md`) that provides s
 
 The skill also enforces graduated CLAUDE.md governance — global `~/.claude/CLAUDE.md` requires all four generalization criteria to pass; project-level CLAUDE.md uses them as guidelines.
 
-As of **v1.7.0**, the skill also carries a writing-standards reference (`references/writing-standards.md`) — an ambiguity layer (§A, hard constraints: one-statement-per-sentence, explicit subject, consistent terminology, controlled modal verbs, an exemption clause for code/commands/identifiers, and more) plus a typography layer (§B, mechanical rules such as CJK spacing and punctuation width, deferred to tooling once available). The CREATE/MODIFY checklists in §5.1/§5.2 reference it, and `skill-gate.sh`'s deny message now injects a condensed summary so the standard reaches an agent even before it reads the skill.
+As of **v1.7.0**, the skill also carries a writing-standards reference (`references/writing-standards.md`) — an ambiguity layer (§A, hard constraints) plus a typography layer (§B, mechanical rules deferred to tooling once available). The CREATE/MODIFY checklists in §5.1/§5.2 point straight at that file. Since **v1.7.1**, `skill-gate.sh`'s deny message carries an unconditional imperative plus the absolute path to it and no item digest — a readable digest let an agent mistake the summary for the rules and skip the reference entirely (#139).
 
 ## Tests
 
