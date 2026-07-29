@@ -143,6 +143,10 @@ _cleanup() {
   # `declare -F` because backfill_engine_err may not be defined yet (an
   # earlier guard can exit before lib/common.sh is even sourced) — the whole
   # line must never let this trap itself fail.
+  # Reentrancy: TERM/INT/HUP fires _cleanup and then EXIT fires it again, so
+  # this runs twice. It stays idempotent because backfill_engine_err truncates
+  # $ENGINE_ERR after flushing it — the second pass sees an empty file and its
+  # own `[ -s ]` guard returns early. No double-write.
   declare -F backfill_engine_err >/dev/null 2>&1 && backfill_engine_err 143 || true
   rm -f "${PROMPT_FILE:-}" "${ENGINE_OUT:-}" "${ENGINE_ERR:-}"
   [ ${#ENGINE_TMP_FILES[@]} -eq 0 ] || rm -f "${ENGINE_TMP_FILES[@]}"
