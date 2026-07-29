@@ -48,224 +48,78 @@ command -v jq >/dev/null 2>&1 || {
 LOG_DIR="${REVIEW_LOG_DIR:-$HOME/.claude/logs}"
 mkdir -p "$LOG_DIR" 2>/dev/null && LOG_FILE="${LOG_DIR}/plan-review.log" || LOG_FILE="/dev/null"
 
-# --- Structured decision log (one line per exit, machine-parseable) ---
-log_decision() {
-  printf '[%s] session=%s attempt=%s/%s total=%s/%s %s\n' \
-    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-    "${SESSION_ID:-unknown}" "${ATTEMPT:-?}" "${REVIEW_MAX_ROUNDS:-?}" \
-    "${TOTAL_ROUNDS:-?}" "${REVIEW_MAX_TOTAL_ROUNDS:-?}" \
-    "$*" >> "$LOG_FILE" 2>/dev/null || true
-}
+# --- Bootstrap: resolve script dir + verify lib files before sourcing ---
+# Cannot call allow_with_reason() here — it is defined in lib/common.sh, not
+# yet sourced (chicken-and-egg). Inline literal JSON mirrors its exact shape
+# (same allow + [WARNING] pattern as the jq-missing guard above).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+LIB_COMMON="$SCRIPT_DIR/lib/common.sh"
+LIB_PLAN_SOURCE="$SCRIPT_DIR/lib/plan-source.sh"
+LIB_MANIFEST="$SCRIPT_DIR/lib/manifest.sh"
+LIB_VERDICT="$SCRIPT_DIR/lib/verdict.sh"
+PROMPT_ASSET="$SCRIPT_DIR/assets/review-system-prompt.md"
 
-# --- Entry-point diagnostic log (before guards, does not require ATTEMPT/TOTAL) ---
-log_entry() {
-  printf '[%s] ENTRY tool=%s session=%s %s\n' \
-    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-    "${1:-unknown}" "${2:-unknown}" "${3:-}" >> "$LOG_FILE" 2>/dev/null || true
-}
+for _lib in "$LIB_COMMON" "$LIB_PLAN_SOURCE" "$LIB_MANIFEST" "$LIB_VERDICT"; do
+  # `-s` (exists AND non-empty) catches both gaps in one test: a missing
+  # file fails `-f` already, but an empty file (or one gutted of all its
+  # function bodies) passes `-f` clean, then `source` "succeeds" (sourcing
+  # zero bytes is valid bash, exit 0) and the very next call to a helper
+  # defined in it — e.g. log_entry() a few lines below — dies with
+  # "command not found" (exit 127), no allow JSON ever printed. That is a
+  # silent fail-closed, the opposite of this script's stated contract.
+  if [ ! -s "$_lib" ]; then
+    echo "plan-review: lib file missing or empty: $_lib, allowing." >&2
+    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] lib file missing or empty, plan-review skipped"}}'
+    exit 0
+  fi
+done
+unset _lib
 
-# --- Raw payload capture (diagnostic-only; never let IO failure kill core logic) ---
-# CC 2.1.x moved plan content out of tool_input into an out-of-band plan file whose
-# path is NOT in the hook stdin. When plan extraction fails we dump the complete raw
-# payload + a key-schema summary so the true field layout can be inspected post-hoc.
-dump_payload() {
-  local raw="$1" session="$2"
-  local dump_dir="${LOG_DIR}/payloads"
-  mkdir -p "$dump_dir" 2>/dev/null || return 0
-  local stamp; stamp=$(date -u +"%Y%m%dT%H%M%SZ")
-  local dump_file="${dump_dir}/exitplanmode-${session:-nosession}-${stamp}-$$.json"
-  printf '%s' "$raw" > "$dump_file" 2>/dev/null || return 0
-  # Echo the dump path into the main log so it can be located later.
-  printf '[%s] PAYLOAD-DUMP session=%s file=%s\n' \
-    "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "${session:-unknown}" "$dump_file" \
-    >> "$LOG_FILE" 2>/dev/null || true
-}
-
-# --- Visible allow helper (eliminates silent exit 0 for non-guard paths) ---
-allow_with_reason() {
-  local reason="$1"
-  local reason_json
-  reason_json=$(printf '%s' "$reason" | jq -Rs . 2>/dev/null) || reason_json="\"$reason\""
-  cat << EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${reason_json}}}
-EOF
-  exit 0
-}
-
-# --- Plan content hasher (portable: sha256sum > shasum > cksum POSIX fallback) ---
-# All branches pipe through awk '{print $1}' to strip filename/extra fields.
-plan_hash() {
-  local content="$1"
-  if command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$content" | sha256sum | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$content" | shasum -a 256 | awk '{print $1}'
-  else
-    printf '%s' "$content" | cksum | awk '{print $1}'
+# --- Bootstrap: source with fail-open on syntax/read errors ---
+# `[ -s ]` above only proves the file exists and is non-empty — a file that
+# clears both but has a bash syntax error (or lost its read permission) still
+# fails here. `source`'s
+# own exit status captures that case too: a syntax error inside the sourced
+# file does not abort the *parent* script's parsing, it only fails the
+# `source` command itself, so wrapping each call in `if ! source ...` is
+# sufficient — no per-file `bash -n` pre-check needed (that would fork bash
+# 4x on every single hook invocation to guard a vanishingly rare failure
+# mode). Same allow + [WARNING] shape as the existence check above, and must
+# `exit 0` immediately: none of these libs' helpers (e.g. allow_with_reason,
+# itself defined in lib/common.sh) can be assumed to exist once any one of
+# them fails to load.
+_source_lib() {
+  local _lib="$1"
+  # shellcheck disable=SC1090
+  if ! source "$_lib" 2>>"$LOG_FILE"; then
+    echo "plan-review: failed to source $_lib, allowing." >&2
+    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] lib file failed to load, plan-review skipped"}}'
+    exit 0
   fi
 }
+_source_lib "$LIB_COMMON"
+_source_lib "$LIB_PLAN_SOURCE"
+_source_lib "$LIB_MANIFEST"
+_source_lib "$LIB_VERDICT"
+unset -f _source_lib
 
-# --- Transcript-based plan recovery (CC 2.1.x contract: plan lives in an
-#     out-of-band file referenced by the plan_mode attachment, which is NOT in
-#     the hook stdin; only transcript_path is). Resolve the latest plan file
-#     path from the transcript and, if — and only if — it clears three security
-#     gates, set RECOVERED_PATH to its physical absolute path. On any rejection,
-#     leave RECOVERED_PATH empty and set RESOLVE_REASON for the caller's error
-#     messaging.
-#
-#     IMPORTANT: sets globals directly (no echo + $(...)), because command
-#     substitution runs in a subshell and would discard RESOLVE_REASON.
-#
-#     Threat model (defense in depth):
-#       - FIFO / device file → blocking read hangs jq/cat, drains the 600s hook
-#         budget, wedges the whole CLI. Gate: [ -f ] (regular file only).
-#       - Symlink in plans dir → string-prefix whitelist is bypassable; a link to
-#         ~/.ssh/id_rsa or /etc/passwd would be cat'd into the review engine.
-#         Gate: reject [ -h ], then realpath to the physical path before the check.
-#       - Path traversal → reject any '..' in the raw path.
-# ---
-RESOLVE_REASON=""
-RECOVERED_PATH=""
-RESOLVE_PATH=""
-resolve_plan_from_transcript() {
-  RESOLVE_REASON=""
-  RECOVERED_PATH=""
-  RESOLVE_PATH=""
-  local transcript="$1"
-  # Gate 0: transcript must be a regular file (not FIFO/device → no blocking read).
-  [ -n "$transcript" ] && [ -f "$transcript" ] || { RESOLVE_REASON="no-transcript"; return; }
-
-  # Whitelist root for plan files (REVIEW_PLAN_DIR reused; prod fallback ~/.claude/plans).
-  local whitelist_root="${REVIEW_PLAN_DIR:-$HOME/.claude/plans}"
-
-  # Streaming extraction (line-by-line, no slurp): newest plan_mode planFilePath.
-  local raw_path
-  raw_path=$(jq -r 'select(.attachment?.type == "plan_mode" and .attachment?.planFilePath != null) | .attachment.planFilePath' "$transcript" 2>/dev/null | tail -1 || true)
-  [ -n "$raw_path" ] && [ "$raw_path" != "null" ] || { RESOLVE_REASON="no-plan-attachment"; return; }
-  # Expose the path under evaluation so error messages stay actionable on every reject path.
-  RESOLVE_PATH="$raw_path"
-
-  # Gate 1: reject path traversal in the raw path.
-  case "$raw_path" in
-    *..*) RESOLVE_REASON="path-traversal"; return ;;
-  esac
-
-  # Gate 2: reject symlinks outright (don't follow links out of the sandbox).
-  if [ -h "$raw_path" ]; then
-    RESOLVE_REASON="symlink-rejected"
-    return
-  fi
-
-  # Resolve to the physical path before the whitelist check. Resolve the PARENT
-  # directory physically (cd -P collapses symlinked path components) and re-append
-  # the basename — this works whether or not the target file exists yet, and is
-  # portable (no realpath-on-missing-file dependency, which fails on macOS/BSD).
-  local dir base dir_resolved resolved
-  dir=$(dirname "$raw_path"); base=$(basename "$raw_path")
-  if [ ! -d "$dir" ]; then
-    # Parent dir absent → framework named a file under a nonexistent dir; treat as missing.
-    RESOLVE_REASON="resolved-but-missing"
-    return
-  fi
-  dir_resolved=$(cd "$dir" 2>/dev/null && pwd -P) || { RESOLVE_REASON="unresolvable"; return; }
-  [ -n "$dir_resolved" ] || { RESOLVE_REASON="unresolvable"; return; }
-  resolved="${dir_resolved}/${base}"
-  RESOLVE_PATH="$resolved"
-
-  # Resolve the whitelist root the same way so the prefix compare is apples-to-apples.
-  local root_resolved
-  if [ -d "$whitelist_root" ]; then
-    root_resolved=$(cd "$whitelist_root" 2>/dev/null && pwd -P) || root_resolved="$whitelist_root"
-  else
-    root_resolved="$whitelist_root"
-  fi
-
-  # Gate 3: physical path must live under the whitelist root.
-  case "$resolved" in
-    "$root_resolved"/*) : ;;
-    *) RESOLVE_REASON="outside-whitelist"; return ;;
-  esac
-
-  # Final: must be an existing regular file (covers "framework named it but never wrote it").
-  if [ ! -f "$resolved" ]; then
-    RESOLVE_REASON="resolved-but-missing"
-    return
-  fi
-
-  RESOLVE_REASON="ok"
-  RECOVERED_PATH="$resolved"
+# --- Cleanup trap (registered here, right after lib sourcing, so any early
+#     exit — including the pre-flight guards below — is covered; previously
+#     this trapped only after PROMPT_FILE=$(mktemp) much later in the script,
+#     leaving every earlier exit path without cleanup coverage. Every var
+#     defaults to empty (":-") since most of them are not assigned until deep
+#     inside the engine-invocation section further down; rm -f/rmdir/kill on
+#     an empty or already-gone target is a harmless no-op. Called on EXIT
+#     (normal), INT (Ctrl-C), TERM (framework hook timeout), and HUP (terminal
+#     disconnect). Idempotent — safe to call multiple times.
+_cleanup() {
+  rm -f "${PROMPT_FILE:-}" "${ENGINE_OUT:-}" "${ENGINE_STATUS:-}" "${REQ_FILE:-}"
+  rm -f "${ENGINE_ERR:-}" "${CODEX_PROMPT_FILE:-}" "${CODEX_PROMPT_FILE:+${CODEX_PROMPT_FILE}.u8}"
+  [ -z "${CODEX_WORKDIR:-}" ] || rmdir "${CODEX_WORKDIR:-}" 2>/dev/null || true
+  [ -z "${ENGINE_PID:-}" ] || kill "${ENGINE_PID:-}" 2>/dev/null || true
 }
-
-# --- Manifest detection helpers (case-insensitive: LLM may write "Worker Agent"/"TASK(") ---
-needs_manifest() { printf '%s' "$1" | grep -qiE '(Task\(|subagent_type|agent_type|Plan agent|Explore agent|worker agent|dev agent)'; }
-has_manifest()   { printf '%s' "$1" | grep -qi '^## Dispatch Manifest'; }
-
-# Returns 0 if at least one manifest data row has a non-dash agent_type.
-manifest_has_real_agent() {
-  printf '%s\n' "$1" | awk '
-    /^## Dispatch Manifest/ {in_m=1; seen_table=0; next}
-    in_m && /^## / {in_m=0}
-    in_m && /^ *\|/ {seen_table=1}
-    in_m && seen_table && /^ *$/ {in_m=0}
-    in_m && /^\|/ && !/^\|---/ && !/^\| *[Ss][Tt][Ee][Pp]/ {
-      gsub(/^\| *| *\| *$/, ""); n = split($0, f, / *\| */)
-      if (n >= 2) { at=f[2]; gsub(/^ +| +$|"/, "", at); if (at != "-" && at != "") found=1 }
-    }
-    END { exit (found ? 0 : 1) }
-  '
-}
-
-# --- Canonical manifest example (single source of truth for both deny messages) ---
-# Single-quoted heredoc: backticks, $ and <placeholders> stay literal (no command
-# substitution, no expansion). Embedded verbatim into deny reasons so a blocked LLM
-# sees the exact format inline instead of guessing column names from CLAUDE.md.
-# Agent-row values are <placeholders>, not a copy-pastable real step, so the LLM
-# can't paste the example wholesale and inject a phantom dispatch step.
-MANIFEST_EXAMPLE=$(cat <<'MANIFEST_EOF'
-格式示例（占位值 <...> 替换为你 plan 的真实步骤，勿原样复制本表）：
-
-## Dispatch Manifest
-| step | agent_type    | model   | depends_on | parallel_with |
-|------|---------------|---------|------------|---------------|
-| 1    | -             | -       | -          | -             |
-| 2    | <agent_type>  | <model> | 1          | -             |
-
-填写规则：
-- 主上下文执行的 step：agent_type 与 model 两列均填 `-`。
-- 委派给 Agent 的 step：两列必填，model 用全名（sonnet / opus / haiku）。
-- depends_on / parallel_with：填依赖/并行的 step 号，无则填 `-`。
-MANIFEST_EOF
-)
-
-# --- Manifest JSON serializer (called only from APPROVE branch; failures are silent) ---
-# Parses the ## Dispatch Manifest markdown table and outputs a dispatch JSON blob.
-# JSON injection defense: strips stray double-quotes LLM may write in manifest rows.
-parse_manifest_to_json() {
-  local plan="$1" hash="$2"
-  printf '%s\n' "$plan" | awk -v hash="$hash" -v now="$(date +%s)" '
-    /^## Dispatch Manifest/ {in_manifest=1; seen_table=0; next}
-    in_manifest && /^## / {in_manifest=0}
-    in_manifest && /^ *\|/ {seen_table=1}
-    in_manifest && seen_table && /^ *$/ {in_manifest=0}
-    in_manifest && /^\|/ && !/^\|---/ && !/^\| *[Ss][Tt][Ee][Pp]/ {
-      gsub(/^\| *| *\| *$/, ""); n = split($0, f, / *\| */)
-      if (n >= 3) {
-        id=f[1]; at=f[2]; md=f[3]
-        gsub(/^ +| +$/, "", id); gsub(/^ +| +$/, "", at); gsub(/^ +| +$/, "", md)
-        gsub(/"/, "", id); gsub(/"/, "", at); gsub(/"/, "", md)
-        rows[++count] = sprintf("{\"id\":\"%s\",\"agent_type\":%s,\"model\":%s}",
-          id,
-          (at == "-" ? "null" : "\"" at "\""),
-          (md == "-" ? "null" : "\"" md "\""))
-      }
-    }
-    END {
-      printf "{\"plan_hash\":\"%s\",\"created_at\":%s,\"requires_dispatch_check\":true,\"steps\":[", hash, now
-      for (i=1; i<=count; i++) printf "%s%s", (i>1?",":""), rows[i]
-      printf "]}\n"
-    }
-  '
-}
+trap '_cleanup' EXIT
+trap '_cleanup; exit 130' INT TERM HUP
 
 # --- Namespace unification (legacy GEMINI_* fallback — never break userspace) ---
 REVIEW_DISABLED="${REVIEW_DISABLED:-${GEMINI_REVIEW_OFF:-0}}"
@@ -366,22 +220,9 @@ if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   CWD_VAL=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")
   log_decision "decision=deny reason=no-plan-content-fail-closed resolve=${RESOLVE_REASON:-none} resolvePath=${RESOLVE_PATH:-empty} planFilePath=${PLAN_FILE_PATH:-empty} top_keys=${TOP_KEYS} tool_input_keys=${TI_KEYS} transcript_path=${TRANSCRIPT_PATH:-empty} cwd=${CWD_VAL:-empty}"
   rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}"
-  # Three-state error message routed by the resolver's RESOLVE_REASON. Every
-  # branch names the plan file path under evaluation (RESOLVE_PATH) so the user
-  # can act — "write your plan to this exact file" instead of a bare directive.
-  REASON=""
-  case "${RESOLVE_REASON:-}" in
-    resolved-but-missing)
-      REASON="[ERROR] plan 内容未传入。框架在 transcript 中指定了 plan 文件 \"${RESOLVE_PATH}\"，但该文件尚未写入。请用 Write 将 plan 写入该文件后重新调用 ExitPlanMode。" ;;
-    outside-whitelist|symlink-rejected|path-traversal)
-      REASON="[ERROR] plan 文件路径 \"${RESOLVE_PATH}\" 非法（${RESOLVE_REASON}），出于安全已拒绝读取。plan 文件必须位于 ~/.claude/plans 下且不能是软链接。" ;;
-    *)
-      if [ -n "${PLAN_FILE_PATH:-}" ] && [ "${PLAN_FILE_PATH:-}" != "null" ]; then
-        REASON="[ERROR] plan 内容未传入。tool_input.plan 为空，planFilePath=\"${PLAN_FILE_PATH}\" 指向的文件不存在。请将 plan 写入该文件后重新调用 ExitPlanMode。"
-      else
-        REASON="[ERROR] plan 内容未传入。tool_input.plan 和 planFilePath 均为空，且无法从 transcript 反查到 plan 文件（${RESOLVE_REASON:-no-transcript}）。请确保 plan 已写入框架指定的 plan 文件后重试。"
-      fi ;;
-  esac
+  # Error message routed by the resolver's RESOLVE_REASON (see
+  # lib/plan-source.sh: plan_source_error_reason) — sets $REASON directly.
+  plan_source_error_reason
   jq -n --arg r "$REASON" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
   exit 0
 fi
@@ -509,166 +350,44 @@ fi
 # Static instructions: single canonical source, injected per-channel (see
 # variant A below): claude → --system-prompt; agy → inline concat; REST →
 # messages[0]. PROMPT_FILE itself carries dynamic content only.
-# Quoted heredoc ('EOF') → body is pure literal: $, backtick, parens, and
-# apostrophe are all safe, no escaping needed. We use `read -r -d ''` rather
-# than `$(cat <<'EOF')`: bash 3.2 (macOS /bin/bash) mis-parses unbalanced
-# parens like "Task(" inside a command-substituted heredoc, erroring with
-# "unexpected EOF looking for matching )". The read form has no command
-# substitution and is immune. `|| true` absorbs read's exit 1 at EOF (set -e).
-IFS= read -r -d '' SYSTEM_INSTRUCTIONS << 'EOF' || true
-# Red Team Plan Review
-
-You are a senior software architect performing an ADVERSARIAL review of the
-following implementation plan. Your job is to find flaws before implementation
-begins. Be direct and specific — no generic advice.
-
-## Scope Boundary
-The plan under review will be executed in a DIFFERENT AI coding assistant with
-its own tools, agent types, and API signatures. You may see tool names, function
-calls, or parameter names that do not exist in YOUR environment — this is normal
-and correct. DO NOT judge whether tool names or agent type identifiers match your
-own system. Focus exclusively on logic, architecture, and engineering quality.
-
-Your training knowledge has a cutoff; the plan may reference things newer than it.
-Treat version identifiers in the plan — model names (e.g. `sonnet-5`, `opus-4.8`),
-library/dependency versions, API signatures — as GROUND TRUTH, not as claims to
-verify against your memory. Whether such an identifier "exists" or "is correct" is
-NOT common knowledge you may assert unprompted: it requires evidence from the plan
-or project context. Absent that evidence, you have no grounds to flag it — do not
-raise it. If you genuinely suspect a concrete, evidence-backed problem, emit it as
-`[UNVERIFIED]` (never Critical), never as a confident correction.
-
-Keep your response under 3000 characters.
-
-## Review Criteria
-1. **Correctness** — Does the plan actually solve the stated problem?
-2. **Completeness** — Missing steps, edge cases, error handling?
-3. **Simplicity** — Is there a simpler approach? Unnecessary complexity?
-4. **Safety** — Security risks, data loss, backwards-compatibility breaks?
-5. **Testability** — Can changes be verified?
-   - **Test strategy presence**: Any plan altering observable behavior (logic, APIs,
-     data contracts, UI interactions) must include a Test Strategy section. Exceptions:
-     documentation-only, config-only, or deletion of provably-dead code with grep
-     evidence in the plan. Missing test strategy for a behavior-changing plan is [Major].
-   - **Test pyramid completeness**: When a Test Strategy is present, it must address
-     each applicable layer. A plan covering only unit tests while making user-visible
-     UI changes, or only listing e2e while introducing new logic without unit coverage,
-     is [Major].
-   - **E2E selector cascade** *(evidence-gated)*: If the plan or project context reveals
-     e2e coverage (Playwright, Cypress, `*.spec.ts` files, `e2e/` directory references),
-     then deleting or renaming a UI component, `data-testid`, or route requires
-     enumerating affected spec files. Omitting this when e2e evidence is present is
-     [Major]. Skip this check if no e2e evidence appears in plan or project context.
-   - **Deletion completeness**: Removing an **exported or cross-boundary** symbol
-     (public component, exported function, public route, shared testid) without listing
-     its consumers (specs, fixtures, imports, callers) is [Major]. Exceptions: purely
-     local/internal symbols, or provably dead code with no external consumers (grep
-     evidence in the plan).
-6. **Architecture fit** — Consistent with project patterns?
-7. **Dispatch Economy** — Work nature determines who executes, to protect the
-   main context's lifespan and minimize token cost. Classify each step by its
-   NATURE (not by a fuzzy complexity estimate), then check the assigned tier:
-   - **Decision work** (architecture, root-cause debugging, requirements
-     breakdown, plan authoring, review judgment) → tier `opus` → runs in main
-     context (manifest model/agent_type = `-`).
-   - **Implementation work** (writing code, editing files, producing content)
-     → tier `sonnet` → MUST be delegated to a typed agent.
-   - **Retrieval work** (read-only exploration, search, data extraction with
-     zero reasoning) → tier `haiku` → MUST be delegated to a typed agent.
-   The default is to delegate: only decision steps legitimately stay in main
-   context. The single whole-plan exemption is **Tier 0** — ALL of: single
-   file, no new dependency, no API-contract / DB-schema change, no cross-file
-   coordination, not an ops task. A Tier-0 plan needs no manifest at all. Do
-   NOT count lines of code to judge Tier 0 — the moment a plan touches multiple
-   files, adds a dependency, or changes an interface, it is not Tier 0 and its
-   implementation steps must be delegated, regardless of how few lines they are.
-   Even a Tier-0 plan, if its text contains dispatch keywords (Task(,
-   subagent_type, worker agent, etc.), must still obey the underlying syntax
-   gate: either remove the keywords or supply a full manifest — otherwise a
-   static check will hard-block it (avoid the split-brain where the reviewer
-   approves but the script rejects).
-   - **Severity calibration** (do not weaken the existing rule):
-     - **Full hoarding** — a non-Tier-0 plan whose manifest leaves ALL
-       implementation/retrieval steps on `-` (main session swallowing every
-       offloadable task) → [Critical] → REJECT. This preserves the existing
-       contract: an all-dash manifest on a complex plan is a Critical blocker.
-     - **Partial hoarding** — individual implementation steps kept in main,
-       a sonnet-grade task kept in main, OR main context (opus) hoarding
-       retrieval/extraction work → [Major] → CONCERNS. Opus hoarding retrieval
-       (haiku-grade, zero-reasoning, high-token work) pollutes the main window
-       worse than hoarding code-writing, so it must force CONCERNS, never Minor.
-     - **Pure mis-tiering / fragmentation** — a sonnet-grade task already inside
-       an agent, or implementation steps sharing one file set split across
-       multiple agents that each reload the same context → [Minor].
-   - Manifest format: Agent steps require both agent_type + model (full name, no
-     abbreviation). Main-context steps use `-`. Missing manifest when dispatch
-     keywords are present = [Major]. Agent step missing model = [Critical].
-8. **Reuse over reinvention** — Does the plan propose building something that already exists in the project dependencies, framework, or standard library? Custom implementations require explicit justification (e.g., "framework X lacks feature Y" with concrete evidence). Without strong justification, prefer existing solutions. This is a [Major] issue.
-
-## Review Discipline
-- Focus on gaps the plan author **missed**, not on restating what they already considered.
-- Every issue MUST cite specific evidence from the plan or project context.
-
-## Finding Quality Gate (pre-report self-check)
-False positives burn scarce negotiation rounds. Gate EVERY finding:
-
-1. **Confidence** — Low confidence + Minor/Major → DROP silently. Low confidence +
-   suspected Critical → keep as `[UNVERIFIED]`, downgrade to Major (→ CONCERNS, not REJECT).
-2. **False-positive registry** — Never raise: naming/style preferences, justified design
-   choices (attack the justification instead), tool/agent-type/parameter names, or version
-   identifiers whose existence or correctness you cannot verify from the plan or project
-   context — model names, library/dependency versions, API signatures (Scope Boundary).
-3. **Severity calibration** — Style is never Major/Critical. Critical requires a concrete,
-   named blocker (specific vuln, data-loss path, wrong-result logic).
-4. **Verdict↔severity** — Confirm verdict matches highest surviving finding:
-   confirmed Critical → REJECT; Major or UNVERIFIED → CONCERNS; Minor-only → APPROVE.
-
-## Severity Definitions
-- **[Critical]** — Blocker: security vulnerabilities, data loss, logic errors producing wrong results, breaking changes to existing behavior, fundamental approach flaws
-- **[Major]** — Significant gap: missing error handling on critical paths, poor architecture decisions, performance issues under normal load, incomplete implementation, reinventing functionality available in existing dependencies without justification
-- **[Minor]** — Polish: naming, style, documentation gaps, minor optimization opportunities
-
-## Verdict Rules
-- **APPROVE**: No issues, or only Minor items remaining
-- **CONCERNS**: Major items present (including any `[UNVERIFIED]` suspicion) but no confirmed Critical
-- **REJECT**: confirmed Critical items present
-
-Verdict is the structured severity signal — the automation routes on verdict tags only,
-no body scanning. Strictly follow verdict-severity correspondence (see Finding Quality
-Gate check 4 — the verdict must match your highest surviving finding).
-
-## Output Format
-- FIRST line must be a verdict tag: <verdict>APPROVE</verdict> or <verdict>CONCERNS</verdict> or <verdict>REJECT</verdict>
-- List issues, each prefixed with severity tag: `[Critical]`, `[Major]`, or `[Minor]`
-- Each issue format: `[Severity] description → impact → suggested fix`
-- A low-confidence but high-severity suspicion (Quality Gate check 1) is emitted as
-  `[Major] [UNVERIFIED] description → ...` — surfaced for the human, never as REJECT
-- If a severity level has no issues, omit it entirely
-- End with brief strengths of the plan (if any)
-
-IMPORTANT: The verdict MUST be wrapped in <verdict></verdict> XML tags on the
-very first line. This is machine-parsed. Do NOT place verdict keywords anywhere
-else in your response without the tags.
-
-Use Chinese for the review output.
-EOF
+# SYSTEM_INSTRUCTIONS content lives in $PROMPT_ASSET (scripts/assets/
+# review-system-prompt.md), not inline — keeps the review rubric editable
+# without touching bash. Missing/empty asset fails open (same allow +
+# [WARNING] shape as the jq-missing guard above). A plain $(...) would
+# silently strip the file's trailing newline; the original `read -r -d ''`
+# heredoc preserved it (bash always terminates a heredoc's last content line
+# with \n, and `read -d ''` never finds its NUL delimiter so nothing gets
+# stripped), so we append a sentinel byte before capture and strip only the
+# sentinel back off — this reproduces the exact prior byte sequence.
+if [ ! -f "$PROMPT_ASSET" ] || [ ! -s "$PROMPT_ASSET" ]; then
+  echo "plan-review: missing/empty prompt asset $PROMPT_ASSET, allowing." >&2
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] prompt asset missing/empty, plan-review skipped"}}'
+  exit 0
+fi
+# Anchor check: `-s` only proves the file has SOME bytes — a truncated asset
+# (e.g. left as a single space or a lone newline by a bad edit) still passes
+# `-s` but carries no real reviewing instructions. `<verdict>` is the one
+# string this file MUST contain: it is the literal tag extract_verdict()
+# (lib/verdict.sh) greps the engine's response for — if the prompt asset
+# doesn't instruct the engine to emit that tag, no review response will ever
+# parse, silently degrading every verdict to the CONCERNS fallback instead of
+# failing open visibly. Reusing that same load-bearing string as the anchor
+# (rather than an arbitrary section heading that could be renamed with zero
+# functional impact) means this check can only pass if the asset still does
+# the one thing the rest of the pipeline actually depends on.
+if ! grep -qF '<verdict>' "$PROMPT_ASSET"; then
+  echo "plan-review: prompt asset $PROMPT_ASSET missing <verdict> anchor (truncated?), allowing." >&2
+  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] prompt asset truncated, plan-review skipped"}}'
+  exit 0
+fi
+SYSTEM_INSTRUCTIONS=$(tr -d '\r' < "$PROMPT_ASSET"; printf 'x')
+SYSTEM_INSTRUCTIONS="${SYSTEM_INSTRUCTIONS%x}"
 
 ENGINE_OUT=""
 ENGINE_STATUS=""
 ENGINE_PID=""
 REQ_FILE=""
 PROMPT_FILE=$(mktemp)
-# Cleanup: remove temp files and kill tracked engine subprocess.
-# Called on EXIT (normal), INT (Ctrl-C), TERM (framework hook timeout),
-# and HUP (terminal disconnect). Idempotent — safe to call multiple times.
-_cleanup() {
-  rm -f "$PROMPT_FILE" "${ENGINE_OUT:-}" "${ENGINE_STATUS:-}" "${REQ_FILE:-}"
-  rm -f "${ENGINE_ERR:-}" "${CODEX_PROMPT_FILE:-}" "${CODEX_PROMPT_FILE:+${CODEX_PROMPT_FILE}.u8}"
-  [ -z "${CODEX_WORKDIR:-}" ] || rmdir "${CODEX_WORKDIR}" 2>/dev/null || true
-  [ -z "${ENGINE_PID:-}" ] || kill "$ENGINE_PID" 2>/dev/null || true
-}
-trap '_cleanup' EXIT
-trap '_cleanup; exit 130' INT TERM HUP
 
 # Engine-specific system injection: PROMPT_FILE holds dynamic content only,
 # regardless of engine. Each channel injects SYSTEM_INSTRUCTIONS on its own
@@ -1285,23 +1004,8 @@ EOF
   fi
 fi
 
-# --- 6. Extract structured verdict (XML-tag isolation, anti-hijack) ---
-# Defensive extraction: LLM output is untrusted external input.
-#   1. printf — safe for text starting with -n/-E (echo is not), trailing \n for POSIX
-#   2. tr upper — case-normalize before matching (BSD sed has no /I flag)
-#   3. grep -oE (first pass) — extract <VERDICT>...</VERDICT> tag
-#   4. grep -oE (second pass) — extract verdict keyword from the tag
-#   5. head -n 1 — LLM may emit multiple tags; guarantee single value
-#   || true — grep returns exit 1 on no match; suppress for set -e + pipefail
-VERDICT=$(printf "%s\n" "$REVIEW" \
-  | tr '[:lower:]' '[:upper:]' \
-  | grep -oE '<VERDICT>[[:space:]]*(APPROVE|CONCERNS|REJECT)[[:space:]]*</VERDICT>' \
-  | grep -oE 'APPROVE|CONCERNS|REJECT' \
-  | head -n 1) || true
-if [ -z "$VERDICT" ]; then
-  VERDICT="CONCERNS"
-  echo "plan-review: verdict tag missing or malformed, falling back to CONCERNS." >&2
-fi
+# --- 6. Extract structured verdict (delegated to lib/verdict.sh) ---
+VERDICT=$(extract_verdict "$REVIEW")
 
 # --- 7. Branch on verdict ---
 if [ "$VERDICT" = "APPROVE" ]; then
@@ -1322,37 +1026,8 @@ if [ "$VERDICT" = "APPROVE" ]; then
     fi
   fi
 
-  if [ "$TOTAL_ROUNDS" -gt 0 ]; then
-    APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED (Round $((TOTAL_ROUNDS + 1)))"
-  else
-    APPROVE_HEADER="Red Team Review — ${REVIEW_ENGINE} — APPROVED"
-  fi
-
   # Emit deny so Claude presents the approval to the user (allow reasons are invisible)
-  FEEDBACK=$(cat << APPROVE_EOF
-## ${APPROVE_HEADER}
-
-审阅引擎对本次 plan **技术上无异议**（verdict=APPROVE）。以下是审阅摘要：
-
----
-
-${REVIEW}
-
----
-
-**审阅通过 ≠ 可以开工。** 审阅引擎只是对等 peer，它的 APPROVE 仅表示"技术上无异议"，**不代表**用户已授权执行。此刻**禁止**开始任何落地动作（编辑文件、执行命令）。
-
-下一步（必须严格照做）：
-1. 向用户简要展示上述审阅结果；
-2. **不修改 plan**，直接再次调用 ExitPlanMode——这一步才会把 plan 交给用户做原生的 go/no-go 决策；
-3. 只有在用户通过 ExitPlanMode 原生批准后，才可以开工。
-APPROVE_EOF
-  )
-  FEEDBACK_JSON=$(printf '%s' "$FEEDBACK" | jq -Rs .)
-  cat << EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${FEEDBACK_JSON}}}
-EOF
-  exit 0
+  render_approve_feedback "$TOTAL_ROUNDS" "$REVIEW_ENGINE" "$REVIEW"
 fi
 
 # CONCERNS or REJECT → update counter, deny with feedback
@@ -1369,35 +1044,6 @@ fi
 echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
 log_decision "verdict=$VERDICT decision=deny round=$ATTEMPT/$REVIEW_MAX_ROUNDS total=$TOTAL_ROUNDS/$REVIEW_MAX_TOTAL_ROUNDS"
 
-# --- 8. Compose deny feedback (severity-differentiated) ---
-if [ "$VERDICT" = "REJECT" ]; then
-  FEEDBACK_HEADER="Red Team Review — ${REVIEW_ENGINE} — REJECT (Round ${TOTAL_ROUNDS}/${REVIEW_MAX_TOTAL_ROUNDS})"
-  PHASE_MSG="审阅引擎发现 Critical 级别问题。非 Critical 磋商计数已重置，解决 Critical 项后可重新获得 ${REVIEW_MAX_ROUNDS} 轮磋商机会。"
-else
-  REMAINING=$((REVIEW_MAX_ROUNDS - ATTEMPT))
-  FEEDBACK_HEADER="Red Team Review — ${REVIEW_ENGINE} — CONCERNS (Round ${ATTEMPT}/${REVIEW_MAX_ROUNDS})"
-  PHASE_MSG="磋商剩余轮次：${REMAINING}。若双方无法达成一致，plan 将直接呈现给用户做最终裁决。"
-fi
-
-FEEDBACK=$(cat << REVIEW_EOF
-## ${FEEDBACK_HEADER}
-
-${PHASE_MSG}
-
-你有两个选择：
-1. 如意见合理，修正 plan 后再次调用 ExitPlanMode
-2. 如你认为意见不成立，在 plan 中补充辩护理由后再次调用 ExitPlanMode
-
----
-
-${REVIEW}
-REVIEW_EOF
-)
-
-FEEDBACK_JSON=$(echo "$FEEDBACK" | jq -Rs .)
-
-cat << EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${FEEDBACK_JSON}}}
-EOF
-
-exit 0
+# --- 8. Compose deny feedback (delegated to lib/verdict.sh, severity-differentiated) ---
+render_concerns_or_reject_feedback "$VERDICT" "$ATTEMPT" "$TOTAL_ROUNDS" "$REVIEW_ENGINE" \
+  "$REVIEW_MAX_ROUNDS" "$REVIEW_MAX_TOTAL_ROUNDS" "$REVIEW"
