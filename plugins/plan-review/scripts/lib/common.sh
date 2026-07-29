@@ -62,11 +62,20 @@ EOF
 #         diagnostics, so the raw file must NEVER be appended wholesale.
 #         Only on failure ($1 != "0"), call the engine's own
 #         engine_err_filter() hook (if it defines one) and log ONLY its
-#         already-filtered, length-bounded return value.
-#     Deliberately does NOT truncate $ENGINE_ERR — the caller's capacity
-#     detection (grep for RESOURCE_EXHAUSTED|MODEL_CAPACITY) reads the same
-#     file immediately after this runs; it is naturally replaced next round
-#     by the engine's own `2>"$ENGINE_ERR"` redirection.
+#         already-filtered, length-bounded return value under the engine's
+#         own self-declared $ENGINE_ERR_LOG_TAG (set in its engine_probe();
+#         falls back to the generic "engine-diag" for engines that don't
+#         declare one) — this generic layer must not hardcode a
+#         codex-private label.
+#     Truncates $ENGINE_ERR after backfilling (both branches, whether or not
+#     engine_err_filter actually ran) so a LATER call against the SAME
+#     $ENGINE_ERR — e.g. plan-review.sh's _cleanup() defensively re-invoking
+#     this on hook-kill — is a harmless no-op via the `[ -s ]` guard above,
+#     instead of double-appending/double-logging this round's content. The
+#     caller's capacity detection (grep for RESOURCE_EXHAUSTED|MODEL_CAPACITY)
+#     therefore MUST read $ENGINE_ERR itself BEFORE calling this function —
+#     see plan-review.sh's retry loop, which captures that grep result into a
+#     flag ahead of the backfill_engine_err call for exactly this reason.
 backfill_engine_err() {
   local exit_code="${1:-0}"
   [ -s "${ENGINE_ERR:-}" ] || return 0
@@ -74,11 +83,12 @@ backfill_engine_err() {
     if [ "$exit_code" != "0" ] && declare -F engine_err_filter >/dev/null 2>&1; then
       local diag
       diag=$(engine_err_filter)
-      log_decision "codex-diag $(printf '%s' "$diag" | tr -d '\000-\037')"
+      log_decision "${ENGINE_ERR_LOG_TAG:-engine-diag} $(printf '%s' "$diag" | tr -d '\000-\037')"
     fi
   else
     cat "$ENGINE_ERR" >> "$LOG_FILE" 2>/dev/null || true
   fi
+  : > "$ENGINE_ERR" 2>/dev/null || true
 }
 
 # --- Plan content hasher (portable: sha256sum > shasum > cksum POSIX fallback) ---

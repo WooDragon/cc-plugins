@@ -3348,9 +3348,80 @@ Sanitized fine."
   [[ "$HOOK_STDERR" == *"REST API fallback succeeded"* ]]
   assert_log_contains "rest-skip=capacity-fast-break engine=codex"
   # Prove the buried capacity text really did NOT survive the privacy filter:
-  # codex-diag's logged excerpt must not contain the capacity marker.
+  # codex-diag's logged excerpt must not contain the capacity marker. This
+  # assertion is only meaningful if the codex-diag line was actually written
+  # — without the `-n` check, a regressed backfill (or a broken filter that
+  # emits nothing) would leave $output empty and the `!= *"..."*` assertion
+  # would pass vacuously, "proving" nothing.
   run grep -F "codex-diag" "${REVIEW_LOG_DIR}/plan-review.log"
+  [ -n "$output" ]
   [[ "$output" != *"RESOURCE_EXHAUSTED"* ]]
+}
+
+# --- Fix (PR #146 review, Major): hook killed mid-invoke must not lose
+# this round's stderr. Pre-fix, _cleanup() only did `rm -f "$ENGINE_ERR"` on
+# every exit path (normal or signal) — a hook-timeout SIGTERM landing while
+# an engine call is in flight discarded that round's raw stderr entirely,
+# with zero trace ever reaching LOG_FILE. That is exactly the diagnostic a
+# maintainer needs most (the round that got killed, not the one that
+# finished). Runs the real hook script as a background process, waits for
+# the mock engine to actually start (ready-file handshake — no fixed sleep
+# guessing), sends SIGTERM to the hook itself (mirroring the framework's
+# 600s hook-timeout kill), and asserts _cleanup's defensive
+# `backfill_engine_err 143` call landed this round's stderr into LOG_FILE
+# before reaping the temp files.
+@test "cleanup: hook killed mid-invoke → this round's stderr still reaches LOG_FILE" {
+  local ready_file="${TEST_TEMP_DIR}/mock-agy-ready"
+  rm -f "$ready_file"
+  # Deliberately NOT the shared create_mock_engine helper: this mock must
+  # touch a ready-file and then block (sleep), which no existing generator
+  # supports. Unquoted heredoc so ${ready_file} interpolates at creation time.
+  cat > "${MOCK_BIN}/agy" << MOCK_EOF
+#!/bin/bash
+touch '${ready_file}'
+echo "MIDKILL-STDERR-MARKER: engine was killed mid-flight" >&2
+sleep 30
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/agy"
+
+  INPUT=$(build_input)
+  local out_file="${TEST_TEMP_DIR}/midkill.stdout"
+  local err_file="${TEST_TEMP_DIR}/midkill.stderr"
+
+  bash "$HOOK_SCRIPT" <<< "$INPUT" > "$out_file" 2> "$err_file" &
+  local hook_pid=$!
+
+  # Handshake: block until the mock has actually started (touched
+  # ready_file) instead of guessing a fixed startup delay — avoids a flake
+  # where SIGTERM arrives before engine_invoke even begins.
+  local waited=0
+  while [ ! -f "$ready_file" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  [ -f "$ready_file" ]
+
+  # The mock writes its stderr line immediately after touching ready_file,
+  # before its `sleep 30` — a small margin covers the write actually landing
+  # on disk (OS-buffered fd write, not an async race with the ready-file
+  # signal itself).
+  sleep 0.2
+
+  kill -TERM "$hook_pid" 2>/dev/null || true
+
+  # Wait for the hook process (and its trap-driven _cleanup) to actually
+  # exit, bounded so a stuck run fails fast instead of hanging the suite.
+  waited=0
+  while kill -0 "$hook_pid" 2>/dev/null && [ "$waited" -lt 100 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+  done
+  if kill -0 "$hook_pid" 2>/dev/null; then
+    kill -KILL "$hook_pid" 2>/dev/null || true
+  fi
+  wait "$hook_pid" 2>/dev/null || true
+
+  assert_log_contains "MIDKILL-STDERR-MARKER: engine was killed mid-flight"
 }
 
 # fixture: reset_leaky_env must clear every env var a developer shell might

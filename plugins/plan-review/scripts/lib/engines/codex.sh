@@ -41,6 +41,10 @@ engine_probe() {
   CODEX_PROMPT_FILE=$(mktemp)
   ENGINE_TMP_FILES+=("$CODEX_PROMPT_FILE" "${CODEX_PROMPT_FILE}.u8")
   ENGINE_ERR_POLICY="filtered"
+  # Self-declared log tag for backfill_engine_err()'s filtered-branch
+  # log_decision line (lib/common.sh) — the generic backfill layer must not
+  # know codex's private label, so codex declares it here instead.
+  ENGINE_ERR_LOG_TAG="codex-diag"
 
   { printf '%s\n\n' "$SYSTEM_INSTRUCTIONS"; cat "$PROMPT_FILE"; } > "$CODEX_PROMPT_FILE"
   printf '\n' >> "$CODEX_PROMPT_FILE"

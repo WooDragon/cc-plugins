@@ -132,6 +132,18 @@ ENGINE_TMP_DIRS=()
 #     rather than routed through the generic ENGINE_TMP_FILES registry (which
 #     is for engine-PRIVATE resources only, e.g. codex's sandboxed workdir).
 _cleanup() {
+  # Defensive stderr backfill BEFORE reaping temp files: if the hook is
+  # killed (SIGTERM on hook timeout) mid-invoke, $ENGINE_ERR can hold this
+  # round's stderr that never reached the normal in-loop backfill_engine_err
+  # call below (see the retry loop) — that content would otherwise be lost
+  # forever to the `rm -f` on the next line. 143 (128+SIGTERM) is a fixed
+  # literal, not a real exit code: trap context has no way to recover the
+  # actual one, and "the hook got killed mid-round" is itself failure enough
+  # to justify running codex's engine_err_filter() path. Guarded via
+  # `declare -F` because backfill_engine_err may not be defined yet (an
+  # earlier guard can exit before lib/common.sh is even sourced) — the whole
+  # line must never let this trap itself fail.
+  declare -F backfill_engine_err >/dev/null 2>&1 && backfill_engine_err 143 || true
   rm -f "${PROMPT_FILE:-}" "${ENGINE_OUT:-}" "${ENGINE_ERR:-}"
   [ ${#ENGINE_TMP_FILES[@]} -eq 0 ] || rm -f "${ENGINE_TMP_FILES[@]}"
   [ ${#ENGINE_TMP_DIRS[@]}  -eq 0 ] || rmdir "${ENGINE_TMP_DIRS[@]}" 2>/dev/null || true
@@ -575,11 +587,19 @@ else
       break
     fi
 
+    # Capacity-exhaustion detection (used further below) MUST scan the raw
+    # $ENGINE_ERR before backfill_engine_err (next) truncates it (see
+    # lib/common.sh) — capture into a flag now, consumed later instead of
+    # re-grepping a file that will already be empty by then.
+    _capacity_hit=0
+    grep -qE "RESOURCE_EXHAUSTED|MODEL_CAPACITY" "$ENGINE_ERR" 2>/dev/null && _capacity_hit=1
+
     # Backfill this round's $ENGINE_ERR into LOG_FILE per the engine's own
     # $ENGINE_ERR_POLICY (see lib/common.sh) — unconditionally for
     # "verbatim" engines (success and failure alike), failure-only and
-    # filtered for codex. Deliberately NOT skipped on failure: the capacity
-    # detection right below reads the raw (un-truncated) $ENGINE_ERR.
+    # filtered for codex. Also truncates $ENGINE_ERR once backfilled, so a
+    # later defensive re-backfill (_cleanup on hook-kill) is a harmless no-op
+    # in the normal exit path.
     backfill_engine_err "$engine_exit"
 
     engine_extract
@@ -596,16 +616,18 @@ else
         # Detect capacity-exhausted 429 (MODEL_CAPACITY_EXHAUSTED via cloudcode-pa.googleapis.com).
         # These outages last minutes — the default 2s retry delay is useless;
         # a longer wait gives the server time to recover.
-        # Scan this round's raw $ENGINE_ERR directly — NOT LOG_FILE. This is
-        # the fix for the codex fast-break bug: codex's raw stderr never
-        # reaches LOG_FILE wholesale (privacy filter, see engine_err_filter
-        # in lib/engines/codex.sh), so grepping LOG_FILE only ever caught
-        # this pattern for agy/claude by coincidence — codex's fast-break
-        # depended on the capacity keyword happening to survive the 500-byte
-        # filtered codex-diag excerpt. All three engines are treated
-        # identically here because $ENGINE_ERR always holds this round's
-        # complete, unfiltered stderr regardless of engine.
-        if grep -qE "RESOURCE_EXHAUSTED|MODEL_CAPACITY" "$ENGINE_ERR" 2>/dev/null; then
+        # $_capacity_hit was captured above (BEFORE backfill_engine_err ran)
+        # from this round's raw, un-truncated $ENGINE_ERR directly — NOT
+        # LOG_FILE. This is the fix for the codex fast-break bug: codex's raw
+        # stderr never reaches LOG_FILE wholesale (privacy filter, see
+        # engine_err_filter in lib/engines/codex.sh), so grepping LOG_FILE
+        # only ever caught this pattern for agy/claude by coincidence —
+        # codex's fast-break depended on the capacity keyword happening to
+        # survive the 500-byte filtered codex-diag excerpt. All three engines
+        # are treated identically here because $ENGINE_ERR always held this
+        # round's complete, unfiltered stderr regardless of engine (at the
+        # time it was captured, before this same round's backfill truncated it).
+        if [ "$_capacity_hit" = "1" ]; then
           _fail_reason="${REVIEW_ENGINE}: capacity exhausted (MODEL_CAPACITY_EXHAUSTED)"
           # Drop any cached conversation_id: the session on agy's side may be
           # invalid/unrecoverable after a capacity outage — don't resume onto it.
