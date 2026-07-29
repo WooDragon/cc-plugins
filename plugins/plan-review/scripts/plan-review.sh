@@ -76,8 +76,9 @@ done
 unset _lib
 
 # --- Bootstrap: source with fail-open on syntax/read errors ---
-# `[ -f ]` above only proves the file EXISTS — a file that exists but has a
-# bash syntax error (or lost its read permission) still fails here. `source`'s
+# `[ -s ]` above only proves the file exists and is non-empty — a file that
+# clears both but has a bash syntax error (or lost its read permission) still
+# fails here. `source`'s
 # own exit status captures that case too: a syntax error inside the sourced
 # file does not abort the *parent* script's parsing, it only fails the
 # `source` command itself, so wrapping each call in `if ! source ...` is
