@@ -38,7 +38,7 @@ color: yellow
 ## 产物落盘
 
 reviewer 拿到 Write 权限只为一件事：让审阅内容不必穿过 Lead 主上下文（见
-`docs/adr-main-session-cost-fix.md` 绝对规则）。两种 mode 产出的审阅报告
+`docs/main-session-isolation-contracts.md` 绝对规则）。两种 mode 产出的审阅报告
 （Gate 评分报告 / 6 维度审阅报告）**必须写入磁盘**，路径与命名：
 
 - 目录：项目根下 `pipeline/verification/`（固定，唯一合法落盘目录）
@@ -178,7 +178,7 @@ receipt。
 `pipeline/verification/`（见「产物落盘」）。**回传 Lead 的只有 receipt**——
 结构化摘要，永不含报告全文。这是绝对规则「主 session 禁读 pipeline 全文」
 成立的前提：Lead 不读盘，只能靠 receipt 里的字段做裁决和驱动下一轮修正
-（详见 `docs/adr-main-session-cost-fix.md` 契约②）。
+（详见 `docs/main-session-isolation-contracts.md` 契约②）。
 
 receipt 必须包含以下字段，两种 mode 共用同一套结构，marker/verdict 标签
 按各自 mode 的既有格式：
@@ -245,4 +245,4 @@ verdict: NEEDS REVISION
 ---
 
 **关联文件**：deep-research skill 的 references/quality-gates.md · references/pipeline.md（Stages 6 + G1/G2/G3）
-· `docs/adr-main-session-cost-fix.md`（契约② receipt schema 唯一事实源）
+· `docs/main-session-isolation-contracts.md`（契约② receipt schema 唯一事实源）

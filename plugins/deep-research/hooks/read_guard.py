@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse(Read|Bash) hook: 主 session 绝对规则门禁。
 
-绝对规则（见 docs/adr-main-session-cost-fix.md 契约①）：主 session（agent_id
+绝对规则（见 docs/main-session-isolation-contracts.md 契约①）：主 session（agent_id
 为空）对 pipeline/** 与 deliverables/** 下的文件只能持路径指针，禁止读取内容
 （Read 工具 + Bash cat 类读取）。subagent（agent_id 非空）不受限——它们必须读
 pipeline 才能干活。
@@ -46,7 +46,7 @@ _READ_COMMANDS = frozenset(
 # stderr 指导语（拦截时输出，防协作 agent 盲目重试）。
 _BLOCK_MESSAGE = (
     "[read_guard] Action blocked: Lead 主 session 禁读 pipeline/deliverables "
-    "全文（绝对规则，见 adr-main-session-cost-fix）。\n"
+    "全文（绝对规则，见 docs/main-session-isolation-contracts.md）。\n"
     "你必须 spawn 一个 subagent 读该文件并回传结构化 receipt（含所需字段），"
     "而不是重试本次读取。\n"
     "Blocked path: {path}"

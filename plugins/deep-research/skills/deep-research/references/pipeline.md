@@ -196,7 +196,7 @@ fetch-report 必填字段：tier 分层（T1/T2/T3）、翻页统计、错误汇
 5. **命名一致**：所有 pipeline 产物使用 `YYYYMMDD_HHMMSS_{source}_{description}` 命名；补轨产物加 `track_{x}_` 前缀（见 principles.md 原则 6）
 6. **Gate 阻塞**：G0/G1/G2/G3 未通过时，后续 Stage 禁止启动
 7. **回退权限**：只有 Lead 可以决定 Stage 回退。G3 裁决 RECYCLE 时强制回退到 G0 重校准问题定义（区别于 FAIL 的原阶段补充）
-8. **主 session 只持指针**：Lead（主 session，`agent_id` 为空）对 `pipeline/**` 和 `deliverables/**` 下的文件只允许持有路径指针，禁止读取其内容（Read 工具 + Bash cat 类读取）。所有内容读取/生成/审阅由 subagent 在隔离上下文完成，回传 Lead 的只有 manifest/receipt/spec/delta-receipt（路径 + 结构化裁决摘要），永不含全文。物理焊死靠 PreToolUse `read_guard` hook。详见 [adr-main-session-cost-fix.md](../../../docs/adr-main-session-cost-fix.md)。
+8. **主 session 只持指针**：Lead（主 session，`agent_id` 为空）对 `pipeline/**` 和 `deliverables/**` 下的文件只允许持有路径指针，禁止读取其内容（Read 工具 + Bash cat 类读取）。所有内容读取/生成/审阅由 subagent 在隔离上下文完成，回传 Lead 的只有 manifest/receipt/spec/delta-receipt（路径 + 结构化裁决摘要），永不含全文。物理焊死靠 PreToolUse `read_guard` hook。详见 [main-session-isolation-contracts.md](../../../docs/main-session-isolation-contracts.md)。
 
 ### manifest / receipt / spec / delta-receipt 产物定义
 
