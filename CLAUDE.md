@@ -99,6 +99,8 @@ plugins/
       harvest.py                 # 多模型采集编排 + 确定性引用验证（+ harvest_safety/harvest_search/harvest_fetch/harvest_clients 子包）
       create-research-project.sh # 研究项目 scaffold 脚本
     hooks/hooks.json             # SubagentStop → gate_check.py（G1 引用验证机械门禁，fail-open）
+    docs/
+      main-session-isolation-contracts.md # 主 session 隔离契约（read_guard 判定规格 + receipt/manifest/delta schema，运行时唯一事实源）
     skills/deep-research/        # SKILL.md 路由器 + references/（框架文档）+ assets/（模板）
     tests/                       # pytest 套件（harvest + gate_check）
   pr-review/                     # 已开 PR 的 AI 评审插件（纯 skill，零 hook）

@@ -1,6 +1,6 @@
 """Unit tests for hooks/read_guard.py — 主 session 绝对规则门禁。
 
-覆盖契约①（adr-main-session-cost-fix.md）的判定边界：agent_id 空/非空区分主/子、
+覆盖契约①（main-session-isolation-contracts.md）的判定边界：agent_id 空/非空区分主/子、
 Read/Bash 命中受管路径、白名单放行、fail-open 硬约束、Bash 读取模式解析。
 
 fail-open 是硬约束：宁可漏检不可误伤（never break userspace）——测试特别覆盖
