@@ -432,10 +432,10 @@ CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 # making the engine structurally blind to a genuine defect) — and the clamp
 # is UTF-8-safe where a bare `head -c` is not (see lib/common.sh for why).
 GLOBAL_MD=""
-[ ! -f "$HOME/.claude/CLAUDE.md" ] || GLOBAL_MD=$(clamp_head_bytes 8000 < "$HOME/.claude/CLAUDE.md")
+[ ! -f "$HOME/.claude/CLAUDE.md" ] || GLOBAL_MD=$(clamp_head_bytes "$GLOBAL_MD_BYTES" < "$HOME/.claude/CLAUDE.md")
 
 PROJECT_MD=""
-[ ! -f "$CWD/CLAUDE.md" ] || PROJECT_MD=$(clamp_head_bytes 24000 < "$CWD/CLAUDE.md")
+[ ! -f "$CWD/CLAUDE.md" ] || PROJECT_MD=$(clamp_head_bytes "$PROJECT_MD_BYTES" < "$CWD/CLAUDE.md")
 
 # --- 3. Extract recent user messages from transcript ---
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // ""')
@@ -552,7 +552,7 @@ inject_review_thread() {
     # `set -e`, same exemption A3's write-side `||` chain relies on.
     if {
       printf '\n## Prior Review Thread\n\n'
-      clamp_tail_bytes 24000 < "$HISTORY_FILE"
+      clamp_tail_bytes "$HISTORY_INJECT_BYTES" < "$HISTORY_FILE"
     } >> "$PROMPT_FILE" 2>>"$LOG_FILE"; then
       HISTORY_INJECTED=1
     else
@@ -716,6 +716,18 @@ else
       # full first round instead of re-sending a --conversation onto a session
       # that just failed. The capacity branch below also rm's it (harmless dup).
       rm -f "${CONV_FILE:-}"
+      # Call site (native-handle-invalidated): CONV_FILE existed (non-empty)
+      # at composition time, so call site 1 (before the retry loop) already
+      # evaluated the injection condition as false and skipped it. Now that
+      # the handle is gone, the NEXT attempt's agy engine_invoke will read an
+      # empty CONV_ID and fall back to its own first-round path — re-reading
+      # PROMPT_FILE from scratch. Without injecting here, that re-read
+      # PROMPT_FILE still has no thread, so the CLI retry silently loses all
+      # prior-round context — the same failure mode call site 2 (REST) fixes,
+      # but hit via the CLI retry path instead, which is more common (fires
+      # with no REST configured at all). HISTORY_INJECTED guards against
+      # double-injection if this round already got one some other way.
+      inject_review_thread
       if [ "$engine_attempt" -lt 2 ]; then
         # Detect capacity-exhausted 429 (MODEL_CAPACITY_EXHAUSTED via cloudcode-pa.googleapis.com).
         # These outages last minutes — the default 2s retry delay is useless;
@@ -736,6 +748,13 @@ else
           # Drop any cached conversation_id: the session on agy's side may be
           # invalid/unrecoverable after a capacity outage — don't resume onto it.
           rm -f "${CONV_FILE:-}"
+          # Same native-handle-invalidated reasoning as the unconditional rm
+          # above (this is a duplicate rm for the capacity branch specifically)
+          # — the CLI retry (or the REST fallback below, if capacity triggers
+          # an immediate break) must not lose the thread just because it was
+          # skipped at composition time. HISTORY_INJECTED guards the no-op
+          # re-call.
+          inject_review_thread
           # If REST fallback is configured, skip retry immediately — retrying a
           # capacity-exhausted endpoint wastes the time budget REST needs.
           if [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
@@ -887,7 +906,7 @@ log_decision "verdict=$VERDICT decision=deny round=$ATTEMPT/$REVIEW_MAX_ROUNDS t
 # error, and itself falls back to `|| true` in case even that log write fails.
 {
   printf '### Round %s — %s\n\n' "$TOTAL_ROUNDS" "$VERDICT"
-  printf '%s' "$REVIEW" | clamp_head_bytes 6000
+  printf '%s' "$REVIEW" | clamp_head_bytes "$HISTORY_ROUND_BYTES"
   printf '\n\n'
 } >> "$HISTORY_FILE" 2>>"$LOG_FILE" || log_decision "history-write-failed" || true
 

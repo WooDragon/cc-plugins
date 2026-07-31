@@ -3954,6 +3954,35 @@ Good."
   grep -q "must survive retry" "$history_file"
 }
 
+# history: grok-flagged gap — a live CONV_FILE at composition time makes
+# call site 1 skip injection (agy's own session memory looked sufficient).
+# The CLI's OWN retry then fails attempt 1, clears CONV_FILE, and agy's
+# attempt 2 reads an empty CONV_ID — falling back to its first-round path,
+# which re-reads PROMPT_FILE from scratch. Without a retry-path injection
+# right after CONV_FILE is cleared, that re-read PROMPT_FILE still has no
+# thread and attempt 2 silently loses all prior-round context — this path
+# is MORE common than the REST-fallback gap (call site 2) since it fires
+# with no REST fallback configured at all.
+@test "history: agy CLI failure clears a LIVE CONV_FILE mid-retry → attempt 2's first-round path carries Prior Review Thread" {
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  printf '### Round 1 — CONCERNS\n\n[Major] stale finding needing re-check.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+  create_flaky_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] round2 finding." "exit"
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+
+  local captured
+  captured=$(agy_args agy)
+  # attempt 2 must NOT resume the (now-cleared) old conversation...
+  [[ "$captured" != *"--conversation"* ]]
+  # ...and must carry the thread call site 1 skipped, via the new
+  # retry-path inject_review_thread call right after CONV_FILE is dropped.
+  [[ "$captured" == *"## Prior Review Thread"* ]]
+  [[ "$captured" == *"stale finding needing re-check"* ]]
+}
+
 # history: engine-not-found is an orphan exit (no engine call will ever
 # happen this cycle) — HISTORY_FILE is dropped to block cross-plan
 # contamination, but COUNTER_FILE deliberately survives (unchanged contract).
@@ -4231,7 +4260,10 @@ line3"
   ! grep -q "第200条中文发现" "$history_file"
   local hist_bytes
   hist_bytes=$(wc -c < "$history_file" | tr -d ' ')
-  [ "$hist_bytes" -lt 6200 ]
+  # HISTORY_ROUND_BYTES is 9000 (lib/common.sh); 9200 leaves the same ~200-byte
+  # margin the original 6200/6000 pairing did, for the "### Round N — VERDICT"
+  # header + trailing blank line this clamp doesn't count against the budget.
+  [ "$hist_bytes" -lt 9200 ]
 }
 
 # prompt: A4 + D integration — an overlong accumulated thread (many rounds)
@@ -4241,13 +4273,16 @@ line3"
   local history_file i
   history_file=$(get_history_file)
   : > "$history_file"
-  for i in $(seq 1 200); do
+  # 400 rounds (not 200): HISTORY_INJECT_BYTES is 48000 (lib/common.sh), up
+  # from the old 24000 — this fixture must exceed the CURRENT budget by a
+  # comfortable margin, or the clamp under test never actually triggers.
+  for i in $(seq 1 400); do
     printf '### Round %d — CONCERNS\n\n[Major] 第%d轮中文审阅意见内容一，用于撑大历史文件体积用于测试截断行为是否安全。第%d轮中文审阅意见内容二，重复一遍确保单条记录本身足够长。\n\n' \
       "$i" "$i" "$i" >> "$history_file"
   done
   local hist_bytes
   hist_bytes=$(wc -c < "$history_file" | tr -d ' ')
-  [ "$hist_bytes" -gt 24000 ]
+  [ "$hist_bytes" -gt 48000 ]
 
   set_counter_value 1 test-session 5
   create_mock_engine "agy" "<verdict>CONCERNS</verdict>
@@ -4259,7 +4294,7 @@ line3"
   local args_file="${MOCK_BIN}/../.agy-args-agy"
   [[ "$(cat "$args_file")" == *"## Prior Review Thread"* ]]
   [[ "$(cat "$args_file")" != *"Round 1 —"* ]]
-  [[ "$(cat "$args_file")" == *"Round 200 —"* ]]
+  [[ "$(cat "$args_file")" == *"Round 400 —"* ]]
   run bash -c "iconv -f UTF-8 -t UTF-8 < '$args_file' >/dev/null 2>&1"
   [ "$status" -eq 0 ]
 }

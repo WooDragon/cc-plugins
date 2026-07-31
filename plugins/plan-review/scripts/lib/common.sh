@@ -160,6 +160,30 @@ backfill_engine_err() {
 #     `wc -c` matches this file's existing byte-counting idiom (see
 #     lib/engines/agy.sh's AGY_PROMPT_BYTES ARG_MAX guard).
 
+# Byte-budget constants for clamp_head_bytes/clamp_tail_bytes call sites —
+# single source of truth so a future tune only needs one edit, not a grep
+# across plan-review.sh. Same spirit as DELTA_REVIEW_RULES above.
+#   GLOBAL_MD_BYTES      — $HOME/.claude/CLAUDE.md ingestion cap.
+#   PROJECT_MD_BYTES     — $CWD/CLAUDE.md ingestion cap.
+#   HISTORY_ROUND_BYTES  — A3: per-round review text written into HISTORY_FILE.
+#                           9000 (not 6000): review-system-prompt.md caps
+#                           review output at 3000 CHARACTERS, and 3000 Chinese
+#                           characters is ~9KB — the old 6000-byte cap would
+#                           truncate roughly a third of a full-length CJK
+#                           review before it's even written to history.
+#   HISTORY_INJECT_BYTES — inject_review_thread: total accumulated thread
+#                           budget read back from HISTORY_FILE. 48000 (not
+#                           24000): keeps ~5 full HISTORY_ROUND_BYTES rounds
+#                           instead of ~4, now that each round is larger.
+#                           When the accumulated thread exceeds this budget,
+#                           clamp_tail_bytes keeps the MOST RECENT rounds and
+#                           drops the oldest — earlier rounds are the ones
+#                           silently cut, not later ones.
+GLOBAL_MD_BYTES=8000
+PROJECT_MD_BYTES=24000
+HISTORY_ROUND_BYTES=9000
+HISTORY_INJECT_BYTES=48000
+
 # clamp_head_bytes <N> — keep the HEAD (first N bytes), drop the tail.
 clamp_head_bytes() {
   local n="$1" content total clamped
