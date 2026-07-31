@@ -27,7 +27,10 @@ APPROVE_MARKER="$COUNTER_DIR/.review-approved-${SESSION_ID}"
 [ -f "$COUNTER_FILE" ] || [ -f "$APPROVE_MARKER" ] || exit 0
 
 # --- Determine review status ---
-IFS=: read -r ATTEMPT TOTAL_ROUNDS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0")"
+# Counter format is ATTEMPT:TOTAL:CONSEC_REJECTS (third field unused here but
+# MUST be consumed by its own variable — a two-var read would leave ":N" glued
+# onto TOTAL_ROUNDS, fail the numeric check below, and zero the display).
+IFS=: read -r ATTEMPT TOTAL_ROUNDS _CONSEC_REJECTS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0:0")"
 ATTEMPT=${ATTEMPT:-0}
 TOTAL_ROUNDS=${TOTAL_ROUNDS:-$ATTEMPT}
 [[ "$ATTEMPT" =~ ^[0-9]+$ ]] || ATTEMPT=0

@@ -75,6 +75,11 @@ names.
 | `REVIEW_DRY_RUN` | `0` | Set `1` to skip engine call (synthetic APPROVE) |
 | `REVIEW_MAX_ROUNDS` | `3` | Max non-Critical consultation rounds (CONCERNS accumulation) before escalation |
 | `REVIEW_MAX_TOTAL_ROUNDS` | `20` | Absolute global ceiling (including REJECT rounds); hard-blocks once reached |
+| `REVIEW_MAX_CONSECUTIVE_REJECTS` | `0` | Opt-in third valve: K consecutive REJECT rounds → allow through for user arbitration (mirrors the non-Critical valve). `0` disables it, preserving the historical contract that REJECT rounds are unlimited up to the global hard stop. Recommended when the review engine is high-recall (e.g. codex on a large reasoning model): field data shows such engines can emit a fresh Critical every round, making the tombstone deny the only built-in exit |
+| `REVIEW_HISTORY_DISABLED` | `0` | Set `1` to disable prior-round review-thread injection for memoryless engines (currently codex; see "Round Memory" below) |
+| `REVIEW_REPO_ACCESS` | `0` | codex engine only. Set `1` to run the reviewer with `-C <project cwd>` (still `-s read-only`) instead of an empty temp dir, letting it ground findings — and verify the plan author's factual rebuttals — against real code. Trade-offs: repo content becomes readable by the engine's provider, and rounds get slower |
+| `REVIEW_GLOBAL_MD_LIMIT` | `3000` | Bytes of `~/.claude/CLAUDE.md` included in the review prompt |
+| `REVIEW_PROJECT_MD_LIMIT` | `8000` | Bytes of `$CWD/CLAUDE.md` included in the review prompt. The fixed 8KB cut has been observed to slice off load-bearing environment facts mid-file; long-context engines can afford much larger values |
 | `REVIEW_ENGINE_TIMEOUT` | `595` | Engine call timeout in seconds (requires `timeout`/`gtimeout` on `PATH`) |
 | `REVIEW_API_URL` | _(empty)_ | REST API fallback base URL (OpenAI-compatible), used when the CLI path fails |
 | `REVIEW_API_KEY` | _(empty)_ | REST API fallback bearer token |
@@ -139,7 +144,7 @@ When `REVIEW_ENGINE=claude`, the script spawns `claude -p` with triple isolation
 When `REVIEW_ENGINE=codex`, the script spawns `codex exec` with a parallel set of isolation flags:
 
 1. **`-s read-only`** — sandbox policy; the reviewer process cannot write to disk
-2. **`-C <fresh empty temp dir>`** — the working root is a throwaway empty directory, not the user's project. This relocates the working root; on its own it does not stop a tool from reaching paths outside that directory (see the tool-surface caveat below)
+2. **`-C <fresh empty temp dir>`** — the working root is a throwaway empty directory, not the user's project. This relocates the working root; on its own it does not stop a tool from reaching paths outside that directory (see the tool-surface caveat below). With `REVIEW_REPO_ACCESS=1` the working root becomes the project cwd instead (sandbox stays read-only) — an explicit opt-in trading isolation for grounded review
 3. **`--ephemeral`** — no session files persisted to disk
 4. **`--skip-git-repo-check`** — required because the isolated temp dir is not a git repo
 
@@ -160,6 +165,17 @@ This lowers 429 frequency and quota consumption on multi-round negotiations. The
 
 **agy invocation contract**: since v1.2.0 the agy CLI is always called with `--output-format json`, and the review body is text-sliced out of the (not-well-formed) JSON `response` field. This depends on agy's envelope carrying `conversation_id` and `response` keys. If a future agy build changes that envelope shape, extraction fails closed (empty review → retry / REST fallback), so a shape change degrades gracefully rather than mis-parsing — but it does mean the agy path is coupled to this envelope. The `claude` engine path and the REST fallback are unchanged. With no env config, the review decision logic behaves as before; the observable deltas are the JSON invocation, multi-round session reuse, and the shorter degrade cooldown (600s).
 
+## Round Memory (codex, v1.5.0)
+
+`codex exec --ephemeral` has no server-side conversation reuse: every consultation round is a fresh process that re-reads the whole plan from scratch. For a high-recall reviewer this breaks convergence structurally — each round it re-discovers a *new* batch of findings on text it already reviewed (and implicitly accepted) last round, so the plan author can never satisfy it. Field data from the first production run of the codex engine: 17 rounds (11 REJECT / 6 CONCERNS), zero APPROVE, exit only via the safety valve, ~2h40m wall clock.
+
+The fix mirrors agy's session reuse at the prompt layer. Engines declare `ENGINE_WANTS_HISTORY=1` at source time (currently only `codex.sh`); for those engines the orchestrator:
+
+- **Records** every CONCERNS/REJECT round's review text (capped 6KB/round) into a session-scoped thread file.
+- **Injects** the accumulated thread into the next round's prompt under `## Prior Review Thread`, with delta-review rules: re-verify prior Criticals first; a factual rebuttal the reviewer cannot verify is re-emitted as `[Major] [UNVERIFIED-REBUTTAL]` (CONCERNS — surfaces to the human) instead of staying Critical or being silently dropped; new non-Critical findings on unchanged text are waived; no new Critical + prior Criticals resolved → must not REJECT.
+
+The thread lives and dies with the review cycle (cleared on approval, escalation, plan-change-after-approve, no-plan fail-closed, and both valves). Engine failures do *not* clear it — a failed CLI call invalidates agy's resume handle, not the thread's content. `REVIEW_HISTORY_DISABLED=1` turns the whole mechanism off. agy does not participate (its `--conversation` resume already carries memory); the claude engine is deliberately left unchanged.
+
 ## Fault Tolerance
 
 - **jq missing** → allow (can't parse input)
@@ -173,9 +189,11 @@ This lowers 429 frequency and quota consumption on multi-round negotiations. The
 
 This plugin sends the following data to the configured review engine — the Gemini API, the Anthropic API, or, when `REVIEW_ENGINE=codex`, whichever provider the user's `~/.codex/config.toml` selects:
 
-- **Global CLAUDE.md** — first 3KB of `~/.claude/CLAUDE.md`
-- **Project CLAUDE.md** — first 8KB of `$CWD/CLAUDE.md`
+- **Global CLAUDE.md** — first `REVIEW_GLOBAL_MD_LIMIT` bytes (default 3KB) of `~/.claude/CLAUDE.md`
+- **Project CLAUDE.md** — first `REVIEW_PROJECT_MD_LIMIT` bytes (default 8KB) of `$CWD/CLAUDE.md`
 - **Recent conversation** — last 3 user messages from the session transcript
 - **Plan content** — the full implementation plan under review
+- **Prior review rounds** — for memoryless engines (codex), the engine's own previous review feedback for this cycle (see "Round Memory")
+- **Repository contents** — only with `REVIEW_REPO_ACCESS=1` (codex): the reviewer runs read-only inside the project working directory and may read any file in it
 
 This context is necessary for meaningful adversarial review. If your CLAUDE.md or conversations contain sensitive information (internal hostnames, credentials, business logic), be aware that this data will be sent to the external API.

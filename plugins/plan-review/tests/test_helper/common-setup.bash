@@ -105,6 +105,19 @@ reset_leaky_env() {
   unset MOCK_CODEX_NO_SECOND_DASHES
   unset MOCK_CODEX_EXTRA_BLANK
   unset MOCK_CODEX_STRICT_UTF8
+
+  # Consecutive-REJECT valve (default 0 = disabled in production)
+  unset REVIEW_MAX_CONSECUTIVE_REJECTS
+
+  # Prior-round review thread (codex-scoped round memory)
+  unset REVIEW_HISTORY_DISABLED
+
+  # codex repo access (default off — reviewer runs in an empty temp dir)
+  unset REVIEW_REPO_ACCESS
+
+  # Context byte limits (defaults 3000/8000)
+  unset REVIEW_GLOBAL_MD_LIMIT
+  unset REVIEW_PROJECT_MD_LIMIT
 }
 
 common_teardown() {
@@ -325,6 +338,37 @@ fi
   echo "ERROR: mock codex failure"
 } >&2
 rm -f "\$_mock_stdin"
+if [ -n "\$out_file" ]; then
+  cat > "\$out_file" << 'OUTPUT_EOF'
+${output}
+OUTPUT_EOF
+fi
+exit 0
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/codex"
+}
+
+# create_mock_codex_capture <output>
+#   Like create_mock_codex, but additionally persists the prompt received on
+#   stdin to ${TEST_TEMP_DIR}/codex-stdin (overwritten per invocation — in a
+#   multi-round test, read it after each run_hook) so tests can assert on
+#   prompt COMPOSITION: Prior Review Thread injection, CLAUDE.md byte limits.
+#   Skips the stderr banner echo — prompt-composition tests don't exercise
+#   the stderr filter, and the echo would just slow multi-round cases down.
+create_mock_codex_capture() {
+  local output="$1"
+  local args_file="${MOCK_BIN}/../.agy-args-codex"
+  local capture_file="${TEST_TEMP_DIR}/codex-stdin"
+  cat > "${MOCK_BIN}/codex" << MOCK_EOF
+#!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
+out_file=""
+prev=""
+for arg in "\$@"; do
+  if [ "\$prev" = "-o" ]; then out_file="\$arg"; fi
+  prev="\$arg"
+done
+cat > '${capture_file}'
 if [ -n "\$out_file" ]; then
   cat > "\$out_file" << 'OUTPUT_EOF'
 ${output}
@@ -697,32 +741,57 @@ create_approve_marker() {
 # --- Counter Helpers ---
 
 # get_counter_value [session_id]
-#   Reads the ATTEMPT field from counter file (new format ATTEMPT:TOTAL).
+#   Reads the ATTEMPT field from counter file (format ATTEMPT:TOTAL:CONSEC).
 #   Returns 0 if missing or unparseable.
 get_counter_value() {
   local session="${1:-test-session}"
-  local attempt total
-  IFS=: read -r attempt total <<< "$(cat "${REVIEW_COUNTER_DIR}/.review-count-${session}" 2>/dev/null || echo "0:0")"
+  local attempt total consec
+  IFS=: read -r attempt total consec <<< "$(cat "${REVIEW_COUNTER_DIR}/.review-count-${session}" 2>/dev/null || echo "0:0:0")"
   echo "${attempt:-0}"
 }
 
 # get_total_rounds [session_id]
-#   Reads the TOTAL_ROUNDS field from counter file (new format ATTEMPT:TOTAL).
-#   Falls back to ATTEMPT for old single-number format.
+#   Reads the TOTAL_ROUNDS field from counter file (format ATTEMPT:TOTAL:CONSEC).
+#   Falls back to ATTEMPT for old single-number format. The third field MUST be
+#   consumed by its own read variable — a two-var read would leave ":N" glued
+#   onto total.
 get_total_rounds() {
   local session="${1:-test-session}"
-  local attempt total
-  IFS=: read -r attempt total <<< "$(cat "${REVIEW_COUNTER_DIR}/.review-count-${session}" 2>/dev/null || echo "0:0")"
+  local attempt total consec
+  IFS=: read -r attempt total consec <<< "$(cat "${REVIEW_COUNTER_DIR}/.review-count-${session}" 2>/dev/null || echo "0:0:0")"
   echo "${total:-$attempt}"
 }
 
-# set_counter_value <attempt> [session_id] [total_rounds]
-#   Sets the counter file for the given session in ATTEMPT:TOTAL format.
+# get_consec_rejects [session_id]
+#   Reads the CONSEC_REJECTS field (third) from the counter file.
+#   Returns 0 for missing file or legacy two-field/one-field formats.
+get_consec_rejects() {
+  local session="${1:-test-session}"
+  local attempt total consec
+  IFS=: read -r attempt total consec <<< "$(cat "${REVIEW_COUNTER_DIR}/.review-count-${session}" 2>/dev/null || echo "0:0:0")"
+  echo "${consec:-0}"
+}
+
+# set_counter_value <attempt> [session_id] [total_rounds] [consec_rejects]
+#   Sets the counter file for the given session in ATTEMPT:TOTAL:CONSEC format.
+#   Omitting consec_rejects writes the two-field legacy format — deliberate:
+#   existing call sites keep exercising the backward-compat parse path.
 set_counter_value() {
   local value="$1"
   local session="${2:-test-session}"
   local total="${3:-$value}"
-  echo "${value}:${total}" > "${REVIEW_COUNTER_DIR}/.review-count-${session}"
+  if [ $# -ge 4 ]; then
+    echo "${value}:${total}:${4}" > "${REVIEW_COUNTER_DIR}/.review-count-${session}"
+  else
+    echo "${value}:${total}" > "${REVIEW_COUNTER_DIR}/.review-count-${session}"
+  fi
+}
+
+# get_history_file [session_id]
+#   Echoes the review-history file path for the session (may not exist).
+get_history_file() {
+  local session="${1:-test-session}"
+  printf '%s' "${REVIEW_COUNTER_DIR}/.review-history-${session}"
 }
 
 # --- Isolated Script Copy (bootstrap fail-open scenarios) ---

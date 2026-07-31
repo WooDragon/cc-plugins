@@ -33,6 +33,11 @@
 #   REVIEW_API_URL=<url>         — REST API fallback base URL (OpenAI-compatible, e.g. https://proxy.example.com)
 #   REVIEW_API_KEY=<key>         — REST API fallback auth key (Bearer token)
 #   REVIEW_ENGINE_DEGRADE_TTL=N  — seconds Gemini stays in degraded state after capacity exhaustion (default: 600)
+#   REVIEW_MAX_CONSECUTIVE_REJECTS=N — K consecutive REJECT rounds → allow (escalate to user); 0 = disabled (default)
+#   REVIEW_HISTORY_DISABLED=1    — disable prior-round review-thread injection for memoryless engines (codex)
+#   REVIEW_REPO_ACCESS=1         — codex engine only: run the reviewer in the project cwd (read-only) instead of an empty temp dir
+#   REVIEW_GLOBAL_MD_LIMIT=N     — bytes of global CLAUDE.md sent to the engine (default: 3000)
+#   REVIEW_PROJECT_MD_LIMIT=N    — bytes of project CLAUDE.md sent to the engine (default: 8000)
 set -euo pipefail
 
 INPUT=$(cat)
@@ -166,6 +171,13 @@ REVIEW_DRY_RUN="${REVIEW_DRY_RUN:-${GEMINI_DRY_RUN:-0}}"
 REVIEW_MAX_ROUNDS="${REVIEW_MAX_ROUNDS:-${GEMINI_MAX_REVIEWS:-3}}"
 REVIEW_MAX_TOTAL_ROUNDS="${REVIEW_MAX_TOTAL_ROUNDS:-20}"
 REVIEW_ENGINE="${REVIEW_ENGINE:-gemini}"
+# Consecutive-REJECT valve threshold: 0 (default) = disabled, preserving the
+# historical contract that REJECT rounds are unlimited up to the global valve.
+# Sanitized like the counter fields — a garbage value must disable the valve,
+# not kill the hook via a non-numeric [ -ge ] comparison under set -e.
+REVIEW_MAX_CONSECUTIVE_REJECTS="${REVIEW_MAX_CONSECUTIVE_REJECTS:-0}"
+[[ "$REVIEW_MAX_CONSECUTIVE_REJECTS" =~ ^[0-9]+$ ]] || REVIEW_MAX_CONSECUTIVE_REJECTS=0
+REVIEW_HISTORY_DISABLED="${REVIEW_HISTORY_DISABLED:-0}"
 
 # --- Engine selection: whitelist case, never string-concat into a source
 #     path (REVIEW_ENGINE is externally controlled via env var — string
@@ -254,14 +266,25 @@ DEGRADE_FILE="$COUNTER_DIR/.gemini-degraded"
 # instead of being resent every round. Lifetime = one review cycle (see cleanup
 # points at the no-plan fail-closed / ack-round-approved / non-critical-valve exits).
 CONV_FILE="$COUNTER_DIR/.conversation-${SESSION_ID}"
+# Prior-round review thread (session-scoped) — accumulated review feedback for
+# engines that declare ENGINE_WANTS_HISTORY=1 (memoryless CLIs, currently
+# codex). Injected into the prompt each round so the engine performs a delta
+# review instead of a from-scratch re-review. Same lifetime as CONV_FILE: one
+# review cycle (cleaned at every CONV_FILE cleanup point EXCEPT engine-failure
+# paths — a failed CLI call invalidates agy's resume handle but not the
+# thread's content).
+HISTORY_FILE="$COUNTER_DIR/.review-history-${SESSION_ID}"
 
-# --- Read counter (new format ATTEMPT:TOTAL, backward-compat with old single-number) ---
-IFS=: read -r ATTEMPT TOTAL_ROUNDS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0")"
+# --- Read counter (format ATTEMPT:TOTAL:CONSEC_REJECTS, backward-compat with
+#     the older ATTEMPT:TOTAL and the original single-number formats) ---
+IFS=: read -r ATTEMPT TOTAL_ROUNDS CONSEC_REJECTS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0:0")"
 # Three-layer defense: empty fallback → old format compat → dirty data sanitization
 ATTEMPT=${ATTEMPT:-0}
 TOTAL_ROUNDS=${TOTAL_ROUNDS:-$ATTEMPT}  # old format "3" → ATTEMPT=3, TOTAL_ROUNDS="" → 3
+CONSEC_REJECTS=${CONSEC_REJECTS:-0}     # two-field format → no reject streak recorded → 0
 [[ "$ATTEMPT" =~ ^[0-9]+$ ]] || ATTEMPT=0
 [[ "$TOTAL_ROUNDS" =~ ^[0-9]+$ ]] || TOTAL_ROUNDS=0
+[[ "$CONSEC_REJECTS" =~ ^[0-9]+$ ]] || CONSEC_REJECTS=0
 
 # --- 1. Extract plan content (must precede ack-round guard for hash comparison) ---
 PLAN=$(echo "$INPUT" | jq -r '.tool_input.plan // ""')
@@ -299,7 +322,7 @@ if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null || echo "")
   CWD_VAL=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")
   log_decision "decision=deny reason=no-plan-content-fail-closed resolve=${RESOLVE_REASON:-none} resolvePath=${RESOLVE_PATH:-empty} planFilePath=${PLAN_FILE_PATH:-empty} top_keys=${TOP_KEYS} tool_input_keys=${TI_KEYS} transcript_path=${TRANSCRIPT_PATH:-empty} cwd=${CWD_VAL:-empty}"
-  rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}"
+  rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
   # Error message routed by the resolver's RESOLVE_REASON (see
   # lib/plan-source.sh: plan_source_error_reason) — sets $REASON directly.
   plan_source_error_reason
@@ -316,15 +339,16 @@ if [ -f "$APPROVE_MARKER" ]; then
   if [ -z "$APPROVED_HASH" ] || [ "$CURRENT_HASH" = "$APPROVED_HASH" ]; then
     # True ack-round: plan unchanged (empty marker = legacy format, unconditional allow)
     log_decision "decision=allow reason=ack-round-approved"
-    rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}"
+    rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
     allow_with_reason "Red Team 审阅已通过，plan 放行。"
   else
     # Plan was modified after approve: marker invalid, delete and fall through to re-review.
-    # Also drop the conversation handle — the session history is about the OLD
-    # plan; reusing it to review a DIFFERENT plan would resume stale context.
-    # The re-review must start a fresh first round for the new plan.
+    # Also drop the conversation handle AND the review thread — both hold
+    # history about the OLD plan; resuming either against a DIFFERENT plan
+    # would feed the engine stale context. The re-review must start a fresh
+    # first round for the new plan.
     log_decision "decision=review-again reason=plan-changed-after-approve conv-cleared"
-    rm -f "$APPROVE_MARKER" "${CONV_FILE:-}"
+    rm -f "$APPROVE_MARKER" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
     # Fall through to full review pipeline
   fi
 fi
@@ -334,8 +358,9 @@ fi
 if [ "$TOTAL_ROUNDS" -ge "$REVIEW_MAX_TOTAL_ROUNDS" ]; then
   log_decision "decision=deny reason=global-safety-valve total=$TOTAL_ROUNDS"
   # Keep the COUNTER_FILE tombstone, but the review cycle is over — no further
-  # engine call will happen, so drop the session ref to avoid an orphan CONV_FILE.
-  rm -f "${CONV_FILE:-}"
+  # engine call will happen, so drop the session refs to avoid orphan
+  # CONV_FILE / HISTORY_FILE.
+  rm -f "${CONV_FILE:-}" "${HISTORY_FILE:-}"
   BLOCK_MSG="## Red Team Review — HARD STOP
 
 审阅已达全局上限（${TOTAL_ROUNDS}/${REVIEW_MAX_TOTAL_ROUNDS}），仍存在未解决的审阅意见。
@@ -350,7 +375,7 @@ fi
 # --- Non-Critical safety valve: CONCERNS rounds exhausted → allow (escalate to user) ---
 if [ "$ATTEMPT" -ge "$REVIEW_MAX_ROUNDS" ]; then
   log_decision "decision=allow reason=non-critical-safety-valve round=$ATTEMPT total=$TOTAL_ROUNDS"
-  rm -f "$COUNTER_FILE" "${CONV_FILE:-}"
+  rm -f "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
   VALVE_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
 
 非 Critical 磋商已达上限（${ATTEMPT}/${REVIEW_MAX_ROUNDS}），未能达成一致。Plan 直接呈现给用户做最终裁决。"
@@ -361,13 +386,35 @@ EOF
   exit 0
 fi
 
+# --- Consecutive-REJECT safety valve (opt-in, default off): K REJECT rounds
+#     in a row → allow (escalate to user), mirroring the non-Critical valve
+#     above. Rationale: REJECT rounds don't consume ATTEMPT and reset it to 0,
+#     so with a high-recall engine that surfaces a fresh Critical every round
+#     the ONLY built-in exit is the global valve's tombstone deny at
+#     REVIEW_MAX_TOTAL_ROUNDS (observed in the field: 17 rounds, 11 REJECTs).
+#     This valve provides a user-arbitration exit before that hard stop.
+#     Default 0 keeps the historical contract (unlimited REJECTs) intact.
+if [ "$REVIEW_MAX_CONSECUTIVE_REJECTS" -gt 0 ] && [ "$CONSEC_REJECTS" -ge "$REVIEW_MAX_CONSECUTIVE_REJECTS" ]; then
+  log_decision "decision=allow reason=consecutive-reject-valve consec=$CONSEC_REJECTS total=$TOTAL_ROUNDS"
+  rm -f "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
+  CREJ_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
+
+连续 REJECT 已达上限（${CONSEC_REJECTS}/${REVIEW_MAX_CONSECUTIVE_REJECTS}），审阅未能收敛。Plan 直接呈现给用户做最终裁决。
+向用户汇报时，必须如实同步历轮仍未解决的 Critical 意见，不得只展示 plan。"
+  CREJ_JSON=$(printf '%s' "$CREJ_MSG" | jq -Rs .)
+  cat << EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${CREJ_JSON}}}
+EOF
+  exit 0
+fi
+
 # --- Pre-flight manifest check (AFTER non-critical valve, not before) ---
 # Format correction, NOT negotiation round: increments TOTAL_ROUNDS only.
 # ATTEMPT stays frozen — pre-flight denies do not count toward MAX_ROUNDS.
 # Global safety valve (TOTAL_ROUNDS >= 20) still protects against infinite loops.
 if needs_manifest "$PLAN" && ! has_manifest "$PLAN"; then
   TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
-  echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
+  echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}:${CONSEC_REJECTS:-0}" > "$COUNTER_FILE"
   log_decision "decision=deny reason=missing-manifest"
   MANIFEST_MSG="## Red Team Pre-flight — MISSING DISPATCH MANIFEST
 
@@ -386,7 +433,7 @@ fi
 # Fires when manifest is present but declares zero real agent steps.
 if needs_manifest "$PLAN" && has_manifest "$PLAN" && ! manifest_has_real_agent "$PLAN"; then
   TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
-  echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
+  echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}:${CONSEC_REJECTS:-0}" > "$COUNTER_FILE"
   log_decision "decision=deny reason=degenerate-manifest"
   DEGEN_MSG="## Red Team Pre-flight — DEGENERATE DISPATCH MANIFEST
 
@@ -405,11 +452,23 @@ fi
 # --- 2. Collect project context ---
 CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 
+# Byte limits are env-tunable (defaults preserve historical behavior): the
+# fixed 8000-byte project cut has been observed to slice off load-bearing
+# facts mid-file (e.g. an environment constraint the reviewer needed to catch
+# a real defect). Long-context engines can afford far larger limits — raise
+# per-user via env rather than globally. Non-numeric values fall back to the
+# defaults: `head -c garbage` exits non-zero and, under set -e, would kill
+# the hook before it emits its decision JSON.
+REVIEW_GLOBAL_MD_LIMIT="${REVIEW_GLOBAL_MD_LIMIT:-3000}"
+[[ "$REVIEW_GLOBAL_MD_LIMIT" =~ ^[0-9]+$ ]] || REVIEW_GLOBAL_MD_LIMIT=3000
+REVIEW_PROJECT_MD_LIMIT="${REVIEW_PROJECT_MD_LIMIT:-8000}"
+[[ "$REVIEW_PROJECT_MD_LIMIT" =~ ^[0-9]+$ ]] || REVIEW_PROJECT_MD_LIMIT=8000
+
 GLOBAL_MD=""
-[ ! -f "$HOME/.claude/CLAUDE.md" ] || GLOBAL_MD=$(head -c 3000 "$HOME/.claude/CLAUDE.md")
+[ ! -f "$HOME/.claude/CLAUDE.md" ] || GLOBAL_MD=$(head -c "$REVIEW_GLOBAL_MD_LIMIT" "$HOME/.claude/CLAUDE.md")
 
 PROJECT_MD=""
-[ ! -f "$CWD/CLAUDE.md" ] || PROJECT_MD=$(head -c 8000 "$CWD/CLAUDE.md")
+[ ! -f "$CWD/CLAUDE.md" ] || PROJECT_MD=$(head -c "$REVIEW_PROJECT_MD_LIMIT" "$CWD/CLAUDE.md")
 
 # --- 3. Extract recent user messages from transcript ---
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // ""')
@@ -490,6 +549,46 @@ ${USER_REQ:-<not available>}
 ## Plan to Review
 ${PLAN}
 DYNEOF
+
+# --- Prior-round review thread (engine-scoped) ---
+# Only for engines that declare ENGINE_WANTS_HISTORY=1 at source time
+# (currently codex — no server-side conversation reuse; agy resumes its own
+# conversation via --conversation, claude is deliberately left unchanged).
+# Injecting the engine's OWN previous rounds turns each round into a delta
+# review: without it, a memoryless high-recall reviewer re-reviews the whole
+# (ever-growing) plan from scratch and surfaces a fresh batch of findings on
+# UNCHANGED text every round, so the consultation never converges to APPROVE
+# (observed in the field: 17 rounds, exit only via safety valve). The rules
+# below live HERE, not in the shared prompt asset, precisely because they
+# only make sense when a thread is attached — other engines' prompts must
+# stay byte-identical.
+if [ "${ENGINE_WANTS_HISTORY:-0}" = "1" ] && [ "$REVIEW_HISTORY_DISABLED" != "1" ] && [ -s "$HISTORY_FILE" ]; then
+  cat >> "$PROMPT_FILE" << 'HISTEOF'
+
+## Prior Review Thread
+Below are YOUR OWN previous review rounds for this same plan, oldest first.
+The "Plan to Review" above is the CURRENT revision, already amended in
+response to this thread. This round is a DELTA review — apply these rules:
+1. Re-verify every Critical from the thread against the current plan:
+   resolved → do not repeat it; convincingly rebutted → drop it. If a
+   rebuttal rests on a factual claim about the codebase that you cannot
+   verify from the plan or project context, re-emit the finding as
+   `[Major] [UNVERIFIED-REBUTTAL]` (→ CONCERNS, never REJECT) so the human
+   arbitrates it — do not keep it Critical solely to win the argument.
+2. Do NOT raise new findings on plan text that was already present in the
+   revision you previously reviewed, unless the finding is a genuine
+   Critical per the severity definitions. Non-Critical issues you did not
+   raise back then are waived — re-litigating waived text burns scarce
+   negotiation rounds without improving the plan.
+3. Focus new-finding effort on text that changed since your last round
+   (revisions, new sections, rebuttals).
+4. If every prior Critical is resolved or rebutted and no new Critical
+   exists, do NOT reject: choose CONCERNS or APPROVE per the verdict rules.
+
+### Thread
+HISTEOF
+  cat "$HISTORY_FILE" >> "$PROMPT_FILE"
+fi
 
 # Volatile tail: round context (always last, changes every round)
 if [ "$TOTAL_ROUNDS" -gt 0 ]; then
@@ -754,15 +853,32 @@ fi
 TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
 
 if [ "$VERDICT" = "REJECT" ]; then
-  # REJECT (Critical): reset ATTEMPT so subsequent non-Critical rounds restart fresh
+  # REJECT (Critical): reset ATTEMPT so subsequent non-Critical rounds restart
+  # fresh; extend the reject streak (consumed by the consecutive-REJECT valve).
   ATTEMPT=0
+  CONSEC_REJECTS=$((CONSEC_REJECTS + 1))
 else
-  # CONCERNS: non-Critical, increment ATTEMPT
+  # CONCERNS: non-Critical, increment ATTEMPT; any non-REJECT breaks the streak
   ATTEMPT=$((ATTEMPT + 1))
+  CONSEC_REJECTS=0
 fi
 
-echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
-log_decision "verdict=$VERDICT decision=deny round=$ATTEMPT/$REVIEW_MAX_ROUNDS total=$TOTAL_ROUNDS/$REVIEW_MAX_TOTAL_ROUNDS"
+echo "${ATTEMPT}:${TOTAL_ROUNDS}:${CONSEC_REJECTS}" > "$COUNTER_FILE"
+log_decision "verdict=$VERDICT decision=deny round=$ATTEMPT/$REVIEW_MAX_ROUNDS total=$TOTAL_ROUNDS/$REVIEW_MAX_TOTAL_ROUNDS consec_rejects=$CONSEC_REJECTS"
+
+# --- Append this round's review to the thread (engine-scoped, mirrors the
+#     Prior Review Thread injection above). Best-effort side channel: a write
+#     failure must never kill the hook before it emits its decision JSON
+#     (set -e), hence the trailing `|| true`. Per-round cap (6000 bytes)
+#     bounds the file even if an engine ignores the prompt's 3000-char limit;
+#     APPROVE rounds are not recorded — approval ends the cycle (ack flow),
+#     and a post-approve plan change clears the thread entirely.
+if [ "${ENGINE_WANTS_HISTORY:-0}" = "1" ] && [ "$REVIEW_HISTORY_DISABLED" != "1" ]; then
+  {
+    printf '\n### Round %s — %s\n' "$TOTAL_ROUNDS" "$VERDICT"
+    printf '%s\n' "$REVIEW" | head -c 6000
+  } >> "$HISTORY_FILE" 2>/dev/null || true
+fi
 
 # --- 8. Compose deny feedback (delegated to lib/verdict.sh, severity-differentiated) ---
 render_concerns_or_reject_feedback "$VERDICT" "$ATTEMPT" "$TOTAL_ROUNDS" "$REVIEW_ENGINE" \

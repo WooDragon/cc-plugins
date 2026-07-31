@@ -3704,3 +3704,247 @@ MOCK_EOF
   [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
   [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
 }
+
+# =============================================================================
+# Round memory: prior review thread (engine-scoped — codex declares
+# ENGINE_WANTS_HISTORY=1; agy/claude do not)
+# =============================================================================
+
+# history: 1. codex deny round appends a thread record
+@test "history: codex CONCERNS round writes review thread record" {
+  export REVIEW_ENGINE="codex"
+  create_mock_codex "<verdict>CONCERNS</verdict>
+[Major] finding-alpha."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ -f "$(get_history_file)" ]
+  grep -q -- "Round 1 — CONCERNS" "$(get_history_file)"
+  grep -q "finding-alpha" "$(get_history_file)"
+}
+
+# history: 2. second round's prompt carries the thread + delta-review rules;
+# first round's prompt must NOT (no thread exists yet)
+@test "history: second codex round injects Prior Review Thread into prompt" {
+  export REVIEW_ENGINE="codex"
+  create_mock_codex_capture "<verdict>REJECT</verdict>
+[Critical] finding-bravo."
+  INPUT=$(build_input)
+
+  run_hook
+  assert_deny_json
+  ! grep -q "Prior Review Thread" "${TEST_TEMP_DIR}/codex-stdin"
+
+  run_hook
+  assert_deny_json
+  grep -q "Prior Review Thread" "${TEST_TEMP_DIR}/codex-stdin"
+  grep -q -- "Round 1 — REJECT" "${TEST_TEMP_DIR}/codex-stdin"
+  grep -q "finding-bravo" "${TEST_TEMP_DIR}/codex-stdin"
+}
+
+# history: 3. memoryful engine (agy) must not write a thread file
+@test "history: gemini engine does not write review thread" {
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] finding-charlie."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ ! -f "$(get_history_file)" ]
+}
+
+# history: 4. kill switch suppresses both record and injection
+@test "history: REVIEW_HISTORY_DISABLED=1 → no thread file" {
+  export REVIEW_ENGINE="codex"
+  export REVIEW_HISTORY_DISABLED=1
+  create_mock_codex "<verdict>CONCERNS</verdict>
+[Major] finding-delta."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ ! -f "$(get_history_file)" ]
+}
+
+# history: 5. ack-round approval tears the thread down with the counters
+@test "history: ack-round approval clears review thread" {
+  export REVIEW_ENGINE="codex"
+  create_mock_codex "<verdict>APPROVE</verdict>
+Looks good."
+  echo "seed-thread" > "$(get_history_file)"
+  INPUT=$(build_input)
+  run_hook_to_completion
+
+  assert_approve_json
+  [ ! -f "$(get_history_file)" ]
+}
+
+# history: 6. plan modified after approve → stale thread cleared BEFORE the
+# re-review composes its prompt (fresh first round for the new plan)
+@test "history: plan changed after approve → stale thread not injected" {
+  export REVIEW_ENGINE="codex"
+  create_approve_marker "old plan content"
+  echo "stale-thread-marker" > "$(get_history_file)"
+  create_mock_codex_capture "<verdict>CONCERNS</verdict>
+[Major] finding-echo."
+  INPUT=$(build_input plan="new plan content")
+  run_hook
+
+  assert_deny_json
+  ! grep -q "stale-thread-marker" "${TEST_TEMP_DIR}/codex-stdin"
+  grep -q -- "Round 1 — CONCERNS" "$(get_history_file)"
+}
+
+# =============================================================================
+# Consecutive-REJECT safety valve (REVIEW_MAX_CONSECUTIVE_REJECTS, default off)
+# =============================================================================
+
+# consec: 1. default (0) = disabled — a long streak still reaches the engine
+@test "consec-reject valve: disabled by default → engine still called" {
+  export REVIEW_ENGINE="codex"
+  set_counter_value 0 test-session 5 4
+  create_mock_codex "<verdict>REJECT</verdict>
+[Critical] finding-foxtrot."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ "$(get_consec_rejects)" -eq 5 ]
+  [ "$(get_total_rounds)" -eq 6 ]
+}
+
+# consec: 2. threshold reached → allow (ESCALATED), session state cleaned.
+# No engine mock on purpose: the valve fires before engine_probe, and a
+# missing binary would fail-open with a [WARNING] allow — asserting the
+# ESCALATED text distinguishes the valve from that masking path.
+@test "consec-reject valve: threshold reached → allow ESCALATED + cleanup" {
+  export REVIEW_MAX_CONSECUTIVE_REJECTS=3
+  set_counter_value 0 test-session 5 3
+  echo "thread" > "$(get_history_file)"
+  INPUT=$(build_input)
+  run_hook
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"连续 REJECT"* ]]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+  [ ! -f "$(get_history_file)" ]
+}
+
+# consec: 3. below threshold → engine round proceeds, streak extends
+@test "consec-reject valve: below threshold → engine called, streak extends" {
+  export REVIEW_MAX_CONSECUTIVE_REJECTS=5
+  export REVIEW_ENGINE="codex"
+  set_counter_value 0 test-session 5 4
+  create_mock_codex "<verdict>REJECT</verdict>
+[Critical] finding-golf."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ "$(get_consec_rejects)" -eq 5 ]
+}
+
+# consec: 4. REJECT extends the streak, CONCERNS resets it
+@test "consec-reject: REJECT extends streak, CONCERNS resets it" {
+  export REVIEW_ENGINE="codex"
+  create_mock_codex "<verdict>REJECT</verdict>
+[Critical] finding-hotel."
+  INPUT=$(build_input)
+  run_hook
+  [ "$(get_consec_rejects)" -eq 1 ]
+
+  create_mock_codex "<verdict>CONCERNS</verdict>
+[Major] finding-india."
+  run_hook
+  [ "$(get_consec_rejects)" -eq 0 ]
+  [ "$(get_counter_value)" -eq 1 ]
+}
+
+# consec: 5. legacy two-field counter file parses as streak 0 (backward compat)
+@test "consec-reject: legacy two-field counter parses as streak 0" {
+  export REVIEW_MAX_CONSECUTIVE_REJECTS=1
+  export REVIEW_ENGINE="codex"
+  set_counter_value 0 test-session 5
+  create_mock_codex "<verdict>REJECT</verdict>
+[Critical] finding-juliett."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  [ "$(get_consec_rejects)" -eq 1 ]
+}
+
+# =============================================================================
+# Context byte limits (REVIEW_GLOBAL_MD_LIMIT / REVIEW_PROJECT_MD_LIMIT)
+# =============================================================================
+
+# context: 1. project CLAUDE.md is cut at the configured byte limit
+@test "context: REVIEW_PROJECT_MD_LIMIT truncates project CLAUDE.md" {
+  export REVIEW_ENGINE="codex"
+  export REVIEW_PROJECT_MD_LIMIT=14
+  local proj="${TEST_TEMP_DIR}/proj"
+  mkdir -p "$proj"
+  printf 'proj-md-head-proj-md-tail' > "${proj}/CLAUDE.md"
+  create_mock_codex_capture "<verdict>APPROVE</verdict>
+ok"
+  INPUT=$(build_input cwd="$proj")
+  run_hook
+
+  grep -q "proj-md-head-" "${TEST_TEMP_DIR}/codex-stdin"
+  ! grep -q "proj-md-tail" "${TEST_TEMP_DIR}/codex-stdin"
+}
+
+# context: 2. non-numeric limit falls back to the default instead of killing
+# the hook under set -e (head -c garbage exits non-zero)
+@test "context: invalid REVIEW_PROJECT_MD_LIMIT falls back to default" {
+  export REVIEW_ENGINE="codex"
+  export REVIEW_PROJECT_MD_LIMIT="bogus"
+  local proj="${TEST_TEMP_DIR}/proj"
+  mkdir -p "$proj"
+  printf 'PROJECT-MD-CONTENT' > "${proj}/CLAUDE.md"
+  create_mock_codex_capture "<verdict>APPROVE</verdict>
+ok"
+  INPUT=$(build_input cwd="$proj")
+  run_hook
+
+  assert_ack_approve_json
+  grep -q "PROJECT-MD-CONTENT" "${TEST_TEMP_DIR}/codex-stdin"
+}
+
+# =============================================================================
+# codex repo access (REVIEW_REPO_ACCESS, default off)
+# =============================================================================
+
+# repo-access: 1. default off → -C target is a throwaway temp dir, not cwd
+@test "repo-access: default off → codex -C is not the project cwd" {
+  export REVIEW_ENGINE="codex"
+  local proj="${TEST_TEMP_DIR}/proj"
+  mkdir -p "$proj"
+  create_mock_codex "<verdict>APPROVE</verdict>
+ok"
+  INPUT=$(build_input cwd="$proj")
+  run_hook
+
+  local args
+  args=$(agy_args codex)
+  [[ "$args" == *"-C "* ]]
+  [[ "$args" != *"-C ${proj}"* ]]
+}
+
+# repo-access: 2. opt-in → -C <cwd>, sandbox stays read-only
+@test "repo-access: REVIEW_REPO_ACCESS=1 → codex -C cwd, still read-only" {
+  export REVIEW_ENGINE="codex"
+  export REVIEW_REPO_ACCESS=1
+  local proj="${TEST_TEMP_DIR}/proj"
+  mkdir -p "$proj"
+  create_mock_codex "<verdict>APPROVE</verdict>
+ok"
+  INPUT=$(build_input cwd="$proj")
+  run_hook
+
+  local args
+  args=$(agy_args codex)
+  [[ "$args" == *"-C ${proj}"* ]]
+  [[ "$args" == *"-s read-only"* ]]
+}

@@ -10,6 +10,20 @@
 #
 # bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
 
+# --- Engine capability declaration (top-level, evaluated at SOURCE time —
+#     the orchestrator reads it while composing PROMPT_FILE, which happens
+#     BEFORE engine_probe() runs, so a declaration inside a hook function
+#     would come too late): codex has no server-side conversation reuse —
+#     every round is a fresh `codex exec --ephemeral` that re-reads the whole
+#     plan from scratch. Without memory, a high-recall reviewer re-discovers
+#     a new batch of findings on UNCHANGED text every round and the
+#     consultation cannot converge. Declaring this asks the orchestrator to
+#     inject the accumulated prior-round review thread into the prompt so
+#     each round becomes a delta review. agy deliberately does NOT declare it
+#     (it already resumes its own server-side conversation via
+#     --conversation); claude is left unchanged for now (no memory channel).
+ENGINE_WANTS_HISTORY=1
+
 # --- One-time setup (called once, outside the retry loop): CLI existence
 #     check + model resolution + sandboxed workdir/merged-prompt/UTF-8
 #     sanitation prep. Returns 0 if usable, 1 (with ENGINE_PROBE_REASON set)
@@ -22,13 +36,28 @@ engine_probe() {
   # Empty CODEX_MODEL means inherit codex's own ~/.codex/config.toml default.
   CODEX_MODEL="${CODEX_MODEL:-}"
 
-  # codex-only temp resources: a sandboxed workdir (-C target, deliberately NOT
-  # the project cwd — codex runs read-only but there's no reason to hand it the
-  # real tree) and a merged prompt file (system instructions + PROMPT_FILE's
-  # dynamic content — kept SEPARATE from PROMPT_FILE itself so the REST
-  # fallback's --rawfile read of PROMPT_FILE doesn't double-send the system
-  # instructions). Registered into the generic cleanup arrays so the caller's
-  # trap reaps them without knowing their codex-private names.
+  # codex-only temp resources: a sandboxed workdir (-C target — by default a
+  # fresh empty temp dir, deliberately NOT the project cwd: codex runs
+  # read-only but there's no reason to hand it the real tree) and a merged
+  # prompt file (system instructions + PROMPT_FILE's dynamic content — kept
+  # SEPARATE from PROMPT_FILE itself so the REST fallback's --rawfile read of
+  # PROMPT_FILE doesn't double-send the system instructions). The temp
+  # workdir is registered into the generic cleanup arrays so the caller's
+  # trap reaps it without knowing its codex-private name.
+  #
+  # REVIEW_REPO_ACCESS=1 (opt-in, default off) flips the workdir to the
+  # project cwd instead: the reviewer can then ground its findings — and
+  # verify the plan author's factual rebuttals — against the actual code,
+  # still under `-s read-only`. Trade-offs the user accepts by opting in:
+  # repo content becomes reachable by the engine's provider, and rounds get
+  # slower as the reviewer reads files. The real cwd must NEVER be added to
+  # ENGINE_TMP_DIRS — the cleanup trap rmdir's every entry.
+  if [ "${REVIEW_REPO_ACCESS:-0}" = "1" ] && [ -n "${CWD:-}" ] && [ -d "${CWD:-}" ]; then
+    CODEX_WORKDIR="$CWD"
+  else
+    CODEX_WORKDIR=$(mktemp -d)
+    ENGINE_TMP_DIRS+=("$CODEX_WORKDIR")
+  fi
   # NOTE: $ENGINE_ERR is NOT declared here — it is a shared orchestrator-owned
   # contract channel (plan-review.sh sets ENGINE_ERR="${ENGINE_OUT}.err" for
   # every engine, and _cleanup hardcodes it alongside PROMPT_FILE/ENGINE_OUT),
@@ -36,8 +65,6 @@ engine_probe() {
   # below (ENGINE_ERR_POLICY) because codex echoes the FULL prompt to stderr
   # before its real diagnostics — see engine_err_filter() further down,
   # which must never let that raw content reach LOG_FILE wholesale.
-  CODEX_WORKDIR=$(mktemp -d)
-  ENGINE_TMP_DIRS+=("$CODEX_WORKDIR")
   CODEX_PROMPT_FILE=$(mktemp)
   ENGINE_TMP_FILES+=("$CODEX_PROMPT_FILE" "${CODEX_PROMPT_FILE}.u8")
   ENGINE_ERR_POLICY="filtered"
