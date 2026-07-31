@@ -34,7 +34,7 @@ plugins/
     scripts/
       plan-review.sh             # 编排器：守卫→计数→双安全阀→预检→prompt 组装→重试驱动→verdict 分支
       lib/
-        common.sh                # 日志三件套 + backfill_engine_err + allow_with_reason + plan_hash
+        common.sh                # 日志三件套 + backfill_engine_err + allow_with_reason + plan_hash + DELTA_REVIEW_RULES（delta 审阅规则单一来源）+ clamp_head_bytes / clamp_tail_bytes（UTF-8 安全字节截断）
         plan-source.sh           # transcript 反查三重安全门 + 提取链 + RESOLVE_REASON 三态文案
         verdict.sh               # verdict 提取 + APPROVE/CONCERNS/REJECT 三种反馈渲染
         manifest.sh              # Manifest 检测三函数 + MANIFEST_EXAMPLE + JSON 序列化
@@ -47,9 +47,9 @@ plugins/
         review-system-prompt.md  # SYSTEM_INSTRUCTIONS 提示词正文（纯数据）
       dispatch-check.sh          # Layer 2 hook（Agent/Task 调度参数强制）
       precompact-review.sh       # PreCompact hook（compaction 恢复）
-    tests/                        # BDD 测试套件（bats-core，205 个测试用例）
-      plan-review.bats            # 主测试套件（191 个，含 Dispatch Manifest、codex 引擎）
-      dispatch-check.bats         # 14 个测试用例（Layer 2 hook）
+    tests/                        # BDD 测试套件（bats-core；用例计数属动态指标，权威版本见 MEMORY.md 层）
+      plan-review.bats            # 主测试套件（含 Dispatch Manifest、codex 引擎、轮间记忆）
+      dispatch-check.bats         # Layer 2 hook 测试
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
   doc-gate/                       # 文档编辑门禁 + 词法召回插件
