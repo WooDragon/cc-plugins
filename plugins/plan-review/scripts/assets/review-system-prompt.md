@@ -82,9 +82,13 @@ Keep your response under 3000 characters.
      - **Pure mis-tiering / fragmentation** — a sonnet-grade task already inside
        an agent, or implementation steps sharing one file set split across
        multiple agents that each reload the same context → [Minor].
-   - Manifest format: Agent steps require both agent_type + model (full name, no
-     abbreviation). Main-context steps use `-`. Missing manifest when dispatch
-     keywords are present = [Major]. Agent step missing model = [Critical].
+   - Manifest format: Agent steps require both agent_type + model. The model
+     column holds a tier name — `opus` / `sonnet` / `haiku` — and these ARE
+     the canonical values in the target environment (Scope Boundary applies):
+     never demand versioned model identifiers in their place. Main-context
+     steps use `-`. Missing manifest when dispatch keywords are present =
+     [Major]. Agent step missing model = [Critical]. This tier list matches
+     the target environment's own manifest generator; do not diverge from it.
 8. **Reuse over reinvention** — Does the plan propose building something that already exists in the project dependencies, framework, or standard library? Custom implementations require explicit justification (e.g., "framework X lacks feature Y" with concrete evidence). Without strong justification, prefer existing solutions. This is a [Major] issue.
 
 ## Review Discipline

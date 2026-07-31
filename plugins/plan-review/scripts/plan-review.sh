@@ -254,6 +254,16 @@ DEGRADE_FILE="$COUNTER_DIR/.gemini-degraded"
 # instead of being resent every round. Lifetime = one review cycle (see cleanup
 # points at the no-plan fail-closed / ack-round-approved / non-critical-valve exits).
 CONV_FILE="$COUNTER_DIR/.conversation-${SESSION_ID}"
+# Round-memory thread (all engines, orchestrator-owned — see
+# inject_review_thread() below). Accumulates each round's CONCERNS/REJECT
+# verdict so an engine with no cross-round memory of its own (claude
+# --no-session-persistence, codex --ephemeral, REST) — and agy itself, once
+# its CONV_FILE handle is lost — can still see prior findings next round.
+# Lifetime mirrors CONV_FILE at every cycle-ending cleanup point EXCEPT
+# plan-changed-after-approve, which appends a revision marker instead of
+# clearing it (see that branch below) — that is the highest-value moment for
+# cross-round memory, not a cycle end.
+HISTORY_FILE="$COUNTER_DIR/.review-history-${SESSION_ID}"
 
 # --- Read counter (new format ATTEMPT:TOTAL, backward-compat with old single-number) ---
 IFS=: read -r ATTEMPT TOTAL_ROUNDS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0")"
@@ -299,7 +309,7 @@ if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null || echo "")
   CWD_VAL=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")
   log_decision "decision=deny reason=no-plan-content-fail-closed resolve=${RESOLVE_REASON:-none} resolvePath=${RESOLVE_PATH:-empty} planFilePath=${PLAN_FILE_PATH:-empty} top_keys=${TOP_KEYS} tool_input_keys=${TI_KEYS} transcript_path=${TRANSCRIPT_PATH:-empty} cwd=${CWD_VAL:-empty}"
-  rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}"
+  rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
   # Error message routed by the resolver's RESOLVE_REASON (see
   # lib/plan-source.sh: plan_source_error_reason) — sets $REASON directly.
   plan_source_error_reason
@@ -316,15 +326,25 @@ if [ -f "$APPROVE_MARKER" ]; then
   if [ -z "$APPROVED_HASH" ] || [ "$CURRENT_HASH" = "$APPROVED_HASH" ]; then
     # True ack-round: plan unchanged (empty marker = legacy format, unconditional allow)
     log_decision "decision=allow reason=ack-round-approved"
-    rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}"
+    rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
     allow_with_reason "Red Team 审阅已通过，plan 放行。"
   else
     # Plan was modified after approve: marker invalid, delete and fall through to re-review.
     # Also drop the conversation handle — the session history is about the OLD
     # plan; reusing it to review a DIFFERENT plan would resume stale context.
     # The re-review must start a fresh first round for the new plan.
+    #
+    # HISTORY_FILE is DELIBERATELY NOT cleared here — this is not a cycle
+    # end (COUNTER_FILE survives, TOTAL_ROUNDS keeps counting), and prior
+    # review findings on this plan are exactly the highest-value context to
+    # carry into the re-review. CONV_FILE must still be dropped because it
+    # embeds the FULL OLD plan text server-side; HISTORY_FILE only holds past
+    # verdicts/findings, which age far better — append a marker instead so
+    # the engine knows a revision happened at this point in the thread.
     log_decision "decision=review-again reason=plan-changed-after-approve conv-cleared"
     rm -f "$APPROVE_MARKER" "${CONV_FILE:-}"
+    printf '\n### [plan revised after approve — re-verify prior findings against the new revision]\n\n' \
+      >> "$HISTORY_FILE" 2>>"$LOG_FILE" || log_decision "history-write-failed" || true
     # Fall through to full review pipeline
   fi
 fi
@@ -335,7 +355,7 @@ if [ "$TOTAL_ROUNDS" -ge "$REVIEW_MAX_TOTAL_ROUNDS" ]; then
   log_decision "decision=deny reason=global-safety-valve total=$TOTAL_ROUNDS"
   # Keep the COUNTER_FILE tombstone, but the review cycle is over — no further
   # engine call will happen, so drop the session ref to avoid an orphan CONV_FILE.
-  rm -f "${CONV_FILE:-}"
+  rm -f "${CONV_FILE:-}" "${HISTORY_FILE:-}"
   BLOCK_MSG="## Red Team Review — HARD STOP
 
 审阅已达全局上限（${TOTAL_ROUNDS}/${REVIEW_MAX_TOTAL_ROUNDS}），仍存在未解决的审阅意见。
@@ -350,7 +370,7 @@ fi
 # --- Non-Critical safety valve: CONCERNS rounds exhausted → allow (escalate to user) ---
 if [ "$ATTEMPT" -ge "$REVIEW_MAX_ROUNDS" ]; then
   log_decision "decision=allow reason=non-critical-safety-valve round=$ATTEMPT total=$TOTAL_ROUNDS"
-  rm -f "$COUNTER_FILE" "${CONV_FILE:-}"
+  rm -f "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
   VALVE_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
 
 非 Critical 磋商已达上限（${ATTEMPT}/${REVIEW_MAX_ROUNDS}），未能达成一致。Plan 直接呈现给用户做最终裁决。"
@@ -405,11 +425,17 @@ fi
 # --- 2. Collect project context ---
 CWD=$(echo "$INPUT" | jq -r '.cwd // "."')
 
+# clamp_head_bytes (lib/common.sh) replaces a naive `head -c N`: modern review
+# engines have 200K+ token context, so the limits below are raised well past
+# the old 3000/8000 defaults (a real project CLAUDE.md once got silently cut
+# mid-way through a load-bearing environment-constraint section at byte 8473,
+# making the engine structurally blind to a genuine defect) — and the clamp
+# is UTF-8-safe where a bare `head -c` is not (see lib/common.sh for why).
 GLOBAL_MD=""
-[ ! -f "$HOME/.claude/CLAUDE.md" ] || GLOBAL_MD=$(head -c 3000 "$HOME/.claude/CLAUDE.md")
+[ ! -f "$HOME/.claude/CLAUDE.md" ] || GLOBAL_MD=$(clamp_head_bytes 8000 < "$HOME/.claude/CLAUDE.md")
 
 PROJECT_MD=""
-[ ! -f "$CWD/CLAUDE.md" ] || PROJECT_MD=$(head -c 8000 "$CWD/CLAUDE.md")
+[ ! -f "$CWD/CLAUDE.md" ] || PROJECT_MD=$(clamp_head_bytes 24000 < "$CWD/CLAUDE.md")
 
 # --- 3. Extract recent user messages from transcript ---
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // ""')
@@ -491,7 +517,61 @@ ${USER_REQ:-<not available>}
 ${PLAN}
 DYNEOF
 
-# Volatile tail: round context (always last, changes every round)
+# --- Round memory injection (A4) ---
+# Responsibility for cross-round memory lives in the ORCHESTRATOR (this
+# script), not in any one engine's own session mechanism — `--conversation`
+# (agy) is a token-cost optimization on top of this, never the sole source of
+# truth. Appends HISTORY_FILE's accumulated prior-round verdicts as a
+# "## Prior Review Thread" section onto PROMPT_FILE, but only when no engine
+# already has its own live cross-round memory for THIS round (see condition
+# below) — otherwise the same findings would be sent twice (once via the
+# engine's native session, once via this thread).
+#
+# HISTORY_INJECTED guards against double-injection across this function's TWO
+# call sites (see below): composition time, and again right before the REST
+# fallback. Both sites can legitimately evaluate true in the SAME round (e.g.
+# agy's CONV_FILE gets cleared mid-round after a failed CLI attempt) — the
+# guard, not the condition, is what prevents that from injecting twice.
+HISTORY_INJECTED=0
+inject_review_thread() {
+  [ "$HISTORY_INJECTED" != "1" ] || return 0
+  # No usable native cross-round memory right now (engine never had one, OR
+  # it has one but the handle is empty/missing — first round, or lost after
+  # an extract failure / CLI error) AND there is prior thread content to
+  # offer. `${ENGINE_HAS_NATIVE_MEMORY:-0}` is unset (0) for every engine
+  # except agy (see lib/engines/agy.sh) — claude/codex/REST always qualify.
+  if { [ "${ENGINE_HAS_NATIVE_MEMORY:-0}" != "1" ] || [ ! -s "${CONV_FILE:-}" ]; } \
+     && [ -s "$HISTORY_FILE" ]; then
+    # `if { block; } >> file; then` (not a bare block) is load-bearing: `-s`
+    # is true for a directory too (not just a regular file), so a HISTORY_FILE
+    # that is somehow unreadable (directory collision, permission error) must
+    # degrade this round to "no thread" rather than let `cat` inside
+    # clamp_tail_bytes crash under `set -e` with NO decision JSON ever
+    # emitted — the one failure mode this whole script exists to avoid (see
+    # the file header). Commands inside an `if` condition are exempt from
+    # `set -e`, same exemption A3's write-side `||` chain relies on.
+    if {
+      printf '\n## Prior Review Thread\n\n'
+      clamp_tail_bytes 24000 < "$HISTORY_FILE"
+    } >> "$PROMPT_FILE" 2>>"$LOG_FILE"; then
+      HISTORY_INJECTED=1
+    else
+      log_decision "history-inject-failed" || true
+    fi
+  fi
+}
+
+# Call site 1 (composition time): evaluated BEFORE the volatile round-context
+# tail below, so an injected thread reads as prior context to that framing,
+# not the other way around.
+inject_review_thread
+
+# Volatile tail: round context (always last, changes every round). The delta
+# review rules below apply regardless of engine or whether a "## Prior Review
+# Thread" section was injected above (an engine with its own live native
+# session, e.g. agy mid-conversation, still needs these rules — its memory of
+# prior findings comes from its own session history instead of the injected
+# thread, but the re-verification discipline is identical either way).
 if [ "$TOTAL_ROUNDS" -gt 0 ]; then
   cat >> "$PROMPT_FILE" << RNDEOF
 
@@ -499,6 +579,10 @@ if [ "$TOTAL_ROUNDS" -gt 0 ]; then
 This is round $((TOTAL_ROUNDS + 1)) of adversarial review.
 The plan author may have revised or added rebuttals since the previous round.
 Evaluate the CURRENT plan on its merits — if prior concerns have been addressed, APPROVE.
+
+Delta review rules (this round builds on prior rounds — see any
+"## Prior Review Thread" section above, or your own session memory):
+${DELTA_REVIEW_RULES}
 RNDEOF
 fi
 
@@ -564,6 +648,14 @@ else
   #     the retry loop below. ---
   if ! engine_probe; then
     log_decision "decision=allow reason=engine-not-found engine=$REVIEW_ENGINE"
+    # Orphan-out cleanup: no engine call will ever happen this cycle, but the
+    # cycle itself is NOT over (COUNTER_FILE/CONV_FILE deliberately survive —
+    # same contract as before this change). Only HISTORY_FILE is dropped:
+    # leaving it would let plan A's findings leak into plan B's review if a
+    # later, unrelated ExitPlanMode reuses this SESSION_ID — a new
+    # contamination surface this thread mechanism itself introduces, unlike
+    # COUNTER_FILE (a stale count is merely inaccurate, not cross-plan noise).
+    rm -f "${HISTORY_FILE:-}"
     allow_with_reason "[WARNING] REVIEW_ENGINE=$REVIEW_ENGINE but '$ENGINE_PROBE_REASON' not found"
   fi
 
@@ -697,6 +789,18 @@ else
     echo "plan-review: CLI exhausted, trying REST API fallback..." >&2
     log_decision "rest-start url=${REVIEW_API_URL:+(set)} key=${REVIEW_API_KEY:+(set)}"
 
+    # Call site 2 (A4 Critical fix): CONV_FILE may have been cleared by a
+    # failed CLI attempt in the retry loop above, AFTER call site 1 already
+    # evaluated the injection condition as false (native memory looked live
+    # at composition time). REST reads PROMPT_FILE verbatim (rest_invoke's
+    # --rawfile) — without this second call, REST would receive a prompt
+    # with NO thread at all, reproducing exactly the failure mode this
+    # mechanism exists to fix: default engine succeeds once (native memory
+    # looks available), fails on capacity/timeout next round, and the
+    # eventual REST fallback silently loses all prior context.
+    # HISTORY_INJECTED guards this from double-injecting on top of call site
+    # 1 in the (rarer) case where call site 1 already injected this round.
+    inject_review_thread
     rest_invoke
     rest_extract
 
@@ -718,6 +822,11 @@ EOF
     else
       # No engines attempted (dry-run exits earlier; this path = unconfigured engine)
       log_decision "decision=allow reason=engine-not-attempted"
+      # Same orphan-out rationale as the engine-not-found branch above: only
+      # HISTORY_FILE is dropped (not COUNTER_FILE/CONV_FILE) to block
+      # cross-plan thread contamination without changing the existing
+      # counter-survival contract for this exit.
+      rm -f "${HISTORY_FILE:-}"
       allow_with_reason "[WARNING] 引擎调用失败（已重试），审阅跳过。详见 $LOG_FILE"
     fi
     exit 0
@@ -763,6 +872,24 @@ fi
 
 echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
 log_decision "verdict=$VERDICT decision=deny round=$ATTEMPT/$REVIEW_MAX_ROUNDS total=$TOTAL_ROUNDS/$REVIEW_MAX_TOTAL_ROUNDS"
+
+# --- Round memory: record this round (A3) ---
+# Only CONCERNS/REJECT ever reach this line — APPROVE exits earlier via
+# render_approve_feedback(), and REVIEW_DRY_RUN's synthetic verdict is always
+# APPROVE (see the dry-run branch above), so no dry-run/APPROVE special-case
+# is needed here: both are structurally excluded already. Recorded for EVERY
+# engine, including agy — agy's own `--conversation` memory is a token-cost
+# optimization, not the source of truth; this file is what backs any round
+# where a live native session is unavailable (see inject_review_thread()).
+# Write failure must not kill the hook under `set -e` (a full /tmp is not
+# this mechanism's problem to solve), but must not fail silently either:
+# `|| log_decision ... || true` — the first `||` only fires on a write
+# error, and itself falls back to `|| true` in case even that log write fails.
+{
+  printf '### Round %s — %s\n\n' "$TOTAL_ROUNDS" "$VERDICT"
+  printf '%s' "$REVIEW" | clamp_head_bytes 6000
+  printf '\n\n'
+} >> "$HISTORY_FILE" 2>>"$LOG_FILE" || log_decision "history-write-failed" || true
 
 # --- 8. Compose deny feedback (delegated to lib/verdict.sh, severity-differentiated) ---
 render_concerns_or_reject_feedback "$VERDICT" "$ATTEMPT" "$TOTAL_ROUNDS" "$REVIEW_ENGINE" \

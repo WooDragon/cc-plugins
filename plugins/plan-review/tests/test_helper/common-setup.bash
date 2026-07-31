@@ -127,13 +127,26 @@ common_teardown() {
 #   Also captures the invocation args to ${MOCK_BIN}/../.agy-args-<name> so tests
 #   can assert whether `--conversation <id>` was passed (session-reuse behavior).
 #   Fixed test conversation_id: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+#
+#   Also captures whatever this invocation received on STDIN to
+#   ${MOCK_BIN}/../.mock-stdin-<name> (read back via `mock_stdin <name>`).
+#   Only the claude engine path actually pipes a real prompt over stdin
+#   (`< "$PROMPT_FILE"`); agy passes its prompt as a `-p` CLI arg instead
+#   (already assertable via agy_args), so for agy this capture is simply
+#   empty — harmless, and uniform is simpler than special-casing per engine.
+#   Safe against blocking: by the time any engine subprocess spawns, the
+#   hook's own top-of-script `INPUT=$(cat)` has already drained the test
+#   harness's heredoc stdin to EOF, so an unredirected `cat` here returns
+#   immediately instead of hanging on a terminal.
 create_mock_engine() {
   local name="$1"
   local output="$2"
   local args_file="${MOCK_BIN}/../.agy-args-${name}"
+  local stdin_file="${MOCK_BIN}/../.mock-stdin-${name}"
   cat > "${MOCK_BIN}/${name}" << MOCK_EOF
 #!/bin/bash
 printf '%s\n' "\$*" > '${args_file}'
+cat > '${stdin_file}' 2>/dev/null || true
 json_mode=0
 case "\$*" in *"--output-format json"*) json_mode=1;; esac
 if [ "\$json_mode" = "1" ]; then
@@ -165,6 +178,15 @@ MOCK_EOF
 agy_args() {
   local name="$1"
   cat "${MOCK_BIN}/../.agy-args-${name}" 2>/dev/null || true
+}
+
+# mock_stdin <name>
+#   Returns the captured stdin content of the last call to mock <name>
+#   (see create_mock_engine). Empty if the mock was never invoked, or if the
+#   engine does not pass its prompt over stdin (e.g. agy uses -p instead).
+mock_stdin() {
+  local name="$1"
+  cat "${MOCK_BIN}/../.mock-stdin-${name}" 2>/dev/null || true
 }
 
 # create_failing_engine <name> <exit_code>
@@ -325,6 +347,43 @@ fi
   echo "ERROR: mock codex failure"
 } >&2
 rm -f "\$_mock_stdin"
+if [ -n "\$out_file" ]; then
+  cat > "\$out_file" << 'OUTPUT_EOF'
+${output}
+OUTPUT_EOF
+fi
+exit 0
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/codex"
+}
+
+# create_mock_codex_capture <output>
+#   Like create_mock_codex, but ALSO writes the raw stdin it receives (the
+#   full merged prompt: SYSTEM_INSTRUCTIONS + PROMPT_FILE content, post
+#   codex.sh's own iconv sanitation) verbatim to MOCK_BIN/../.codex-stdin —
+#   bypassing the production privacy filter entirely. The real
+#   engine_err_filter() only runs on FAILURE, and backfill_engine_err()'s
+#   "filtered" policy (codex.sh) never logs raw stderr at all on SUCCESS —
+#   so a successful run leaves no trace of what codex actually received
+#   anywhere a test could otherwise inspect. This capture file is the only
+#   way to assert prompt content (e.g. "## Prior Review Thread") reached
+#   codex without depending on that privacy machinery. Still honors -o so the
+#   real extraction path (engine_extract reading $ENGINE_OUT) is exercised.
+#   Always exits 0 — no banner/stderr theater needed since nothing reads it.
+create_mock_codex_capture() {
+  local output="$1"
+  local stdin_file="${MOCK_BIN}/../.codex-stdin"
+  local args_file="${MOCK_BIN}/../.agy-args-codex"
+  cat > "${MOCK_BIN}/codex" << MOCK_EOF
+#!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
+out_file=""
+prev=""
+for arg in "\$@"; do
+  if [ "\$prev" = "-o" ]; then out_file="\$arg"; fi
+  prev="\$arg"
+done
+cat > '${stdin_file}'
 if [ -n "\$out_file" ]; then
   cat > "\$out_file" << 'OUTPUT_EOF'
 ${output}
@@ -539,6 +598,51 @@ MOCK_EOF
   chmod +x "${MOCK_BIN}/curl"
 }
 
+# create_mock_curl_sse_capture <content> <capture_path> [http_status]
+#   Same SSE response shape as create_mock_curl_sse, but ALSO copies the
+#   request body (the file referenced by curl's `-d @<path>` argument —
+#   rest_invoke() always calls curl this way) to <capture_path> before
+#   responding, so a test can inspect what the orchestrator actually sent
+#   REST (e.g. whether "## Prior Review Thread" made it into the prompt).
+#   REQ_FILE is a short-lived mktemp that production deletes immediately
+#   after the call (see rest.sh's rest_invoke), so this is the only way to
+#   see its content from a test.
+create_mock_curl_sse_capture() {
+  local content="$1"
+  local capture_path="$2"
+  local status="${3:-200}"
+  local frame
+  frame=$(jq -nc --arg c "$content" '{choices:[{delta:{content:$c}}]}')
+  local sse_body
+  sse_body="data: ${frame}
+
+data: [DONE]
+"
+  cat > "${MOCK_BIN}/curl" << MOCK_EOF
+#!/bin/bash
+out_file=""
+data_arg=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) out_file="\$2"; shift 2 ;;
+    -d) data_arg="\$2"; shift 2 ;;
+    --speed-limit|--speed-time) shift 2 ;;
+    --no-buffer) shift ;;
+    *)  shift ;;
+  esac
+done
+req_path="\${data_arg#@}"
+[ -n "\$req_path" ] && cp "\$req_path" "${capture_path}"
+if [ -n "\$out_file" ]; then
+  cat > "\$out_file" << 'BODY'
+${sse_body}
+BODY
+fi
+printf '%s' "${status}"
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/curl"
+}
+
 # create_stalling_curl
 #   Creates a mock curl that exits 28 (CURLE_OPERATION_TIMEDOUT) — simulates the
 #   --speed-time stall watchdog firing mid-stream. Writes nothing to -o.
@@ -723,6 +827,17 @@ set_counter_value() {
   local session="${2:-test-session}"
   local total="${3:-$value}"
   echo "${value}:${total}" > "${REVIEW_COUNTER_DIR}/.review-count-${session}"
+}
+
+# get_history_file [session_id]
+#   Echoes the path to the round-memory thread file (HISTORY_FILE in
+#   production) for the given session. Callers combine this with `[ -f ]`,
+#   `[ -s ]`, or `cat` — this helper only resolves the path, mirroring how
+#   CONV_FILE/APPROVE_MARKER paths are built inline at each call site
+#   elsewhere in this file.
+get_history_file() {
+  local session="${1:-test-session}"
+  echo "${REVIEW_COUNTER_DIR}/.review-history-${session}"
 }
 
 # --- Isolated Script Copy (bootstrap fail-open scenarios) ---
