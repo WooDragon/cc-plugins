@@ -3977,10 +3977,90 @@ Good."
   captured=$(agy_args agy)
   # attempt 2 must NOT resume the (now-cleared) old conversation...
   [[ "$captured" != *"--conversation"* ]]
-  # ...and must carry the thread call site 1 skipped, via the new
-  # retry-path inject_review_thread call right after CONV_FILE is dropped.
+  # ...and must carry the thread call site 1 skipped, via call site 2
+  # (unified: right after engine_extract(), before any branching).
   [[ "$captured" == *"## Prior Review Thread"* ]]
   [[ "$captured" == *"stale finding needing re-check"* ]]
+}
+
+# history: grok re-review round 2 finding — a 0-exit agy CLI call whose JSON
+# envelope has no parseable "response" field never trips the orchestrator's
+# `engine_exit != 0` invalidation (exit IS 0); the ONLY thing that clears
+# CONV_FILE here is agy.sh's own internal rm inside engine_extract() (see
+# lib/engines/agy.sh, the "else: rm -f CONV_FILE" branch under REVIEW empty).
+# Before the unified call site 2, the orchestrator had no way to observe that
+# internal rm, so attempt 2 (which reads the now-empty CONV_ID and falls back
+# to agy's first-round path, re-reading PROMPT_FILE) never got the thread.
+@test "history: agy CLI exit 0 but malformed envelope (no response field) → attempt 2's first-round path carries Prior Review Thread" {
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  printf '### Round 1 — CONCERNS\n\n[Major] stale finding survives malformed envelope.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+
+  local state_file="${TEST_TEMP_DIR}/.agy-malformed-state"
+  local args_file="${MOCK_BIN}/../.agy-args-agy"
+  cat > "${MOCK_BIN}/agy" << MOCK_EOF
+#!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
+if [ ! -f "${state_file}" ]; then
+  touch "${state_file}"
+  # attempt 1: exit 0, JSON parses, but there is no "response" key at all —
+  # engine_extract's forward scan finds no match, REVIEW stays empty, and
+  # agy.sh's OWN internal rm (not the orchestrator) clears CONV_FILE.
+  echo '{"conversation_id":"bbbbbbbb-cccc-dddd-eeee-ffffffffffff","status":"SUCCESS","usage":{"input_tokens":1,"total_tokens":1}}'
+  exit 0
+fi
+# attempt 2: well-formed envelope, real verdict.
+echo '{"conversation_id":"cccccccc-dddd-eeee-ffff-000000000000","status":"SUCCESS","response":"<verdict>CONCERNS</verdict> round2 finding.","usage":{"input_tokens":1,"total_tokens":1}}'
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/agy"
+
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+
+  local captured
+  captured=$(agy_args agy)
+  # attempt 2 must NOT resume the (internally-cleared) old conversation...
+  [[ "$captured" != *"--conversation"* ]]
+  # ...and must carry the thread call site 1 skipped (agy looked live at
+  # composition time), picked up here via call site 2 seeing agy's own
+  # internal rm having already run inside engine_extract().
+  [[ "$captured" == *"## Prior Review Thread"* ]]
+  [[ "$captured" == *"stale finding survives malformed envelope"* ]]
+}
+
+# history: grok re-review round 2 finding — agy's ARG_MAX guard
+# (_ENGINE_ABORT_RETRY=1, oversized prompt) aborts BEFORE engine_extract()
+# ever runs this round, so CONV_FILE is left completely untouched — it can
+# still look perfectly "live" even though this round produced no agy call at
+# all and is about to fall through to REST, which never has session memory
+# of its own. Gating REST's injection on agy's CONV_FILE liveness was the
+# category error call site 3's `force` parameter exists to close.
+@test "history: agy ARG_MAX abort (_ENGINE_ABORT_RETRY, oversized prompt) with a LIVE CONV_FILE → REST fallback still receives Prior Review Thread (force)" {
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  printf '### Round 1 — CONCERNS\n\n[Major] finding that must survive an ARG_MAX abort.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+
+  # A plan body north of 256KB trips agy's ARG_MAX guard (mirrors "rest-sse:
+  # oversized prompt → skip agy, REST fallback used" above) — CONV_FILE stays
+  # live/untouched through this whole path.
+  local big_plan
+  big_plan="<verdict>marker</verdict> $(printf 'x%.0s' $(seq 1 300000))"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  local captured_req="${TEST_TEMP_DIR}/rest-request-body-argmax.json"
+  create_mock_curl_sse_capture '<verdict>APPROVE</verdict>\nApproved via REST after ARG_MAX abort.' "$captured_req"
+
+  INPUT=$(build_input plan="$big_plan")
+  run_hook
+  assert_ack_approve_json
+  assert_log_contains "agy-skip reason=prompt-too-large"
+
+  [ -f "$captured_req" ]
+  local prompt_content
+  prompt_content=$(jq -r '.messages[1].content' "$captured_req")
+  [[ "$prompt_content" == *"## Prior Review Thread"* ]]
+  [[ "$prompt_content" == *"finding that must survive an ARG_MAX abort"* ]]
 }
 
 # history: engine-not-found is an orphan exit (no engine call will ever

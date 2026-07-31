@@ -527,20 +527,51 @@ DYNEOF
 # below) — otherwise the same findings would be sent twice (once via the
 # engine's native session, once via this thread).
 #
-# HISTORY_INJECTED guards against double-injection across this function's TWO
-# call sites (see below): composition time, and again right before the REST
-# fallback. Both sites can legitimately evaluate true in the SAME round (e.g.
-# agy's CONV_FILE gets cleared mid-round after a failed CLI attempt) — the
-# guard, not the condition, is what prevents that from injecting twice.
+# inject_review_thread [force] — three call sites, each covering a distinct
+# moment where the "does the engine already have native memory?" answer can
+# change:
+#   1. Composition time (before the retry loop): the common case — first
+#      round, or an engine with no native memory concept at all (claude,
+#      codex; REST is covered separately, see site 3).
+#   2. Immediately after engine_extract() returns, inside the retry loop,
+#      before ANY branch on this round's outcome (empty / non-zero exit /
+#      capacity / success). By the time engine_extract() returns, this
+#      round's native-handle state is FINAL, however it got there — this
+#      single point subsumes every way agy's CONV_FILE can end up invalid
+#      this round: an orchestrator-level `rm` on non-zero CLI exit (folded
+#      in right above this call, see the retry loop), agy's OWN internal rm
+#      inside engine_extract() on a 0-exit-but-unparseable envelope (a path
+#      the orchestrator cannot otherwise see), or simply never having been
+#      live to begin with. One check here replaces what used to be two
+#      separate patches pinned next to each `rm -f CONV_FILE` call site —
+#      those were symptom-chasing (they only covered the two rm's the
+#      orchestrator itself performs, and READ THE SAME race the malformed-
+#      envelope case exploits: rm and inject must be adjacent in the SAME
+#      control-flow step, not independently duplicated at each call site).
+#   3. Right before the REST fallback (`force=force`, see below). REST is
+#      not "agy with a possibly-cleared CONV_FILE" — it is a DIFFERENT
+#      engine that never has session memory of any kind, agy's or anyone
+#      else's. Gating REST's injection on agy's CONV_FILE state is a
+#      category error: it produced a real gap when a round aborted BEFORE
+#      ever reaching engine_extract() (e.g. agy's own ARG_MAX guard,
+#      _ENGINE_ABORT_RETRY=1) — CONV_FILE was never touched that round, so
+#      it can still look "live" even though REST, about to receive this
+#      exact prompt, has no way to consume that liveness. `force` skips the
+#      native-memory CONDITION only; the HISTORY_INJECTED guard below still
+#      applies, so a round that already injected via site 1 or 2 does not
+#      inject a second time via REST.
 HISTORY_INJECTED=0
 inject_review_thread() {
   [ "$HISTORY_INJECTED" != "1" ] || return 0
+  local force="${1:-}"
   # No usable native cross-round memory right now (engine never had one, OR
   # it has one but the handle is empty/missing — first round, or lost after
   # an extract failure / CLI error) AND there is prior thread content to
   # offer. `${ENGINE_HAS_NATIVE_MEMORY:-0}` is unset (0) for every engine
   # except agy (see lib/engines/agy.sh) — claude/codex/REST always qualify.
-  if { [ "${ENGINE_HAS_NATIVE_MEMORY:-0}" != "1" ] || [ ! -s "${CONV_FILE:-}" ]; } \
+  # `force=force` (REST call site only) short-circuits straight past the
+  # native-memory condition — see call site 3's rationale above.
+  if { [ "$force" = "force" ] || [ "${ENGINE_HAS_NATIVE_MEMORY:-0}" != "1" ] || [ ! -s "${CONV_FILE:-}" ]; } \
      && [ -s "$HISTORY_FILE" ]; then
     # `if { block; } >> file; then` (not a bare block) is load-bearing: `-s`
     # is true for a directory too (not just a regular file), so a HISTORY_FILE
@@ -707,27 +738,30 @@ else
     backfill_engine_err "$engine_exit"
 
     engine_extract
+
+    # Orchestrator-level CONV_FILE invalidation: a non-zero CLI exit (timeout
+    # 124, resume-rejected, network, plain 1) means engine_extract()'s own
+    # outer guard (`[ "$engine_exit" = "0" ] && [ -s "$ENGINE_OUT" ]`) never
+    # ran, so agy's internal persist/rm logic never touched CONV_FILE this
+    # round — the orchestrator is the ONLY thing that can invalidate it here.
+    # Drop it so the next round starts a fresh full first round instead of
+    # re-sending a --conversation onto a session that just failed. (A 0-exit-
+    # but-malformed-envelope round is the other invalidation path, handled
+    # entirely inside engine_extract() itself — see lib/engines/agy.sh.)
+    if [ "$engine_exit" != "0" ]; then
+      rm -f "${CONV_FILE:-}"
+    fi
+
+    # Call site 2: by this point this round's native-handle state is FINAL,
+    # whichever of the paths above (or agy's own internal rm inside
+    # engine_extract) got it there — see inject_review_thread's own comment
+    # for why this single point replaces per-rm-site patches.
+    inject_review_thread
+
     : > "$ENGINE_OUT"
     if [ "$engine_exit" != "0" ]; then
       REVIEW=""
       _fail_reason="${REVIEW_ENGINE}: exit ${engine_exit}"
-      # Any non-zero CLI exit (timeout 124, resume-rejected, network, plain 1)
-      # invalidates the resume handle — drop it so the next round starts a fresh
-      # full first round instead of re-sending a --conversation onto a session
-      # that just failed. The capacity branch below also rm's it (harmless dup).
-      rm -f "${CONV_FILE:-}"
-      # Call site (native-handle-invalidated): CONV_FILE existed (non-empty)
-      # at composition time, so call site 1 (before the retry loop) already
-      # evaluated the injection condition as false and skipped it. Now that
-      # the handle is gone, the NEXT attempt's agy engine_invoke will read an
-      # empty CONV_ID and fall back to its own first-round path — re-reading
-      # PROMPT_FILE from scratch. Without injecting here, that re-read
-      # PROMPT_FILE still has no thread, so the CLI retry silently loses all
-      # prior-round context — the same failure mode call site 2 (REST) fixes,
-      # but hit via the CLI retry path instead, which is more common (fires
-      # with no REST configured at all). HISTORY_INJECTED guards against
-      # double-injection if this round already got one some other way.
-      inject_review_thread
       if [ "$engine_attempt" -lt 2 ]; then
         # Detect capacity-exhausted 429 (MODEL_CAPACITY_EXHAUSTED via cloudcode-pa.googleapis.com).
         # These outages last minutes — the default 2s retry delay is useless;
@@ -745,16 +779,12 @@ else
         # time it was captured, before this same round's backfill truncated it).
         if [ "$_capacity_hit" = "1" ]; then
           _fail_reason="${REVIEW_ENGINE}: capacity exhausted (MODEL_CAPACITY_EXHAUSTED)"
-          # Drop any cached conversation_id: the session on agy's side may be
-          # invalid/unrecoverable after a capacity outage — don't resume onto it.
-          rm -f "${CONV_FILE:-}"
-          # Same native-handle-invalidated reasoning as the unconditional rm
-          # above (this is a duplicate rm for the capacity branch specifically)
-          # — the CLI retry (or the REST fallback below, if capacity triggers
-          # an immediate break) must not lose the thread just because it was
-          # skipped at composition time. HISTORY_INJECTED guards the no-op
-          # re-call.
-          inject_review_thread
+          # CONV_FILE was already dropped and re-injected (if needed) by call
+          # site 2 above, right after engine_extract() — a capacity-flavored
+          # non-zero exit is still a non-zero exit, no separate handling
+          # needed here (the old duplicate rm+inject pinned to this branch
+          # specifically was provably a no-op: this code only runs inside the
+          # `engine_exit != 0` branch, whose invalidation already ran).
           # If REST fallback is configured, skip retry immediately — retrying a
           # capacity-exhausted endpoint wastes the time budget REST needs.
           if [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
@@ -808,18 +838,18 @@ else
     echo "plan-review: CLI exhausted, trying REST API fallback..." >&2
     log_decision "rest-start url=${REVIEW_API_URL:+(set)} key=${REVIEW_API_KEY:+(set)}"
 
-    # Call site 2 (A4 Critical fix): CONV_FILE may have been cleared by a
-    # failed CLI attempt in the retry loop above, AFTER call site 1 already
-    # evaluated the injection condition as false (native memory looked live
-    # at composition time). REST reads PROMPT_FILE verbatim (rest_invoke's
-    # --rawfile) — without this second call, REST would receive a prompt
-    # with NO thread at all, reproducing exactly the failure mode this
-    # mechanism exists to fix: default engine succeeds once (native memory
-    # looks available), fails on capacity/timeout next round, and the
-    # eventual REST fallback silently loses all prior context.
-    # HISTORY_INJECTED guards this from double-injecting on top of call site
-    # 1 in the (rarer) case where call site 1 already injected this round.
-    inject_review_thread
+    # Call site 3 (force): REST is a DIFFERENT engine, not "agy with a maybe-
+    # cleared CONV_FILE" — it never has session memory of its own, so gating
+    # its injection on agy's CONV_FILE state is a category error. `force`
+    # skips that condition entirely; this is what closes the gap where a
+    # round aborts BEFORE ever reaching engine_extract() (agy's own ARG_MAX
+    # guard, ${TIMEOUT_CMD:+...} never invoked, ${_ENGINE_ABORT_RETRY}=1) —
+    # CONV_FILE is untouched in that path and can still look perfectly live,
+    # even though REST, about to receive this exact prompt, has no way to
+    # consume that liveness. HISTORY_INJECTED still guards this from
+    # double-injecting on top of call site 1 or 2 if either already injected
+    # this round.
+    inject_review_thread force
     rest_invoke
     rest_extract
 
