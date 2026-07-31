@@ -18,6 +18,26 @@
 #
 # bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
 
+# --- Round-memory capability declaration (orchestrator contract, NOT a user
+#     env var — see plan-review.sh's inject_review_thread()). Must be set at
+#     TOP LEVEL (function scope would be too late): the orchestrator sources
+#     this file around plan-review.sh:206-208, long before PROMPT_FILE
+#     assembly (~470-503) reads it. agy is the ONLY engine that ever sets
+#     this — claude (--no-session-persistence), codex (--ephemeral), and REST
+#     (no session concept) have no cross-round memory of their own, so they
+#     leave it unset (defaults to 0 at the read site) and always rely on the
+#     orchestrator-owned HISTORY_FILE thread instead. Declaring "native
+#     memory" here does not mean agy is exempt from that thread either — see
+#     the CONV_FILE-empty branch of inject_review_thread()'s condition, which
+#     treats a missing/cleared CONV_FILE (first round, or agy's own session
+#     handle lost after an extract failure or CLI error) as "no usable native
+#     memory right now" regardless of this flag.
+#     Known limitation (not fixed): switching REVIEW_ENGINE mid-session away
+#     from agy leaves an orphaned CONV_FILE on disk. Harmless — it is just an
+#     unused tmpfs file, cleaned up by the existing cycle-end cleanup points
+#     the same as any other CONV_FILE, and never resumed by a different engine.
+ENGINE_HAS_NATIVE_MEMORY=1
+
 # --- One-time setup (called once, outside the retry loop): CLI existence
 #     check + model resolution. Returns 0 if usable, 1 (with
 #     ENGINE_PROBE_REASON set) otherwise. ---
@@ -61,15 +81,29 @@ engine_invoke() {
   else
     # Reuse round: static prefix already lives in agy's session history —
     # resend only the volatile tail. Mirror the first-round Consultation
-    # Context framing (round number + "APPROVE if prior concerns addressed")
-    # so the reuse round carries the same negotiation semantics, not a bare
-    # plan dump. Resending the delta only (not the static context) is the
-    # point — it gets appended to session history, so duplicating context
-    # would cost tokens, not save them.
+    # Context framing (round number + "APPROVE if prior concerns addressed"
+    # + delta review rules) so the reuse round carries the same negotiation
+    # semantics, not a bare plan dump. Resending the delta only (not the
+    # static context) is the point — it gets appended to session history, so
+    # duplicating context would cost tokens, not save them.
+    # The numbered rules below are NOT a local copy: they interpolate
+    # DELTA_REVIEW_RULES, the single source defined in lib/common.sh, also
+    # referenced by plan-review.sh's "## Consultation Context" heredoc (the
+    # PROMPT_FILE-based composition path agy's FIRST round and every other
+    # engine use). agy's resume round bypasses PROMPT_FILE entirely, so it
+    # cannot share that heredoc directly — it shares the rules text instead.
+    # The one-line intro sentence below stays local (not part of the shared
+    # constant): unlike plan-review.sh's copy, agy's resume round never has
+    # an injected "## Prior Review Thread" section to point at (PROMPT_FILE
+    # is bypassed), so it must not claim one may exist above.
     AGY_PROMPT="## Consultation Context
 This is round $((TOTAL_ROUNDS + 1)) of adversarial review.
 The plan author may have revised or added rebuttals since the previous round.
 Evaluate the CURRENT plan on its merits — if prior concerns have been addressed, APPROVE.
+
+Delta review rules (this round builds on prior rounds — see your own session
+memory):
+${DELTA_REVIEW_RULES}
 
 ## Plan to Review
 ${PLAN}"

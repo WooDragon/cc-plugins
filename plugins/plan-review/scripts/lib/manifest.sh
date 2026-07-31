@@ -45,6 +45,11 @@ MANIFEST_EXAMPLE=$(cat <<'MANIFEST_EOF'
 - depends_on / parallel_with：填依赖/并行的 step 号，无则填 `-`。
 MANIFEST_EOF
 )
+# NOTE: the "sonnet / opus / haiku" tier enumeration above must stay in sync
+# with assets/review-system-prompt.md's "Manifest format" bullet (Criterion 7,
+# Dispatch Economy) — dispatch-check.sh:49-55 only checks the model column is
+# non-empty, it does not validate against a value list, so this comment pair
+# is the only thing preventing the two prose copies from drifting apart.
 
 # --- Manifest JSON serializer (called only from APPROVE branch; failures are silent) ---
 # Parses the ## Dispatch Manifest markdown table and outputs a dispatch JSON blob.

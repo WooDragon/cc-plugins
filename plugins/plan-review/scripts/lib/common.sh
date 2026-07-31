@@ -4,6 +4,46 @@
 #
 # bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
 
+# DELTA_REVIEW_RULES — single source of truth for the delta-review-rules
+# NUMBERED LIST (the actual re-verification discipline) used in every
+# non-first round of adversarial review. Referenced by BOTH plan-review.sh's
+# Consultation Context heredoc (composed via PROMPT_FILE, used by every
+# engine's first round and most reuse rounds) AND agy.sh's resume-round
+# AGY_PROMPT (agy's session-native reuse path, which bypasses PROMPT_FILE
+# entirely and cannot share that heredoc directly). Do not duplicate this
+# text inline anywhere else — a drifted copy is exactly the class of bug
+# that the Dispatch Manifest single-source fix (manifest.sh's
+# MANIFEST_EXAMPLE vs. review-system-prompt.md) addressed.
+#
+# Deliberately excludes the one-line intro sentence ("Delta review rules
+# (...): "): that line legitimately differs per call site — plan-review.sh's
+# copy may point at an injected "## Prior Review Thread" section (which that
+# path can produce), agy's resume round never has one (it bypasses
+# PROMPT_FILE, so no such section is ever injected there) and a regression
+# test (tests/plan-review.bats, "agy with live CONV_FILE does not inject
+# Prior Review Thread") asserts that exact string's absence from agy's
+# resume-round prompt as a proxy for "no thread section was injected". Each
+# call site keeps its own accurate intro sentence and interpolates this
+# constant for the shared body.
+#
+# Interpolation contract (verified in both consumers):
+#   - plan-review.sh uses an UNQUOTED heredoc delimiter (<< RNDEOF), which
+#     performs parameter expansion — ${DELTA_REVIEW_RULES} expands in place.
+#   - agy.sh assigns AGY_PROMPT as a double-quoted string, which also
+#     performs parameter expansion — ${DELTA_REVIEW_RULES} expands in place.
+DELTA_REVIEW_RULES=$(cat <<'DELTA_RULES_EOF'
+1. Re-check every prior Critical against the CURRENT plan: if resolved, drop
+   it; if effectively rebutted, withdraw it.
+2. A new non-Critical finding on text that is UNCHANGED since the last round
+   is a forfeited relitigation — it burns a round without improving the plan.
+   Do not raise it.
+3. Focus new-finding attention on text that has changed since the last round.
+4. Evidence burden is symmetric. A rebuttal resting on an unverifiable
+   factual claim about the codebase does NOT clear a finding — keep the
+   original severity and name the specific claim that needs proof.
+DELTA_RULES_EOF
+)
+
 log_decision() {
   printf '[%s] session=%s attempt=%s/%s total=%s/%s %s\n' \
     "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
@@ -89,6 +129,93 @@ backfill_engine_err() {
     cat "$ENGINE_ERR" >> "$LOG_FILE" 2>/dev/null || true
   fi
   : > "$ENGINE_ERR" 2>/dev/null || true
+}
+
+# --- Byte-budget clamps: stdin -> stdout, UTF-8-safe truncation. ---
+#     Used for CLAUDE.md ingestion (plan-review.sh) and round-memory bytes
+#     (A3 single-round record, A4 thread total). A naive `head -c N` / `tail
+#     -c N` slices at an arbitrary byte offset, which can land inside a
+#     multi-byte UTF-8 character — the review output is Chinese by contract
+#     (review-system-prompt.md), so this is not a hypothetical edge case.
+#     Each function has three branches, and all three are load-bearing (not
+#     just the truncation branch):
+#       1. Input already within budget: pass through byte-for-byte. Skipping
+#          this branch would make every UNDER-budget caller pay the line-drop
+#          cost of branch 2 too — silent data loss on the common case.
+#       2. Over budget: cut at N bytes, then drop the line that the cut fell
+#          inside (sed '$d' for head / sed '1d' for tail) — a bare newline
+#          byte (0x0A) can never appear inside a multi-byte UTF-8 sequence, so
+#          dropping the (possibly-mid-character) boundary line guarantees
+#          every remaining byte belongs to a complete line, hence complete
+#          characters.
+#       3. Branch 2 produced an empty result — the truncation point fell
+#          before any complete line existed yet (e.g. one long line with no
+#          newline in the first N bytes at all). Falling back to the raw cut
+#          means the result MAY still split a character, but an occasional
+#          dirty tail beats returning nothing at all — an empty clamp result
+#          would silently degrade a caller from "has context" to "has zero
+#          context" for content that legitimately doesn't fit.
+#     stdin/stdout (not a file-path interface) so the same pair serves both
+#     shapes: A3 clamps a variable ($REVIEW) and D clamps a file (CLAUDE.md).
+#     `wc -c` matches this file's existing byte-counting idiom (see
+#     lib/engines/agy.sh's AGY_PROMPT_BYTES ARG_MAX guard).
+
+# Byte-budget constants for clamp_head_bytes/clamp_tail_bytes call sites —
+# single source of truth so a future tune only needs one edit, not a grep
+# across plan-review.sh. Same spirit as DELTA_REVIEW_RULES above.
+#   GLOBAL_MD_BYTES      — $HOME/.claude/CLAUDE.md ingestion cap.
+#   PROJECT_MD_BYTES     — $CWD/CLAUDE.md ingestion cap.
+#   HISTORY_ROUND_BYTES  — A3: per-round review text written into HISTORY_FILE.
+#                           9000 (not 6000): review-system-prompt.md caps
+#                           review output at 3000 CHARACTERS, and 3000 Chinese
+#                           characters is ~9KB — the old 6000-byte cap would
+#                           truncate roughly a third of a full-length CJK
+#                           review before it's even written to history.
+#   HISTORY_INJECT_BYTES — inject_review_thread: total accumulated thread
+#                           budget read back from HISTORY_FILE. 48000 (not
+#                           24000): keeps ~5 full HISTORY_ROUND_BYTES rounds
+#                           instead of ~4, now that each round is larger.
+#                           When the accumulated thread exceeds this budget,
+#                           clamp_tail_bytes keeps the MOST RECENT rounds and
+#                           drops the oldest — earlier rounds are the ones
+#                           silently cut, not later ones.
+GLOBAL_MD_BYTES=8000
+PROJECT_MD_BYTES=24000
+HISTORY_ROUND_BYTES=9000
+HISTORY_INJECT_BYTES=48000
+
+# clamp_head_bytes <N> — keep the HEAD (first N bytes), drop the tail.
+clamp_head_bytes() {
+  local n="$1" content total clamped
+  content=$(cat)
+  total=$(printf '%s' "$content" | wc -c | tr -d ' ')
+  if [ "$total" -le "$n" ]; then
+    printf '%s' "$content"
+    return 0
+  fi
+  clamped=$(printf '%s' "$content" | head -c "$n" | sed '$d')
+  if [ -z "$clamped" ]; then
+    printf '%s' "$content" | head -c "$n"
+  else
+    printf '%s\n' "$clamped"
+  fi
+}
+
+# clamp_tail_bytes <N> — keep the TAIL (last N bytes), drop the head.
+clamp_tail_bytes() {
+  local n="$1" content total clamped
+  content=$(cat)
+  total=$(printf '%s' "$content" | wc -c | tr -d ' ')
+  if [ "$total" -le "$n" ]; then
+    printf '%s' "$content"
+    return 0
+  fi
+  clamped=$(printf '%s' "$content" | tail -c "$n" | sed '1d')
+  if [ -z "$clamped" ]; then
+    printf '%s' "$content" | tail -c "$n"
+  else
+    printf '%s\n' "$clamped"
+  fi
 }
 
 # --- Plan content hasher (portable: sha256sum > shasum > cksum POSIX fallback) ---

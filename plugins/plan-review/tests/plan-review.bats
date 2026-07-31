@@ -3268,23 +3268,30 @@ MOCK_EOF
 
 @test "codex: byte-truncated non-ASCII CLAUDE.md → prompt sanitized to valid UTF-8" {
   export REVIEW_ENGINE="codex"
-  # Reproduce the real-world break: PROJECT_MD is read with `head -c 8000`,
-  # a BYTE cut. A CLAUDE.md whose 8000th byte lands inside a multi-byte
-  # character yields an orphaned lead byte in the merged prompt, and codex
-  # hard-rejects such stdin ("input is not valid UTF-8") rather than degrading.
-  # Without the iconv sanitation this test fails with engines-failed.
+  # Reproduce the real-world break: PROJECT_MD is read via clamp_head_bytes
+  # 24000 (lib/common.sh), which itself only guarantees clean UTF-8 when a
+  # complete line exists before the cut (see that function's branch 2/3
+  # split). This fixture has NO newline anywhere in its first 24000 bytes —
+  # one long ASCII run — so clamp_head_bytes falls through to its branch-3
+  # raw fallback (`head -c 24000`) and the cut still lands mid-character,
+  # exactly like the pre-clamp `head -c` bug this test was written against.
+  # codex hard-rejects such stdin ("input is not valid UTF-8") rather than
+  # degrading. Without codex.sh's own iconv sanitation this test fails with
+  # engines-failed — that is what this test actually verifies now that the
+  # clamp handles the common (has-a-newline) case at the source.
   local proj_dir="${TEST_TEMP_DIR}/proj"
   mkdir -p "$proj_dir"
-  # 7999 ASCII bytes, then a 3-byte CJK char → head -c 8000 keeps only its
-  # first byte (0xE4), producing an invalid sequence at the cut.
+  # 23999 ASCII bytes (no newline among them), then a 3-byte CJK char →
+  # head -c 24000 keeps only its first byte (0xE4), producing an invalid
+  # sequence at the cut.
   {
-    printf 'a%.0s' $(seq 1 7999)
+    printf 'a%.0s' $(seq 1 23999)
     printf '中文内容\n'
   } > "${proj_dir}/CLAUDE.md"
 
   # Sanity-check the fixture itself: the truncated slice MUST be invalid UTF-8,
   # otherwise this test would pass vacuously.
-  run bash -c "head -c 8000 '${proj_dir}/CLAUDE.md' | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1"
+  run bash -c "head -c 24000 '${proj_dir}/CLAUDE.md' | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1"
   [ "$status" -ne 0 ]
 
   MOCK_CODEX_STRICT_UTF8=1 create_mock_codex "<verdict>APPROVE</verdict>
@@ -3703,4 +3710,732 @@ MOCK_EOF
   assert_approve_json
   [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
   [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}
+
+# =============================================================================
+# Round Memory (A): HISTORY_FILE injection, recording, and lifecycle
+# =============================================================================
+
+# history: codex — second round injects the thread built from round 1
+@test "history: codex second round injects Prior Review Thread with first round's review" {
+  export REVIEW_ENGINE="codex"
+  create_mock_codex_capture "<verdict>CONCERNS</verdict>
+[Major] round1 finding about caching."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+
+  local history_file
+  history_file=$(get_history_file)
+  [ -s "$history_file" ]
+  grep -q "round1 finding about caching" "$history_file"
+
+  create_mock_codex_capture "<verdict>APPROVE</verdict>
+Looks good now."
+  run_hook
+  assert_ack_approve_json
+
+  local captured
+  captured=$(cat "${MOCK_BIN}/../.codex-stdin")
+  [[ "$captured" == *"## Prior Review Thread"* ]]
+  [[ "$captured" == *"round1 finding about caching"* ]]
+}
+
+# history: claude — second round injects the thread built from round 1 (the
+# path PR #153 missed: it only fixed codex).
+@test "history: claude second round injects Prior Review Thread with first round's review" {
+  export REVIEW_ENGINE="claude"
+  create_mock_engine "claude" "<verdict>CONCERNS</verdict>
+[Major] round1 claude finding."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+
+  local history_file
+  history_file=$(get_history_file)
+  [ -s "$history_file" ]
+  grep -q "round1 claude finding" "$history_file"
+
+  create_mock_engine "claude" "<verdict>APPROVE</verdict>
+Approved on round 2."
+  run_hook
+  assert_ack_approve_json
+
+  local captured
+  captured=$(mock_stdin "claude")
+  [[ "$captured" == *"## Prior Review Thread"* ]]
+  [[ "$captured" == *"round1 claude finding"* ]]
+}
+
+# history: agy with a live CONV_FILE does NOT inject the thread (native
+# session memory already carries it — injecting too would duplicate findings).
+@test "history: agy with live CONV_FILE does not inject Prior Review Thread" {
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  printf '### Round 1 — CONCERNS\n\n[Major] stale finding.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] round2 finding."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  [[ "$(agy_args agy)" == *"--conversation aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"* ]]
+  [[ "$(agy_args agy)" != *"Prior Review Thread"* ]]
+}
+
+# history: agy CONV_FILE missing/cleared → falls back to thread injection
+# (first-round-shaped call reads PROMPT_FILE, which now carries the thread).
+@test "history: agy CONV_FILE cleared falls back to Prior Review Thread injection" {
+  printf '### Round 1 — CONCERNS\n\n[Major] earlier finding needing re-check.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] round2 finding."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  [[ "$(agy_args agy)" != *"--conversation"* ]]
+  [[ "$(agy_args agy)" == *"## Prior Review Thread"* ]]
+  [[ "$(agy_args agy)" == *"earlier finding needing re-check"* ]]
+}
+
+# history: agy CLI failure mid-round → CONV_FILE cleared → REST fallback
+# still receives the thread (A4's SECOND call site, right before rest_invoke;
+# the review's own root-cause scenario: composition-time judged "agy has
+# native memory" so call site 1 skipped injection, then the CLI call itself
+# failed and dropped that memory before REST ever saw the prompt).
+@test "history: agy CLI failure → REST fallback receives Prior Review Thread (second injection call site)" {
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  printf '### Round 1 — CONCERNS\n\n[Major] finding that must survive to REST.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+  create_failing_engine "agy" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  local captured_req="${TEST_TEMP_DIR}/rest-request-body.json"
+  create_mock_curl_sse_capture '<verdict>APPROVE</verdict>\nApproved via REST with thread.' "$captured_req"
+
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+
+  [ -f "$captured_req" ]
+  local prompt_content
+  prompt_content=$(jq -r '.messages[1].content' "$captured_req")
+  [[ "$prompt_content" == *"## Prior Review Thread"* ]]
+  [[ "$prompt_content" == *"finding that must survive to REST"* ]]
+}
+
+# history: both A4 call sites can legitimately fire in the same round (agy's
+# CONV_FILE already absent at composition time, THEN the CLI call also
+# fails) — the HISTORY_INJECTED guard, not the condition, must be what stops
+# a second, duplicate injection.
+@test "history: thread is injected only once per round despite two call sites (HISTORY_INJECTED guard)" {
+  printf '### Round 1 — CONCERNS\n\n[Major] guard-check finding.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+  create_failing_engine "agy" 1
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  local captured_req="${TEST_TEMP_DIR}/rest-request-body-guard.json"
+  create_mock_curl_sse_capture '<verdict>APPROVE</verdict>\nApproved.' "$captured_req"
+
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+
+  [ -f "$captured_req" ]
+  local prompt_content occurrences
+  prompt_content=$(jq -r '.messages[1].content' "$captured_req")
+  # Match the injected SECTION HEADING as its own line, not any substring —
+  # the delta review rules (B) legitimately reference "## Prior Review
+  # Thread" by name in prose ('see any "## Prior Review Thread" section
+  # above'), which would double-count against a plain substring grep.
+  occurrences=$(printf '%s' "$prompt_content" | grep -c '^## Prior Review Thread$')
+  [ "$occurrences" -eq 1 ]
+}
+
+# history: first round (TOTAL_ROUNDS=0) never carries a thread section — there
+# are no prior rounds to summarize yet.
+@test "history: first round prompt has no Prior Review Thread section" {
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] first round only."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  [[ "$(agy_args agy)" != *"Prior Review Thread"* ]]
+}
+
+# history: dry-run's synthetic APPROVE never reaches the CONCERNS/REJECT
+# recording branch — no engine call happened, nothing to record.
+@test "history: dry-run never writes to HISTORY_FILE" {
+  export REVIEW_DRY_RUN=1
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+  [ ! -f "$(get_history_file)" ]
+}
+
+# history: cycle-ending exits clear HISTORY_FILE, one test per exit path.
+@test "history: ack-round approved clears HISTORY_FILE" {
+  printf '### Round 1 — APPROVE\n\nstale.\n\n' > "$(get_history_file)"
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Looks good."
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+  run_hook
+  assert_approve_json
+  [ ! -f "$(get_history_file)" ]
+}
+
+@test "history: non-critical safety valve clears HISTORY_FILE" {
+  export REVIEW_MAX_ROUNDS=1
+  printf '### Round 1 — CONCERNS\n\nstale.\n\n' > "$(get_history_file)"
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] persistent."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  run_hook
+  assert_approve_json
+  [ ! -f "$(get_history_file)" ]
+}
+
+@test "history: no-plan fail-closed clears HISTORY_FILE" {
+  printf '### Round 1 — CONCERNS\n\nstale.\n\n' > "$(get_history_file)"
+  INPUT=$(build_input_no_plan)
+  run_hook
+  assert_deny_json
+  [ ! -f "$(get_history_file)" ]
+}
+
+@test "history: global safety valve clears HISTORY_FILE" {
+  set_counter_value 0 test-session 3
+  export REVIEW_MAX_TOTAL_ROUNDS=3
+  printf '### Round 3 — CONCERNS\n\nstale.\n\n' > "$(get_history_file)"
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"HARD STOP"* ]]
+  [ ! -f "$(get_history_file)" ]
+}
+
+# history: plan-changed-after-approve is NOT a cycle end — HISTORY_FILE is
+# kept (only appended a revision marker), unlike every other exit above.
+@test "history: plan-changed-after-approve retains HISTORY_FILE and appends revision marker" {
+  printf '### Round 1 — CONCERNS\n\n[Major] earlier finding.\n\n' > "$(get_history_file)"
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Good."
+  INPUT=$(build_input plan="Original plan")
+  run_hook
+  assert_ack_approve_json
+
+  INPUT=$(build_input plan="Completely different plan")
+  run_hook
+  assert_log_contains "reason=plan-changed-after-approve conv-cleared"
+
+  local history_file
+  history_file=$(get_history_file)
+  [ -f "$history_file" ]
+  grep -q "earlier finding" "$history_file"
+  grep -q "plan revised after approve" "$history_file"
+}
+
+# history: an in-loop CLI failure (:626/:646 — this round's own retry, not a
+# cycle end) must NOT clear HISTORY_FILE — only the resume handle is stale.
+@test "history: engine failure within the retry loop does not clear HISTORY_FILE" {
+  printf '### Round 1 — CONCERNS\n\n[Major] must survive retry.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+  create_flaky_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] round2 finding." "exit"
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  local history_file
+  history_file=$(get_history_file)
+  [ -s "$history_file" ]
+  grep -q "must survive retry" "$history_file"
+}
+
+# history: grok-flagged gap — a live CONV_FILE at composition time makes
+# call site 1 skip injection (agy's own session memory looked sufficient).
+# The CLI's OWN retry then fails attempt 1, clears CONV_FILE, and agy's
+# attempt 2 reads an empty CONV_ID — falling back to its first-round path,
+# which re-reads PROMPT_FILE from scratch. Without a retry-path injection
+# right after CONV_FILE is cleared, that re-read PROMPT_FILE still has no
+# thread and attempt 2 silently loses all prior-round context — this path
+# is MORE common than the REST-fallback gap (call site 2) since it fires
+# with no REST fallback configured at all.
+@test "history: agy CLI failure clears a LIVE CONV_FILE mid-retry → attempt 2's first-round path carries Prior Review Thread" {
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  printf '### Round 1 — CONCERNS\n\n[Major] stale finding needing re-check.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+  create_flaky_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] round2 finding." "exit"
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+
+  local captured
+  captured=$(agy_args agy)
+  # attempt 2 must NOT resume the (now-cleared) old conversation...
+  [[ "$captured" != *"--conversation"* ]]
+  # ...and must carry the thread call site 1 skipped, via call site 2
+  # (unified: right after engine_extract(), before any branching).
+  [[ "$captured" == *"## Prior Review Thread"* ]]
+  [[ "$captured" == *"stale finding needing re-check"* ]]
+}
+
+# history: grok re-review round 2 finding — a 0-exit agy CLI call whose JSON
+# envelope has no parseable "response" field never trips the orchestrator's
+# `engine_exit != 0` invalidation (exit IS 0); the ONLY thing that clears
+# CONV_FILE here is agy.sh's own internal rm inside engine_extract() (see
+# lib/engines/agy.sh, the "else: rm -f CONV_FILE" branch under REVIEW empty).
+# Before the unified call site 2, the orchestrator had no way to observe that
+# internal rm, so attempt 2 (which reads the now-empty CONV_ID and falls back
+# to agy's first-round path, re-reading PROMPT_FILE) never got the thread.
+@test "history: agy CLI exit 0 but malformed envelope (no response field) → attempt 2's first-round path carries Prior Review Thread" {
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  printf '### Round 1 — CONCERNS\n\n[Major] stale finding survives malformed envelope.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+
+  local state_file="${TEST_TEMP_DIR}/.agy-malformed-state"
+  local args_file="${MOCK_BIN}/../.agy-args-agy"
+  cat > "${MOCK_BIN}/agy" << MOCK_EOF
+#!/bin/bash
+printf '%s\n' "\$*" > '${args_file}'
+if [ ! -f "${state_file}" ]; then
+  touch "${state_file}"
+  # attempt 1: exit 0, JSON parses, but there is no "response" key at all —
+  # engine_extract's forward scan finds no match, REVIEW stays empty, and
+  # agy.sh's OWN internal rm (not the orchestrator) clears CONV_FILE.
+  echo '{"conversation_id":"bbbbbbbb-cccc-dddd-eeee-ffffffffffff","status":"SUCCESS","usage":{"input_tokens":1,"total_tokens":1}}'
+  exit 0
+fi
+# attempt 2: well-formed envelope, real verdict.
+echo '{"conversation_id":"cccccccc-dddd-eeee-ffff-000000000000","status":"SUCCESS","response":"<verdict>CONCERNS</verdict> round2 finding.","usage":{"input_tokens":1,"total_tokens":1}}'
+MOCK_EOF
+  chmod +x "${MOCK_BIN}/agy"
+
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+
+  local captured
+  captured=$(agy_args agy)
+  # attempt 2 must NOT resume the (internally-cleared) old conversation...
+  [[ "$captured" != *"--conversation"* ]]
+  # ...and must carry the thread call site 1 skipped (agy looked live at
+  # composition time), picked up here via call site 2 seeing agy's own
+  # internal rm having already run inside engine_extract().
+  [[ "$captured" == *"## Prior Review Thread"* ]]
+  [[ "$captured" == *"stale finding survives malformed envelope"* ]]
+}
+
+# history: grok re-review round 2 finding — agy's ARG_MAX guard
+# (_ENGINE_ABORT_RETRY=1, oversized prompt) aborts BEFORE engine_extract()
+# ever runs this round, so CONV_FILE is left completely untouched — it can
+# still look perfectly "live" even though this round produced no agy call at
+# all and is about to fall through to REST, which never has session memory
+# of its own. Gating REST's injection on agy's CONV_FILE liveness was the
+# category error call site 3's `force` parameter exists to close.
+@test "history: agy ARG_MAX abort (_ENGINE_ABORT_RETRY, oversized prompt) with a LIVE CONV_FILE → REST fallback still receives Prior Review Thread (force)" {
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  printf '### Round 1 — CONCERNS\n\n[Major] finding that must survive an ARG_MAX abort.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+
+  # A plan body north of 256KB trips agy's ARG_MAX guard (mirrors "rest-sse:
+  # oversized prompt → skip agy, REST fallback used" above) — CONV_FILE stays
+  # live/untouched through this whole path.
+  local big_plan
+  big_plan="<verdict>marker</verdict> $(printf 'x%.0s' $(seq 1 300000))"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  local captured_req="${TEST_TEMP_DIR}/rest-request-body-argmax.json"
+  create_mock_curl_sse_capture '<verdict>APPROVE</verdict>\nApproved via REST after ARG_MAX abort.' "$captured_req"
+
+  INPUT=$(build_input plan="$big_plan")
+  run_hook
+  assert_ack_approve_json
+  assert_log_contains "agy-skip reason=prompt-too-large"
+
+  [ -f "$captured_req" ]
+  local prompt_content
+  prompt_content=$(jq -r '.messages[1].content' "$captured_req")
+  [[ "$prompt_content" == *"## Prior Review Thread"* ]]
+  [[ "$prompt_content" == *"finding that must survive an ARG_MAX abort"* ]]
+}
+
+# history: grok re-review round 3 finding — CROSS-round, a different
+# dimension from the three same-round injection call sites tested above.
+# Round 1's ARG_MAX abort leaves CONV_FILE completely untouched, and REST —
+# not agy — produces this round's authoritative REVIEW. Without invalidating
+# CONV_FILE afterward, round 2's composition-time check would see a
+# non-empty CONV_FILE, conclude agy has native memory, and skip thread
+# injection entirely — but agy's own server-side session never saw round
+# 1's REST-produced finding (it never ran), so round 2 would get neither the
+# thread nor real native memory of it. This is what `[ -z "$REVIEW" ] ||
+# rm -f "${CONV_FILE:-}"` right after rest_extract fixes.
+@test "history: REST-produced REVIEW after an ARG_MAX abort invalidates CONV_FILE cross-round → next round has no --conversation and carries REST's finding" {
+  # Precondition: CONV_FILE already live, as if established by an earlier
+  # successful agy round outside this test's visibility — this is what makes
+  # the assertions below non-trivial (without a live CONV_FILE to begin
+  # with, "no --conversation next round" would hold even without the fix).
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+
+  # Round 1: oversized plan trips agy's ARG_MAX guard — CONV_FILE is never
+  # touched by that path — and REST is the only producer of a result this
+  # round. Verdict CONCERNS so A3 records the finding into HISTORY_FILE and
+  # the cycle continues (a round 2 happens at all).
+  local big_plan
+  big_plan="<verdict>marker</verdict> $(printf 'x%.0s' $(seq 1 300000))"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>CONCERNS</verdict>
+[Major] REST-produced finding from the ARG_MAX round.'
+  INPUT=$(build_input plan="$big_plan")
+  run_hook
+  assert_deny_json
+  assert_log_contains "agy-skip reason=prompt-too-large"
+
+  local history_file
+  history_file=$(get_history_file)
+  [ -s "$history_file" ]
+  grep -q "REST-produced finding from the ARG_MAX round" "$history_file"
+
+  # Round 1 exhausting CLI and falling to REST unconditionally refreshes the
+  # gemini degrade-file (unrelated to this fix — same behavior pre-dates it),
+  # which would otherwise make round 2 ALSO skip straight to REST (reusing
+  # round 1's REST mock output) instead of actually invoking agy. Clear it
+  # so round 2 genuinely exercises the agy CLI path this test is about.
+  rm -f "${REVIEW_COUNTER_DIR}/.gemini-degraded"
+
+  # Round 2: same session, a normal (non-oversized) plan — agy's CLI
+  # actually gets invoked this time. If CONV_FILE were still live from round
+  # 1 (the bug this test pins), this round would resume it with
+  # --conversation and never receive the injected thread.
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Acknowledged, finding resolved."
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+
+  local captured
+  captured=$(agy_args agy)
+  [[ "$captured" != *"--conversation"* ]]
+  [[ "$captured" == *"## Prior Review Thread"* ]]
+  [[ "$captured" == *"REST-produced finding from the ARG_MAX round"* ]]
+}
+
+# history: engine-not-found is an orphan exit (no engine call will ever
+# happen this cycle) — HISTORY_FILE is dropped to block cross-plan
+# contamination, but COUNTER_FILE deliberately survives (unchanged contract).
+@test "history: engine-not-found clears HISTORY_FILE but keeps COUNTER_FILE" {
+  export REVIEW_ENGINE="codex"
+  printf '### Round 1 — CONCERNS\n\n[Major] should not leak to next plan.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+  INPUT=$(build_input)
+
+  # Rebuild PATH excluding any directory that happens to have a real `codex`
+  # installed (mirrors the existing "codex: binary missing" test).
+  local clean_path="${MOCK_BIN}"
+  local orig_path="$PATH"
+  while IFS=: read -r -d: dir || [ -n "$dir" ]; do
+    if [ -d "$dir" ] && [ ! -x "${dir}/codex" ]; then
+      clean_path="${clean_path}:${dir}"
+    fi
+  done <<< "${orig_path}:"
+
+  export PATH="$clean_path"
+  run_hook
+  export PATH="$orig_path"
+
+  assert_approve_json
+  [ ! -f "$(get_history_file)" ]
+  [ -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+# history: engine-not-attempted (CLI ran, returned empty, no REST configured
+# to try next) is the other orphan exit — same cleanup contract as above.
+@test "history: engine-not-attempted clears HISTORY_FILE but keeps COUNTER_FILE" {
+  create_mock_engine "agy" ""
+  printf '### Round 1 — CONCERNS\n\n[Major] should not leak to next plan.\n\n' > "$(get_history_file)"
+  set_counter_value 1 test-session 1
+  INPUT=$(build_input)
+  run_hook
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [ ! -f "$(get_history_file)" ]
+  [ -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+# history: HISTORY_FILE write failure must not kill the hook under `set -e`,
+# and must not fail silently either.
+@test "history: HISTORY_FILE unwritable → hook still emits decision JSON, logs history-write-failed" {
+  mkdir -p "$(get_history_file)"
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] finding despite write failure."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  assert_log_contains "history-write-failed"
+}
+
+# =============================================================================
+# Delta Review Rules (B): "## Consultation Context" expansion, all engines
+# =============================================================================
+
+# context: codex — delta rules present on round > 0
+@test "context: delta review rules appear in codex prompt when TOTAL_ROUNDS>0" {
+  export REVIEW_ENGINE="codex"
+  set_counter_value 1 test-session 1
+  create_mock_codex_capture "<verdict>APPROVE</verdict>
+Fine."
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+  local captured
+  captured=$(cat "${MOCK_BIN}/../.codex-stdin")
+  [[ "$captured" == *"Evidence burden is symmetric"* ]]
+  [[ "$captured" == *"forfeited relitigation"* ]]
+}
+
+# context: claude — delta rules present on round > 0
+@test "context: delta review rules appear in claude prompt when TOTAL_ROUNDS>0" {
+  export REVIEW_ENGINE="claude"
+  set_counter_value 1 test-session 1
+  create_mock_engine "claude" "<verdict>APPROVE</verdict>
+Fine."
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+  local captured
+  captured=$(mock_stdin "claude")
+  [[ "$captured" == *"Evidence burden is symmetric"* ]]
+  [[ "$captured" == *"forfeited relitigation"* ]]
+}
+
+# context: agy first-round-shaped call (no CONV_FILE yet, reads PROMPT_FILE)
+# — delta rules present on round > 0
+@test "context: delta review rules appear in agy PROMPT_FILE-based prompt when TOTAL_ROUNDS>0" {
+  set_counter_value 1 test-session 1
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Fine."
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+  local captured
+  captured=$(agy_args agy)
+  [[ "$captured" == *"Evidence burden is symmetric"* ]]
+  [[ "$captured" == *"forfeited relitigation"* ]]
+}
+
+# context: agy resume-round inline prompt (bypasses PROMPT_FILE entirely) —
+# delta rules must ALSO be present here, since this duplicate text is the
+# MOST COMMON multi-round path with the default engine.
+@test "context: delta review rules appear in agy resume-round inline prompt when TOTAL_ROUNDS>0" {
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+  set_counter_value 1 test-session 1
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Fine."
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+  local captured
+  captured=$(agy_args agy)
+  [[ "$captured" == *"--conversation aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"* ]]
+  [[ "$captured" == *"Evidence burden is symmetric"* ]]
+  [[ "$captured" == *"forfeited relitigation"* ]]
+}
+
+# context: first round (TOTAL_ROUNDS=0) has no delta review rules — there is
+# no prior round to build a delta against yet.
+@test "context: first round prompt has no delta review rules" {
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] first round."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  [[ "$(agy_args agy)" != *"Evidence burden is symmetric"* ]]
+}
+
+# =============================================================================
+# Byte Clamps (D): clamp_head_bytes / clamp_tail_bytes — lib/common.sh
+# =============================================================================
+
+# prompt: clamp_head_bytes branch 1 (under limit) — full round-trip, no
+# edge line dropped from either boundary. Title says "content preserved",
+# NOT "unchanged": this fixture's $input has no trailing newline, so this
+# case happens to round-trip byte-for-byte, but the function's own
+# content=$(cat) strips ALL trailing stdin newlines regardless — see the
+# dedicated trailing-newline test below, which pins that behavior for input
+# that DOES have one.
+@test "prompt: clamp_head_bytes under limit preserves content, no edge line dropped" {
+  source "${BATS_TEST_DIRNAME}/../scripts/lib/common.sh"
+  local input="line1
+line2
+line3"
+  local out
+  out=$(printf '%s' "$input" | clamp_head_bytes 1000)
+  [ "$out" = "$input" ]
+}
+
+# prompt: clamp_head_bytes's content=$(cat) strips ALL trailing stdin
+# newlines before the byte-count comparison even when under the limit — the
+# same command-substitution semantics already used elsewhere in this
+# codebase (e.g. the original GLOBAL_MD=$(head -c ... ) idiom). This is
+# acceptable, not a regression: it only ever shortens output, never exceeds
+# the byte budget, and the under-limit branch is a pure pass-through of
+# already-truncated content otherwise. Pinned here so a future refactor
+# doesn't accidentally "fix" this into inconsistent behavior with the rest
+# of the codebase.
+@test "prompt: clamp_head_bytes strips trailing newlines from stdin even when under limit (known, acceptable)" {
+  source "${BATS_TEST_DIRNAME}/../scripts/lib/common.sh"
+  local out
+  out=$(printf 'aaaaaaaaaa\n\n\n' | clamp_head_bytes 12 | wc -c | tr -d ' ')
+  [ "$out" -eq 10 ]
+}
+
+# prompt: clamp_head_bytes branch 2 (over limit, cut lands mid-CJK-character
+# on a line that has a complete predecessor) — the truncated line is dropped
+# whole, result stays valid UTF-8.
+@test "prompt: clamp_head_bytes over limit at a line boundary drops the truncated line, stays valid UTF-8" {
+  source "${BATS_TEST_DIRNAME}/../scripts/lib/common.sh"
+  local infile outfile
+  infile="${TEST_TEMP_DIR}/head-over.txt"
+  outfile="${TEST_TEMP_DIR}/head-over.out"
+  {
+    printf 'aaaaaaaaaa\n'
+    printf 'b%.0s' $(seq 1 20)
+    printf '中文内容\n'
+    printf 'c%.0s' $(seq 1 20)
+  } > "$infile"
+  clamp_head_bytes 33 < "$infile" > "$outfile"
+  run bash -c "iconv -f UTF-8 -t UTF-8 < '$outfile' >/dev/null 2>&1"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$outfile")" = "aaaaaaaaaa" ]
+}
+
+# prompt: clamp_head_bytes branch 3 (over limit, no newline before the cut —
+# a single long line) — falls back to a raw byte cut rather than returning
+# empty.
+@test "prompt: clamp_head_bytes over limit with no newline before the cut falls back to raw head -c, not empty" {
+  source "${BATS_TEST_DIRNAME}/../scripts/lib/common.sh"
+  local infile outfile
+  infile="${TEST_TEMP_DIR}/head-single.txt"
+  outfile="${TEST_TEMP_DIR}/head-single.out"
+  printf 'a%.0s' $(seq 1 50) > "$infile"
+  clamp_head_bytes 10 < "$infile" > "$outfile"
+  [ -s "$outfile" ]
+  [ "$(wc -c < "$outfile" | tr -d ' ')" -eq 10 ]
+}
+
+# prompt: clamp_tail_bytes branch 1 (under limit) — full round-trip, no edge
+# line dropped. Title says "content preserved", NOT "unchanged": see the
+# clamp_head_bytes trailing-newline note above — the same content=$(cat)
+# stripping applies here too, this fixture's $input just has no trailing
+# newline so it round-trips byte-for-byte.
+@test "prompt: clamp_tail_bytes under limit preserves content, no edge line dropped" {
+  source "${BATS_TEST_DIRNAME}/../scripts/lib/common.sh"
+  local input="line1
+line2
+line3"
+  local out
+  out=$(printf '%s' "$input" | clamp_tail_bytes 1000)
+  [ "$out" = "$input" ]
+}
+
+# prompt: clamp_tail_bytes branch 2 (over limit, cut lands mid-CJK-character)
+# — the truncated line is dropped whole, result stays valid UTF-8.
+@test "prompt: clamp_tail_bytes over limit at a line boundary drops the truncated line, stays valid UTF-8" {
+  source "${BATS_TEST_DIRNAME}/../scripts/lib/common.sh"
+  local infile outfile
+  infile="${TEST_TEMP_DIR}/tail-over.txt"
+  outfile="${TEST_TEMP_DIR}/tail-over.out"
+  {
+    printf 'AAAAAAAAAA\n'
+    printf '中文内容\n'
+    printf 'CCCC\n'
+    printf 'DDDD\n'
+  } > "$infile"
+  clamp_tail_bytes 15 < "$infile" > "$outfile"
+  run bash -c "iconv -f UTF-8 -t UTF-8 < '$outfile' >/dev/null 2>&1"
+  [ "$status" -eq 0 ]
+  local content
+  content=$(cat "$outfile")
+  [[ "$content" == *"CCCC"* ]]
+  [[ "$content" == *"DDDD"* ]]
+  [[ "$content" != *"内容"* ]]
+}
+
+# prompt: clamp_tail_bytes branch 3 (over limit, no newline before the cut) —
+# falls back to a raw byte cut rather than returning empty.
+@test "prompt: clamp_tail_bytes over limit with no newline before the cut falls back to raw tail -c, not empty" {
+  source "${BATS_TEST_DIRNAME}/../scripts/lib/common.sh"
+  local infile outfile
+  infile="${TEST_TEMP_DIR}/tail-single.txt"
+  outfile="${TEST_TEMP_DIR}/tail-single.out"
+  printf 'a%.0s' $(seq 1 50) > "$infile"
+  clamp_tail_bytes 10 < "$infile" > "$outfile"
+  [ -s "$outfile" ]
+  [ "$(wc -c < "$outfile" | tr -d ' ')" -eq 10 ]
+}
+
+# prompt: A3 + D integration — a single overlong Chinese review is clamped
+# by clamp_head_bytes before landing in HISTORY_FILE, and the clamped record
+# stays valid UTF-8.
+@test "prompt: single-round overlong Chinese review is clamped into HISTORY_FILE, stays valid UTF-8" {
+  local body i
+  body="<verdict>CONCERNS</verdict>"$'\n'
+  for i in $(seq 1 200); do
+    body="${body}[Major] 第${i}条中文发现内容，用于撑大审阅正文长度以测试单轮记录截断行为是否安全可靠。"$'\n'
+  done
+  create_mock_engine "agy" "$body"
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+
+  local history_file
+  history_file=$(get_history_file)
+  [ -s "$history_file" ]
+  run bash -c "iconv -f UTF-8 -t UTF-8 < '$history_file' >/dev/null 2>&1"
+  [ "$status" -eq 0 ]
+  grep -q "第1条中文发现" "$history_file"
+  ! grep -q "第200条中文发现" "$history_file"
+  local hist_bytes
+  hist_bytes=$(wc -c < "$history_file" | tr -d ' ')
+  # HISTORY_ROUND_BYTES is 9000 (lib/common.sh); 9200 leaves the same ~200-byte
+  # margin the original 6200/6000 pairing did, for the "### Round N — VERDICT"
+  # header + trailing blank line this clamp doesn't count against the budget.
+  [ "$hist_bytes" -lt 9200 ]
+}
+
+# prompt: A4 + D integration — an overlong accumulated thread (many rounds)
+# is capped by clamp_tail_bytes on injection, keeping only the most recent
+# rounds, and the injected content stays valid UTF-8.
+@test "prompt: overlong accumulated thread is capped by clamp_tail_bytes on injection, stays valid UTF-8" {
+  local history_file i
+  history_file=$(get_history_file)
+  : > "$history_file"
+  # 400 rounds (not 200): HISTORY_INJECT_BYTES is 48000 (lib/common.sh), up
+  # from the old 24000 — this fixture must exceed the CURRENT budget by a
+  # comfortable margin, or the clamp under test never actually triggers.
+  for i in $(seq 1 400); do
+    printf '### Round %d — CONCERNS\n\n[Major] 第%d轮中文审阅意见内容一，用于撑大历史文件体积用于测试截断行为是否安全。第%d轮中文审阅意见内容二，重复一遍确保单条记录本身足够长。\n\n' \
+      "$i" "$i" "$i" >> "$history_file"
+  done
+  local hist_bytes
+  hist_bytes=$(wc -c < "$history_file" | tr -d ' ')
+  [ "$hist_bytes" -gt 48000 ]
+
+  set_counter_value 1 test-session 5
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] latest finding."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+
+  local args_file="${MOCK_BIN}/../.agy-args-agy"
+  [[ "$(cat "$args_file")" == *"## Prior Review Thread"* ]]
+  [[ "$(cat "$args_file")" != *"Round 1 —"* ]]
+  [[ "$(cat "$args_file")" == *"Round 400 —"* ]]
+  run bash -c "iconv -f UTF-8 -t UTF-8 < '$args_file' >/dev/null 2>&1"
+  [ "$status" -eq 0 ]
 }

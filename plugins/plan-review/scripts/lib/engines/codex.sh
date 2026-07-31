@@ -50,9 +50,13 @@ engine_probe() {
   printf '\n' >> "$CODEX_PROMPT_FILE"
 
   # UTF-8 sanitation (codex-only — the other engines never see this file).
-  # GLOBAL_MD/PROJECT_MD are truncated by BYTE count (`head -c 3000` / `-c 8000`),
-  # which slices a multi-byte character in half whenever a CLAUDE.md is non-ASCII
-  # near the cut. codex hard-rejects such input — it does not degrade, it aborts:
+  # GLOBAL_MD/PROJECT_MD go through clamp_head_bytes (lib/common.sh,
+  # GLOBAL_MD_BYTES=8000 / PROJECT_MD_BYTES=24000), which is UTF-8-safe in the
+  # common case — it drops the whole line the cut landed on. But its own
+  # fallback (a single long line with no newline before the cut) degrades to
+  # a raw byte-count cut, which CAN still slice a multi-byte character in
+  # half whenever a CLAUDE.md is non-ASCII near that cut. codex hard-rejects
+  # such input — it does not degrade, it aborts:
   #   "Failed to read prompt from stdin: input is not valid UTF-8 (invalid byte
   #    at offset N). Convert it to UTF-8 and retry"
   # …making REVIEW_ENGINE=codex unusable for anyone with a non-ASCII CLAUDE.md.
