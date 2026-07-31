@@ -4063,6 +4063,67 @@ MOCK_EOF
   [[ "$prompt_content" == *"finding that must survive an ARG_MAX abort"* ]]
 }
 
+# history: grok re-review round 3 finding — CROSS-round, a different
+# dimension from the three same-round injection call sites tested above.
+# Round 1's ARG_MAX abort leaves CONV_FILE completely untouched, and REST —
+# not agy — produces this round's authoritative REVIEW. Without invalidating
+# CONV_FILE afterward, round 2's composition-time check would see a
+# non-empty CONV_FILE, conclude agy has native memory, and skip thread
+# injection entirely — but agy's own server-side session never saw round
+# 1's REST-produced finding (it never ran), so round 2 would get neither the
+# thread nor real native memory of it. This is what `[ -z "$REVIEW" ] ||
+# rm -f "${CONV_FILE:-}"` right after rest_extract fixes.
+@test "history: REST-produced REVIEW after an ARG_MAX abort invalidates CONV_FILE cross-round → next round has no --conversation and carries REST's finding" {
+  # Precondition: CONV_FILE already live, as if established by an earlier
+  # successful agy round outside this test's visibility — this is what makes
+  # the assertions below non-trivial (without a live CONV_FILE to begin
+  # with, "no --conversation next round" would hold even without the fix).
+  printf '%s' "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" > "${REVIEW_COUNTER_DIR}/.conversation-test-session"
+
+  # Round 1: oversized plan trips agy's ARG_MAX guard — CONV_FILE is never
+  # touched by that path — and REST is the only producer of a result this
+  # round. Verdict CONCERNS so A3 records the finding into HISTORY_FILE and
+  # the cycle continues (a round 2 happens at all).
+  local big_plan
+  big_plan="<verdict>marker</verdict> $(printf 'x%.0s' $(seq 1 300000))"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse '<verdict>CONCERNS</verdict>
+[Major] REST-produced finding from the ARG_MAX round.'
+  INPUT=$(build_input plan="$big_plan")
+  run_hook
+  assert_deny_json
+  assert_log_contains "agy-skip reason=prompt-too-large"
+
+  local history_file
+  history_file=$(get_history_file)
+  [ -s "$history_file" ]
+  grep -q "REST-produced finding from the ARG_MAX round" "$history_file"
+
+  # Round 1 exhausting CLI and falling to REST unconditionally refreshes the
+  # gemini degrade-file (unrelated to this fix — same behavior pre-dates it),
+  # which would otherwise make round 2 ALSO skip straight to REST (reusing
+  # round 1's REST mock output) instead of actually invoking agy. Clear it
+  # so round 2 genuinely exercises the agy CLI path this test is about.
+  rm -f "${REVIEW_COUNTER_DIR}/.gemini-degraded"
+
+  # Round 2: same session, a normal (non-oversized) plan — agy's CLI
+  # actually gets invoked this time. If CONV_FILE were still live from round
+  # 1 (the bug this test pins), this round would resume it with
+  # --conversation and never receive the injected thread.
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Acknowledged, finding resolved."
+  INPUT=$(build_input)
+  run_hook
+  assert_ack_approve_json
+
+  local captured
+  captured=$(agy_args agy)
+  [[ "$captured" != *"--conversation"* ]]
+  [[ "$captured" == *"## Prior Review Thread"* ]]
+  [[ "$captured" == *"REST-produced finding from the ARG_MAX round"* ]]
+}
+
 # history: engine-not-found is an orphan exit (no engine call will ever
 # happen this cycle) — HISTORY_FILE is dropped to block cross-plan
 # contamination, but COUNTER_FILE deliberately survives (unchanged contract).

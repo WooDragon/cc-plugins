@@ -853,6 +853,25 @@ else
     rest_invoke
     rest_extract
 
+    # Cross-ROUND fix (different dimension from the three same-round
+    # injection call sites above — do not fold this into any of them). This
+    # round's CONV_FILE can still be live even after REST — not agy — just
+    # produced the authoritative REVIEW for it (e.g. the ARG_MAX-abort path:
+    # agy's own CLI never ran, so nothing ever touched CONV_FILE). If left
+    # alone, agy's server-side session history silently stops one round
+    # short of current: the NEXT round's composition-time check
+    # (call site 1) sees a non-empty CONV_FILE, concludes agy has native
+    # memory, and skips thread injection — but agy's actual session never
+    # saw this round's REST-produced finding, so the next round gets NEITHER
+    # the injected thread NOR a native memory of what REST just found.
+    # Dropping CONV_FILE here forces the next round onto the thread path
+    # instead, which DOES have this round's finding (written into
+    # HISTORY_FILE via A3 further below). Gated on REVIEW being non-empty:
+    # if REST also failed, this round produced no authoritative result at
+    # all, so agy's (possibly still-valid) session must not be invalidated
+    # for nothing.
+    [ -z "$REVIEW" ] || rm -f "${CONV_FILE:-}"
+
     : > "$ENGINE_OUT"
     [ -z "$REVIEW" ] || echo "plan-review: REST API fallback succeeded." >&2
   fi
