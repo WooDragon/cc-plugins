@@ -26,6 +26,7 @@ npx skills add WooDragon/cc-plugins -g
 | [code-search](./plugins/code-search/) | Code search & symbol navigation — pick the right tool by search intent |
 | [deep-research](./plugins/deep-research/) | Deep research framework — 7-Stage pipeline + role-specialized subagents + multi-model harvest & citation-verification gate |
 | [pr-review](./plugins/pr-review/) | AI review for open GitHub PRs — grok CLI local synchronous review (default, multi-round follow-up) + Copilot bot asynchronous review (optional) |
+| [dispatch-contract](./plugins/dispatch-contract/) | Subagent dispatch contract — four dispatch rules + `%%DONE%%` finalization gate (SubagentStop) |
 
 ## Skills
 
@@ -39,6 +40,7 @@ npx skills add WooDragon/cc-plugins -g
 | [code-search](./plugins/code-search/skills/code-search/) | code-search | Pick the right search tool (ctags/ast-grep/grep) by intent |
 | [deep-research](./plugins/deep-research/skills/deep-research/) | deep-research | Router skill for the 7-stage research pipeline + quality gates |
 | [pr-review](./plugins/pr-review/skills/pr-review/) | pr-review | Review an open PR by number — grok (default) or Copilot bot backend |
+| [subagent-dispatch](./plugins/dispatch-contract/skills/subagent-dispatch/) | dispatch-contract | Four dispatch rules + `%%DONE%%` finalization contract for subagent delegation |
 
 ## Basic Usage
 
@@ -73,3 +75,12 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/create-research-project.sh" "研究主题" -
 ```
 
 **pr-review** — check out the PR's branch, then ask Claude Code to "评审 PR 123" / "grok review PR 123". The grok backend prints the review to your terminal and keeps a session so follow-up rounds only send the incremental diff; the Copilot backend is opt-in and posts back onto the PR instead.
+
+**dispatch-contract** — also automatic. When Claude dispatches a subagent and the prompt contains `%%DONE%%`, the SubagentStop gate verifies that the subagent's final non-empty line is exactly that marker. If it isn't, the gate blocks the stop once and injects a correction directive asking the subagent to complete its report and end with `%%DONE%%`. The bundled `subagent-dispatch` skill is invoked when you or Claude asks about subagent delegation; it inlines the four dispatch rules, offload-scenario guidance, and mailbox/liveness patterns directly into the conversation.
+
+```bash
+# To require a finalized report, append this line verbatim to your dispatch prompt:
+# 末尾单独一行输出 %%DONE%%。
+# The gate is fail-open: no %%DONE%% in the prompt → gate stays silent.
+export ALLOW_UNMARKED_FINAL=1  # escape hatch if needed
+```
