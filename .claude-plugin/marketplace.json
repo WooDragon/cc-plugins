@@ -81,6 +81,17 @@
       "source": "./plugins/guardrails",
       "category": "development",
       "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "dispatch-contract",
+      "description": "Subagent dispatch contract — four dispatch rules + %%DONE%% finalization gate (SubagentStop)",
+      "version": "1.0.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/dispatch-contract",
+      "category": "development",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
     }
   ]
 }

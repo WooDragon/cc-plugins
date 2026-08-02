@@ -1,0 +1,13 @@
+{
+  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop",
+  "hooks": {
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/subagent-done-gate.sh", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}
