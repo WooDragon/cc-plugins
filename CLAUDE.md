@@ -140,6 +140,7 @@ plugins/
 | doc-gate | `SKILL_GATE_*`、`RECALL_GATE_*` | [plugins/doc-gate/README.md](plugins/doc-gate/README.md#environment-variables) |
 | deep-research | `GATEWAY_API_KEY`、`TAVILY_API_KEY`、`JINA_API_KEY`（可选凭证） | [plugins/deep-research/README.md](plugins/deep-research/README.md#prerequisites) |
 | pr-review | `GROK_MODEL`、`GROK_EFFORT`、`XDG_STATE_HOME`（session 落盘根） | [plugins/pr-review/README.md](plugins/pr-review/README.md#prerequisites) |
+| dispatch-contract | `ALLOW_UNMARKED_FINAL`（`%%DONE%%` 门禁逃生舱） | [plugins/dispatch-contract/README.md](plugins/dispatch-contract/README.md#environment-variables) |
 
 敏感变量（如 `REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
 

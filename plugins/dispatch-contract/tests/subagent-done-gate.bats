@@ -178,7 +178,7 @@ teardown() {
 }
 
 # ============================================================
-# Marker line whitespace tolerance (4)
+# Marker line whitespace tolerance + decoration must still block (6)
 # ============================================================
 
 @test "whitespace: marker line with trailing space → PASS" {

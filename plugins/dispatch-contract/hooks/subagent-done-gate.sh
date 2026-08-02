@@ -59,9 +59,9 @@ TP="${TP/#\~/${HOME:-}}"
 # 含该标记的文件」也误判成派发方要求过。
 # fork 特征串刻意用宽松匹配：误命中只是退回旧的取两行行为（至多多拦一次、自愈），
 # 漏命中却会让整类 fork 子 agent 静默失去保护，方向上不对称。
-L1=$(head -1 "$TP" 2>/dev/null)
+L1=$(head -n 1 -- "$TP" 2>/dev/null)
 case "$L1" in
-  *fork-context-ref*) PROMPT_SRC=$(head -2 "$TP" 2>/dev/null) ;;
+  *fork-context-ref*) PROMPT_SRC=$(head -n 2 -- "$TP" 2>/dev/null) ;;
   *)                  PROMPT_SRC=$L1 ;;
 esac
 grep -qF "$MARK" <<< "$PROMPT_SRC" || exit 0

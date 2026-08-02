@@ -20,7 +20,8 @@ SubagentStop
          Checks whether the dispatch prompt contained %%DONE%%.
          If yes: verifies the subagent's final non-empty line equals %%DONE%% exactly.
          Mismatch → deny once, inject correction directive asking for a complete
-         report ending with %%DONE%%.  On the subagent's next stop the check repeats.
+         report ending with %%DONE%%.  Blocks at most once per subagent:
+         the resumed stop carries stop_hook_active=true and passes unconditionally.
          If no: silent pass-through (fail-open).
 
 skills/subagent-dispatch  (no hook — loaded by description match)
@@ -35,11 +36,19 @@ instead.
 
 ## The `%%DONE%%` Contract
 
-Declare the contract per task, not per role. When a dispatch prompt requires a finalized deliverable, append this line verbatim at the end of the prompt:
+Declare the contract per task, not per role. When a dispatch prompt requires a finalized deliverable, append a line asking for the marker — at minimum:
 
 > 末尾单独一行输出 `%%DONE%%`。
 
-The subagent's final non-empty line must then be exactly `%%DONE%%` — not contain it, but equal it. If the check fails, the gate blocks the SubagentStop event once and sends a correction directive back into the subagent, asking it to complete the report and end with the marker. The subagent resumes, produces the missing content, and stops again; the gate re-checks.
+The gate enforces only that marker line. What else a finalized report must contain is a
+convention rather than something a hook can check, so the canonical wording — which also
+asks for a verification matrix and an unfinished-items section — lives in one place:
+the `定稿标记` section of `skills/subagent-dispatch/SKILL.md`. Copy it from there rather
+than from this README, which shows only the gate-enforced minimum.
+
+The subagent's final non-empty line must then be exactly `%%DONE%%` — not contain it, but equal it. If the check fails, the gate blocks the SubagentStop event and sends a correction directive back into the subagent, asking it to complete the report and end with the marker.
+
+**It blocks at most once.** The resumed stop arrives with `stop_hook_active=true`, and the gate passes it unconditionally without re-checking. A subagent that still omits the marker on its second attempt is let through rather than looped — an unbounded retry loop on a subagent that cannot satisfy the check would be worse than an unmarked report.
 
 **Tolerances**: leading/trailing whitespace and CRLF line endings are stripped before comparison, so `  %%DONE%%\r\n` passes.
 
@@ -69,8 +78,8 @@ Set this before starting the Claude Code session to disable the gate globally. U
 ## Known Boundaries
 
 - The gate only fires at `SubagentStop` — it has no visibility into intermediate tool calls or messages the subagent sends before stopping.
-- If the dispatch prompt contains `%%DONE%%` anywhere (even in a negated or illustrative context), the gate activates. Misfire direction is one extra block, which self-heals on the next stop.
-- Correction injection happens once per SubagentStop event; if the subagent's corrected output still misses the marker, the gate fires again on the next stop.
+- If the dispatch prompt contains `%%DONE%%` anywhere (even in a negated or illustrative context), the gate activates. Misfire direction is one extra block, which self-heals because the retry passes unconditionally.
+- The gate blocks at most once per subagent. If the corrected output still misses the marker, it is let through — the gate does not loop.
 
 ## `subagent-dispatch` Skill
 
@@ -92,7 +101,7 @@ The skill triggers on dispatch-related requests: "派发 subagent", "dispatch su
 bats plugins/dispatch-contract/tests/subagent-done-gate.bats
 ```
 
-26 test cases covering: marker present/absent in prompt, exact-match pass, decoration variants (bold/backtick/list/punctuation), whitespace tolerance, CRLF tolerance, fail-open conditions (missing fields, no jq, unreadable transcript), escape hatch, and correction directive injection.
+26 test cases covering: core judgment (marker required/not required in the dispatch prompt), `fork-context-ref` transcript shape, in-band signaling defence (a subagent cannot open its own gate), whitespace and CRLF tolerance, decoration variants that must still block (bold, backticks, trailing punctuation), blank final message treated as an empty deliverable rather than fail-open, fail-open paths (missing fields, `last_assistant_message` null, invalid JSON, empty stdin, absent transcript path, `stop_hook_active`), hostile paths (`HOME` unset, FIFO must not hang), and the kill switch.
 
 ## Environment Variables
 
