@@ -41,16 +41,18 @@ description: |
 
 ## 己方端补充纪律（background 派发后，与④同族）
 
-铁律①②③钉进子 agent 的 prompt（派发端），④与下列三条约束主 agent 自己（己方端）。四条同族——都拒绝凭不可靠信号抢跑不可逆动作。
+铁律①②③钉进子 agent 的 prompt（派发端），④与下列各条约束主 agent 自己（己方端）。同族——都拒绝凭不可靠信号抢跑不可逆动作。
+
+**两类别混**：前三行对**一切 background 派发**生效（通知队列投递问题）；后两行仅 **teammate/mailbox** 场景适用（传了 `name` 才会走 mailbox）。#141 那类"5 路跑完零通知"属前者，与 mailbox 无关——那 5 条通知自带完整产物正文，走的是 task-notification 队列。
 
 | 纪律 | 一句话 | 展开 |
 |---|---|---|
 | 通道选择 | 不传 `name`，产物走工具返回值（可靠）；传 `name` 即提升为 teammate、产物改走 mailbox。teammate 由 team-ops 的 TeamCreate + handoff 协议起，不靠手传 `name`——故即席派发一律不传；可另配 PreToolUse hook 拦截违规通道选择 | 见 references/mailbox-liveness.md |
-| 回传通道 | background subagent 的 final text 不自动进主 mailbox，产物必须走 `SendMessage(to:"main")`；该工具在 subagent 里默认 deferred，prompt 须要求它先 `ToolSearch select:SendMessage` 加载。**能同步就 `run_in_background:false`**——产物走 tool_result，既绕开此坑，也不进那个会丢通知的队列 | 见 references/mailbox-liveness.md |
+| 等待方式 | 需要产物才能往下走 → `run_in_background:false` 同步派发（产物走 tool_result，不进通知队列）；真要后台并行则派完就结束本轮、交还主循环空闲态。**禁止 `sleep`/轮询/主动查进度**（上游官方明令）。主循环有工具在飞时到达的通知实测 92.7% 被丢弃且无恢复通道 | 见 references/dispatch-contract.md |
+| 取产物 | 别用 `TaskOutput`（官方已标弃用，且对 local_agent 会灌入整个 transcript）；派完后台 agent 后别紧接着 `AskUserQuestion`（该期间到达的通知实测 18 例全丢） | 见 references/dispatch-contract.md |
+| 汇报纪律 | 「没收到通知」≠「agent 零产出」——汇报前先查 transcript 末条 assistant，别把通知丢失说成子 agent 没干活 | 见 references/dispatch-contract.md |
+| 回传通道 | **teammate/mailbox 专属**：background teammate 的 final text 不自动进主 mailbox，产物必须走 `SendMessage(to:"main")`；该工具在 subagent 里默认 deferred，prompt 须要求它先 `ToolSearch select:SendMessage` 加载 | 见 references/mailbox-liveness.md |
 | 活性判定 | 完成/进展是 mailbox 异步、下一 turn 才可见；文件没变 / ps 查不到进程 / sleep 期间没消息都不算 agent 死了；TaskStop 不可逆，存疑多等一 turn 不错杀 | 见 references/mailbox-liveness.md |
-| 等待方式 | 派完就结束本轮、交还主循环空闲态等唤起；**禁止 `sleep`/轮询/主动查进度**（上游官方明令，见 reference 引原文）。主循环有工具在飞时到达的通知实测 92.7% 被丢弃且不可恢复 | 见 references/mailbox-liveness.md |
-| 取产物 | 别用 `TaskOutput`（官方已标弃用，且对 local_agent 会灌入整个 transcript）；派完后台 agent 后别紧接着 `AskUserQuestion`（该期间到达的通知实测全丢） | 见 references/mailbox-liveness.md |
-| 汇报纪律 | 「没收到通知」≠「agent 零产出」——汇报前先查 transcript 末条 assistant，别把通知丢失说成子 agent 没干活 | 见 references/mailbox-liveness.md |
 
 ## 派发端补充纪律（仅上游带焊死 persona 时发作）
 
@@ -71,7 +73,8 @@ description: |
 
 - 需要每条铁律的正反例与常见踩坑时，读取：`references/dispatch-contract.md`
 - 判断某任务该不该卸载、用哪个模型档时，读取：`references/offload-scenarios.md`
-- spawn background subagent 后如何收产物 / 判活性 / 何时能 TaskStop，读取：`references/mailbox-liveness.md`
+- 派完 background agent 后怎么等、通知为什么会丢、产物怎么兜底取回，读取：`references/dispatch-contract.md` 的「己方端纪律：派完就交还主循环」章节
+- teammate（传了 `name`）的 mailbox 回传通道 / 活性判定 / 何时能 TaskStop，读取：`references/mailbox-liveness.md`
 - 需要子 agent 返回强结构化产物（JSON/schema 校验）时，读取：`references/workflow-schema.md`
 - 派发端 persona 规避的发作区/安全区展开与实测背书，读取：同一份 `references/dispatch-contract.md` 的「## 派发端补充」章节
 
