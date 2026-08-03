@@ -9,7 +9,7 @@ description: |
   - 需要子 agent 返回强结构化产物（JSON schema 校验）时了解 Workflow agent() 用法
   - 派发 prompt 触发拒绝，排查是否遇到上游 persona 焊死问题
   时调用此 Skill。
-  Triggers: 派发 subagent, subagent 调度, dispatch subagent, spawn agent, delegate to agent, Task 派发, 并行派发, 交付物形态, 定稿标记, 输出即产物, 范围围栏, 渐进产出, 定稿纪律, offload, 卸载场景, 卸载判断, background subagent, 活性判定, TaskStop, 回传通道, workflow schema, 结构化产物, persona 拒绝, 派发契约, dispatch contract, %%DONE%%.
+  Triggers: 派发 subagent, subagent 调度, dispatch subagent, spawn agent, delegate to agent, Task 派发, 并行派发, 交付物形态, 定稿标记, 输出即产物, 范围围栏, 渐进产出, 定稿纪律, offload, 卸载场景, 卸载判断, background subagent, 活性判定, TaskStop, 回传通道, workflow schema, 结构化产物, persona 拒绝, 派发契约, dispatch contract, %%DONE%%, 通知丢失, task-notification 未送达, 完成通知没到, agent 跑完没回传, 主 session 一直等, sleep 等 subagent, 轮询等待, TaskOutput, 零产出误判.
 ---
 
 # 子 agent 派发契约
@@ -46,8 +46,11 @@ description: |
 | 纪律 | 一句话 | 展开 |
 |---|---|---|
 | 通道选择 | 不传 `name`，产物走工具返回值（可靠）；传 `name` 即提升为 teammate、产物改走 mailbox。teammate 由 team-ops 的 TeamCreate + handoff 协议起，不靠手传 `name`——故即席派发一律不传；可另配 PreToolUse hook 拦截违规通道选择 | 见 references/mailbox-liveness.md |
-| 回传通道 | background subagent 的 final text 不自动进主 mailbox，产物必须走 `SendMessage(to:"main")`；该工具在 subagent 里默认 deferred，prompt 须要求它先 `ToolSearch select:SendMessage` 加载。能同步就 `run_in_background:false` 绕开此坑 | 见 references/mailbox-liveness.md |
+| 回传通道 | background subagent 的 final text 不自动进主 mailbox，产物必须走 `SendMessage(to:"main")`；该工具在 subagent 里默认 deferred，prompt 须要求它先 `ToolSearch select:SendMessage` 加载。**能同步就 `run_in_background:false`**——产物走 tool_result，既绕开此坑，也不进那个会丢通知的队列 | 见 references/mailbox-liveness.md |
 | 活性判定 | 完成/进展是 mailbox 异步、下一 turn 才可见；文件没变 / ps 查不到进程 / sleep 期间没消息都不算 agent 死了；TaskStop 不可逆，存疑多等一 turn 不错杀 | 见 references/mailbox-liveness.md |
+| 等待方式 | 派完就结束本轮、交还主循环空闲态等唤起；**禁止 `sleep`/轮询/主动查进度**（上游官方明令，见 reference 引原文）。主循环有工具在飞时到达的通知实测 92.7% 被丢弃且不可恢复 | 见 references/mailbox-liveness.md |
+| 取产物 | 别用 `TaskOutput`（官方已标弃用，且对 local_agent 会灌入整个 transcript）；派完后台 agent 后别紧接着 `AskUserQuestion`（该期间到达的通知实测全丢） | 见 references/mailbox-liveness.md |
+| 汇报纪律 | 「没收到通知」≠「agent 零产出」——汇报前先查 transcript 末条 assistant，别把通知丢失说成子 agent 没干活 | 见 references/mailbox-liveness.md |
 
 ## 派发端补充纪律（仅上游带焊死 persona 时发作）
 

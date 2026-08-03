@@ -39,10 +39,89 @@
 **正确等待手段**：
 - 需要结果才能往下走 → 用同步派发（解法优先级 #1），别 spawn 后轮询。
 - 必须异步 → 依赖完成通知 / mailbox 事件被下一 turn 唤醒，**不要中途凭文件状态抢跑 TaskStop**。
+- **派完就结束本轮**，把主循环交还空闲态等唤起。别用 `sleep` 占着主循环——除了浪费墙上时间，它还会让通知走进下节那条会被吃掉的路径。
+
+**上游官方立场（2.1.220 二进制内 Agent 工具描述原文，非社区转述）**：
+
+> Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
+
+Bash 工具描述同版原文：
+
+> Foreground `sleep` is blocked; use Monitor with an until-loop to wait on a condition.
+
+拦截文案另写明 `Do not chain shorter sleeps to work around this block.`。即"sleep 等 subagent"本就是上游明令禁止的用法，本纪律与其同向，不是本地独创。
+
+注：该拦截并非在所有环境都实际生效（本地 2.1.220 实测 `sleep 3` 仍放行），所以它拦不住你，**纪律仍须自觉遵守**。
 
 **TaskStop 是不可逆动作**：套铁律④同源标准——不凭推断的卡死判断拍板。真正的死有客观兜底（框架 watchdog 对无进展达阈值判失败），不靠主 agent 用文件轮询猜。
 
 **不确定性诚实**：不能 100% 排除某次真有网络 / CLI 挂起（部分后端延迟方差大，实测 26s ~ >120s）。但存疑时**倾向再等一个完成信号 / 一个 turn**，判死门槛设高——宁可多等一 turn，不可错杀一个正在干活的 agent。本纪律的经验来源：被判死并 TaskStop 的三个 agent 事后全部复活并交出完整产物。
+
+## 完成通知会被"中途折叠"吃掉（机制级，解释为什么优先级 #1 是同步）
+
+这是"能同步就同步"的**机制层理由**，也是上节"派完就结束本轮"的根据。本地 2.1.220 实测 + 二进制代码互证。
+
+**机制**：完成通知先入命令队列，消费分两条路——
+
+| 主循环状态 | 队列动作 | 结果 |
+|---|---|---|
+| 空闲 | `dequeue` | 落成真正的 `user` 消息，模型必定看见 |
+| 正在跑工具（mid-turn） | **`remove`** | 只落一条 `attachment/queued_command`，`origin` 兜底为 `{kind:"task-notification"}` 并打 `isMeta:true`，随后从队列移除 |
+
+二进制里这段是 query 主循环在每批工具结果后做的 mid-turn fold：`registerFoldInFlight(dn)` → 渲染 attachment → `messageQueue.remove(Jr)`。
+
+**实测数据**（本地 383 个 session 全量扫描，仅统计 subagent 通知）：
+
+| 通知到达时主循环 | 送达 | 丢失 | 丢失率 |
+|---|---|---|---|
+| 有工具在飞 | 11 | 139 | **92.7%** |
+| 空闲 | 690 | 91 | 11.7% |
+
+按通知正文哈希精确配对 `remove` 事件（不靠代理指标）：内容出现在 `remove` 里的 430 例丢失率 **95.3%**，未出现的 1124 例 23.4%。
+
+**在飞工具排名**：`TaskOutput` 80、`Bash` 35（其中 `sleep` 26）、`AskUserQuestion` 18、`Agent` 5。
+
+**按后果分类**（关键区分，别一刀切）：
+- **良性**：`TaskOutput` 那 80 例中 75 例是在轮询它自己等的那个 task，其中 70 例产物经 tool_result 正常回来了——通知被吃但产物没丢。
+- **有害**：`Bash`(35，sleep 占 26)、`AskUserQuestion`(18)、`TaskOutput` 轮询别的 task(5)、`Agent`(5)、`TaskStop`(1)。这些丢了就是净丢失。
+
+**没有恢复通道**：`remove` 是终态。实测 28 例"丢失后用 `SendMessage` 续跑该 agent"，那条通知仍未送达（SendMessage 开的是新一轮，不补发旧通知）。兜底只能读 transcript（见下节）。
+
+**推论（这才是纪律的根据）**：
+1. 同步派发（`run_in_background:false`）的产物走 tool_result，**根本不进这个队列**——没有通知，就没有丢通知。这是从根上消除问题，不是打补丁。
+2. `AskUserQuestion` 期间到达的通知会丢（18 例全丢）。派完后台 agent 后**不要紧接着抛问题给用户等答复**。
+3. 别用 `TaskOutput` 取产物：官方文档已标其弃用（替代方案是 `Read` 任务输出文件路径），且上游有未修 bug——对 local_agent 调 `TaskOutput(block=true)` 会把整个 JSONL transcript 灌进上下文。
+
+**未验证边界（诚实标注）**：折叠出的 `isMeta:true` attachment 究竟是完全不进 API 请求，还是进了但被模型当背景噪声忽略——未能区分，需抓主循环真实请求体才能定。对上述纪律无影响（后果一样：模型不知情），但对上游是两个不同修法。
+
+## 别把"没收到通知"当成"agent 零产出"
+
+上一节的直接推论，独立成节因为它是**汇报正确性**问题，不只是效率问题。
+
+通知丢失时，主 agent 的上下文里确实没有产物——于是容易得出"这几路等于零产出"并据此向用户汇报。这是**基于错误前提的正向汇报**，比空等更糟：用户若不追问就会接受这个错误结论。已知踩过两次。
+
+**汇报前自查**（不读 `.output`，避免撑爆上下文）：
+
+```bash
+# 末条 assistant 文本即该 subagent 的最终产物
+python3 - <<'PY'
+import json,sys
+p="<项目>/<session-id>/subagents/agent-<agentId>.jsonl"   # ~/.claude/projects/ 下
+last=None
+for line in open(p):
+    try: d=json.loads(line)
+    except: continue
+    if d.get("type")!="assistant": continue
+    c=(d.get("message") or {}).get("content") or []
+    t="".join(b.get("text","") for b in c if isinstance(b,dict) and b.get("type")=="text")
+    if t.strip(): last=t
+print(last[:2000] if last else "(no assistant text)")
+PY
+```
+
+要求「渐进产出」的 subagent 会分多段输出，末段可能只是报告尾部——需要全文时拼接全部 assistant 段落，别只取末段。
+
+**该措施的代价**：产物未经框架侧收尾校验，且绕过了工具描述"不要读 `.output`"的契约（这里只提末条 text、不 `Read` 整个文件，属可控折中）。**不应固化为常规取产物手段**——常规路径是同步派发。
 
 ## 二进制实证（deferred 机制，标确定性）
 
