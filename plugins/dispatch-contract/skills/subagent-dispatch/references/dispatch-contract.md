@@ -68,7 +68,19 @@ Bash 工具描述同版原文：
 
 > Foreground `sleep` is blocked; use Monitor with an until-loop to wait on a condition.
 
-拦截文案另写明 `Do not chain shorter sleeps to work around this block.`。即"sleep 等 subagent"本就是上游明令禁止的用法。**注**：该拦截未必在所有环境实际生效（本地 2.1.220 实测 `sleep 3` 仍放行），拦不住你，所以本铁律须自觉遵守。
+拦截文案另写明 `Do not chain shorter sleeps to work around this block.`。即"sleep 等 subagent"本就是上游明令禁止的用法。
+
+**但别指望它拦你——本纪律必须自觉遵守**。该门禁在 Bash 的 `validateInput`，三条件全真才生效：
+
+```js
+if (ese() && !DT() && !e.run_in_background) { /* eny(command) !== null → 拦 */ }
+```
+
+- `eny()`：只认**首个命令**为 `sleep <数字>` 且 **≥25 秒**（`KTo=25`）
+- `ese()`：`Ke("tengu_amber_sentinel", false)` —— 服务端特性开关，**默认关**
+- `DT()`：`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` 环境变量
+
+本机实测开关未启用，判定被短路。且即便开启，判据也只覆盖「首命令 + ≥25 秒 + 前台」——`sleep 20` 连开五轮、`bash -c 'until ...; do sleep 2; done'` 都绕得过。更关键的是它**不看「当前有没有活跃 background agent」**，而那才是区分"无害的 sleep"与"会吃掉通知的 sleep"的判据：`sleep` 本身无罪，有罪的是有 agent 在跑时占着主循环。
 
 **为什么（机制根据）**：普通 background agent 的完成通知**自带完整产物正文**（实测 5 条通知各带 8414~14593 字符的 `<result>`），走 task-notification 队列而非 mailbox。该队列的消费分两条路：
 
