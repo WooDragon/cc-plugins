@@ -58,62 +58,22 @@
 
 **原则一句话**：需要产物才能往下走就同步派发；真要后台并行，派完立刻结束本轮、把主循环交还空闲态等唤起——**不 sleep、不轮询、不主动查进度**。
 
-**上游官方立场**（2.1.220 二进制内 Agent 工具描述原文，非社区转述）：
+**为什么**：后台 agent 的完成通知在「主循环正跑着工具」时到达会被丢弃，且无补发、无恢复通道。实测丢失率 92.7%（空闲时 11.7%）。`sleep` 空等最糟：既占着主循环制造丢弃窗口，又不带回任何产物。同步派发的产物走 tool_result，根本不进那个队列——没有通知，就没有丢通知。
 
-> Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
+**别指望机器拦你**：上游确有 `sleep` 门禁，但默认关闭，且判据只看「首命令 + ≥25 秒 + 前台」，不看「当前有无活跃 background agent」。绕过方式很多，本纪律须自觉遵守。
 
-> **Foreground vs background**: Pass `run_in_background: false` to run an agent in the foreground when you need its results before you can proceed — e.g., research agents whose findings inform your next steps.
-
-Bash 工具描述同版原文：
-
-> Foreground `sleep` is blocked; use Monitor with an until-loop to wait on a condition.
-
-拦截文案另写明 `Do not chain shorter sleeps to work around this block.`。即"sleep 等 subagent"本就是上游明令禁止的用法。
-
-**但别指望它拦你——本纪律必须自觉遵守**。该门禁在 Bash 的 `validateInput`，三条件全真才生效：
-
-```js
-if (ese() && !DT() && !e.run_in_background) { /* eny(command) !== null → 拦 */ }
-```
-
-- `eny()`：只认**首个命令**为 `sleep <数字>` 且 **≥25 秒**（`KTo=25`）
-- `ese()`：`Ke("tengu_amber_sentinel", false)` —— 服务端特性开关，**默认关**
-- `DT()`：`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` 环境变量
-
-本机实测开关未启用，判定被短路。且即便开启，判据也只覆盖「首命令 + ≥25 秒 + 前台」——`sleep 20` 连开五轮、`bash -c 'until ...; do sleep 2; done'` 都绕得过。更关键的是它**不看「当前有没有活跃 background agent」**，而那才是区分"无害的 sleep"与"会吃掉通知的 sleep"的判据：`sleep` 本身无罪，有罪的是有 agent 在跑时占着主循环。
-
-**为什么（机制根据）**：普通 background agent 的完成通知**自带完整产物正文**（实测 5 条通知各带 8414~14593 字符的 `<result>`），走 task-notification 队列而非 mailbox。该队列的消费分两条路：
-
-| 通知到达时主循环 | 队列动作 | 结果 |
-|---|---|---|
-| 空闲 | `dequeue` | 落成真正的 `user` 消息，模型必定看见 |
-| 正在跑工具（mid-turn） | **`remove`** | 只落一条 `attachment/queued_command`（`isMeta:true`）后从队列移除 |
-
-二进制里这是 query 主循环在每批工具结果后的 mid-turn fold：`registerFoldInFlight(dn)` → 渲染 attachment → `messageQueue.remove(Jr)`。
-
-**实测**（本地 383 个 session 全量扫描，仅统计 subagent 通知）：
-
-| 到达时主循环 | 送达 | 丢失 | 丢失率 |
-|---|---|---|---|
-| 有工具在飞 | 11 | 139 | **92.7%** |
-| 空闲 | 690 | 91 | 11.7% |
-
-按通知正文哈希精确配对 `remove` 事件（不靠代理指标）：内容出现在 `remove` 里的 430 例丢失率 **95.3%**，未出现的 1124 例 23.4%。在飞工具排名：`TaskOutput` 80、`Bash` 35（`sleep` 26）、`AskUserQuestion` 18、`Agent` 5。
-
-**无恢复通道**：`remove` 是终态。实测 28 例"丢失后用 `SendMessage` 续跑该 agent"，那条通知仍未送达——SendMessage 开的是新一轮，不补发旧通知。
-
-**正例（纪律）**：
-> 需要调研结论才能定方案 → `run_in_background: false` 同步派发，产物走 tool_result 直接返回，根本不进那个队列。没有通知，就没有丢通知。
+**正例**：
+> 需要调研结论才能定方案 → `run_in_background: false`，产物直接作为 tool result 返回。
 
 **反例**：
-> 派 5 路 background agent，然后 `Bash: sleep 110` 连等 13 轮。每轮 sleep 收尾都是一次 mid-turn fold，把期间到达的通知全部吃掉。
+> 派 5 路 background agent，然后 `Bash: sleep 110` 连等 13 轮——每轮 sleep 收尾都吃掉一批通知。
 
 **衍生三条**：
-1. **别紧接着 `AskUserQuestion`**：派完后台 agent 就抛问题给用户等答复，该期间到达的通知实测 18 例全丢。
-2. **别用 `TaskOutput` 取产物**：官方已标弃用（替代方案是 `Read` 任务输出文件路径），且上游有未修 bug——对 local_agent 调 `TaskOutput(block=true)` 会把整个 JSONL transcript 灌进调用方上下文。
-3. **「没收到通知」≠「agent 零产出」**：通知丢失时主 agent 上下文里确实没产物，容易据此向用户汇报"这几路等于零产出"。这是**基于错误前提的正向汇报**，比空等更糟——用户不追问就会接受错误结论（已踩两次）。汇报前先查 transcript 末条 assistant（`~/.claude/projects/<项目>/<session>/subagents/agent-<id>.jsonl`），只提取 text 块、不 `Read` 整个 `.output`（那是完整 JSONL，会撑爆上下文）。要求「渐进产出」的子 agent 分多段输出，末段可能只是报告尾部，需全文时拼接全部 assistant 段落。
+1. **别紧接着 `AskUserQuestion`**：派完后台 agent 就抛问题给用户等答复，该期间到达的通知实测全丢。
+2. **别用 `TaskOutput` 取产物**：官方已标弃用（替代是 `Read` 任务输出文件路径），且对 local_agent 会把整个 JSONL transcript 灌进上下文。
+3. **「没收到通知」≠「agent 零产出」**：通知丢了，主上下文里确实没产物，于是容易向用户汇报"这几路等于零产出"——基于错误前提的正向汇报，比空等更糟（已踩两次）。汇报前先查 `~/.claude/projects/<项目>/<session>/subagents/agent-<id>.jsonl` 的末条 assistant，只提取 text 块，别 `Read` 整个 `.output`（完整 JSONL，会撑爆上下文）。子 agent 分段输出时末段可能只是报告尾部，需全文则拼接各 assistant 段落。
 
-**未验证边界**：折叠出的 `isMeta:true` attachment 是完全不进 API 请求，还是进了被当背景噪声忽略——未能区分，需抓主循环真实请求体才能定。对本铁律无影响（后果一样：模型不知情），但对上游是两个不同修法。
+> 底层机制与实测数据不在本 skill 展开——本节只给行动规范。
 
 ## 铁律①的技术边界
 

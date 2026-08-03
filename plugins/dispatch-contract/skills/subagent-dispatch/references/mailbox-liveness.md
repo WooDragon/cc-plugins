@@ -2,7 +2,7 @@
 
 本文件管 **teammate / mailbox 通道**：产物怎么经 mailbox 收回、活性怎么判、什么时候能停。触发场景：spawn background teammate 后等待产物，或考虑 TaskStop 中止某 agent 时。
 
-**边界（先读这条，别找错文件）**：本文件的前提是"产物走 mailbox"——**只在传了 `name`（即提升为 teammate）时成立**。普通 background agent（不传 `name`）的完成通知自带完整产物正文、走 task-notification 队列，与 mailbox 无关；那条链路的投递可靠性、为什么通知会被中途折叠吃掉、以及"派完该怎么等"，见 `dispatch-contract.md` 的「己方端纪律：派完就交还主循环」章节。两者是不同机制，别混。
+**边界（先读这条，别找错文件）**：本文件的前提是"产物走 mailbox"——**只在传了 `name`（即提升为 teammate）时成立**。不传 `name` 的普通 background agent 走的是完成通知，与 mailbox 无关；那条链路的等待纪律与取产物方式见 `dispatch-contract.md` 的「己方端纪律：派完就交还主循环」。两者是不同机制，别混。
 
 来源：一次真实事故——三个 background subagent 被误判卡死并 TaskStop，事后全部复活并发来完整产物。根因是「回传通道断裂」+「等待模型错误」两个叠加，非 agent 真死。
 
