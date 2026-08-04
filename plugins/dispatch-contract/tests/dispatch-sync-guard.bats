@@ -191,6 +191,9 @@ teardown() {
   # stdout must parse as JSON
   jq -e '.hookSpecificOutput.hookEventName == "SubagentStart"' <<< "$INJECT_STDOUT" >/dev/null
   jq -e '.hookSpecificOutput.additionalContext | length > 0' <<< "$INJECT_STDOUT" >/dev/null
+  local ctx
+  ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<< "$INJECT_STDOUT")
+  [[ "$ctx" == *"只改指定文件"* ]]
 }
 
 # ============================================================
@@ -201,6 +204,19 @@ teardown() {
   local payload
   payload=$(mk_start_payload "Explore")
   [[ "$(jq -r '.agent_type' <<< "$payload")" == "Explore" ]]
+  run_rules_inject "$payload"
+  [ "$INJECT_EXIT" -eq 0 ]
+  local ctx
+  ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<< "$INJECT_STDOUT")
+  [[ "$ctx" != *"只改指定文件"* ]]
+  [[ "$ctx" == *"输出即产物"* ]]
+  [[ "$ctx" == *"渐进产出"* ]]
+}
+
+@test "inject #13b: agent_type=Plan -> same read-only tier as Explore (omits scope-fence wording)" {
+  local payload
+  payload=$(mk_start_payload "Plan")
+  [[ "$(jq -r '.agent_type' <<< "$payload")" == "Plan" ]]
   run_rules_inject "$payload"
   [ "$INJECT_EXIT" -eq 0 ]
   local ctx

@@ -206,6 +206,20 @@ malformed-stdin shapes), plus the rules-injector's JSON-shape checks (normal
 `agent_type` gets all three rules, `Explore` omits the scope-fence rule, empty stdin
 and `ALLOW_NO_RULES_INJECT=1` both leave stdout fully empty).
 
+## Block Response Shape (Deliberate Choice)
+
+Both hooks in this plugin — `dispatch-sync-guard.sh` (PreToolUse) and
+`subagent-done-gate.sh` (SubagentStop) — block via `exit 2` plus a stderr
+message. Some sibling plugins in this repo use a different shape instead:
+`plan-review`'s `dispatch-check.sh` and `doc-gate`'s `skill-gate.sh` return
+JSON `permissionDecision: deny`. This repo does not use one block-response
+shape across all plugins — `guardrails`' `git-push-guard.sh` also blocks via
+`exit 2`. Within this plugin, consistency with the sibling
+`subagent-done-gate.sh` hook takes priority over matching an unrelated
+plugin's shape. The two forms are functionally equivalent here. The runtime
+routes the `exit 2` stderr text through `blockingError` into the tool result
+the model sees. The correction message reaches model context either way.
+
 ## Environment Variables
 
 | Variable | Default | Description |

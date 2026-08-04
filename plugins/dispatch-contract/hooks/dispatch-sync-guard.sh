@@ -124,7 +124,7 @@ NAME=$(jq -r '.tool_input.name // empty' <<< "$INPUT" 2>/dev/null) || exit 0
 
 jq -e '.tool_input.run_in_background == false' <<< "$INPUT" >/dev/null 2>&1 && exit 0
 
-printf '[dispatch-sync-guard] 省略 run_in_background 即选择后台通道：完成通知在主循环正跑工具时到达会被丢弃，实测丢失率 92.7%%，且无补发、无恢复通道（SendMessage 续跑不补发旧通知）。\n' >&2
+printf '[dispatch-sync-guard] run_in_background 被省略、显式设为 true、或传入非布尔值时都会选中后台通道：完成通知在主循环正跑工具时到达会被丢弃，实测丢失率 92.7%%，且无补发、无恢复通道（SendMessage 续跑不补发旧通知）。\n' >&2
 printf '[dispatch-sync-guard] 需要产物才能往下走 → 加 run_in_background:false 重派，产物走 tool_result，根本不进那个会被折叠吃掉的队列。真要后台并行 → 派完立刻结束本轮交还主循环，禁止 sleep/轮询/紧接 AskUserQuestion。\n' >&2
 printf '[dispatch-sync-guard] 确需后台：在 ~/.claude/settings.json 的 env 段加 "ALLOW_BACKGROUND_DISPATCH":"1"（Bash 里 export 传不进 hook 进程）。\n' >&2
 printf '[dispatch-sync-guard] 若本机所有派发都被本门禁拦下，是 fork-subagent 特性（tengu_copper_fox）已开启、run_in_background 从 schema 中移除所致。此时后台通道本不存在，拦截为误伤：按上一行加 .env 开关放行即可。\n' >&2

@@ -72,4 +72,4 @@ esac
 
 jq -n \
   --arg ctx "$CONTEXT" \
-  '{hookSpecificOutput:{hookEventName:"SubagentStart",additionalContext:$ctx}}' 2>/dev/null
+  '{hookSpecificOutput:{hookEventName:"SubagentStart",additionalContext:$ctx}}' 2>/dev/null || exit 0
