@@ -1,6 +1,28 @@
 {
-  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop",
+  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop, background-dispatch sync guard on PreToolUse, dispatch-rules injection on SubagentStart",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-sync-guard.sh", "timeout": 5 }
+        ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-sync-guard.sh", "timeout": 5 }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-rules-inject.sh", "timeout": 5 }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "matcher": "*",

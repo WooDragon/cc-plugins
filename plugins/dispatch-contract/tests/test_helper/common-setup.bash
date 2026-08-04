@@ -123,7 +123,152 @@ run_gate() {
   rm -f "$stderr_file"
 }
 
-# --- Assertion Helpers ---
+# ============================================================
+# Additions below support dispatch-sync-guard.bats
+# (PreToolUse sync guard + SubagentStart rules injector).
+# Existing functions above are untouched — subagent-done-gate.bats
+# depends on them as-is.
+# ============================================================
+
+SYNC_GUARD_SCRIPT="${BATS_TEST_DIRNAME}/../hooks/dispatch-sync-guard.sh"
+INJECT_SCRIPT="${BATS_TEST_DIRNAME}/../hooks/dispatch-rules-inject.sh"
+
+# --- Payload Builders (dispatch-sync-guard) ---
+
+# mk_dispatch_payload TOOL_NAME RIB_MODE [AGENT_ID_MODE] [NAME_MODE]
+# TOOL_NAME: any string (e.g. Agent, Task, Bash)
+# RIB_MODE: false | true | string_false | omit  (tool_input.run_in_background)
+# AGENT_ID_MODE (optional, default omit): omit | present | empty
+# NAME_MODE (optional, default omit): omit | present  (tool_input.name)
+mk_dispatch_payload() {
+  local tool="$1" rib_mode="$2" agent_id_mode="${3:-omit}" name_mode="${4:-omit}"
+  local tool_input
+  case "$rib_mode" in
+    false)        tool_input=$(jq -cn '{run_in_background:false}') ;;
+    true)         tool_input=$(jq -cn '{run_in_background:true}') ;;
+    string_false) tool_input=$(jq -cn '{run_in_background:"false"}') ;;
+    omit)         tool_input='{}' ;;
+    *)            tool_input='{}' ;;
+  esac
+  if [[ "$name_mode" == "present" ]]; then
+    tool_input=$(jq -cn --argjson base "$tool_input" '$base + {name:"lead"}')
+  elif [[ "$name_mode" == "tab" ]]; then
+    # Tab-only name: must read as blank. Guards against ${var// /}, which
+    # strips only U+0020 and would let this fake the team-ops exemption.
+    tool_input=$(jq -cn --argjson base "$tool_input" '$base + {name:"\t"}')
+  fi
+  local payload
+  payload=$(jq -cn --arg tool "$tool" --argjson ti "$tool_input" '{tool_name:$tool, tool_input:$ti}')
+  case "$agent_id_mode" in
+    present) payload=$(jq -cn --argjson base "$payload" '$base + {agent_id:"test-agent-0000"}') ;;
+    empty)   payload=$(jq -cn --argjson base "$payload" '$base + {agent_id:""}') ;;
+    # Tab-only / newline-only agent_id: same blank-detection trap as name above.
+    tab)     payload=$(jq -cn --argjson base "$payload" '$base + {agent_id:"\t"}') ;;
+    newline) payload=$(jq -cn --argjson base "$payload" '$base + {agent_id:"\n"}') ;;
+    omit)    ;;
+  esac
+  echo "$payload"
+}
+
+# --- Payload Builders (dispatch-rules-inject) ---
+
+# mk_start_payload [AGENT_TYPE]
+# AGENT_TYPE omitted entirely from payload when not passed.
+mk_start_payload() {
+  local agent_type="${1:-}"
+  if [[ -z "$agent_type" ]]; then
+    jq -cn '{}'
+  else
+    jq -cn --arg t "$agent_type" '{agent_type:$t}'
+  fi
+}
+
+# --- Run Helpers ---
+
+# run_sync_guard PAYLOAD [env_overrides...]
+# Sets: SYNC_STDOUT, SYNC_STDERR, SYNC_EXIT
+run_sync_guard() {
+  local payload="$1"
+  SYNC_STDOUT=""
+  SYNC_STDERR=""
+  SYNC_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  if [[ "${2:-}" != "" ]]; then
+    SYNC_STDOUT=$(printf '%s' "$payload" | env "${@:2}" bash "$SYNC_GUARD_SCRIPT" 2>"$stderr_file") || SYNC_EXIT=$?
+  else
+    SYNC_STDOUT=$(printf '%s' "$payload" | bash "$SYNC_GUARD_SCRIPT" 2>"$stderr_file") || SYNC_EXIT=$?
+  fi
+  SYNC_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# run_rules_inject PAYLOAD [env_overrides...]
+# Sets: INJECT_STDOUT, INJECT_STDERR, INJECT_EXIT
+run_rules_inject() {
+  local payload="$1"
+  INJECT_STDOUT=""
+  INJECT_STDERR=""
+  INJECT_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  if [[ "${2:-}" != "" ]]; then
+    INJECT_STDOUT=$(printf '%s' "$payload" | env "${@:2}" bash "$INJECT_SCRIPT" 2>"$stderr_file") || INJECT_EXIT=$?
+  else
+    INJECT_STDOUT=$(printf '%s' "$payload" | bash "$INJECT_SCRIPT" 2>"$stderr_file") || INJECT_EXIT=$?
+  fi
+  INJECT_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# --- Assertion Helpers (dispatch-sync-guard) ---
+
+# assert_sync_pass — exit 0 and no "dispatch-sync-guard" in stderr
+assert_sync_pass() {
+  [ "$SYNC_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $SYNC_EXIT"
+    echo "stderr: $SYNC_STDERR"
+    return 1
+  }
+  [[ "$SYNC_STDERR" != *"dispatch-sync-guard"* ]] || {
+    echo "Expected no 'dispatch-sync-guard' in stderr, got: $SYNC_STDERR"
+    return 1
+  }
+}
+
+# assert_sync_block — exit 2 and "dispatch-sync-guard" in stderr
+assert_sync_block() {
+  [ "$SYNC_EXIT" -eq 2 ] || {
+    echo "Expected exit 2, got $SYNC_EXIT"
+    echo "stderr: $SYNC_STDERR"
+    return 1
+  }
+  [[ "$SYNC_STDERR" == *"dispatch-sync-guard"* ]] || {
+    echo "Expected 'dispatch-sync-guard' in stderr, got: $SYNC_STDERR"
+    return 1
+  }
+}
+
+# --- Assertion Helpers (dispatch-rules-inject) ---
+
+# assert_inject_empty_stdout — exit 0 and completely empty stdout
+assert_inject_empty_stdout() {
+  [ "$INJECT_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $INJECT_EXIT"
+    echo "stderr: $INJECT_STDERR"
+    return 1
+  }
+  [ -z "$INJECT_STDOUT" ] || {
+    echo "Expected empty stdout, got: $INJECT_STDOUT"
+    return 1
+  }
+}
+
+# --- Assertion Helpers (existing — subagent-done-gate.bats) ---
 
 # assert_pass — exit 0 and no "subagent-done-gate" in stderr
 assert_pass() {
