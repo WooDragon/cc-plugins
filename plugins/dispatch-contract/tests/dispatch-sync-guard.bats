@@ -101,6 +101,34 @@ teardown() {
   assert_sync_block
 }
 
+@test "sync #6c: agent_id present but tab-only + omitted RIB -> BLOCK (blank test must cover tabs, not just spaces)" {
+  local payload
+  payload=$(mk_dispatch_payload "Task" "omit" "tab")
+  # fixture self-check: field present, value is exactly one tab (not absent, not empty)
+  [[ "$(jq -e 'has("agent_id")' <<< "$payload")" == "true" ]]
+  [[ "$(jq -r '.agent_id' <<< "$payload")" == $'\t' ]]
+  run_sync_guard "$payload"
+  assert_sync_block
+}
+
+@test "sync #6d: agent_id present but newline-only + omitted RIB -> BLOCK" {
+  local payload
+  payload=$(mk_dispatch_payload "Task" "omit" "newline")
+  [[ "$(jq -e 'has("agent_id")' <<< "$payload")" == "true" ]]
+  run_sync_guard "$payload"
+  assert_sync_block
+}
+
+@test "sync #4b: tool_input.name tab-only + omitted RIB -> BLOCK (blank name must not fake the team-ops exemption)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "omit" "omit" "tab")
+  # fixture self-check: name key present, value is exactly one tab
+  [[ "$(jq -e '.tool_input | has("name")' <<< "$payload")" == "true" ]]
+  [[ "$(jq -r '.tool_input.name' <<< "$payload")" == $'\t' ]]
+  run_sync_guard "$payload"
+  assert_sync_block
+}
+
 # ============================================================
 # dispatch-sync-guard: env-var fail-open + escape hatch (7-8)
 # ============================================================

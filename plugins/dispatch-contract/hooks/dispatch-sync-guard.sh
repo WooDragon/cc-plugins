@@ -108,13 +108,19 @@ esac
 # agent_id exemption: distinguish field-absent from present-but-blank.
 if jq -e 'has("agent_id") and .agent_id != null' <<< "$INPUT" >/dev/null 2>&1; then
   AGENT_ID=$(jq -r '.agent_id' <<< "$INPUT" 2>/dev/null) || exit 0
-  [[ -n "${AGENT_ID// /}" ]] && exit 0
+  # Blank test must cover tabs and newlines, not just spaces: ${var// /} only
+  # strips U+0020, so a tab-only or newline-only agent_id would read as
+  # "non-blank" and wrongly open the exemption. Same [[:space:]] shape as the
+  # sibling pre-dispatch-channel-guard.sh.
+  [[ ! "$AGENT_ID" =~ ^[[:space:]]*$ ]] && exit 0
 fi
 
 # team-ops lifeline: non-empty tool_input.name means this dispatch is
 # starting a teammate. DO NOT REMOVE.
 NAME=$(jq -r '.tool_input.name // empty' <<< "$INPUT" 2>/dev/null) || exit 0
-[[ -n "${NAME// /}" ]] && exit 0
+# Same [[:space:]] blank test as the agent_id step above — see the comment
+# there for why ${var// /} is not sufficient.
+[[ ! "$NAME" =~ ^[[:space:]]*$ ]] && exit 0
 
 jq -e '.tool_input.run_in_background == false' <<< "$INPUT" >/dev/null 2>&1 && exit 0
 

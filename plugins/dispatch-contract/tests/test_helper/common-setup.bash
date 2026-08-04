@@ -152,12 +152,19 @@ mk_dispatch_payload() {
   esac
   if [[ "$name_mode" == "present" ]]; then
     tool_input=$(jq -cn --argjson base "$tool_input" '$base + {name:"lead"}')
+  elif [[ "$name_mode" == "tab" ]]; then
+    # Tab-only name: must read as blank. Guards against ${var// /}, which
+    # strips only U+0020 and would let this fake the team-ops exemption.
+    tool_input=$(jq -cn --argjson base "$tool_input" '$base + {name:"\t"}')
   fi
   local payload
   payload=$(jq -cn --arg tool "$tool" --argjson ti "$tool_input" '{tool_name:$tool, tool_input:$ti}')
   case "$agent_id_mode" in
     present) payload=$(jq -cn --argjson base "$payload" '$base + {agent_id:"test-agent-0000"}') ;;
     empty)   payload=$(jq -cn --argjson base "$payload" '$base + {agent_id:""}') ;;
+    # Tab-only / newline-only agent_id: same blank-detection trap as name above.
+    tab)     payload=$(jq -cn --argjson base "$payload" '$base + {agent_id:"\t"}') ;;
+    newline) payload=$(jq -cn --argjson base "$payload" '$base + {agent_id:"\n"}') ;;
     omit)    ;;
   esac
   echo "$payload"
