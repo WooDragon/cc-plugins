@@ -2,7 +2,7 @@
 
 Subagent dispatch contract enforcement for Claude Code — a `%%DONE%%` finalization gate plus a methodology skill for reliable subagent delegation.
 
-The plugin has two parts: a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
+The plugin has four parts: a **PreToolUse hook** that blocks dispatch calls omitting `run_in_background:false`, a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
 
 ## Installation
 
@@ -14,7 +14,29 @@ claude plugin add dispatch-contract@WooDragon-cc-plugins
 ## Architecture
 
 ```
-SubagentStop
+PreToolUse (matcher: Agent, Task)
+  │
+  └─ dispatch-sync-guard.sh (5s timeout)
+         Blocks a dispatch call that omits run_in_background:false.
+         Omission selects the background delivery channel, and that channel
+         drops completion notifications at a measured 92.7% loss rate with
+         no resend path. Passes silently (fail-open) on teammate context
+         (agent_id present), Lead-starts-a-teammate calls (tool_input.name
+         present), the CLAUDE_CODE_DISABLE_BACKGROUND_TASKS env var, and any
+         malformed or missing payload field.
+
+SubagentStart (matcher: *)
+  │
+  └─ dispatch-rules-inject.sh (5s timeout)
+         Injects the three dispatch rules — output-is-deliverable, scope
+         fence, incremental progress — into the spawned subagent's own
+         context via additionalContext, regardless of whether the dispatch
+         prompt stated them. Read-only agent types (Explore, Plan) receive
+         only the output-is-deliverable and incremental-progress rules; the
+         scope-fence rule is a no-op for agent types whose Edit/Write tools
+         are already disabled by the platform.
+
+SubagentStop (matcher: *)
   │
   └─ subagent-done-gate.sh (10s timeout)
          Checks whether the dispatch prompt contained %%DONE%%.
@@ -29,10 +51,11 @@ skills/subagent-dispatch  (no hook — loaded by description match)
          contract is reachable at dispatch time rather than only after a block.
 ```
 
-This plugin registers exactly one hook, on `SubagentStop`. There is no dispatch-side
-hook: deciding whether a given task needs a deliverable is a semantic judgment, and a
-keyword guess would misfire often enough to be ignored. The skill closes that gap
-instead.
+This plugin registers three hooks: `PreToolUse` (dispatch-sync-guard),
+`SubagentStart` (dispatch-rules-inject), and `SubagentStop` (subagent-done-gate).
+There is no dispatch-side hook that guesses whether a given task needs a
+`%%DONE%%` deliverable — that judgment is semantic, and a keyword guess would
+misfire often enough to be ignored. The skill closes that gap instead.
 
 ## The `%%DONE%%` Contract
 
@@ -81,6 +104,70 @@ Set this before starting the Claude Code session to disable the gate globally. U
 - If the dispatch prompt contains `%%DONE%%` anywhere (even in a negated or illustrative context), the gate activates. Misfire direction is one extra block, which self-heals because the retry passes unconditionally.
 - The gate blocks at most once per subagent. If the corrected output still misses the marker, it is let through — the gate does not loop.
 
+## The Background-Dispatch Sync Guard
+
+`dispatch-sync-guard.sh` runs on `PreToolUse` for `Agent` and `Task` calls. It reads
+only the fields carried by the dispatch call itself — never session state or prior
+turns — and applies this decision chain, each step fail-opening before the next runs:
+
+1. Empty stdin → pass.
+2. `jq` unavailable → pass.
+3. `jq .` fails to parse the payload → pass.
+4. `ALLOW_BACKGROUND_DISPATCH=1` → pass (escape hatch).
+5. `tool_name` is not `Agent` or `Task` → pass.
+6. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` is set → pass.
+7. `agent_id` is present and non-blank → pass (teammate context).
+8. `tool_input.name` is present and non-blank → pass (Lead starting a teammate).
+9. `tool_input.run_in_background` is the JSON boolean `false` → pass.
+10. Otherwise → block (exit 2) with a four-line stderr correction.
+
+Step 6 checks whether `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` is set, not whether
+`run_in_background` is present, because Agent's own input schema omits the
+`run_in_background` field entirely when this variable is truthy — every dispatch is
+synchronous by construction in that mode, and judging the omission as a violation
+would misfire on every call.
+
+Step 7 distinguishes a genuinely-absent `agent_id` field from a field that is present
+but blank, using the same field-presence check pattern as `subagent-done-gate.sh`'s
+handling of `last_assistant_message`. The distinction matters because a teammate
+context is physically forbidden from requesting background dispatch by the runtime
+itself; when `agent_id` is present, background dispatch was never going to happen
+regardless of this hook, so blocking it would be a false positive.
+
+Step 8 is load-bearing for team-ops: a non-empty `tool_input.name` is the only entry
+point for starting a teammate. Removing this step would block Lead from starting any
+teammate.
+
+**Known boundary**: the Agent input schema also omits `run_in_background` when a
+server-side rollout flag (internally named `tengu_copper_fox`) is active, independent
+of `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`. This hook has no reliable way to detect that
+flag from the `PreToolUse` payload — its on-disk cache and live runtime value have
+been observed to disagree. The hook leaves this case unguarded on purpose: when the
+flag is active, the field is omitted because the background channel does not exist in
+that runtime, so the notification-loss risk this hook exists to prevent is already
+zero. A misfire in this case blocks a harmless call rather than letting a real drop
+recur, and the escape hatch (`ALLOW_BACKGROUND_DISPATCH=1` in `settings.json`'s `env`
+section) resolves it.
+
+## The SubagentStart Rules Injector
+
+`dispatch-rules-inject.sh` runs on `SubagentStart` for every spawned subagent
+(`matcher: "*"`). It writes `additionalContext` carrying the three dispatch rules
+(output-is-deliverable, scope fence, incremental progress) plus a pointer to the
+`subagent-dispatch` skill, so the rules reach the subagent even when the dispatching
+prompt omitted them.
+
+Agent types with Edit/Write disabled by the platform (`Explore`, `Plan`, matched
+case-insensitively) receive only the output-is-deliverable and incremental-progress
+rules — the scope-fence rule's file-boundary wording would be a no-op reminder for a
+type that cannot write files at all.
+
+The hook writes stdout exactly once, in a single statement at the end of the script.
+Every fail-open path (empty stdin, no `jq`, unparsable JSON,
+`ALLOW_NO_RULES_INJECT=1`) exits before that statement with no stdout output at all —
+a half-formed JSON payload on stdout would corrupt the harness's parse of the hook
+output, so an empty stdout is the safe default on any early exit.
+
 ## `subagent-dispatch` Skill
 
 The bundled skill covers:
@@ -99,12 +186,30 @@ The skill triggers on dispatch-related requests: "派发 subagent", "dispatch su
 ```bash
 # Requires bats-core
 bats plugins/dispatch-contract/tests/subagent-done-gate.bats
+bats plugins/dispatch-contract/tests/dispatch-sync-guard.bats
 ```
 
-26 test cases covering: core judgment (marker required/not required in the dispatch prompt), `fork-context-ref` transcript shape, in-band signaling defence (a subagent cannot open its own gate), whitespace and CRLF tolerance, decoration variants that must still block (bold, backticks, trailing punctuation), blank final message treated as an empty deliverable rather than fail-open, fail-open paths (missing fields, `last_assistant_message` null, invalid JSON, empty stdin, absent transcript path, `stop_hook_active`), hostile paths (`HOME` unset, FIFO must not hang), and the kill switch.
+`subagent-done-gate.bats` has 26 test cases covering: core judgment (marker
+required/not required in the dispatch prompt), `fork-context-ref` transcript shape,
+in-band signaling defence (a subagent cannot open its own gate), whitespace and CRLF
+tolerance, decoration variants that must still block (bold, backticks, trailing
+punctuation), blank final message treated as an empty deliverable rather than
+fail-open, fail-open paths (missing fields, `last_assistant_message` null, invalid
+JSON, empty stdin, absent transcript path, `stop_hook_active`), hostile paths (`HOME`
+unset, FIFO must not hang), and the kill switch.
+
+`dispatch-sync-guard.bats` covers both new hooks: the sync-guard's pass/block matrix
+(explicit `false`, omission, explicit `true`, string `"false"`, `tool_name` outside
+`{Agent, Task}`, the `agent_id` and `tool_input.name` exemptions including an
+empty-string `agent_id` that must still block, the two escape hatches, and three
+malformed-stdin shapes), plus the rules-injector's JSON-shape checks (normal
+`agent_type` gets all three rules, `Explore` omits the scope-fence rule, empty stdin
+and `ALLOW_NO_RULES_INJECT=1` both leave stdout fully empty).
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ALLOW_UNMARKED_FINAL` | _(unset)_ | `1` disables the gate entirely |
+| `ALLOW_UNMARKED_FINAL` | _(unset)_ | `1` disables the `%%DONE%%` finalization gate entirely |
+| `ALLOW_BACKGROUND_DISPATCH` | _(unset)_ | `1` disables the background-dispatch sync guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
+| `ALLOW_NO_RULES_INJECT` | _(unset)_ | `1` disables the SubagentStart rules injector entirely |

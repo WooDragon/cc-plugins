@@ -45,7 +45,7 @@ description: |
 
 | 纪律 | 一句话 | 展开 |
 |---|---|---|
-| 通道选择 | 不传 `name`，产物走工具返回值（可靠）；传 `name` 即提升为 teammate、产物改走 mailbox。teammate 由 team-ops 的 TeamCreate + handoff 协议起，不靠手传 `name`——故即席派发一律不传；可另配 PreToolUse hook 拦截违规通道选择 | 见 references/mailbox-liveness.md |
+| 通道选择 | 不传 `name`，产物走工具返回值（可靠）；传 `name` 即提升为 teammate、产物改走 mailbox。teammate 由 team-ops 的 TeamCreate + handoff 协议起，不靠手传 `name`——故即席派发一律不传。禁止 sleep/轮询/主动查进度这条现在有机器强制：本插件 `hooks/dispatch-sync-guard.sh` 在 PreToolUse 拦截省略 `run_in_background:false` 的派发；逃生舱 `ALLOW_BACKGROUND_DISPATCH=1` 需写进 `settings.json` 的 `.env` 段（Bash 里 export 传不进 hook 进程） | 见 references/mailbox-liveness.md |
 | 回传通道 | background subagent 的 final text 不自动进主 mailbox，产物必须走 `SendMessage(to:"main")`；该工具在 subagent 里默认 deferred，prompt 须要求它先 `ToolSearch select:SendMessage` 加载。能同步就 `run_in_background:false` 绕开此坑 | 见 references/mailbox-liveness.md |
 | 活性判定 | 完成/进展是 mailbox 异步、下一 turn 才可见；文件没变 / ps 查不到进程 / sleep 期间没消息都不算 agent 死了；TaskStop 不可逆，存疑多等一 turn 不错杀 | 见 references/mailbox-liveness.md |
 
