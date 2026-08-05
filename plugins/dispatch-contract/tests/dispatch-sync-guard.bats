@@ -39,6 +39,7 @@ teardown() {
   payload=$(mk_dispatch_payload "Task" "omit")
   # fixture self-check: field genuinely absent
   [[ "$(jq -e 'has("tool_input") and (.tool_input | has("run_in_background") | not)' <<< "$payload")" == "true" ]]
+  # 省略路径的 stderr 形态断言见 sync #16（field-absent 分支）——本用例只钉 BLOCK。
   run_sync_guard "$payload"
   assert_sync_block
 }

@@ -119,7 +119,9 @@ turns — and applies this decision chain, each step fail-opening before the nex
 7. `agent_id` is present and non-blank → pass (teammate context).
 8. `tool_input.name` is present and non-blank → pass (Lead starting a teammate).
 9. `tool_input.run_in_background` is the JSON boolean `false` → pass.
-10. Otherwise → block (exit 2) with a four-line stderr correction.
+9b. `run_in_background` field absent → block (exit 2), fork-aware stderr (4 lines).
+10. Otherwise (field present but not `false`, e.g. `true` or a non-boolean) →
+    block (exit 2), generic stderr (3 lines).
 
 Step 6 checks whether `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` is set, not whether
 `run_in_background` is present, because Agent's own input schema omits the
@@ -144,7 +146,9 @@ entirely when the `fork-subagent` feature (server-side rollout flag, internally 
 In that mode the runtime forces every dispatch onto the background channel — it does
 not remove the channel, it removes the ability to opt out of it. The hook detects this
 state structurally, from field absence combined with step 6's env var being unset, and
-blocks (exit 2) with a fork-specific stderr message rather than passing. The fix is
+blocks (exit 2) with a fork-aware stderr message rather than passing — the message
+leads with the generic "you probably just forgot the field" advice first, then covers
+the fork-world case as the second, less common possibility. The fix is
 `CLAUDE_CODE_FORK_SUBAGENT=0` in `settings.json`'s `env` section, which restarts Claude
 Code with the fork feature off, restores `run_in_background` to the schema, and makes
 synchronous dispatch requestable again. `ALLOW_BACKGROUND_DISPATCH=1` does not fix this
