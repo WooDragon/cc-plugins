@@ -164,11 +164,17 @@ NAME=$(jq -r '.tool_input.name // empty' <<< "$INPUT" 2>/dev/null) || exit 0
 
 jq -e '.tool_input.run_in_background == false' <<< "$INPUT" >/dev/null 2>&1 && exit 0
 
-# No type-check on tool_input is needed before this `has()`: a non-object
-# tool_input (string/number/array) makes jq error out (exit 5) at step 8's
+# No type-check on tool_input is needed before this `has()`, but the reason is
+# narrower than "non-object payloads never get here". A string/number/array/
+# boolean tool_input makes jq error out (exit 5) at step 8's
 # `jq -r '.tool_input.name // empty'`, which already carries `|| exit 0` and
-# fail-opens there — such a payload can never reach this branch. A guard here
-# would be dead code, and a test for it would pass vacuously.
+# fail-opens there — those genuinely cannot reach this branch. A null
+# tool_input is the exception: `null | has(...)` is a clean exit 1, so step 8
+# does not fail-open and the payload DOES land here and gets the fork-aware
+# message. That is accepted rather than guarded: Agent/Task always send an
+# object tool_input in practice, so a type-check here would be dead code and
+# any test for it would pass vacuously (verified — commenting the guard out
+# left its test green).
 
 # Fork world (field absent + step 6's env var unset) gets its own message:
 # the generic "add run_in_background:false" advice is unfollowable there,
