@@ -20,6 +20,7 @@
 #   7. agent_id field present and non-blank              -> exit 0
 #   8. tool_input.name present and non-blank              -> exit 0
 #   9. tool_input.run_in_background boolean false         -> exit 0
+#  9b. field absent (fork world)                        -> exit 2 (BLOCK, fork-aware message)
 #  10. otherwise                                          -> exit 2 (BLOCK)
 #
 # Step 3 must run before ANY field extraction. If a malformed payload were
@@ -75,17 +76,56 @@
 # NOT qualify and falls through to BLOCK. Checked with
 # `jq -e '.tool_input.run_in_background == false'`.
 #
-# Known failure mode (documented, not patched): the Agent inputSchema omits
-# run_in_background whenever `DT()||TSe()` is true. Step 6 only catches the
-# DT() half (the env var). TSe() is NOT caught — it gates on a server-side
-# rollout flag (tengu_copper_fox) whose on-disk cache and live runtime value
-# have been observed to disagree, so this hook has no reliable way to judge
-# it from the PreToolUse payload alone. This is deliberately left unguarded:
-# when TSe() is true the field is omitted BECAUSE the background channel does
-# not exist in that runtime, which means the notification-loss risk this hook
-# exists to prevent is already zero — misfiring here means blocking a
-# harmless call. The failure direction is "false positive with an escape
-# hatch," never "silent miss that lets the drop recur."
+# Step 9b (fork world) exists because the Agent inputSchema DROPS
+# run_in_background whenever `Lv() || bEe()` is true — Lv() is the env var
+# from step 6, bEe() is the fork-subagent feature. Step 6 already exempts the
+# Lv() half. The bEe() half is the dangerous one, and an earlier revision of
+# this header had its semantics exactly backwards, claiming the field is
+# omitted BECAUSE the background channel does not exist and that blocking
+# here is therefore a harmless false positive. Reading the shipped runtime
+# (2.1.222) shows the opposite. The expression deciding async is:
+#
+#   let K=Wb(), q=bEe(), U=Lv();
+#   Z = z || (o===!0 || V.background===!0 || K || q || !w && o!==!1) && !U;
+#
+# `q` (i.e. bEe()) is an independent disjunct, so when fork is on, Z is
+# unconditionally true and EVERY dispatch takes the async_launched /
+# isBackgroundAgent:true branch. Meanwhile zod's `.object()` strips keys not
+# in the schema, so passing run_in_background:false does not even reach `o` —
+# and even if it did, `q` would still force Z true. Fork world is therefore
+# not "no background channel, zero risk"; it is "background forced, sync
+# unrequestable" — the worst form of the very thing this hook guards.
+#
+# That is why step 9b still BLOCKS. What it changes is the WAY OUT. The old
+# text pointed at ALLOW_BACKGROUND_DISPATCH=1, which silences this hook in
+# every world including the ones where the channel is real and the guard is
+# earning its keep. The actionable fix is CLAUDE_CODE_FORK_SUBAGENT=0,
+# because the fork gate resolves as:
+#
+#   function Ax_(){
+#     if(Ple())return"disabled";
+#     if(tr(env.CLAUDE_CODE_FORK_SUBAGENT))return"env";
+#     if($u(env.CLAUDE_CODE_FORK_SUBAGENT))return"disabled";  // <- before rollout
+#     if(Sn())return"disabled";
+#     if(Qe(wx_,!1))return"gb_rollout";
+#     return"disabled" }
+#
+# The falsy-env branch sits BEFORE the `tengu_copper_fox` rollout check, so
+# it overrides the server-side flag. Setting it makes bEe() false, which
+# restores the field to the schema and clears `q` from Z — the third state
+# (channel present but sync unexpressable) stops existing, and this hook's
+# judgment source is never an empty set again. Removing the hazard beats
+# muting the alarm, so no fourth env switch is added here: a guard that needs
+# another guard to stay honest is a design smell.
+#
+# Detection is deliberately indirect. The rollout flag's on-disk cache and
+# live runtime value have been observed to disagree, so this hook never tries
+# to read it. It infers fork world structurally instead: the field is absent
+# AND step 6's env var is unset, which leaves bEe() as the only remaining
+# explanation for the omission. A dispatcher that simply forgot the field in
+# a normal (non-fork) runtime lands here too, and blocking that is correct
+# anyway — the failure direction stays "false positive with a way out," never
+# "silent miss that lets the drop recur."
 set -u
 
 INPUT=$(cat)
@@ -124,8 +164,33 @@ NAME=$(jq -r '.tool_input.name // empty' <<< "$INPUT" 2>/dev/null) || exit 0
 
 jq -e '.tool_input.run_in_background == false' <<< "$INPUT" >/dev/null 2>&1 && exit 0
 
-printf '[dispatch-sync-guard] run_in_background 被省略、显式设为 true、或传入非布尔值时都会选中后台通道：完成通知在主循环正跑工具时到达会被丢弃，实测丢失率 92.7%%，且无补发、无恢复通道（SendMessage 续跑不补发旧通知）。\n' >&2
+# No type-check on tool_input is needed before this `has()`, but the reason is
+# narrower than "non-object payloads never get here". A string/number/array/
+# boolean tool_input makes jq error out (exit 5) at step 8's
+# `jq -r '.tool_input.name // empty'`, which already carries `|| exit 0` and
+# fail-opens there — those genuinely cannot reach this branch. A null
+# tool_input is the exception: `null | has(...)` is a clean exit 1, so step 8
+# does not fail-open and the payload DOES land here and gets the fork-aware
+# message. That is accepted rather than guarded: Agent/Task always send an
+# object tool_input in practice, so a type-check here would be dead code and
+# any test for it would pass vacuously (verified — commenting the guard out
+# left its test green).
+
+# Fork world (field absent + step 6's env var unset) gets its own message:
+# the generic "add run_in_background:false" advice is unfollowable there,
+# because the field is not in the schema to begin with.
+if ! jq -e '.tool_input | has("run_in_background")' <<< "$INPUT" >/dev/null 2>&1; then
+  printf '[dispatch-sync-guard] tool_input 里没有 run_in_background。若你只是漏传了 → 补 run_in_background:false 重派即可,产物走 tool_result,不进那个会被折叠吃掉的队列(丢失率实测 92.7%%,无补发、无恢复通道)。\n' >&2
+  printf '[dispatch-sync-guard] 若重派时发现该字段根本不在 Agent 的 inputSchema 里(传了也被剥掉),说明 fork-subagent 特性已开启(tengu_copper_fox)。此时后台不是"不存在"而是被强制:运行时里 bEe() 是决定异步的独立析取项,Z 恒真,所有派发都走 async_launched;zod 会剥掉 schema 外的键,硬传 run_in_background:false 也进不去 —— 所以这里同样不放行。\n' >&2
+  printf '[dispatch-sync-guard] fork 世界的解法:在 ~/.claude/settings.json 的 env 段加 "CLAUDE_CODE_FORK_SUBAGENT":"0"(需重启 CC 生效)。该假值分支在运行时里排在 rollout 检查之前,能压过服务端 flag,字段随即回到 schema、同步派发重新可表达。代价仅是放弃 fork 的上下文继承。\n' >&2
+  printf '[dispatch-sync-guard] 两种情形都不要改用 ALLOW_BACKGROUND_DISPATCH=1 绕过 —— 那会让本门禁在所有环境一起失效,包括后台通道真实存在、真正需要它的场景。\n' >&2
+  exit 2
+fi
+
+# 省略的情形已被上面的 field-absent 分支截走,这里只可能是"字段在场但值非法"
+# (显式 true,或字符串 "false" 之类非布尔值)。文案必须与控制流一致,否则等于
+# 对模型撒谎。
+printf '[dispatch-sync-guard] run_in_background 显式设为 true、或传入非布尔值(如字符串 "false")时都会选中后台通道：完成通知在主循环正跑工具时到达会被丢弃，实测丢失率 92.7%%，且无补发、无恢复通道（SendMessage 续跑不补发旧通知）。\n' >&2
 printf '[dispatch-sync-guard] 需要产物才能往下走 → 加 run_in_background:false 重派，产物走 tool_result，根本不进那个会被折叠吃掉的队列。真要后台并行 → 派完立刻结束本轮交还主循环，禁止 sleep/轮询/紧接 AskUserQuestion。\n' >&2
 printf '[dispatch-sync-guard] 确需后台：在 ~/.claude/settings.json 的 env 段加 "ALLOW_BACKGROUND_DISPATCH":"1"（Bash 里 export 传不进 hook 进程）。\n' >&2
-printf '[dispatch-sync-guard] 若本机所有派发都被本门禁拦下，是 fork-subagent 特性（tengu_copper_fox）已开启、run_in_background 从 schema 中移除所致。此时后台通道本不存在，拦截为误伤：按上一行加 env 开关放行即可。\n' >&2
 exit 2
