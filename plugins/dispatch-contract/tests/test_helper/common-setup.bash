@@ -114,10 +114,13 @@ run_gate() {
   local stderr_file
   stderr_file=$(mktemp)
 
+  # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_UNMARKED_FINAL=1
+  # (subagent-done-gate 的逃生舱),门禁会全局失效,导致每个 BLOCK 用例假通过。
+  # -u 排在显式 override 之前,用例仍能主动传该变量做正向测试。
   if [[ "${2:-}" != "" ]]; then
-    HOOK_STDOUT=$(printf '%s' "$payload" | env "${@:2}" bash "$GATE_SCRIPT" 2>"$stderr_file") || HOOK_EXIT=$?
+    HOOK_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMARKED_FINAL "${@:2}" bash "$GATE_SCRIPT" 2>"$stderr_file") || HOOK_EXIT=$?
   else
-    HOOK_STDOUT=$(printf '%s' "$payload" | bash "$GATE_SCRIPT" 2>"$stderr_file") || HOOK_EXIT=$?
+    HOOK_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMARKED_FINAL bash "$GATE_SCRIPT" 2>"$stderr_file") || HOOK_EXIT=$?
   fi
   HOOK_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
@@ -196,10 +199,14 @@ run_sync_guard() {
   local stderr_file
   stderr_file=$(mktemp)
 
+  # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_BACKGROUND_DISPATCH=1
+  # 或 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS,门禁会全部 fail-open,导致每个
+  # BLOCK 用例假通过。测试结果不该取决于谁在什么 shell 里跑。
+  # 注意 -u 必须排在显式 override 之前,这样用例仍能主动传这两个变量做正向测试。
   if [[ "${2:-}" != "" ]]; then
-    SYNC_STDOUT=$(printf '%s' "$payload" | env "${@:2}" bash "$SYNC_GUARD_SCRIPT" 2>"$stderr_file") || SYNC_EXIT=$?
+    SYNC_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS "${@:2}" bash "$SYNC_GUARD_SCRIPT" 2>"$stderr_file") || SYNC_EXIT=$?
   else
-    SYNC_STDOUT=$(printf '%s' "$payload" | bash "$SYNC_GUARD_SCRIPT" 2>"$stderr_file") || SYNC_EXIT=$?
+    SYNC_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS bash "$SYNC_GUARD_SCRIPT" 2>"$stderr_file") || SYNC_EXIT=$?
   fi
   SYNC_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
@@ -216,10 +223,13 @@ run_rules_inject() {
   local stderr_file
   stderr_file=$(mktemp)
 
+  # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_NO_RULES_INJECT=1
+  # (dispatch-rules-inject 的逃生舱),门禁会静默 exit 0 不注入,导致用例假通过。
+  # -u 排在显式 override 之前,用例仍能主动传该变量做正向测试。
   if [[ "${2:-}" != "" ]]; then
-    INJECT_STDOUT=$(printf '%s' "$payload" | env "${@:2}" bash "$INJECT_SCRIPT" 2>"$stderr_file") || INJECT_EXIT=$?
+    INJECT_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_NO_RULES_INJECT "${@:2}" bash "$INJECT_SCRIPT" 2>"$stderr_file") || INJECT_EXIT=$?
   else
-    INJECT_STDOUT=$(printf '%s' "$payload" | bash "$INJECT_SCRIPT" 2>"$stderr_file") || INJECT_EXIT=$?
+    INJECT_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_NO_RULES_INJECT bash "$INJECT_SCRIPT" 2>"$stderr_file") || INJECT_EXIT=$?
   fi
   INJECT_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"

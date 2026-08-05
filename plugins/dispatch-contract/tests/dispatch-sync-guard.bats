@@ -241,3 +241,59 @@ teardown() {
   run_rules_inject "$payload" "ALLOW_NO_RULES_INJECT=1"
   assert_inject_empty_stdout
 }
+
+# --- fork world (schema dropped run_in_background) ---
+
+@test "sync #16: RIB field absent + no DISABLE env -> BLOCK with fork-specific message" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "omit")
+  # 夹具自检：确认 tool_input 里真的没有该键(防夹具错导致假绿)
+  run jq -e '.tool_input | has("run_in_background") | not' <<< "$payload"
+  [ "$status" -eq 0 ]
+
+  run_sync_guard "$payload"
+  assert_sync_block
+  [[ "$SYNC_STDERR" == *"CLAUDE_CODE_FORK_SUBAGENT"* ]] || {
+    echo "Expected fork-specific advice in stderr, got: $SYNC_STDERR"
+    return 1
+  }
+  # fork 世界必须给出可执行解法。判据锚定"有没有指向 FORK_SUBAGENT 这个正解",
+  # 而不是"有没有出现 ALLOW_BACKGROUND_DISPATCH 这个词"——消息里本就有一句
+  # "不要改用 ALLOW_BACKGROUND_DISPATCH=1 绕过"的劝阻,按词判会与自家措辞撞车。
+  # 因此这里断言:该词若出现,必须是以劝阻形态出现(带"不要")。
+  [[ "$SYNC_STDERR" == *"需重启"* ]] || {
+    echo "Fork-world message must state the fix requires a CC restart, got: $SYNC_STDERR"
+    return 1
+  }
+  if [[ "$SYNC_STDERR" == *"ALLOW_BACKGROUND_DISPATCH"* ]]; then
+    [[ "$SYNC_STDERR" == *"不要改用 ALLOW_BACKGROUND_DISPATCH"* ]] || {
+      echo "If ALLOW_BACKGROUND_DISPATCH appears in fork-world message it must be as a warning, got: $SYNC_STDERR"
+      return 1
+    }
+  fi
+}
+
+@test "sync #17: RIB explicitly true -> generic message, NOT the fork one" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "true")
+  run jq -e '.tool_input | has("run_in_background")' <<< "$payload"
+  [ "$status" -eq 0 ]
+
+  run_sync_guard "$payload"
+  assert_sync_block
+  [[ "$SYNC_STDERR" != *"CLAUDE_CODE_FORK_SUBAGENT"* ]] || {
+    echo "Field-present block must not use the fork message, got: $SYNC_STDERR"
+    return 1
+  }
+}
+
+@test "sync #18: RIB string \"false\" -> generic message, NOT the fork one" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "string_false")
+  run_sync_guard "$payload"
+  assert_sync_block
+  [[ "$SYNC_STDERR" != *"CLAUDE_CODE_FORK_SUBAGENT"* ]] || {
+    echo "Field-present block must not use the fork message, got: $SYNC_STDERR"
+    return 1
+  }
+}

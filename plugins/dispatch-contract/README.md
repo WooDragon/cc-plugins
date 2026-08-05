@@ -138,16 +138,18 @@ Step 8 is load-bearing for team-ops: a non-empty `tool_input.name` is the only e
 point for starting a teammate. Removing this step would block Lead from starting any
 teammate.
 
-**Known boundary**: the Agent input schema also omits `run_in_background` when a
-server-side rollout flag (internally named `tengu_copper_fox`) is active, independent
-of `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`. This hook has no reliable way to detect that
-flag from the `PreToolUse` payload — its on-disk cache and live runtime value have
-been observed to disagree. The hook leaves this case unguarded on purpose: when the
-flag is active, the field is omitted because the background channel does not exist in
-that runtime, so the notification-loss risk this hook exists to prevent is already
-zero. A misfire in this case blocks a harmless call rather than letting a real drop
-recur, and the escape hatch (`ALLOW_BACKGROUND_DISPATCH=1` in `settings.json`'s `env`
-section) resolves it.
+**Fork world (step 9b)**: the Agent input schema also drops `run_in_background`
+entirely when the `fork-subagent` feature (server-side rollout flag, internally named
+`tengu_copper_fox`) is active, independent of `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`.
+In that mode the runtime forces every dispatch onto the background channel — it does
+not remove the channel, it removes the ability to opt out of it. The hook detects this
+state structurally, from field absence combined with step 6's env var being unset, and
+blocks (exit 2) with a fork-specific stderr message rather than passing. The fix is
+`CLAUDE_CODE_FORK_SUBAGENT=0` in `settings.json`'s `env` section, which restarts Claude
+Code with the fork feature off, restores `run_in_background` to the schema, and makes
+synchronous dispatch requestable again. `ALLOW_BACKGROUND_DISPATCH=1` does not fix this
+case — it silences the guard everywhere, including runtimes where the background
+channel is real and the guard is protecting against an actual notification-loss risk.
 
 ## The SubagentStart Rules Injector
 
@@ -227,3 +229,4 @@ the model sees. The correction message reaches model context either way.
 | `ALLOW_UNMARKED_FINAL` | _(unset)_ | `1` disables the `%%DONE%%` finalization gate entirely |
 | `ALLOW_BACKGROUND_DISPATCH` | _(unset)_ | `1` disables the background-dispatch sync guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
 | `ALLOW_NO_RULES_INJECT` | _(unset)_ | `1` disables the SubagentStart rules injector entirely |
+| `CLAUDE_CODE_FORK_SUBAGENT` | _(unset)_ | `0` disables the fork-subagent feature — restores `run_in_background` to the Agent input schema, the correct fix for step 9b's fork-world block |
