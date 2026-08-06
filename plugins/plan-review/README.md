@@ -281,6 +281,16 @@ one.
 Omitting `--session` gives a single-round, stateless call backed by a throwaway temp file — no
 session persists past that one invocation.
 
+Multi-round memory under `--session` is **not unconditional**. It lives entirely in agy's
+server-side `--conversation` session, which only accumulates while the agy CLI path keeps
+succeeding. If the agy CLI fails on a given round and the REST fallback produces the review
+instead, that round's output never reaches agy's session history — the driver detects this and
+deletes the session file (`CONV_FILE`) rather than leave a conversation handle with a silent gap
+in it. The **next** round under the same `--session` label therefore starts over as a fresh first
+round, with no memory of anything before the REST fallback fired. Callers relying on continuity
+across rounds should treat "agy CLI succeeded every round so far" as the precondition for that
+continuity, not the `--session` flag alone.
+
 ### Path discovery
 
 The officially recommended path is:

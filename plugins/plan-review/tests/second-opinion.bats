@@ -217,6 +217,60 @@ teardown() {
 # fail loud
 # =============================================================================
 
+# 12a. --prompt-file pointing at an empty (zero-byte) file → fail loud with
+#      the artifact-body-empty message (implementation at ~line 178: `[ -n
+#      "$ARTIFACT" ] || _fail "artifact body is empty..."` — this was
+#      previously untested).
+@test "fail-loud: --prompt-file pointing at an empty file fails with artifact-body-empty" {
+  local sys_file="${TEST_TEMP_DIR}/sys.md"
+  local artifact_file="${TEST_TEMP_DIR}/empty-artifact.md"
+  printf 'System rubric.' > "$sys_file"
+  : > "$artifact_file"
+
+  run_second_opinion --system-prompt-file "$sys_file" --prompt-file "$artifact_file"
+
+  [ "$SO_EXIT" -ne 0 ]
+  [ -z "$SO_STDOUT" ]
+  [[ "$SO_STDERR" == *"artifact body is empty"* ]]
+}
+
+# 12b. Empty stdin (no --prompt-file, stdin is /dev/null) → fail loud with the
+#      same artifact-body-empty message — the stdin path through the same
+#      check.
+@test "fail-loud: empty stdin (no --prompt-file) fails with artifact-body-empty" {
+  local sys_file="${TEST_TEMP_DIR}/sys.md"
+  printf 'System rubric.' > "$sys_file"
+
+  # SO_STDIN deliberately left unset: run_second_opinion's default path feeds
+  # /dev/null when SO_STDIN is unset (see common-setup.bash) — a genuinely
+  # empty stream. `SO_STDIN=""` would NOT work here: `<<< ""` still feeds a
+  # single trailing newline byte, which command substitution then strips down
+  # to a non-empty-looking-but-actually-empty-after-strip edge case that does
+  # NOT reliably trip `[ -n "$ARTIFACT" ]` the same way — /dev/null is the
+  # unambiguous "truly empty" input.
+  run_second_opinion --system-prompt-file "$sys_file"
+
+  [ "$SO_EXIT" -ne 0 ]
+  [ -z "$SO_STDOUT" ]
+  [[ "$SO_STDERR" == *"artifact body is empty"* ]]
+}
+
+# 12c. --session "" (explicitly empty label) → fail loud with the
+#      invalid-session-label message (implementation at ~line 120: `[
+#      "$SESSION_LABEL_GIVEN" -eq 1 ] && [ -z "$SESSION_LABEL" ]` — this was
+#      previously untested; distinct from the charset-rejection tests below,
+#      which cover a non-empty malformed label).
+@test "fail-loud: --session with an explicitly empty value fails with invalid-session-label" {
+  local sys_file="${TEST_TEMP_DIR}/sys.md"
+  printf 'System rubric.' > "$sys_file"
+
+  run_second_opinion --system-prompt-file "$sys_file" --session ""
+
+  [ "$SO_EXIT" -ne 0 ]
+  [ -z "$SO_STDOUT" ]
+  [[ "$SO_STDERR" == *"invalid --session label"* ]]
+}
+
 # 12. Engines exhausted (CLI fails, no REST configured) → nonzero exit, empty stdout
 @test "fail-loud: all engines exhausted → nonzero exit and empty stdout" {
   create_failing_engine "agy" 1
@@ -391,6 +445,65 @@ teardown() {
   [ "$SO_EXIT" -eq 0 ]
   [[ "$SO_STDOUT" == *"UNIQUE_REAL_REVIEW_BODY_MARKER"* ]]
   [[ "$SO_STDOUT" != *"<verdict>APPROVE</verdict>"* ]]
+}
+
+# =============================================================================
+# consult_on_rest_success driver-side hook (Major #3 fix, second-opinion.sh
+# ~line 300): `consult_on_rest_success() { rm -f "${CONV_FILE:-}"; }` — after
+# the CLI path fails and REST produces a usable REVIEW, the driver must drop
+# CONV_FILE so the NEXT round under the same --session label starts a clean
+# first round instead of resuming an agy session that is silently missing
+# this round's REST-produced finding.
+# =============================================================================
+
+# 21. Round 1 (agy CLI succeeds, --session given) establishes a live CONV_FILE
+#     under REVIEW_COUNTER_DIR/.so-*. Round 2, same --session label: the
+#     artifact is oversized enough to trip agy's own ARG_MAX guard (see
+#     lib/engines/agy.sh's 256000-byte check) — that path sets
+#     _ENGINE_ABORT_RETRY=1 and `break`s the retry loop BEFORE engine_exit is
+#     ever set non-zero and BEFORE engine_extract runs, so consult.sh's OWN
+#     unconditional "engine_exit != 0 → rm CONV_FILE" (consult.sh:166) never
+#     fires — CONV_FILE survives completely untouched by anything except
+#     consult_on_rest_success. This is deliberately the SAME shape as
+#     plan-review.bats's "REST-produced REVIEW after an ARG_MAX abort
+#     invalidates CONV_FILE" precedent (~line 4210) — a plain
+#     create_failing_engine CLI failure would be caught by that unconditional
+#     rm regardless of consult_on_rest_success, and would not actually pin
+#     this fix (verified: see the self-check note below).
+@test "session: REST-succeeds after an ARG_MAX abort clears CONV_FILE established by a prior round" {
+  create_mock_engine "agy" "round 1 review body"
+  local sys_file="${TEST_TEMP_DIR}/sys.md"
+  local artifact_file="${TEST_TEMP_DIR}/artifact.md"
+  printf 'Stable rubric.' > "$sys_file"
+  printf 'Artifact body.' > "$artifact_file"
+
+  # Round 1: agy CLI succeeds → persists a conversation_id into CONV_FILE.
+  run_second_opinion --system-prompt-file "$sys_file" --prompt-file "$artifact_file" --session "rest-clears-conv"
+  [ "$SO_EXIT" -eq 0 ]
+
+  local conv_file
+  conv_file=$(find "$REVIEW_COUNTER_DIR" -maxdepth 1 -name '.so-*' | head -n1)
+  [ -n "$conv_file" ]
+  [ -s "$conv_file" ]
+
+  # Round 2, same --session label: oversized artifact trips agy's ARG_MAX
+  # guard (CONV_FILE untouched by that path), REST is configured and
+  # succeeds. Mirrors plan-review.bats's rest-fallback environment setup
+  # (create_mock_curl_sse + REVIEW_API_URL/REVIEW_API_KEY).
+  local big_artifact_file="${TEST_TEMP_DIR}/big-artifact.md"
+  printf 'x%.0s' $(seq 1 300000) > "$big_artifact_file"
+  export REVIEW_API_URL="http://localhost:9999"
+  export REVIEW_API_KEY="test-key"
+  create_mock_curl_sse "REST-produced review body for round 2."
+
+  run_second_opinion --system-prompt-file "$sys_file" --prompt-file "$big_artifact_file" --session "rest-clears-conv"
+
+  [ "$SO_EXIT" -eq 0 ]
+  [[ "$SO_STDOUT" == *"REST-produced review body for round 2."* ]]
+  # The fix: CONV_FILE from round 1 must be gone — a stale, ungapped-looking
+  # session handle must not survive a round whose authoritative result came
+  # from REST instead of agy.
+  [ ! -e "$conv_file" ]
 }
 
 # =============================================================================
