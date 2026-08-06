@@ -62,15 +62,10 @@
 # blocking it would be a pure false positive.
 #
 # Step 8 is the team-ops lifeline. DO NOT REMOVE THIS STEP. A non-empty
-# tool_input.name is the ONLY entry point Lead has for starting a teammate —
-# empirically there is no standalone TeamCreate tool (the binary contains
-# exactly 3 occurrences of the string "TeamCreate": two are copies of the
-# `$Yr` constant-pool set literal, one is `$Yr`'s own JS definition; `$Yr` is
-# read only by UI rendering and dynamic tool-pool accounting, never touched by
-# hook dispatch). Starting a teammate goes through Agent.call()'s
-# `if(b&&i&&!L&&!s&&!a)` branch -> `cvd()` -> `Fko()` ->
-# `taskRegistry.register`, and tool_name for that call is `Agent`. Removing
-# this step would block Lead from ever starting a teammate.
+# tool_input.name means this dispatch is starting a teammate, which is
+# pre-dispatch-channel-guard.sh's domain (this plugin) to judge — this hook
+# simply passes. Removing this step would block Lead from ever starting a
+# teammate.
 #
 # Step 9 accepts ONLY the JSON boolean `false` — the string `"false"` does
 # NOT qualify and falls through to BLOCK. Checked with
@@ -161,6 +156,64 @@ NAME=$(jq -r '.tool_input.name // empty' <<< "$INPUT" 2>/dev/null) || exit 0
 # Same [[:space:]] blank test as the agent_id step above — see the comment
 # there for why ${var// /} is not sufficient.
 [[ ! "$NAME" =~ ^[[:space:]]*$ ]] && exit 0
+
+# CLAUDE_AUTO_BACKGROUND_TASKS: when this env var is truthy, run_in_background:
+# false no longer guarantees synchronous delivery. The runtime's own
+# synchronous branch sets `autoBackgroundMs: U ? void 0 : oEb() || void 0`, and
+# oEb() returns 120000 whenever this variable is truthy — a synchronous agent
+# that runs past 120s auto-flips into the background channel regardless of
+# what the caller requested. This step is placed AFTER the name/agent_id
+# exemptions above (not before): those two dispatch shapes deliver through the
+# mailbox, not the tool's return value, so auto-backgrounding does not affect
+# them and judging it here would misfire on both. It is placed BEFORE the
+# run_in_background:false check below because that check is exactly the
+# judgment this variable defeats — checking it first would report a false pass.
+#
+# Truthiness here is NOT "non-empty" — it mirrors the runtime's own tr():
+#
+#   function tr(e){ if(!e)return!1; if(typeof e==="boolean")return e;
+#     let t=String(e).toLowerCase().trim(); return ["1","true","yes","on"].includes(t) }
+#
+# oEb() calls tr(process.env.CLAUDE_AUTO_BACKGROUND_TASKS) directly, so
+# CLAUDE_AUTO_BACKGROUND_TASKS=0 (or false/no/off/anything else tr() rejects)
+# means auto-backgrounding is OFF and this gate must NOT fire. "Non-empty" was
+# tried in an earlier revision and misfired on exactly that case — verified,
+# `CLAUDE_AUTO_BACKGROUND_TASKS=0` was wrongly BLOCKed.
+#
+# This is a deliberate asymmetry with step 6's CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
+# check above, which correctly uses "non-empty" — do NOT "fix" that one to match
+# this one. Step 6's env var feeds Bv(){ return te.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS }
+# whose return value is consumed as a raw JS truthy test in the `ee` expression, where
+# any non-empty string (including "0") IS truthy. Step 6 reasons about the runtime's
+# raw-truthy semantics; this step reasons about the runtime's own tr()-truthy
+# semantics — they differ because the two switches are read differently by the
+# runtime, not because one of them is a mistake.
+#
+# The two steps also differ in which direction a wrong judgment call hurts. Step
+# 6 exits 0 (PASS) on match — an over-wide match there just under-blocks, a soft
+# miss. This step exits 2 (BLOCK) on match — an over-wide match here (like the
+# old "non-empty" check) jams EVERY dispatch shut, including CLAUDE_AUTO_BACKGROUND_TASKS=0
+# which explicitly means "off". A gate whose match fires BLOCK must track the
+# runtime's own truthy semantics exactly; a gate whose match fires PASS can
+# afford to be loose.
+_dsg_tr_truthy() {
+  # bash 3.2 compatible (no ${var,,}): lowercase via `tr`, then trim via
+  # parameter expansion against [:space:] glob classes.
+  local v
+  v=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  case "$v" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if _dsg_tr_truthy "${CLAUDE_AUTO_BACKGROUND_TASKS:-}"; then
+  printf '[dispatch-sync-guard] CLAUDE_AUTO_BACKGROUND_TASKS 已设置：即便本次派发带了 run_in_background:false，运行时仍会在同步 agent 跑满 120 秒后自动翻入后台通道（同步分支的 autoBackgroundMs 由该变量决定，非 void 0 即 120000）。补 run_in_background:false 救不了这种情形。\n' >&2
+  printf '[dispatch-sync-guard] 出路：在 ~/.claude/settings.json 的 env 段清掉 CLAUDE_AUTO_BACKGROUND_TASKS（或确保其为空/未设置），恢复同步派发的可靠交付；Bash 内 export/unset 对 hook 进程不生效。\n' >&2
+  exit 2
+fi
 
 jq -e '.tool_input.run_in_background == false' <<< "$INPUT" >/dev/null 2>&1 && exit 0
 
