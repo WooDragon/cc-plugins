@@ -9,7 +9,9 @@
 HOOK_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/plan-review.sh"
 PRECOMPACT_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/precompact-review.sh"
 DISPATCH_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/dispatch-check.sh"
-SYSTEM_PROMPT_FILE="${BATS_TEST_DIRNAME}/../scripts/assets/review-system-prompt.md"
+SECOND_OPINION_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/second-opinion.sh"
+SYSTEM_PROMPT_PLAN_FILE="${BATS_TEST_DIRNAME}/../scripts/assets/review-plan.md"
+SYSTEM_PROMPT_COMMON_FILE="${BATS_TEST_DIRNAME}/../scripts/assets/review-common.md"
 
 # --- Setup / Teardown ---
 
@@ -901,6 +903,29 @@ run_hook() {
   # Direct invocation — no eval, no exec indirection, no quote destruction.
   HOOK_STDOUT=$(bash "$HOOK_SCRIPT" <<< "$input" 2>"$stderr_file") || HOOK_EXIT=$?
   HOOK_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# run_second_opinion [arg ...]
+#   Invokes SECOND_OPINION_SCRIPT with the given args. If SO_STDIN is set,
+#   feeds it as stdin (the driver's stdin-body path); otherwise stdin is
+#   /dev/null (so a test that forgets to supply a body sees the driver's own
+#   stdin `cat` block rather than hanging on a terminal).
+#   Sets: SO_STDOUT, SO_STDERR, SO_EXIT
+run_second_opinion() {
+  SO_STDOUT=""
+  SO_STDERR=""
+  SO_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  if [ -n "${SO_STDIN+x}" ]; then
+    SO_STDOUT=$(bash "$SECOND_OPINION_SCRIPT" "$@" <<< "$SO_STDIN" 2>"$stderr_file") || SO_EXIT=$?
+  else
+    SO_STDOUT=$(bash "$SECOND_OPINION_SCRIPT" "$@" < /dev/null 2>"$stderr_file") || SO_EXIT=$?
+  fi
+  SO_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
 }
 

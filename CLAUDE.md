@@ -6,7 +6,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 
 | 类型 | 名称 | 说明 |
 |------|------|------|
-| Plugin | plan-review | 对抗性审阅（Gemini/Claude/Codex） |
+| Plugin | plan-review | 对抗性审阅（Gemini/Claude/Codex）+ `second-opinion.sh` 通用第二意见驱动（插件外可调用） |
 | Plugin | ppt-press（4 skills） | PPT 全生命周期（init/create/deploy/manage） |
 | Plugin | doc-gate（1 skill + 3 hooks + 2 tools） | 文档编辑门禁 + 词法召回 |
 | Plugin | code-search（1 skill） | 代码搜索与符号导航方法论（纯 skill，零 hook） |
@@ -33,9 +33,11 @@ plugins/
     .claude-plugin/plugin.json    # 插件元数据
     hooks/hooks.json              # PreToolUse + PreCompact hook 声明
     scripts/
-      plan-review.sh             # 编排器：守卫→计数→双安全阀→预检→prompt 组装→重试驱动→verdict 分支
+      plan-review.sh             # 编排器（hook）：守卫→计数→双安全阀→预检→prompt 组装→重试驱动→verdict 分支
+      second-opinion.sh          # 通用第二意见驱动：插件外调用方直接拿评审正文，fail loud，不做 verdict 解析
       lib/
         common.sh                # 日志三件套 + backfill_engine_err + allow_with_reason + plan_hash + DELTA_REVIEW_RULES（delta 审阅规则单一来源）+ clamp_head_bytes / clamp_tail_bytes（UTF-8 安全字节截断）
+        consult.sh                # 引擎调用状态机 run_consultation()：超时解析/降级检查/重试循环/REST fallback，hook 与驱动共用
         plan-source.sh           # transcript 反查三重安全门 + 提取链 + RESOLVE_REASON 三态文案
         verdict.sh               # verdict 提取 + APPROVE/CONCERNS/REJECT 三种反馈渲染
         manifest.sh              # Manifest 检测三函数 + MANIFEST_EXAMPLE + JSON 序列化
@@ -45,12 +47,14 @@ plugins/
           codex.sh               # REVIEW_ENGINE=codex（含 engine_err_filter 隐私过滤钩子）
           rest.sh                # REST SSE 降级通道（rest_ 前缀独立函数，不实现三钩子）
       assets/
-        review-system-prompt.md  # SYSTEM_INSTRUCTIONS 提示词正文（纯数据）
+        review-common.md         # 通用评审规范层（ground truth / Review Discipline / Finding Quality Gate / Severity / Verdict Rules / Output Format），供 hook 与驱动共用
+        review-plan.md           # plan 专有层（框架语 / Scope Boundary / 9 条 Review Criteria / 输出长度上限），hook 拼接在 review-common.md 之前
       dispatch-check.sh          # Layer 2 hook（Agent/Task 调度参数强制）
       precompact-review.sh       # PreCompact hook（compaction 恢复）
     tests/                        # BDD 测试套件（bats-core；用例计数属动态指标，权威版本见 MEMORY.md 层）
       plan-review.bats            # 主测试套件（含 Dispatch Manifest、codex 引擎、轮间记忆）
       dispatch-check.bats         # Layer 2 hook 测试
+      second-opinion.bats         # second-opinion.sh 驱动测试
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
   doc-gate/                       # 文档编辑门禁 + 词法召回插件

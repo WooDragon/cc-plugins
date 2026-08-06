@@ -18,11 +18,23 @@ claude --plugin-dir ~/.claude/dev-plugins/plan-review
 
 ```
 scripts/
-  plan-review.sh              Orchestrator: guards → counters → dual safety valves →
-                               pre-check → prompt assembly → retry driver → verdict branching
+  plan-review.sh              Orchestrator (PreToolUse hook): guards → counters → dual safety
+                               valves → pre-check → prompt assembly → retry driver → verdict
+                               branching. Plan-specific policy only (plan extraction, ack-round
+                               counters, verdict routing, manifest parsing).
+  second-opinion.sh           Generic second-opinion driver — a plain CLI any caller invokes
+                               directly to get a second opinion on any artifact, built on the
+                               same engine state machine. Does no verdict parsing; stdout is the
+                               engine's raw review text, verbatim. See "Second Opinion Entry
+                               Point" below.
   lib/
     common.sh                 Logging helpers, backfill_engine_err, allow_with_reason, plan_hash,
                                clamp_head_bytes/clamp_tail_bytes (UTF-8-safe byte-budget truncation)
+    consult.sh                Engine consultation state machine (run_consultation()): timeout
+                               resolution, degrade checks, the retry loop (capacity/timeout/empty-
+                               response handling), and the REST fallback. Shared by both
+                               plan-review.sh (hook) and second-opinion.sh (driver) — extracted so
+                               the engine infrastructure is callable outside the hook context.
     plan-source.sh            Transcript triple-gated lookup + extraction chain +
                                RESOLVE_REASON tri-state messaging
     verdict.sh                Verdict extraction + APPROVE/CONCERNS/REJECT feedback rendering
@@ -34,7 +46,14 @@ scripts/
                                 engine_err_filter privacy-redaction hook
       rest.sh                  REST SSE fallback (see "Engine interface" below)
   assets/
-    review-system-prompt.md   SYSTEM_INSTRUCTIONS prompt text (pure data, no shell logic)
+    review-common.md          Generic review-engine instructions shared by every caller (ground
+                               truth on version identifiers, Review Discipline, Finding Quality
+                               Gate, Severity Definitions, Verdict Rules, Output Format). Does not
+                               assume the artifact under review is a plan.
+    review-plan.md            Plan-specific layer (framing, Scope Boundary, the 9 Review
+                               Criteria, output length cap). Concatenated ahead of
+                               review-common.md when plan-review.sh assembles the hook's system
+                               prompt — this is the only consumer that concatenates the two.
   dispatch-check.sh           Layer 2 hook — Agent/Task dispatch-parameter enforcement
   precompact-review.sh        PreCompact hook — plan recovery across compaction
 ```
@@ -87,6 +106,19 @@ names.
 
 Legacy variables (`GEMINI_REVIEW_OFF`, `GEMINI_DRY_RUN`, `GEMINI_MAX_REVIEWS`) are supported via fallback mapping.
 
+### `second-opinion.sh` (generic second-opinion driver)
+
+The driver reuses the same engine variables above (`REVIEW_ENGINE`, `AGY_MODEL`, `CLAUDE_MODEL`,
+`CODEX_BIN`, `CODEX_MODEL`, `GEMINI_MODEL`, `REVIEW_API_URL`, `REVIEW_API_KEY`,
+`REVIEW_REST_TIMEOUT`, `REVIEW_REST_STALL_TIMEOUT`, `REVIEW_HOOK_BUDGET`,
+`REVIEW_CAPACITY_DELAY`, `REVIEW_ENGINE_DEGRADE_TTL`) and shares `REVIEW_COUNTER_DIR` (and
+therefore `DEGRADE_FILE`) with `plan-review.sh` — a Gemini capacity degrade tripped by one is
+honored by the other. It does **not** provide its own `--timeout` flag; time budget is inherited
+purely from env (`REVIEW_ENGINE_TIMEOUT` / `REVIEW_HOOK_BUDGET`). It also does **not** read
+`REVIEW_DISABLED` or `REVIEW_DRY_RUN` — see [Second Opinion Entry Point](#second-opinion-entry-point-second-opinionsh)
+for why. `REVIEW_LOG_DIR` (default `~/.claude/logs`) controls where its own `second-opinion.log`
+is written, separate from `plan-review.log`.
+
 ### `dispatch-check.sh` (Layer 2 — Agent/Task dispatch enforcement)
 
 | Variable | Default | Description |
@@ -109,7 +141,15 @@ on that second call permits execution.
 
 ## Review Criteria
 
-Nine criteria — authoritative text lives in `scripts/assets/review-system-prompt.md`.
+Nine criteria — authoritative text is split across two files (see [Architecture](#architecture)):
+
+- `scripts/assets/review-common.md` — the generic layer: version-identifier ground truth, Review
+  Discipline, Finding Quality Gate, Severity Definitions, Verdict Rules, Output Format. Shared by
+  every caller of the engine infrastructure, including `second-opinion.sh`; it never assumes the
+  reviewed artifact is a plan.
+- `scripts/assets/review-plan.md` — the plan-specific layer: framing, Scope Boundary, the 9
+  criteria below, and the output length cap. Only `plan-review.sh` uses this file, concatenating
+  it ahead of `review-common.md` when assembling the hook's system prompt.
 
 | # | Criterion | Focus |
 |---|-----------|-------|
@@ -171,7 +211,125 @@ The `## Consultation Context` block (present whenever a plan is past its first r
 
 The thread's lifetime mirrors the review cycle: cleared whenever a cycle ends — approval, either safety valve, no-plan fail-closed, or an orphan exit (engine not found / not attempted — dropped to avoid leaking one plan's findings into an unrelated later plan under the same session id). The one exception is a plan revised after approval (plan hash no longer matches the approved marker): that is not a cycle end — the counter keeps counting — so the thread survives with an appended revision marker instead of being cleared, since prior findings on this same plan are exactly the highest-value context to carry into the re-review. Only the `--conversation` handle is dropped there, since it embeds the full old plan text server-side.
 
-No new environment variables — the byte budgets are fixed defaults in `lib/common.sh` (`HISTORY_ROUND_BYTES=9000` per recorded round, `HISTORY_INJECT_BYTES=48000` on injection), sized so a full-length CJK review (`review-system-prompt.md` caps output at 3000 characters, ~9KB in Chinese) survives a single round uncut and roughly 5 rounds of thread history survive injection. Once a plan's accumulated thread exceeds the injection budget, `clamp_tail_bytes` keeps the most recent rounds and silently drops the oldest ones first. These match the raised `CLAUDE.md` ingestion limits below (`GLOBAL_MD_BYTES=8000`, `PROJECT_MD_BYTES=24000`).
+No new environment variables — the byte budgets are fixed defaults in `lib/common.sh` (`HISTORY_ROUND_BYTES=9000` per recorded round, `HISTORY_INJECT_BYTES=48000` on injection), sized so a full-length CJK review (`review-plan.md` caps output at 3000 characters, ~9KB in Chinese) survives a single round uncut and roughly 5 rounds of thread history survive injection. Once a plan's accumulated thread exceeds the injection budget, `clamp_tail_bytes` keeps the most recent rounds and silently drops the oldest ones first. These match the raised `CLAUDE.md` ingestion limits below (`GLOBAL_MD_BYTES=8000`, `PROJECT_MD_BYTES=24000`).
+
+## Second Opinion Entry Point (second-opinion.sh)
+
+`second-opinion.sh` is a generic, out-of-hook driver built on the same engine infrastructure
+(agy + Gemini 3.1 Pro + REST fallback + session reuse) that `plan-review.sh` uses. Unlike the
+hook, it is a plain CLI: any caller invokes it directly to get a second opinion on any artifact —
+not just an implementation plan — and gets back raw review text, not a verdict decision.
+
+### Interface
+
+```
+second-opinion.sh --system-prompt-file <path> [--system-prompt-file <path2> ...]
+                  [--prompt-file <path>] [--session <label>]
+```
+
+- `--system-prompt-file` — **required, repeatable**. Concatenated in command-line order to form
+  the system instructions sent to the engine. Missing entirely, pointing at a nonexistent path, or
+  an empty file is **fail loud**: nonzero exit, empty stdout. There is no fallback rubric — unlike
+  the hook, this driver never silently substitutes the plan-review criteria for a caller that
+  forgot to pass one.
+- Artifact body — `--prompt-file <path>` or stdin. **stdin is the only path available to callers
+  that are forbidden from writing files** (e.g. redteam-style callers operating under a
+  read-only mandate). If both are given, `--prompt-file` wins; stdin is a fallback for
+  file-write-averse callers, not a second source merged with an explicit file.
+- stdout carries **only** the review body — no JSON wrapper, no log lines. stderr carries all
+  diagnostics. Exit 0 means a result was obtained; nonzero means every engine was exhausted, or a
+  fail-loud precondition was violated.
+
+**Fail loud, not fail open.** `plan-review.sh` fails open (allows the tool call through) on every
+engine failure, because the cost of a false block is high and the hook has a native human
+approval step downstream regardless. This driver has no such downstream backstop — a caller
+treats whatever comes out of stdout as the review. A synthesized "looks like a review" response
+here would be actively misleading, so every failure path is fail-closed: nonzero exit, empty
+stdout, diagnostic on stderr.
+
+**Does not read `REVIEW_DISABLED` / `REVIEW_DRY_RUN`.** Those two variables encode "turn off the
+ExitPlanMode gate" semantics for the hook. An explicit, direct invocation of this driver is not
+that gate — it must not be silently reshaped by env state that was set for a different call site.
+
+**Shares `DEGRADE_FILE`** with `plan-review.sh` (same `REVIEW_COUNTER_DIR`) so a Gemini
+capacity-exhaustion degrade tripped by one caller is honored by the other. **Does no verdict
+parsing** — the driver is a transport layer only; `<verdict>` tags, if present in the engine's
+response, are returned as-is inside the raw text.
+
+### Session continuation (`--session <label>`)
+
+`--session <label>` takes an opaque label, not a file path. The actual session-file path is
+derived by the driver:
+
+```
+${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}/.so-<hash(label + assembled system-prompt bytes)[:16]>
+```
+
+The hash folds in the **assembled system-prompt bytes**, not just the label, via `plan_hash()`
+(`lib/common.sh`, reused verbatim — sha256sum → shasum -a 256 → cksum fallback, so this stays
+portable across Linux and macOS). This is deliberate: it means a rubric edit invalidates the old
+session automatically. A caller does not need to remember "I changed the prompt, so I must also
+throw away the old `--session` value" — that is a rule a path-based scheme would require the
+caller to enforce themselves, and forgetting it means resuming a stale session under a changed
+rubric, silently mixing old and new review criteria.
+
+Real evidence from testing: with the same `--session` label, changing one byte of the system
+prompt changed the derived key from `9f2d2375...` to `bf96267a...`, and the engine returned to a
+genuinely fresh first round (no reference to "the previous round") instead of resuming the old
+one.
+
+Omitting `--session` gives a single-round, stateless call backed by a throwaway temp file — no
+session persists past that one invocation.
+
+### Path discovery
+
+The officially recommended path is:
+
+```
+~/.claude/plugins/marketplaces/cc-plugins/plugins/plan-review/scripts/second-opinion.sh
+```
+
+This is the version-less, CC-maintained git checkout — the one under `marketplaces/`, not
+`cache/`. **This has a real cost, and it is intentional to state it plainly rather than let
+callers discover it by surprise**: `marketplaces/` tracks the marketplace `HEAD`, but the hook
+actually loads assets from `plugins/cache/<version>/`. The two drift apart across a push — a
+caller invoking the `marketplaces/` path picks up a change immediately on push; the hook only
+picks it up after the next plugin reinstall. The same asset can therefore be two different
+versions depending on which of the two consumers is looking at it.
+
+**Do not glob `find ~/.claude/plugins -path '.../second-opinion.sh'` and take the first hit.**
+Tested against the structurally identical `pr-review` plugin, that glob returned three hits
+(`marketplaces/` + two different `cache/<version>/` directories); `head -1` picking the "right"
+one is an accident of filesystem traversal order, not a guarantee. `plan-review`'s own `cache/`
+directory currently has four different versions sitting side by side.
+
+### Time budget
+
+The driver does **not** provide its own `--timeout` flag — time budget is purely inherited from
+env (`REVIEW_ENGINE_TIMEOUT` / `REVIEW_HOOK_BUDGET`). To override, set those env vars inline on
+the invocation. Worst-case measured latency was ~415s (agy self-terminates at its own
+`--print-timeout` 5-minute mark, the retry guard breaks out because the remaining time budget is
+insufficient for another attempt, and REST fallback then gets its own 115s). Callers wrapping the
+driver in a `timeout` command should budget **at least 480s**.
+
+### Known limitation: no usage/log traceability
+
+The driver does not set `SESSION_ID`, so its calls produce **no** `agy-conversation` /
+`agy-usage` log lines — the driver's diagnostics go to stderr only (`second-opinion.log`), by
+design, but the practical effect is that a driver invocation **cannot be traced from
+`plan-review.log`**. If you need to quantify the driver's own token consumption, that requires
+adding a separate extraction mechanism — not currently in scope.
+
+### Example
+
+```bash
+SO=~/.claude/plugins/marketplaces/cc-plugins/plugins/plan-review/scripts/second-opinion.sh
+"$SO" --system-prompt-file <plugin>/scripts/assets/review-common.md \
+      --system-prompt-file <your-own-rubric>.md \
+      --session my-review-t7 <<'EOF'
+<artifact under review>
+EOF
+```
 
 ## Fault Tolerance
 

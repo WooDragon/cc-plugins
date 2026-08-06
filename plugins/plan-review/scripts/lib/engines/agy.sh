@@ -5,7 +5,7 @@
 # why unrecognized values fall through here (current-behavior preservation).
 #
 # Orchestrator pre-sets before calling these hooks: PROMPT_FILE,
-# SYSTEM_INSTRUCTIONS, PLAN, TOTAL_ROUNDS, ENGINE_OUT, ENGINE_TIMEOUT,
+# SYSTEM_INSTRUCTIONS, ARTIFACT, ROUND_INDEX, ENGINE_OUT, ENGINE_TIMEOUT,
 # TIMEOUT_CMD, CONV_FILE, LOG_FILE, ENGINE_CMD.
 #
 # engine_invoke may set _ENGINE_ABORT_RETRY=1 to signal the caller's retry
@@ -97,7 +97,7 @@ engine_invoke() {
     # an injected "## Prior Review Thread" section to point at (PROMPT_FILE
     # is bypassed), so it must not claim one may exist above.
     AGY_PROMPT="## Consultation Context
-This is round $((TOTAL_ROUNDS + 1)) of adversarial review.
+This is round $((ROUND_INDEX + 1)) of adversarial review.
 The plan author may have revised or added rebuttals since the previous round.
 Evaluate the CURRENT plan on its merits — if prior concerns have been addressed, APPROVE.
 
@@ -106,7 +106,7 @@ memory):
 ${DELTA_REVIEW_RULES}
 
 ## Plan to Review
-${PLAN}"
+${ARTIFACT}"
   fi
 
   # ARG_MAX defense: agy only accepts the prompt as a command-line argument,

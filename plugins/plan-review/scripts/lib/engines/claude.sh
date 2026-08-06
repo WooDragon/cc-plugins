@@ -3,7 +3,7 @@
 # executed) by plan-review.sh when REVIEW_ENGINE=claude.
 #
 # Orchestrator pre-sets before calling these hooks: PROMPT_FILE,
-# SYSTEM_INSTRUCTIONS, PLAN, TOTAL_ROUNDS, ENGINE_OUT, ENGINE_TIMEOUT,
+# SYSTEM_INSTRUCTIONS, ARTIFACT, ROUND_INDEX, ENGINE_OUT, ENGINE_TIMEOUT,
 # TIMEOUT_CMD, CONV_FILE, LOG_FILE, ENGINE_CMD.
 #
 # bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.

@@ -3,7 +3,7 @@
 # executed) by plan-review.sh when REVIEW_ENGINE=codex.
 #
 # Orchestrator pre-sets before calling these hooks: PROMPT_FILE,
-# SYSTEM_INSTRUCTIONS, PLAN, TOTAL_ROUNDS, ENGINE_OUT, ENGINE_TIMEOUT,
+# SYSTEM_INSTRUCTIONS, ARTIFACT, ROUND_INDEX, ENGINE_OUT, ENGINE_TIMEOUT,
 # TIMEOUT_CMD, CONV_FILE, LOG_FILE, ENGINE_CMD. ENGINE_TMP_FILES/
 # ENGINE_TMP_DIRS arrays are declared (and cleared) by the caller before
 # trap registration — this file only appends its own private temp paths.
