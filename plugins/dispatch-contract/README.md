@@ -2,7 +2,7 @@
 
 Subagent dispatch contract enforcement for Claude Code — a `%%DONE%%` finalization gate plus a methodology skill for reliable subagent delegation.
 
-The plugin has four parts: a **PreToolUse hook** that blocks dispatch calls omitting `run_in_background:false`, a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
+The plugin has five parts: a **PreToolUse hook** that blocks dispatch calls omitting `run_in_background:false`, a second **PreToolUse hook** that blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
 
 ## Installation
 
@@ -16,14 +16,21 @@ claude plugin add dispatch-contract@WooDragon-cc-plugins
 ```
 PreToolUse (matcher: Agent, Task)
   │
-  └─ dispatch-sync-guard.sh (5s timeout)
-         Blocks a dispatch call that omits run_in_background:false.
-         Omission selects the background delivery channel, and that channel
-         drops completion notifications at a measured 92.7% loss rate with
-         no resend path. Passes silently (fail-open) on teammate context
-         (agent_id present), Lead-starts-a-teammate calls (tool_input.name
-         present), the CLAUDE_CODE_DISABLE_BACKGROUND_TASKS env var, and any
-         malformed or missing payload field.
+  ├─ dispatch-sync-guard.sh (5s timeout)
+  │      Blocks a dispatch call that omits run_in_background:false.
+  │      Omission selects the background delivery channel, and that channel
+  │      drops completion notifications at a measured 92.7% loss rate with
+  │      no resend path. Passes silently (fail-open) on teammate context
+  │      (agent_id present), Lead-starts-a-teammate calls (tool_input.name
+  │      present), the CLAUDE_CODE_DISABLE_BACKGROUND_TASKS env var, and any
+  │      malformed or missing payload field.
+  │
+  └─ dispatch-capability-guard.sh (5s timeout)
+         Blocks a dispatch call whose subagent_type/model cannot deliver
+         what the prompt itself asks for — a read-only declaration sent to
+         a full-privilege agent, or a write/exec-needing task sent to a
+         read-only agent type or the haiku model tier. See "The Dispatch
+         Capability Guard" below for the full judgment matrix.
 
 SubagentStart (matcher: *)
   │
@@ -51,8 +58,9 @@ skills/subagent-dispatch  (no hook — loaded by description match)
          contract is reachable at dispatch time rather than only after a block.
 ```
 
-This plugin registers three hooks: `PreToolUse` (dispatch-sync-guard),
-`SubagentStart` (dispatch-rules-inject), and `SubagentStop` (subagent-done-gate).
+This plugin registers four hooks: `PreToolUse` (dispatch-sync-guard,
+dispatch-capability-guard), `SubagentStart` (dispatch-rules-inject), and
+`SubagentStop` (subagent-done-gate).
 There is no dispatch-side hook that guesses whether a given task needs a
 `%%DONE%%` deliverable — that judgment is semantic, and a keyword guess would
 misfire often enough to be ignored. The skill closes that gap instead.
@@ -157,6 +165,83 @@ synchronous dispatch requestable again. `ALLOW_BACKGROUND_DISPATCH=1` does not f
 case — it silences the guard everywhere, including runtimes where the background
 channel is real and the guard is protecting against an actual notification-loss risk.
 
+## The Dispatch Capability Guard
+
+`dispatch-capability-guard.sh` also runs on `PreToolUse` for `Agent` and `Task`
+calls, alongside `dispatch-sync-guard.sh`. Where the sync guard treats the
+*delivery channel* (background vs. synchronous), this hook treats *capability
+mismatch* — whether the `subagent_type`/`model` a dispatch call names can
+actually deliver what its own prompt asks for.
+
+It extracts four signals from the prompt text (and the `model` field):
+
+- **EXEC** — exec intent (run tests/scripts/build/lint)
+- **WRITE** — write intent, anchored on a write verb adjacent to a code
+  object or a path-shaped token (a bare write verb alone, e.g. 创建一份调研报告,
+  is not collected — that produces a report, not code)
+- **RO** — an explicit read-only declaration
+- **NEG** — an absolute negation of writing (e.g. 不要修改任何文件)
+
+These fold into one derived predicate:
+
+```
+NEEDS_CAP = (EXEC || WRITE) && !RO && !NEG
+```
+
+Three independent judgments fire off this signal set, each printing its own
+stderr message before a single trailing `exit 2`:
+
+- **Judgment A** (migrated verbatim from the user's local
+  `pre-dispatch-readonly-guard.sh`, condition kept unchanged — uses `!EXEC`,
+  not `!NEEDS_CAP`): `!EXEC && (RO || NEG) && subagent_type ∈ {general-purpose,
+  claude}` → block. A read-only declaration (or absolute negation) sent to a
+  full-privilege agent when Explore's Edit/Write/NotebookEdit are physically
+  disabled and would catch the same scope even if the declaration were wrong.
+  Fix: redispatch to `Explore`.
+- **Judgment B** (new): `NEEDS_CAP && subagent_type ∈ {explore, plan}` →
+  block. The task needs write/exec capability, but Explore/Plan have
+  Edit/Write/NotebookEdit disabled and Bash limited to a read-only whitelist
+  — the dispatch would dead-end after a full round trip. Fix: redispatch to
+  `general-purpose` or `dev` (team-ops).
+- **Judgment C** (new): `NEEDS_CAP && model` contains the substring `haiku`
+  (matched as a substring because real values look like
+  `claude-haiku-4-5-20251001`, never the bare word) → block. Interpreting
+  run/test/build output well enough to decide what to do next is a
+  judgment-forming action the daily model-tiering rubric excludes from the
+  haiku tier. Fix: redispatch at `sonnet` or the task's required tier.
+
+Judgment A keeps its original `!EXEC`-based condition rather than being folded
+into `NEEDS_CAP` — it is a behavior-preserving migration of an existing gate,
+not a rewrite, so its trigger condition is intentionally left exactly as it
+was before this hook widened scope. Judgments B and C are new and share the
+`NEEDS_CAP` predicate because both are instances of the same underlying
+question: does this subagent/model have the capability the prompt is asking
+for.
+
+**Deliberately accepted miss**: a mixed prompt like 调研根因并修复 hits both RO
+and WRITE, so `!RO` is false and `NEEDS_CAP` stays 0 — the dispatch passes.
+This is a known under-block, not a bug: today's behavior for such prompts is
+also "pass" (no regression), and requiring every Explore dispatch to declare
+read-only explicitly was rejected as a fix — it would push dispatchers toward
+`general-purpose` by default, amplifying exactly the over-privilege risk
+judgment A exists to catch.
+
+**Fail-open paths**: empty stdin, missing `jq`, non-JSON payload, or an empty
+prompt field all exit 0 silently.
+
+**Escape hatch**: `ALLOW_DISPATCH_CAPABILITY_MISMATCH=1` in the `env` block of
+`settings.json` (a plain Bash `export` does not reach this hook's process).
+
+**Logging**: unlike this plugin's other hooks, which fail open silently, this
+hook writes one of two distinct stderr tags depending on why a check did not
+run: `[GATE-BYPASS]` when the escape hatch is open (a human deliberately
+disabled the check — not a malfunction), checked first so an open hatch is
+never mistaken for broken judgment data; `[GATE-DEGRADE]` when the judgment
+data itself could not be read (empty stdin, missing `jq`, malformed JSON).
+Collapsing the two into one silent fail-open, as this plugin's sibling hooks
+do, would make a grep for real breakage indistinguishable from a session that
+simply has the hatch on.
+
 ## The SubagentStart Rules Injector
 
 `dispatch-rules-inject.sh` runs on `SubagentStart` for every spawned subagent
@@ -195,6 +280,7 @@ The skill triggers on dispatch-related requests: "派发 subagent", "dispatch su
 # Requires bats-core
 bats plugins/dispatch-contract/tests/subagent-done-gate.bats
 bats plugins/dispatch-contract/tests/dispatch-sync-guard.bats
+bats plugins/dispatch-contract/tests/dispatch-capability-guard.bats
 ```
 
 `subagent-done-gate.bats` has 26 test cases covering: core judgment (marker
@@ -214,16 +300,24 @@ malformed-stdin shapes), plus the rules-injector's JSON-shape checks (normal
 `agent_type` gets all three rules, `Explore` omits the scope-fence rule, empty stdin
 and `ALLOW_NO_RULES_INJECT=1` both leave stdout fully empty).
 
+`dispatch-capability-guard.bats` has 40 test cases covering: signal extraction
+(EXEC/WRITE/RO/NEG, including the double-negation and exclusive-write-scope scrub
+logic), the `NEEDS_CAP` derived predicate and its deliberately-accepted mixed-prompt
+miss, judgments A/B/C individually and in combination (Explore + haiku triggering both
+B and C's messages before one `exit 2`), the `[GATE-BYPASS]`/`[GATE-DEGRADE]` tag
+split, the escape hatch, and fail-open paths (empty stdin, missing `jq`, malformed
+JSON, empty prompt).
+
 ## Block Response Shape (Deliberate Choice)
 
-Both hooks in this plugin — `dispatch-sync-guard.sh` (PreToolUse) and
-`subagent-done-gate.sh` (SubagentStop) — block via `exit 2` plus a stderr
-message. Some sibling plugins in this repo use a different shape instead:
-`plan-review`'s `dispatch-check.sh` and `doc-gate`'s `skill-gate.sh` return
-JSON `permissionDecision: deny`. This repo does not use one block-response
-shape across all plugins — `guardrails`' `git-push-guard.sh` also blocks via
-`exit 2`. Within this plugin, consistency with the sibling
-`subagent-done-gate.sh` hook takes priority over matching an unrelated
+All three blocking hooks in this plugin — `dispatch-sync-guard.sh` (PreToolUse),
+`dispatch-capability-guard.sh` (PreToolUse), and `subagent-done-gate.sh`
+(SubagentStop) — block via `exit 2` plus a stderr message. Some sibling plugins
+in this repo use a different shape instead: `plan-review`'s `dispatch-check.sh`
+and `doc-gate`'s `skill-gate.sh` return JSON `permissionDecision: deny`. This
+repo does not use one block-response shape across all plugins — `guardrails`'
+`git-push-guard.sh` also blocks via `exit 2`. Within this plugin, consistency
+across the three blocking hooks takes priority over matching an unrelated
 plugin's shape. The two forms are functionally equivalent here. The runtime
 routes the `exit 2` stderr text through `blockingError` into the tool result
 the model sees. The correction message reaches model context either way.
@@ -236,3 +330,4 @@ the model sees. The correction message reaches model context either way.
 | `ALLOW_BACKGROUND_DISPATCH` | _(unset)_ | `1` disables the background-dispatch sync guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
 | `ALLOW_NO_RULES_INJECT` | _(unset)_ | `1` disables the SubagentStart rules injector entirely |
 | `CLAUDE_CODE_FORK_SUBAGENT` | _(unset)_ | `0` disables the fork-subagent feature — restores `run_in_background` to the Agent input schema, the correct fix for step 9b's fork-world block |
+| `ALLOW_DISPATCH_CAPABILITY_MISMATCH` | _(unset)_ | `1` disables the dispatch-capability guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |

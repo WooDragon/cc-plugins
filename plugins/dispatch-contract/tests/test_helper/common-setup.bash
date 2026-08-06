@@ -305,3 +305,124 @@ assert_block() {
     return 1
   }
 }
+
+# ============================================================
+# Additions below support dispatch-capability-guard.bats
+# (PreToolUse hook: subagent_type/model capability mismatch guard,
+# judgments A/B/C). Existing functions above are untouched —
+# subagent-done-gate.bats and dispatch-sync-guard.bats depend on them
+# as-is.
+# ============================================================
+
+CAP_GUARD_SCRIPT="${BATS_TEST_DIRNAME}/../hooks/dispatch-capability-guard.sh"
+
+# --- Payload Builder (dispatch-capability-guard) ---
+
+# mk_cap_payload SUBAGENT_TYPE_MODE PROMPT [MODEL_MODE]
+# SUBAGENT_TYPE_MODE: omit | any other string (used verbatim as subagent_type value)
+# PROMPT: prompt text. Pass "" for an explicit empty string (field present but
+#         blank); use PROMPT_MODE=omit (4th positional, see below) to omit the
+#         field entirely instead.
+# MODEL_MODE: omit | any other string (used verbatim as model value)
+# 4th optional arg PROMPT_FIELD_MODE: omit | present(default) — when "omit",
+#   the prompt key itself is absent from tool_input (distinct from prompt:"").
+mk_cap_payload() {
+  local type_mode="$1" prompt="$2" model_mode="${3:-omit}" prompt_field_mode="${4:-present}"
+  local ti='{}'
+  if [[ "$type_mode" != "omit" ]]; then
+    ti=$(jq -cn --argjson base "$ti" --arg v "$type_mode" '$base + {subagent_type:$v}')
+  fi
+  if [[ "$prompt_field_mode" != "omit" ]]; then
+    ti=$(jq -cn --argjson base "$ti" --arg v "$prompt" '$base + {prompt:$v}')
+  fi
+  if [[ "$model_mode" != "omit" ]]; then
+    ti=$(jq -cn --argjson base "$ti" --arg v "$model_mode" '$base + {model:$v}')
+  fi
+  jq -cn --argjson ti "$ti" '{tool_input:$ti}'
+}
+
+# mk_cap_payload_null_input
+# tool_input is JSON null, not an object — malformed-shape fixture.
+mk_cap_payload_null_input() {
+  jq -cn '{tool_input:null}'
+}
+
+# --- Run Helper (dispatch-capability-guard) ---
+
+# run_cap_guard PAYLOAD [env_overrides...]
+# Sets: CAP_STDOUT, CAP_STDERR, CAP_EXIT
+run_cap_guard() {
+  local payload="$1"
+  CAP_STDOUT=""
+  CAP_STDERR=""
+  CAP_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  # 夹具必须隔离调用者环境：若跑测试的 shell 里设了
+  # ALLOW_DISPATCH_CAPABILITY_MISMATCH=1 (本 hook 的逃生舱),门禁会全局失效,
+  # 导致每个 BLOCK 用例假通过。-u 排在显式 override 之前,用例仍能主动传该
+  # 变量做正向测试（见 GATE-BYPASS 用例）。
+  if [[ "${2:-}" != "" ]]; then
+    CAP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH "${@:2}" bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
+  else
+    CAP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
+  fi
+  CAP_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# run_cap_guard_stdin RAW_STDIN [env_overrides...]
+# Like run_cap_guard but takes a raw stdin string instead of building/echoing
+# a JSON payload — for malformed-input fixtures (empty, non-JSON, etc.) where
+# there is no well-formed payload to build.
+run_cap_guard_stdin() {
+  local raw="$1"
+  CAP_STDOUT=""
+  CAP_STDERR=""
+  CAP_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  if [[ "${2:-}" != "" ]]; then
+    CAP_STDOUT=$(printf '%s' "$raw" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH "${@:2}" bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
+  else
+    CAP_STDOUT=$(printf '%s' "$raw" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
+  fi
+  CAP_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# --- Assertion Helpers (dispatch-capability-guard) ---
+
+# assert_cap_pass — exit 0 and no "dispatch-capability-guard" in stderr
+assert_cap_pass() {
+  [ "$CAP_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $CAP_EXIT"
+    echo "stderr: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" != *"dispatch-capability-guard"* ]] || {
+    echo "Expected no 'dispatch-capability-guard' in stderr, got: $CAP_STDERR"
+    return 1
+  }
+}
+
+# assert_cap_block JUDGMENT(A|B|C) — exit 2 and stderr names the judgment
+# ("命中判据 A" / "命中判据 B" / "命中判据 C"), anchoring the assertion to
+# WHICH branch fired rather than exit code alone (mutation-testing requirement:
+# a stray path that also exits 2 for the wrong reason must not pass this).
+assert_cap_block() {
+  local judgment="$1"
+  [ "$CAP_EXIT" -eq 2 ] || {
+    echo "Expected exit 2, got $CAP_EXIT"
+    echo "stderr: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"命中判据 ${judgment}"* ]] || {
+    echo "Expected '命中判据 ${judgment}' in stderr, got: $CAP_STDERR"
+    return 1
+  }
+}
