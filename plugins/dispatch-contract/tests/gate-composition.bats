@@ -48,18 +48,38 @@ teardown() {
 # before any composition assertion built on top of it can be.
 # ============================================================
 
-@test "composition #0: hooks.json PreToolUse(Agent) discovery resolves exactly the two known guards" {
-  [ "${#GATE_SCRIPTS[@]}" -eq 2 ] || {
-    echo "Expected 2 discovered gates, got ${#GATE_SCRIPTS[@]}: ${GATE_SCRIPTS[*]}"
+@test "composition #0: hooks.json PreToolUse(Agent) discovery is complete, on-disk, and covers every known guard" {
+  # Check 1: discovered count must match an INDEPENDENTLY-parsed count from
+  # hooks.json — a different jq traversal (recursive descent via `..` instead
+  # of discover_agent_gates' explicit `.hooks.PreToolUse[]` field walk) so
+  # this check cannot pass by construction just because both expressions
+  # share the same bug. This is what makes the assertion resilient to a
+  # fourth guard being added later: the expected number is computed from the
+  # same file discover_agent_gates reads, not hardcoded here.
+  local independent_count
+  independent_count=$(jq '
+    [.. | objects | select(has("matcher") and .matcher == "Agent") | .hooks[]?] | length
+  ' "$HOOKS_JSON_PATH")
+  [ "${#GATE_SCRIPTS[@]}" -eq "$independent_count" ] || {
+    echo "discover_agent_gates found ${#GATE_SCRIPTS[@]} gates, but independent jq recount of hooks.json found $independent_count: ${GATE_SCRIPTS[*]}"
     return 1
   }
-  local found_sync=0 found_channel=0 s
+
+  # Check 2: every discovered path must actually exist on disk.
+  local s
   for s in "${GATE_SCRIPTS[@]}"; do
     [ -f "$s" ] || { echo "Discovered gate path does not exist on disk: $s"; return 1; }
+  done
+
+  # Check 3: all three known guards must be present in the discovered set.
+  local found_sync=0 found_capability=0 found_channel=0
+  for s in "${GATE_SCRIPTS[@]}"; do
     [[ "$s" == *"/hooks/dispatch-sync-guard.sh" ]] && found_sync=1
+    [[ "$s" == *"/hooks/dispatch-capability-guard.sh" ]] && found_capability=1
     [[ "$s" == *"/hooks/pre-dispatch-channel-guard.sh" ]] && found_channel=1
   done
   [ "$found_sync" -eq 1 ] || { echo "dispatch-sync-guard.sh not in discovered set: ${GATE_SCRIPTS[*]}"; return 1; }
+  [ "$found_capability" -eq 1 ] || { echo "dispatch-capability-guard.sh not in discovered set: ${GATE_SCRIPTS[*]}"; return 1; }
   [ "$found_channel" -eq 1 ] || { echo "pre-dispatch-channel-guard.sh not in discovered set: ${GATE_SCRIPTS[*]}"; return 1; }
 }
 
