@@ -319,9 +319,17 @@ teardown() {
 # Malformed input fail-open
 # ============================================================
 
-@test "cap #30a: empty stdin -> PASS" {
+@test "cap #30a: empty stdin -> exit 0 with [GATE-DEGRADE] (Major finding #3: empty stdin is a degrade path, not a silent no-signal pass — not assert_cap_pass, same reasoning as #30b)" {
   run_cap_guard_stdin ""
-  assert_cap_pass
+  [ "$CAP_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $CAP_EXIT"
+    echo "stderr: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"[GATE-DEGRADE]"* ]] || {
+    echo "Expected '[GATE-DEGRADE]' in stderr, got: $CAP_STDERR"
+    return 1
+  }
 }
 
 @test "cap #30b: non-JSON string stdin -> exit 0 (fail-open via [GATE-DEGRADE], not assert_cap_pass — that helper's stderr check is for the no-signal case, but jq extraction failure legitimately logs [GATE-DEGRADE] with the hook's own name while still exiting 0)" {
@@ -399,4 +407,171 @@ teardown() {
   payload=$(mk_cap_payload "explore" "修复 main.py" "omit")
   run_cap_guard "$payload"
   assert_cap_block "B"
+}
+
+# ============================================================
+# Regression: 4 defects fixed post-AI-review
+# (WRITE_HIT_A dead-end close, EXEC exec-intent anchor, GATE-DEGRADE for
+# empty stdin / missing jq, WRITE_OBJ bug|issue|error). See preamble in
+# hooks/dispatch-capability-guard.sh ("A's exemption" block comment) for
+# the full trace of what each fix closes.
+# ============================================================
+
+# --- Group 1: Critical dead-end regression (judgment A + !WRITE_A) ---
+# Before the fix, a mixed RO+WRITE prompt on general-purpose/claude hit
+# judgment A on !EXEC alone and was told to re-dispatch to Explore — whose
+# Edit/Write is physically disabled, a dead end the gate manufactured. The
+# fix adds !WRITE_A to A's condition so a prompt carrying write intent no
+# longer matches A at all. Exit code alone does not pin this: a future
+# regression could still exit 0 while the stderr dead-end text is back
+# (e.g. some other change makes A fire but stops short of exit 2), so the
+# assertion below anchors on both exit AND the absence of A's specific
+# re-dispatch-to-Explore wording, not just assert_cap_pass's exit check.
+
+@test "cap #33: general-purpose + 只读查看现有实现，然后修复 main.py -> PASS, no dead-end re-dispatch-to-Explore text in stderr" {
+  local payload
+  payload=$(mk_cap_payload "general-purpose" "只读查看现有实现，然后修复 main.py" "omit")
+  run_cap_guard "$payload"
+  assert_cap_pass
+  [[ "$CAP_STDERR" != *"改派内置 Explore"* ]] || {
+    echo "Expected no dead-end re-dispatch-to-Explore text, got: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" != *"命中判据 A"* ]] || {
+    echo "Expected judgment A to not fire, got: $CAP_STDERR"
+    return 1
+  }
+}
+
+@test "cap #34: general-purpose + 先只读通读一遍，再重构 auth 模块 (rephrased dead-end regression, different verb/object) -> PASS, no dead-end re-dispatch-to-Explore text" {
+  local payload
+  payload=$(mk_cap_payload "general-purpose" "先只读通读一遍，再重构 auth 模块" "omit")
+  run_cap_guard "$payload"
+  assert_cap_pass
+  [[ "$CAP_STDERR" != *"改派内置 Explore"* ]] || {
+    echo "Expected no dead-end re-dispatch-to-Explore text, got: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" != *"命中判据 A"* ]] || {
+    echo "Expected judgment A to not fire, got: $CAP_STDERR"
+    return 1
+  }
+}
+
+# --- Group 2: EXEC false-positive regression (clause-anchored EXEC_HIT) ---
+# Bare-keyword EXEC match must sit in an imperative/delegation clause, not a
+# research-frame or negated clause, before counting as EXEC_HIT.
+
+@test "cap #35: Explore + 查一下跑测试的脚本在哪 (research-frame CN, distinct from cap #22's comma-joined variant) -> PASS" {
+  local payload
+  payload=$(mk_cap_payload "explore" "查一下跑测试的脚本在哪" "omit")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
+@test "cap #36: Explore + 分析为什么不要跑测试 (negation/research-frame CN) -> PASS" {
+  local payload
+  payload=$(mk_cap_payload "explore" "分析为什么不要跑测试" "omit")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
+@test "cap #37: Explore + find where we document how to run the tests (research-frame EN) -> PASS" {
+  local payload
+  payload=$(mk_cap_payload "explore" "find where we document how to run the tests" "omit")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
+# --- Group 3: EXEC true-positive retained (guard against group 2 over-fix) ---
+
+@test "cap #38: Explore + 请跑测试看结果 (imperative exec, no research-frame) -> BLOCK judgment B" {
+  local payload
+  payload=$(mk_cap_payload "explore" "请跑测试看结果" "omit")
+  run_cap_guard "$payload"
+  assert_cap_block "B"
+}
+
+@test "cap #39: Explore + 跑一遍测试并确认全绿 (imperative exec, no research-frame) -> BLOCK judgment B" {
+  local payload
+  payload=$(mk_cap_payload "explore" "跑一遍测试并确认全绿" "omit")
+  run_cap_guard "$payload"
+  assert_cap_block "B"
+}
+
+# --- Group 4: judgment A narrowing (!WRITE_A) stays scoped to write intent ---
+# A must not have gone from "reject !EXEC" to "never reject" — pure
+# read-only declarations with no write object must still block.
+
+@test "cap #40: general-purpose + 只读调研这个模块，然后请跑测试看结果 (RO + EXEC, no WRITE object) -> PASS (EXEC_HIT suppresses A same as before, and suppresses NEEDS_CAP's RO-gated B on this TYPE)" {
+  local payload
+  payload=$(mk_cap_payload "general-purpose" "只读调研这个模块，然后请跑测试看结果" "omit")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
+@test "cap #41: general-purpose + 只读调研一下这个模块 (pure RO, no WRITE/EXEC at all) -> BLOCK judgment A (A is narrowed, not disabled)" {
+  local payload
+  payload=$(mk_cap_payload "general-purpose" "只读调研一下这个模块" "omit")
+  run_cap_guard "$payload"
+  assert_cap_block "A"
+}
+
+# --- Group 5: WRITE_OBJ bug|issue|error addition ---
+
+@test "cap #42: Explore + fix the bug in auth (defect noun only, no file/code/test noun) -> BLOCK judgment B" {
+  local payload
+  payload=$(mk_cap_payload "explore" "fix the bug in auth" "omit")
+  run_cap_guard "$payload"
+  assert_cap_block "B"
+}
+
+# 中文侧 bug 的专属锚点：cap #42 走的是 RE_WRITE_EN 自己的宾语表，不经过
+# WRITE_OBJ,所以删掉 WRITE_OBJ 里的 bug 时 cap #42 照样绿——中英两侧的 bug
+# token 各有独立落点,只测一侧会让另一侧的删除静默通过。本例钉住 CN 侧。
+# 句中刻意不含「模块」「代码」「文件」等其它 WRITE_OBJ 词：WRITE_OBJ 是并集
+# 匹配,任一词表内词共现都会掩盖 bug 单独被删的效果,那样本用例就名存实亡。
+@test "cap #45: Explore + 修复 auth 的 bug (CN verb + EN defect noun as the ONLY WRITE_OBJ hit) -> BLOCK judgment B" {
+  local payload
+  payload=$(mk_cap_payload "explore" "修复 auth 的 bug" "omit")
+  run_cap_guard "$payload"
+  assert_cap_block "B"
+}
+
+# --- Group 6: new GATE-DEGRADE paths (empty stdin / missing jq) ---
+
+@test "cap #43: empty stdin -> exit 0 with [GATE-DEGRADE] and 'empty stdin' text (distinct message from cap #30a's generic check — pins the specific wording this fix introduced)" {
+  run_cap_guard_stdin ""
+  [ "$CAP_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $CAP_EXIT"
+    echo "stderr: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"[GATE-DEGRADE]"* ]] || {
+    echo "Expected '[GATE-DEGRADE]' in stderr, got: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"empty stdin"* ]] || {
+    echo "Expected 'empty stdin' in stderr, got: $CAP_STDERR"
+    return 1
+  }
+}
+
+@test "cap #44: jq unavailable (isolated PATH with bash/cat/tr symlinked but no jq) -> exit 0 with [GATE-DEGRADE] and 'jq unavailable' text" {
+  local payload
+  payload=$(mk_cap_payload "general-purpose" "修复 main.py" "omit")
+  run_cap_guard_no_jq "$payload"
+  [ "$CAP_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $CAP_EXIT"
+    echo "stderr: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"[GATE-DEGRADE]"* ]] || {
+    echo "Expected '[GATE-DEGRADE]' in stderr, got: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"jq unavailable"* ]] || {
+    echo "Expected 'jq unavailable' in stderr, got: $CAP_STDERR"
+    return 1
+  }
 }

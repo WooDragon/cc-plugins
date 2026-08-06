@@ -175,10 +175,24 @@ actually deliver what its own prompt asks for.
 
 It extracts four signals from the prompt text (and the `model` field):
 
-- **EXEC** — exec intent (run tests/scripts/build/lint)
+- **EXEC** — exec intent (run tests/scripts/build/lint). A bare-keyword match
+  (migrated verbatim from the user's local `pre-dispatch-readonly-guard.sh`,
+  where the same word list was used as an *exemption* — widening it only ever
+  widened the pass set, harmless in that direction) is required to sit in an
+  imperative/delegation clause; it is demoted back to a non-hit when the
+  clause containing the match instead governs a research-frame or negated
+  object (`查一下跑测试的脚本在哪`, `分析为什么不要跑测试`, `find where we
+  document how to run the tests`) — reusing the same bare list as a
+  *rejection* signal flips its safety direction, so false positives there
+  now have a real cost.
 - **WRITE** — write intent, anchored on a write verb adjacent to a code
   object or a path-shaped token (a bare write verb alone, e.g. 创建一份调研报告,
-  is not collected — that produces a report, not code)
+  is not collected — that produces a report, not code). The English object
+  list includes bare defect nouns `bug|bugs|issue|issues|error|errors` so
+  that `fix the bug in auth` — no file/code/test noun, only a defect noun —
+  still counts as a write object; the Chinese-side object list separately
+  gained the same tokens (`bug|issue|error`) since 中文句子里 `bug` 常年以英文
+  原词出现且这两条 token 各自独立命中，互不覆盖.
 - **RO** — an explicit read-only declaration
 - **NEG** — an absolute negation of writing (e.g. 不要修改任何文件)
 
@@ -191,13 +205,14 @@ NEEDS_CAP = (EXEC || WRITE) && !RO && !NEG
 Three independent judgments fire off this signal set, each printing its own
 stderr message before a single trailing `exit 2`:
 
-- **Judgment A** (migrated verbatim from the user's local
-  `pre-dispatch-readonly-guard.sh`, condition kept unchanged — uses `!EXEC`,
-  not `!NEEDS_CAP`): `!EXEC && (RO || NEG) && subagent_type ∈ {general-purpose,
-  claude}` → block. A read-only declaration (or absolute negation) sent to a
-  full-privilege agent when Explore's Edit/Write/NotebookEdit are physically
-  disabled and would catch the same scope even if the declaration were wrong.
-  Fix: redispatch to `Explore`.
+- **Judgment A** (originally migrated verbatim from the user's local
+  `pre-dispatch-readonly-guard.sh`; condition since **widened** from `!EXEC`
+  alone to `!EXEC && !WRITE_HIT_A`): `!EXEC && !WRITE_HIT_A && (RO || NEG) &&
+  subagent_type ∈ {general-purpose, claude}` → block. A read-only declaration
+  (or absolute negation) sent to a full-privilege agent, provided the same
+  prompt carries no write intent either — Explore's Edit/Write/NotebookEdit
+  are physically disabled and would catch the same scope even if the
+  declaration were wrong. Fix: redispatch to `Explore`.
 - **Judgment B** (new): `NEEDS_CAP && subagent_type ∈ {explore, plan}` →
   block. The task needs write/exec capability, but Explore/Plan have
   Edit/Write/NotebookEdit disabled and Bash limited to a read-only whitelist
@@ -210,24 +225,39 @@ stderr message before a single trailing `exit 2`:
   judgment-forming action the daily model-tiering rubric excludes from the
   haiku tier. Fix: redispatch at `sonnet` or the task's required tier.
 
-Judgment A keeps its original `!EXEC`-based condition rather than being folded
-into `NEEDS_CAP` — it is a behavior-preserving migration of an existing gate,
-not a rewrite, so its trigger condition is intentionally left exactly as it
-was before this hook widened scope. Judgments B and C are new and share the
-`NEEDS_CAP` predicate because both are instances of the same underlying
-question: does this subagent/model have the capability the prompt is asking
-for.
+**Why A's condition had to widen**: the original `pre-dispatch-readonly-guard.sh`
+had no WRITE signal at all, so `!EXEC` meant "this task needs nothing beyond
+read-only" in that world. Once WRITE was introduced to this hook, a mixed
+prompt like `只读查看现有实现，然后修复 main.py` hit `!EXEC` (true) and `RO`
+(true) and `WRITE` (true) at the same time. Under the old `!EXEC`-only
+condition, A fired and told the caller to redispatch to `Explore` — but
+Explore's Edit/Write is physically disabled, so the redispatch could not do
+what the prompt asked. That was a dead end the gate itself manufactured, not
+a legitimate rejection. Adding `!WRITE_HIT_A` closes it: a prompt carrying
+write intent is no longer routed toward an agent that cannot write, regardless
+of what RO/NEG also say in the same prompt. `WRITE_HIT_A` is judgment A's own
+NEG-scrubbed variant of the WRITE signal (judgment B still uses the raw
+`WRITE_HIT`) — without the scrub, a genuine absolute-negation declaration like
+`不得不改测试，不修改任何文件` would stop triggering A, because a
+write-looking substring sits inside its own already-negated clause.
 
-**Deliberately accepted miss**: a mixed prompt like 调研根因并修复 hits both RO
-and WRITE, so `!RO` is false and `NEEDS_CAP` stays 0 — the dispatch passes.
-This is a known under-block, not a bug: today's behavior for such prompts is
-also "pass" (no regression), and requiring every Explore dispatch to declare
-read-only explicitly was rejected as a fix — it would push dispatchers toward
-`general-purpose` by default, amplifying exactly the over-privilege risk
-judgment A exists to catch.
+**Deliberately accepted miss (judgment B's, not A's)**: a mixed prompt like
+`调研根因并修复` dispatched straight to `subagent_type=explore` still passes,
+because `NEEDS_CAP` folds to 0 whenever `RO_HIT` is 1. This is the same
+under-block that existed before this patch too — today's behavior for such
+prompts is already "pass", so leaving it is a no-op, not a regression — and it
+must not be confused with A's now-fixed dead end above: A's old problem was
+that the gate *actively rejected* and then pointed the caller at an agent that
+physically could not comply; B's miss is merely passive under-coverage — the
+dispatch goes through unexamined, exactly today's baseline. Tightening
+`NEEDS_CAP` to ignore RO for mixed prompts was rejected as the fix here too,
+for the same over-privilege reason given below.
 
 **Fail-open paths**: empty stdin, missing `jq`, non-JSON payload, or an empty
-prompt field all exit 0 silently.
+prompt field all exit 0 silently — except empty stdin and missing `jq`, which
+first write `[GATE-DEGRADE]` to stderr (`empty stdin` / `jq unavailable`) so a
+grep for gate breakage can find them; the two paths were previously silent
+`exit 0` with no stderr trace at all.
 
 **Escape hatch**: `ALLOW_DISPATCH_CAPABILITY_MISMATCH=1` in the `env` block of
 `settings.json` (a plain Bash `export` does not reach this hook's process).
@@ -300,13 +330,21 @@ malformed-stdin shapes), plus the rules-injector's JSON-shape checks (normal
 `agent_type` gets all three rules, `Explore` omits the scope-fence rule, empty stdin
 and `ALLOW_NO_RULES_INJECT=1` both leave stdout fully empty).
 
-`dispatch-capability-guard.bats` has 40 test cases covering: signal extraction
+`dispatch-capability-guard.bats` has 53 test cases covering: signal extraction
 (EXEC/WRITE/RO/NEG, including the double-negation and exclusive-write-scope scrub
 logic), the `NEEDS_CAP` derived predicate and its deliberately-accepted mixed-prompt
 miss, judgments A/B/C individually and in combination (Explore + haiku triggering both
 B and C's messages before one `exit 2`), the `[GATE-BYPASS]`/`[GATE-DEGRADE]` tag
 split, the escape hatch, and fail-open paths (empty stdin, missing `jq`, malformed
-JSON, empty prompt).
+JSON, empty prompt). A later regression batch (`cap #24`–`#45`) pins the four
+post-PR fixes above: judgment A's narrowed `!WRITE_HIT_A` exemption on mixed
+RO+WRITE prompts (including the double-negation edge case that resurfaced once A
+started consulting WRITE), EXEC's research-frame/negation anchoring on both CN
+and EN phrasing, the distinct `[GATE-DEGRADE]` wording for empty-stdin and
+missing-`jq`, and the EN/CN defect-noun objects pinned by two separate cases
+(`cap #42` for the English side, `cap #45` for the Chinese side with no other
+`WRITE_OBJ` word present) since the two token tables are matched independently
+and a deletion on one side would otherwise pass silently under a shared test.
 
 ## Block Response Shape (Deliberate Choice)
 

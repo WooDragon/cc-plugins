@@ -12,18 +12,53 @@
 # the same prompt declares the task read-only after all". Three independent
 # judgments fire off that signal set:
 #
-#   A (migrated verbatim from pre-dispatch-readonly-guard.sh, condition
-#      UNCHANGED — uses !EXEC, not !NEEDS_CAP):
-#        !EXEC && (RO || NEG) && TYPE in {general-purpose, claude}
+#   A (originally migrated verbatim from pre-dispatch-readonly-guard.sh;
+#      condition WIDENED from !EXEC to !EXEC && !WRITE_A — see "A's exemption"
+#      below for why the verbatim condition stopped holding; WRITE_A is a
+#      NEG-scrubbed variant of WRITE, not the raw WRITE signal — see
+#      WRITE_HIT_A's own comment near its computation for why the raw
+#      signal is not safe to reuse here):
+#        !EXEC && !WRITE_A && (RO || NEG) && TYPE in {general-purpose, claude}
 #        -> read-only declaration sent to a full-privilege agent; Explore's
 #           Edit/Write/NotebookEdit are physically disabled, so re-dispatch
 #           there cannot exceed scope even if the declaration is wrong.
+#
+#      A's exemption (why !EXEC alone is no longer correct): the original
+#      pre-dispatch-readonly-guard.sh had no WRITE signal, so !EXEC meant
+#      "this task needs nothing beyond read-only" in that world. Once WRITE
+#      was introduced, a prompt like "只读查看现有实现，然后修复 main.py" hits
+#      !EXEC (true, no exec-intent phrase) AND RO (true, "只读查看") AND WRITE
+#      (true, "修复 main.py") at the same time. Under the old !EXEC-only
+#      condition, A fired and told the caller to re-dispatch to Explore — but
+#      Explore's Edit/Write is physically disabled, so the re-dispatch cannot
+#      do what the prompt asks. That is a dead end the gate manufactured,
+#      not a legitimate rejection (see issue's Critical finding #1). Adding
+#      !WRITE closes it: a prompt carrying write intent is no longer routed
+#      toward an agent that cannot write, regardless of what RO/NEG also say
+#      in the same prompt.
 #
 #   B (new): NEEDS_CAP && TYPE in {explore, plan}
 #        -> this task needs write/exec capability, but Explore/Plan have
 #           Edit/Write/NotebookEdit physically disabled and Bash limited to a
 #           read-only whitelist. The dispatch would dead-end after burning a
 #           full round trip. Re-dispatch to general-purpose/dev.
+#
+#      B's accepted miss (NOT the same gap as A's old dead end above): mixed
+#      RO+WRITE prompts dispatched directly to Explore (e.g. "调研根因并修复"
+#      sent straight to subagent_type=explore) still pass, because NEEDS_CAP
+#      folds to 0 whenever RO_HIT is 1 (see NEEDS_CAP's own comment below).
+#      This is a real under-block and it is deliberately kept — tightening
+#      NEEDS_CAP to ignore RO for mixed prompts would flood genuine read-only
+#      research dispatches with false positives. The reason this is safe to
+#      leave as B's problem rather than promoted to a fix: it is a same-shape
+#      miss that existed before this patch too (today's behavior for such
+#      prompts is already "pass"), so leaving it is a no-op, not a regression.
+#      It must not be confused with A's now-fixed dead end: A's problem was
+#      that the gate ACTIVELY REJECTED and then pointed the caller at an
+#      agent that physically cannot comply — a self-inflicted trap with no
+#      good exit. B's miss is merely PASSIVE under-coverage — the dispatch
+#      goes through unexamined, which is exactly today's baseline, not a
+#      regression this patch introduces or a trap this patch built.
 #
 #   C (new): NEEDS_CAP && model contains "haiku"
 #        -> this task needs write/exec capability, which in practice means
@@ -82,9 +117,15 @@ if [[ "${ALLOW_DISPATCH_CAPABILITY_MISMATCH:-}" == "1" ]]; then
   exit 0
 fi
 
-[ -z "$INPUT" ] && exit 0
+if [ -z "$INPUT" ]; then
+  printf '[GATE-DEGRADE] dispatch-capability-guard: empty stdin\n' >&2
+  exit 0
+fi
 
-command -v jq >/dev/null 2>&1 || exit 0
+if ! command -v jq >/dev/null 2>&1; then
+  printf '[GATE-DEGRADE] dispatch-capability-guard: jq unavailable\n' >&2
+  exit 0
+fi
 
 SUBAGENT_TYPE=$(jq -r '.tool_input.subagent_type // empty' <<< "$INPUT" 2>/dev/null) || {
   printf '[GATE-DEGRADE] dispatch-capability-guard: subagent_type extract failed\n' >&2
@@ -113,14 +154,30 @@ TYPE=$(tr '[:upper:]' '[:lower:]' <<< "$SUBAGENT_TYPE")
 PROMPT_LC=$(tr '[:upper:]' '[:lower:]' <<< "$PROMPT")
 MODEL_LC=$(tr '[:upper:]' '[:lower:]' <<< "$MODEL")
 
-# --- Signal 1: EXEC (exec intent) — migrated verbatim from
-# pre-dispatch-readonly-guard.sh. Positive capability requirement: needs Bash
-# execution but does not necessarily write repo files (run tests, run lint,
-# run a review CLI). Deliberately does NOT cover bare 跑一遍 (no execution
-# object) — that would misfire on 跑一遍历史 commit 记录，只读调查, a genuinely
-# read-only task; narrowed to 跑一遍+测试/脚本/用例.
-RE_EXEC='前台(同步)?执行|执行脚本|运行脚本|跑脚本|跑测试|运行测试|执行测试|跑用例|跑一遍(测试|脚本|用例)|跑 ?lint|跑 ?build|跑构建|执行以下命令|执行下列命令'
-RE_EXEC_EN='run (the |this |that )?scripts?|execute (the |this )?scripts?|run (the )?tests?|run (the )?test suite|run (the )?lint|run (the )?build'
+# --- Signal 1: EXEC (exec intent) — the bare keyword list below
+# (RE_EXEC_BARE*) is migrated verbatim from pre-dispatch-readonly-guard.sh,
+# where it was used as an EXEMPTION (widening the word list only ever
+# widened the set of prompts allowed to pass — harmless in that direction).
+# This hook reuses it as a REJECTION signal (judgment B blocks on EXEC_HIT),
+# which flips the safety direction: a bare keyword list now widens the set
+# of prompts BLOCKED, and false positives there have a real cost (실측 in
+# Major finding #2 — "查一下跑测试的脚本在哪" is pure research and got
+# blocked). Per gate-design.md §2 (anchor syntactic shape, not bare
+# keywords), EXEC_HIT now requires a bare-keyword match to sit in an
+# imperative/delegation clause, not a research-frame or negated clause.
+# The word list itself is unchanged from the original migration; only the
+# surrounding clause is inspected before accepting the hit.
+RE_EXEC_BARE_CN='前台(同步)?执行|执行脚本|运行脚本|跑脚本|跑测试|运行测试|执行测试|跑用例|跑一遍(测试|脚本|用例)|跑 ?lint|跑 ?build|跑构建|执行以下命令|执行下列命令'
+RE_EXEC_BARE_EN='run (the |this |that )?scripts?|execute (the |this )?scripts?|run (the )?tests?|run (the )?test suite|run (the )?lint|run (the )?build'
+RE_EXEC_BARE="${RE_EXEC_BARE_CN}|${RE_EXEC_BARE_EN}"
+# Research-frame / negation words that, when they appear in the SAME CLAUSE
+# preceding the bare-keyword hit (i.e. between the nearest clause boundary
+# 逗号/顿号/分号/句号/comma/period and the match), demote it back to a
+# non-hit: the keyword is the OBJECT of a research or negated verb, not an
+# imperative to execute. Mirrors RO_ACT's existing anchor-not-bare-keyword
+# treatment — same design move, applied to EXEC instead of RO.
+RE_EXEC_FRAME_CN='查|找|看|分析|说明|文档|哪里|在哪|为什么|如何|怎么|不要|不用|别|无需|不需要|不必|勿|莫'
+RE_EXEC_FRAME_EN='document how to|find where|explain why|show me where|do not|don.t|dont|why not|should not'
 
 # --- Signal 2: WRITE (write intent, NEW) — anchored per gate-design.md §2:
 # anchor on syntactic shape, not bare keywords. A write verb alone (裸
@@ -130,11 +187,17 @@ RE_EXEC_EN='run (the |this |that )?scripts?|execute (the |this )?scripts?|run (t
 # what keeps the two apart — same reasoning pre-dispatch-readonly-guard.sh's
 # RE_WRITE_SCOPE comment already documents for a different judgment.
 WRITE_VERB='修改|修复|重构|实现|新增|添加|删除|重命名|改写|补充|编写|落地|开发|加一个|加个'
-WRITE_OBJ='文件|代码|源码|函数|方法|测试|用例|脚本|模块|类|接口|配置|字段'
+# bug|issue|error added per Minor finding #4: "fix the bug in auth" carries
+# no code/file/test noun at all, only a defect noun, and was missing from
+# the object list. English tokens kept as-is (not translated) because 中文
+# 句子里 bug 常年以英文原词出现（"修复 auth 模块的 bug"），同一 token 双语都要收。
+WRITE_OBJ='文件|代码|源码|函数|方法|测试|用例|脚本|模块|类|接口|配置|字段|bug|issue|error'
 # Path-shaped token: contains a slash, or a common source/doc extension.
 RE_PATH_TOKEN='[[:alnum:]_.-]*/[[:alnum:]_./-]*|[[:alnum:]_-]+\.(py|sh|ts|tsx|js|jsx|go|md|json|yaml|yml|rb|java|c|cpp|h|rs)'
 RE_WRITE_CN="(${WRITE_VERB})[^。,，;；]{0,20}(${WRITE_OBJ})|(${WRITE_VERB})[^。,，;；]{0,20}(${RE_PATH_TOKEN})"
-RE_WRITE_EN='(implement|fix|refactor|rename|add|remove|modify|write)s? (the |a |an |this )?(file|files|code|function|functions|test|tests|script|scripts|module|modules)'
+# bug|bugs|issue|issues|error|errors added per Minor finding #4: "fix the
+# bug in auth" carried no file/code/test noun, only a defect noun.
+RE_WRITE_EN='(implement|fix|refactor|rename|add|remove|modify|write)s? (the |a |an |this )?(file|files|code|function|functions|test|tests|script|scripts|module|modules|bug|bugs|issue|issues|error|errors)'
 RE_WRITE_PATH_EN="(implement|fix|refactor|rename|add|remove|modify|write)[^.,;]{0,40}(${RE_PATH_TOKEN})"
 
 # --- Signal 3: RO (read-only declaration) — migrated verbatim from
@@ -195,8 +258,25 @@ RE_SCOPE_NEG='(不要|不得|不准|不许|别|请勿|切勿|切莫|禁止|严�
 RE_WRITE_SCOPE_EN='(only|just) (change|modify|edit|touch|write|add)|(change|modify|edit|touch|write) only|limit (changes|edits|modifications) to'
 
 # --- Compute EXEC / WRITE -----------------------------------------------
+# EXEC_HIT: bare-keyword match required, PLUS the clause containing the
+# match must not carry a research-frame or negation word. Clause boundary
+# is the nearest 逗号/顿号/分号/句号 (or English comma/period) to the LEFT of
+# the match — this is what lets "查一下跑测试的脚本在哪，只读调研" (frame word
+# 查 sits in the same clause as 跑测试) stay a non-hit while "只读调研，跑一遍
+# 测试确认" (frame word 只读调研 is in the PRIOR clause, separated by a comma)
+# still hits: the frame word must govern the same clause as the keyword, not
+# merely appear earlier in the sentence.
 EXEC_HIT=0
-[[ "$PROMPT_LC" =~ $RE_EXEC || "$PROMPT_LC" =~ $RE_EXEC_EN ]] && EXEC_HIT=1
+if [[ "$PROMPT_LC" =~ $RE_EXEC_BARE ]]; then
+  EXEC_MATCH="${BASH_REMATCH[0]}"
+  EXEC_PREFIX="${PROMPT_LC%%"$EXEC_MATCH"*}"
+  EXEC_CLAUSE="${EXEC_PREFIX##*[,，、；;。.]}"
+  if [[ "$EXEC_CLAUSE" =~ $RE_EXEC_FRAME_CN || "$EXEC_CLAUSE" =~ $RE_EXEC_FRAME_EN ]]; then
+    EXEC_HIT=0
+  else
+    EXEC_HIT=1
+  fi
+fi
 
 WRITE_HIT=0
 if [[ "$PROMPT_LC" =~ $RE_WRITE_CN || "$PROMPT_LC" =~ $RE_WRITE_EN || "$PROMPT_LC" =~ $RE_WRITE_PATH_EN ]]; then
@@ -221,6 +301,38 @@ while [[ "$SCRUBBED" =~ $RE_DOUBLE_NEG ]]; do
   # PreToolUse——挂起没有逃生舱，值得一行防御。
   [[ -z "$m" || "$SCRUBBED" == "$prev" ]] && break
 done
+
+# WRITE_HIT_A: a judgment-A-only variant of WRITE_HIT, scanned against text
+# with every already-recognized absolute-negation span (RE_NEG/RE_NEG_EN)
+# scrubbed out first. Root cause this works around: RE_WRITE_CN/RE_WRITE_EN
+# are bare substring matches with no clause anchoring, so for "不得不改测试，
+# 不修改任何文件" they match "修改任何文件" INSIDE a clause that RE_NEG also
+# (correctly) matches as an absolute negation — the same substring is
+# simultaneously "a write object" to one regex and "a negated write object"
+# to another. This collision predates this patch (WRITE_OBJ additions did
+# not cause it — the bare verb 修改 + bare object 文件 already collide with
+# RE_NEG on this exact sentence even under the pre-patch word lists) but was
+# invisible before because judgment A never consulted WRITE_HIT. Once A
+# started requiring !WRITE (this patch's Critical fix), the collision
+# surfaced as a regression on a previously-pinned test (cap #25b): a genuine
+# absolute-negation declaration stopped triggering A because a write-looking
+# substring sat inside its own negated clause. Scoping WRITE_HIT_A to the
+# NEG-scrubbed text (reusing the same scrub-by-placeholder mechanism as
+# SCRUBBED/RE_DOUBLE_NEG above, applied one level further) resolves it
+# without touching RE_WRITE_CN/RE_WRITE_EN themselves, so judgment B's
+# WRITE detection (and NEEDS_CAP) are unaffected — only A's local !WRITE
+# check looks at text with recognized negations already removed.
+WRITE_SRC_A=$SCRUBBED
+while [[ "$WRITE_SRC_A" =~ $RE_NEG || "$WRITE_SRC_A" =~ $RE_NEG_EN ]]; do
+  nm=${BASH_REMATCH[0]}
+  nprev=$WRITE_SRC_A
+  WRITE_SRC_A=${WRITE_SRC_A/"$nm"/␡}
+  [[ -z "$nm" || "$WRITE_SRC_A" == "$nprev" ]] && break
+done
+WRITE_HIT_A=0
+if [[ "$WRITE_SRC_A" =~ $RE_WRITE_CN || "$WRITE_SRC_A" =~ $RE_WRITE_EN || "$WRITE_SRC_A" =~ $RE_WRITE_PATH_EN ]]; then
+  WRITE_HIT_A=1
+fi
 
 NEG_HIT=0
 if [[ "$SCRUBBED" =~ $RE_NEG || "$SCRUBBED" =~ $RE_NEG_EN ]]; then
@@ -259,13 +371,24 @@ fi
 
 REJECT=0
 
-# --- Judgment A (migrated, condition unchanged: uses !EXEC, not !NEEDS_CAP) -
+# --- Judgment A (condition WIDENED: !EXEC && !WRITE_A, was !EXEC alone) ----
 # Read-only declaration (or absolute negation) sent to a full-privilege
-# built-in agent. Kept exactly as pre-dispatch-readonly-guard.sh judged it —
-# behavior-preserving migration, not a rewrite.
+# built-in agent, PROVIDED the same prompt carries no write intent either.
+# The !WRITE_A addition is this patch's Critical fix (see the "A's exemption"
+# block comment near the top of this file for the full trace): without it,
+# a mixed prompt like "只读查看现有实现，然后修复 main.py" got told to
+# re-dispatch to Explore, whose Edit/Write is physically disabled — a dead
+# end the gate manufactured rather than a legitimate rejection. With !WRITE_A,
+# such a prompt no longer matches A at all (it needs write capability, so
+# staying on general-purpose/claude is the correct dispatch, not an error).
+# Uses WRITE_HIT_A (NEG-scrubbed variant), not the raw WRITE_HIT judgment B
+# uses: see WRITE_HIT_A's own comment above for why — a write-object
+# substring sitting inside an already-recognized absolute-negation clause
+# ("不修改任何文件") must not disqualify A's read-only declaration just
+# because a bare-substring regex also sees a write-shaped token in it.
 case "$TYPE" in
   general-purpose|claude)
-    if [ "$EXEC_HIT" -eq 0 ] && { [ "$RO_HIT" -eq 1 ] || [ "$NEG_HIT" -eq 1 ]; }; then
+    if [ "$EXEC_HIT" -eq 0 ] && [ "$WRITE_HIT_A" -eq 0 ] && { [ "$RO_HIT" -eq 1 ] || [ "$NEG_HIT" -eq 1 ]; }; then
       printf '[dispatch-capability-guard] 命中判据 A: 只读任务声明但派了全权 agent(subagent_type=%s),应改派内置 Explore(Edit/Write/NotebookEdit 物理禁用,越权改不了文件)。\n' "$TYPE" >&2
       printf '[dispatch-capability-guard] 出路: 改派 subagent_type=Explore。需 code-search/web-search 时在 prompt 内 Skill(...) 加载。任务其实要执行脚本/跑测试(Explore 的 Bash 限只读白名单,会拒执行)时,在 prompt 里写明执行意图(如"前台同步执行"/"跑脚本")即豁免——这类任务留 general-purpose 是对的。\n' >&2
       REJECT=1

@@ -395,6 +395,47 @@ run_cap_guard_stdin() {
   rm -f "$stderr_file"
 }
 
+# mk_no_jq_path
+# Builds a temp dir containing symlinks to only the commands
+# dispatch-capability-guard.sh itself invokes (bash, cat, tr — printf/command
+# are builtins) MINUS jq, so `command -v jq` genuinely fails inside the
+# hook's subprocess without also breaking bash's own startup (a bare
+# PATH=/nonexistent would make bash itself unresolvable under `env`, giving
+# exit 127 before the script's own jq check ever runs — that is a fixture
+# bug, not a positive test of the jq-unavailable branch). Written into
+# TEST_TEMP_DIR so common_teardown's `rm -rf` reclaims it; the mktemp/ln
+# calls below run in the test's own shell (already on the real PATH), not
+# inside the isolated PATH being constructed.
+mk_no_jq_path() {
+  local dir
+  dir=$(mktemp -d "$TEST_TEMP_DIR/no-jq-path.XXXXXX")
+  ln -s "$(command -v bash)" "$dir/bash"
+  ln -s "$(command -v cat)" "$dir/cat"
+  ln -s "$(command -v tr)" "$dir/tr"
+  echo "$dir"
+}
+
+# run_cap_guard_no_jq PAYLOAD
+# Like run_cap_guard, but runs the hook with PATH pointed at mk_no_jq_path's
+# jq-less directory (via `env -i`, a clean environment, so no ambient PATH
+# leaks jq back in) instead of the real PATH. Sets CAP_STDOUT/CAP_STDERR/CAP_EXIT.
+run_cap_guard_no_jq() {
+  local payload="$1"
+  local no_jq_dir
+  no_jq_dir=$(mk_no_jq_path)
+
+  CAP_STDOUT=""
+  CAP_STDERR=""
+  CAP_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  CAP_STDOUT=$(printf '%s' "$payload" | env -i PATH="$no_jq_dir" bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
+  CAP_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
 # --- Assertion Helpers (dispatch-capability-guard) ---
 
 # assert_cap_pass — exit 0 and no "dispatch-capability-guard" in stderr
