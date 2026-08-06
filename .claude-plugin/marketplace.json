@@ -85,7 +85,7 @@
     {
       "name": "dispatch-contract",
       "description": "Subagent dispatch contract — four dispatch rules + %%DONE%% finalization gate (SubagentStop) + background-dispatch sync guard (PreToolUse) + dispatch-rules injection (SubagentStart)",
-      "version": "1.2.1",
+      "version": "1.2.2",
       "author": {
         "name": "WooDragon"
       },
