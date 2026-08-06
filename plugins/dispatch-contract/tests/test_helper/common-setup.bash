@@ -317,13 +317,14 @@ mk_channel_payload() {
 # run_channel_guard PAYLOAD [env_overrides...]
 # Sets: CHANNEL_STDOUT, CHANNEL_STDERR, CHANNEL_EXIT
 #
-# Isolates all four escape-hatch/fail-open env vars any of this plugin's
+# Isolates all five escape-hatch/fail-open env vars any of this plugin's
 # PreToolUse(Agent|Task) guards read, not just this gate's own
 # ALLOW_UNMANAGED_TEAMMATE — a BLOCK test here must not silently PASS because
 # the calling shell happens to have ALLOW_BACKGROUND_DISPATCH,
-# CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, or CLAUDE_AUTO_BACKGROUND_TASKS set
-# for an unrelated sibling guard's tests. -u is placed before any explicit
-# override, so a test can still pass one of them positively.
+# CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, CLAUDE_AUTO_BACKGROUND_TASKS, or
+# ALLOW_DISPATCH_CAPABILITY_MISMATCH set for an unrelated sibling guard's
+# tests. -u is placed before any explicit override, so a test can still pass
+# one of them positively.
 run_channel_guard() {
   local payload="$1"
   CHANNEL_STDOUT=""
@@ -334,9 +335,9 @@ run_channel_guard() {
   stderr_file=$(mktemp)
 
   if [[ "${2:-}" != "" ]]; then
-    CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS "${@:2}" bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
+    CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH "${@:2}" bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
   else
-    CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
+    CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
   fi
   CHANNEL_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
@@ -587,26 +588,27 @@ assert_cap_block() {
 HOOKS_JSON_PATH="${BATS_TEST_DIRNAME}/../hooks/hooks.json"
 PLUGIN_ROOT_DIR="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
 
-# discover_agent_gates
+# _discover_gates_by_matcher MATCHER
 # Reads hooks.json's PreToolUse section, keeps only hook entries whose
-# matcher is exactly "Agent", and resolves each hook's `command` string
+# matcher is exactly MATCHER, and resolves each hook's `command` string
 # (shape: "bash ${CLAUDE_PLUGIN_ROOT}/hooks/xxx.sh") into a real script path
 # under this checkout. Sets global array GATE_SCRIPTS. De-dupes so a script
-# listed twice under matcher "Agent" (should not happen, but nothing enforces
-# it) is only invoked once per payload.
+# listed twice under the same matcher (should not happen, but nothing
+# enforces it) is only invoked once per payload.
 #
 # This is the mechanism that keeps the composition test honest as the plugin
-# grows: a third PreToolUse(Agent) guard added to hooks.json tomorrow is
-# picked up here automatically, with no edit to this file or to
-# gate-composition.bats required. A hardcoded GATE_SCRIPTS=(a.sh b.sh) list
-# would not have that property — it is exactly the shape of drift that let
-# the channel-guard header's "does not collide with the other gate" claim go
-# unverified for months (see gate-composition.bats header).
-discover_agent_gates() {
+# grows: a third PreToolUse guard added to hooks.json tomorrow is picked up
+# here automatically, with no edit to this file or to gate-composition.bats
+# required. A hardcoded GATE_SCRIPTS=(a.sh b.sh) list would not have that
+# property — it is exactly the shape of drift that let the channel-guard
+# header's "does not collide with the other gate" claim go unverified for
+# months (see gate-composition.bats header).
+_discover_gates_by_matcher() {
+  local matcher="$1"
   local raw
-  raw=$(jq -r '
+  raw=$(jq -r --arg m "$matcher" '
     .hooks.PreToolUse[]
-    | select(.matcher == "Agent")
+    | select(.matcher == $m)
     | .hooks[].command
   ' "$HOOKS_JSON_PATH")
 
@@ -630,7 +632,25 @@ discover_agent_gates() {
   done
 }
 
-# mk_composed_payload TOOL_NAME RIB_MODE NAME_MODE SUBTYPE_MODE CWD_MODE
+# discover_agent_gates — matcher "Agent". Sets GATE_SCRIPTS. See
+# _discover_gates_by_matcher above for the mechanism.
+discover_agent_gates() {
+  _discover_gates_by_matcher "Agent"
+}
+
+# discover_task_gates — matcher "Task". Sets GATE_SCRIPTS. hooks.json
+# mirrors the same three PreToolUse guards under both the "Agent" and
+# "Task" matchers (Lead/PM dispatch via the Task tool as well as Agent), so
+# any composition assertion built only from discover_agent_gates would stay
+# green even if someone stripped a guard from the "Task" side only — the
+# exact failure mode this function exists to make mechanically checkable
+# instead of relying on the two matcher blocks in hooks.json staying in sync
+# by eyeball (see gate-composition.bats "Task matcher mirrors Agent matcher").
+discover_task_gates() {
+  _discover_gates_by_matcher "Task"
+}
+
+# mk_composed_payload TOOL_NAME RIB_MODE NAME_MODE SUBTYPE_MODE CWD_MODE [PROMPT_MODE] [DESC_MODE] [MODEL_MODE]
 #
 # Single payload builder shared across all gates in GATE_SCRIPTS — the two
 # existing per-gate builders (mk_dispatch_payload / mk_channel_payload) each
@@ -643,8 +663,16 @@ discover_agent_gates() {
 # NAME_MODE:     omit | <literal string>   (tool_input.name)
 # SUBTYPE_MODE:  omit | <literal string>   (tool_input.subagent_type)
 # CWD_MODE:      omit | <literal path>     (top-level .cwd)
+# PROMPT_MODE:   omit | <literal string>   (tool_input.prompt, default omit)
+# DESC_MODE:     omit | <literal string>   (tool_input.description, default omit)
+# MODEL_MODE:    omit | <literal string>   (tool_input.model, default omit)
+#
+# PROMPT_MODE/DESC_MODE/MODEL_MODE default to "omit" so every existing call
+# site (built before dispatch-capability-guard.sh joined GATE_SCRIPTS'
+# composition coverage) keeps building the same payload shape it always did.
 mk_composed_payload() {
   local tool="$1" rib="$2" name="$3" subtype="$4" cwd="$5"
+  local prompt="${6:-omit}" desc="${7:-omit}" model="${8:-omit}"
   local ti='{}'
   case "$rib" in
     false) ti=$(jq -cn --argjson b "$ti" '$b + {run_in_background:false}') ;;
@@ -656,6 +684,15 @@ mk_composed_payload() {
   fi
   if [[ "$subtype" != "omit" ]]; then
     ti=$(jq -cn --argjson b "$ti" --arg s "$subtype" '$b + {subagent_type:$s}')
+  fi
+  if [[ "$prompt" != "omit" ]]; then
+    ti=$(jq -cn --argjson b "$ti" --arg p "$prompt" '$b + {prompt:$p}')
+  fi
+  if [[ "$desc" != "omit" ]]; then
+    ti=$(jq -cn --argjson b "$ti" --arg d "$desc" '$b + {description:$d}')
+  fi
+  if [[ "$model" != "omit" ]]; then
+    ti=$(jq -cn --argjson b "$ti" --arg m "$model" '$b + {model:$m}')
   fi
   local payload
   payload=$(jq -cn --arg tool "$tool" --argjson ti "$ti" '{tool_name:$tool, tool_input:$ti}')
@@ -670,8 +707,14 @@ mk_composed_payload() {
 #
 # Same escape-hatch/fail-open isolation discipline as the sibling
 # run_*_guard helpers above: a BLOCK case here must not silently PASS
-# because the invoking shell happens to carry one of these four vars for an
-# unrelated reason.
+# because the invoking shell happens to carry one of these five vars for an
+# unrelated reason. This runner is shared across every gate discovered by
+# discover_agent_gates/discover_task_gates (dispatch-sync-guard.sh,
+# dispatch-capability-guard.sh, pre-dispatch-channel-guard.sh) — it must
+# clear the union of all their escape hatches, not just the ones the gate
+# under test in a given call happens to read, since a caller composing a
+# payload for one gate may still route it through this same helper for
+# another gate in the set.
 run_one_gate() {
   local script="$1" payload="$2"
   shift 2
@@ -679,9 +722,9 @@ run_one_gate() {
   local stderr_file
   stderr_file=$(mktemp)
   if [[ "${1:-}" != "" ]]; then
-    printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS "$@" bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
+    printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH "$@" bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
   else
-    printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
+    printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
   fi
   ONE_GATE_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"

@@ -1,5 +1,5 @@
 {
-  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop, background-dispatch sync guard and dispatch-capability guard on PreToolUse, dispatch-rules injection on SubagentStart",
+  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop, background-dispatch sync guard, dispatch-capability guard and channel guard on PreToolUse, dispatch-rules injection on SubagentStart",
   "hooks": {
     "PreToolUse": [
       {

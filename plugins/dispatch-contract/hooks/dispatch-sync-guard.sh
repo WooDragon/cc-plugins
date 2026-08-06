@@ -19,6 +19,7 @@
 #   6. CLAUDE_CODE_DISABLE_BACKGROUND_TASKS is set        -> exit 0
 #   7. agent_id field present and non-blank              -> exit 0
 #   8. tool_input.name present and non-blank              -> exit 0
+#  8b. CLAUDE_AUTO_BACKGROUND_TASKS truthy (tr()-truthy)   -> exit 2 (BLOCK, auto-background defeats run_in_background:false)
 #   9. tool_input.run_in_background boolean false         -> exit 0
 #  9b. field absent (fork world)                        -> exit 2 (BLOCK, fork-aware message)
 #  10. otherwise                                          -> exit 2 (BLOCK)

@@ -317,10 +317,92 @@ teardown() {
   }
 }
 
+@test "sync #19b: CLAUDE_AUTO_BACKGROUND_TASKS=true + run_in_background:false -> BLOCK (tr()-truthy word form)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "false")
+  run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS=true"
+  assert_sync_block
+  [[ "$SYNC_STDERR" == *"CLAUDE_AUTO_BACKGROUND_TASKS"* ]] || {
+    echo "Expected CLAUDE_AUTO_BACKGROUND_TASKS wording in stderr, got: $SYNC_STDERR"
+    return 1
+  }
+}
+
+@test "sync #19c: CLAUDE_AUTO_BACKGROUND_TASKS=yes + run_in_background:false -> BLOCK (tr()-truthy word form)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "false")
+  run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS=yes"
+  assert_sync_block
+  [[ "$SYNC_STDERR" == *"CLAUDE_AUTO_BACKGROUND_TASKS"* ]] || {
+    echo "Expected CLAUDE_AUTO_BACKGROUND_TASKS wording in stderr, got: $SYNC_STDERR"
+    return 1
+  }
+}
+
+@test "sync #19d: CLAUDE_AUTO_BACKGROUND_TASKS=on + run_in_background:false -> BLOCK (tr()-truthy word form)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "false")
+  run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS=on"
+  assert_sync_block
+  [[ "$SYNC_STDERR" == *"CLAUDE_AUTO_BACKGROUND_TASKS"* ]] || {
+    echo "Expected CLAUDE_AUTO_BACKGROUND_TASKS wording in stderr, got: $SYNC_STDERR"
+    return 1
+  }
+}
+
+@test "sync #19e: CLAUDE_AUTO_BACKGROUND_TASKS=TRUE (uppercase) + run_in_background:false -> BLOCK (tr()-truthy is case-insensitive)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "false")
+  run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS=TRUE"
+  assert_sync_block
+}
+
+@test "sync #19f: CLAUDE_AUTO_BACKGROUND_TASKS=' on ' (padded whitespace) + run_in_background:false -> BLOCK (tr()-truthy trims)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "false")
+  run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS= on "
+  assert_sync_block
+}
+
 @test "sync #20: CLAUDE_AUTO_BACKGROUND_TASKS=0 + run_in_background:false -> PASS (tr()-falsy, not merely non-empty)" {
   local payload
   payload=$(mk_dispatch_payload "Agent" "false")
   run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS=0"
+  assert_sync_pass
+}
+
+@test "sync #20b: CLAUDE_AUTO_BACKGROUND_TASKS=false + run_in_background:false -> PASS (tr()-falsy word form)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "false")
+  run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS=false"
+  assert_sync_pass
+}
+
+@test "sync #20c: CLAUDE_AUTO_BACKGROUND_TASKS=no + run_in_background:false -> PASS (tr()-falsy word form)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "false")
+  run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS=no"
+  assert_sync_pass
+}
+
+@test "sync #20d: CLAUDE_AUTO_BACKGROUND_TASKS=off + run_in_background:false -> PASS (tr()-falsy word form)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "false")
+  run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS=off"
+  assert_sync_pass
+}
+
+@test "sync #20e: CLAUDE_AUTO_BACKGROUND_TASKS=enabled + run_in_background:false -> PASS (unrecognized word is tr()-falsy)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "false")
+  run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS=enabled"
+  assert_sync_pass
+}
+
+@test "sync #20f: CLAUDE_AUTO_BACKGROUND_TASKS='' (empty) + run_in_background:false -> PASS (tr()-falsy, unset/blank)" {
+  local payload
+  payload=$(mk_dispatch_payload "Agent" "false")
+  run_sync_guard "$payload" "CLAUDE_AUTO_BACKGROUND_TASKS="
   assert_sync_pass
 }
 

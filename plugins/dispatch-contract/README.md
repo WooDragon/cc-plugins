@@ -321,11 +321,14 @@ output then travels through the mailbox (an explicit `SendMessage(to:"main")` fr
 the subagent side) rather than the tool's return value — miss that step and the
 result is silently lost.
 
-Decision chain, each step fail-opening before the next runs:
+Decision chain, each step fail-opening before the next runs. `gate_preamble` checks
+the escape hatch before the degrade conditions — a human deliberately opening the
+door must not be reported as a malfunction, so `[GATE-BYPASS]` is checked ahead of
+`[GATE-DEGRADE]`, not after it:
 
-1. Empty stdin / `jq` unavailable / parse failure → pass (`gate_preamble` degrade).
-2. `ALLOW_UNMANAGED_TEAMMATE=1` → pass (escape hatch).
-3. `tool_name` is not `Agent` or `Task` → pass.
+1. `ALLOW_UNMANAGED_TEAMMATE=1` → pass (escape hatch, `[GATE-BYPASS]`).
+2. Empty stdin / `jq` unavailable / parse failure → pass (`[GATE-DEGRADE]`).
+3. `tool_name` is not `Agent` or `Task` → pass (`gate_preamble` rc 2, silent).
 4. `tool_input.name` is blank or absent → pass (not this hook's domain).
 5. `tool_input.subagent_type` resolves to a role file in the `agents/` roster → pass
    (structural exemption — this dispatch is a legitimate team-ops teammate spawn).
