@@ -199,14 +199,15 @@ run_sync_guard() {
   local stderr_file
   stderr_file=$(mktemp)
 
-  # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_BACKGROUND_DISPATCH=1
-  # 或 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS,门禁会全部 fail-open,导致每个
-  # BLOCK 用例假通过。测试结果不该取决于谁在什么 shell 里跑。
-  # 注意 -u 必须排在显式 override 之前,这样用例仍能主动传这两个变量做正向测试。
+  # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_BACKGROUND_DISPATCH=1、
+  # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS 或 CLAUDE_AUTO_BACKGROUND_TASKS,门禁
+  # 会全部 fail-open(或改判 BLOCK),导致用例假通过/假失败。测试结果不该取决于
+  # 谁在什么 shell 里跑。注意 -u 必须排在显式 override 之前,这样用例仍能主动
+  # 传这三个变量做正向测试。
   if [[ "${2:-}" != "" ]]; then
-    SYNC_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS "${@:2}" bash "$SYNC_GUARD_SCRIPT" 2>"$stderr_file") || SYNC_EXIT=$?
+    SYNC_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS "${@:2}" bash "$SYNC_GUARD_SCRIPT" 2>"$stderr_file") || SYNC_EXIT=$?
   else
-    SYNC_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS bash "$SYNC_GUARD_SCRIPT" 2>"$stderr_file") || SYNC_EXIT=$?
+    SYNC_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS bash "$SYNC_GUARD_SCRIPT" 2>"$stderr_file") || SYNC_EXIT=$?
   fi
   SYNC_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
@@ -274,6 +275,112 @@ assert_inject_empty_stdout() {
   }
   [ -z "$INJECT_STDOUT" ] || {
     echo "Expected empty stdout, got: $INJECT_STDOUT"
+    return 1
+  }
+}
+
+# ============================================================
+# Additions below support dispatch-channel-guard.bats
+# (PreToolUse channel/protocol-match guard, pre-dispatch-channel-guard.sh).
+# Existing functions above are untouched.
+# ============================================================
+
+CHANNEL_GUARD_SCRIPT="${BATS_TEST_DIRNAME}/../hooks/pre-dispatch-channel-guard.sh"
+
+# --- Payload Builders (dispatch-channel-guard) ---
+
+# mk_channel_payload TOOL_NAME NAME SUBAGENT_TYPE CWD
+# Any of NAME / SUBAGENT_TYPE / CWD passed as the literal string "__OMIT__"
+# omits that field from the payload entirely (distinct from an empty string,
+# which is a present-but-blank value). NAME/SUBAGENT_TYPE go under
+# tool_input; CWD is a top-level payload field (matches the script's `.cwd`
+# read, not $PWD).
+mk_channel_payload() {
+  local tool="$1" name_val="$2" subtype_val="$3" cwd_val="$4"
+  local tool_input='{}'
+  if [[ "$name_val" != "__OMIT__" ]]; then
+    tool_input=$(jq -cn --argjson base "$tool_input" --arg n "$name_val" '$base + {name:$n}')
+  fi
+  if [[ "$subtype_val" != "__OMIT__" ]]; then
+    tool_input=$(jq -cn --argjson base "$tool_input" --arg s "$subtype_val" '$base + {subagent_type:$s}')
+  fi
+  local payload
+  payload=$(jq -cn --arg tool "$tool" --argjson ti "$tool_input" '{tool_name:$tool, tool_input:$ti}')
+  if [[ "$cwd_val" != "__OMIT__" ]]; then
+    payload=$(jq -cn --argjson base "$payload" --arg c "$cwd_val" '$base + {cwd:$c}')
+  fi
+  echo "$payload"
+}
+
+# --- Run Helper (dispatch-channel-guard) ---
+
+# run_channel_guard PAYLOAD [env_overrides...]
+# Sets: CHANNEL_STDOUT, CHANNEL_STDERR, CHANNEL_EXIT
+#
+# Isolates all five escape-hatch/fail-open env vars any of this plugin's
+# PreToolUse(Agent|Task) guards read, not just this gate's own
+# ALLOW_UNMANAGED_TEAMMATE — a BLOCK test here must not silently PASS because
+# the calling shell happens to have ALLOW_BACKGROUND_DISPATCH,
+# CLAUDE_CODE_DISABLE_BACKGROUND_TASKS, CLAUDE_AUTO_BACKGROUND_TASKS, or
+# ALLOW_DISPATCH_CAPABILITY_MISMATCH set for an unrelated sibling guard's
+# tests. -u is placed before any explicit override, so a test can still pass
+# one of them positively.
+run_channel_guard() {
+  local payload="$1"
+  CHANNEL_STDOUT=""
+  CHANNEL_STDERR=""
+  CHANNEL_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp)
+
+  if [[ "${2:-}" != "" ]]; then
+    CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH "${@:2}" bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
+  else
+    CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
+  fi
+  CHANNEL_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# --- Assertion Helpers (dispatch-channel-guard) ---
+
+# assert_channel_pass — exit 0 and no BLOCK-shaped "[dispatch-channel-guard]"
+# marker in stderr. NOTE this is narrower than the sibling sync-guard
+# assertion's bare-substring check: this gate is built on lib/gate.sh's
+# gate_preamble, whose fail-open/escape-hatch paths legitimately write
+# "[GATE-DEGRADE] dispatch-channel-guard: ..." / "[GATE-BYPASS]
+# dispatch-channel-guard: ..." on PASS itself (see channel #15/#16/#17) — those
+# contain the bare gate name too, so a bare-substring check would wrongly fail
+# every one of those legitimate PASS cases. The bracket-wrapped
+# "[dispatch-channel-guard]" form is only ever emitted by this script's own
+# terminal BLOCK message (see the two `printf` calls before `exit 2` in
+# pre-dispatch-channel-guard.sh) — that literal is what distinguishes "this
+# gate actually blocked" from "this gate's preamble merely logged a
+# degrade/bypass note on its way to passing".
+assert_channel_pass() {
+  [ "$CHANNEL_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $CHANNEL_EXIT"
+    echo "stderr: $CHANNEL_STDERR"
+    return 1
+  }
+  [[ "$CHANNEL_STDERR" != *"[dispatch-channel-guard]"* ]] || {
+    echo "Expected no BLOCK marker '[dispatch-channel-guard]' in stderr, got: $CHANNEL_STDERR"
+    return 1
+  }
+}
+
+# assert_channel_block — exit 2 and the "[dispatch-channel-guard]" BLOCK
+# marker in stderr (see assert_channel_pass above for why this is the
+# bracket-wrapped form, not the bare gate name).
+assert_channel_block() {
+  [ "$CHANNEL_EXIT" -eq 2 ] || {
+    echo "Expected exit 2, got $CHANNEL_EXIT"
+    echo "stderr: $CHANNEL_STDERR"
+    return 1
+  }
+  [[ "$CHANNEL_STDERR" == *"[dispatch-channel-guard]"* ]] || {
+    echo "Expected BLOCK marker '[dispatch-channel-guard]' in stderr, got: $CHANNEL_STDERR"
     return 1
   }
 }
@@ -466,4 +573,159 @@ assert_cap_block() {
     echo "Expected '命中判据 ${judgment}' in stderr, got: $CAP_STDERR"
     return 1
   }
+}
+
+# ============================================================
+# Additions below support gate-composition.bats
+# (composition test: every PreToolUse(Agent) guard this plugin declares in
+# hooks.json, run against the same payload, checking the outroutes claimed
+# in pre-dispatch-channel-guard.sh's header actually clear every gate — not
+# just the one gate whose own test file was written with that outroute in
+# mind. See gate-composition.bats header for the issue-173-shaped failure
+# mode this exists to catch mechanically instead of by header comment.)
+# ============================================================
+
+HOOKS_JSON_PATH="${BATS_TEST_DIRNAME}/../hooks/hooks.json"
+PLUGIN_ROOT_DIR="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
+
+# _discover_gates_by_matcher MATCHER
+# Reads hooks.json's PreToolUse section, keeps only hook entries whose
+# matcher is exactly MATCHER, and resolves each hook's `command` string
+# (shape: "bash ${CLAUDE_PLUGIN_ROOT}/hooks/xxx.sh") into a real script path
+# under this checkout. Sets global array GATE_SCRIPTS. De-dupes so a script
+# listed twice under the same matcher (should not happen, but nothing
+# enforces it) is only invoked once per payload.
+#
+# This is the mechanism that keeps the composition test honest as the plugin
+# grows: a third PreToolUse guard added to hooks.json tomorrow is picked up
+# here automatically, with no edit to this file or to gate-composition.bats
+# required. A hardcoded GATE_SCRIPTS=(a.sh b.sh) list would not have that
+# property — it is exactly the shape of drift that let the channel-guard
+# header's "does not collide with the other gate" claim go unverified for
+# months (see gate-composition.bats header).
+_discover_gates_by_matcher() {
+  local matcher="$1"
+  local raw
+  raw=$(jq -r --arg m "$matcher" '
+    .hooks.PreToolUse[]
+    | select(.matcher == $m)
+    | .hooks[].command
+  ' "$HOOKS_JSON_PATH")
+
+  local line resolved
+  local -a resolved_all=()
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    resolved="${line#bash }"
+    resolved="${resolved//\$\{CLAUDE_PLUGIN_ROOT\}/$PLUGIN_ROOT_DIR}"
+    resolved_all+=("$resolved")
+  done <<< "$raw"
+
+  GATE_SCRIPTS=()
+  local s seen_s dup
+  for s in "${resolved_all[@]}"; do
+    dup=0
+    for seen_s in "${GATE_SCRIPTS[@]:-}"; do
+      [[ "$seen_s" == "$s" ]] && { dup=1; break; }
+    done
+    [ "$dup" -eq 0 ] && GATE_SCRIPTS+=("$s")
+  done
+}
+
+# discover_agent_gates — matcher "Agent". Sets GATE_SCRIPTS. See
+# _discover_gates_by_matcher above for the mechanism.
+discover_agent_gates() {
+  _discover_gates_by_matcher "Agent"
+}
+
+# discover_task_gates — matcher "Task". Sets GATE_SCRIPTS. hooks.json
+# mirrors the same three PreToolUse guards under both the "Agent" and
+# "Task" matchers (Lead/PM dispatch via the Task tool as well as Agent), so
+# any composition assertion built only from discover_agent_gates would stay
+# green even if someone stripped a guard from the "Task" side only — the
+# exact failure mode this function exists to make mechanically checkable
+# instead of relying on the two matcher blocks in hooks.json staying in sync
+# by eyeball (see gate-composition.bats "Task matcher mirrors Agent matcher").
+discover_task_gates() {
+  _discover_gates_by_matcher "Task"
+}
+
+# mk_composed_payload TOOL_NAME RIB_MODE NAME_MODE SUBTYPE_MODE CWD_MODE [PROMPT_MODE] [DESC_MODE] [MODEL_MODE]
+#
+# Single payload builder shared across all gates in GATE_SCRIPTS — the two
+# existing per-gate builders (mk_dispatch_payload / mk_channel_payload) each
+# omit a field the *other* gate reads (mk_dispatch_payload has no cwd;
+# mk_channel_payload has no run_in_background), so neither can build a
+# payload a composition test can feed to both without silently starving one
+# gate's judgment data.
+#
+# RIB_MODE:      omit | false | true
+# NAME_MODE:     omit | <literal string>   (tool_input.name)
+# SUBTYPE_MODE:  omit | <literal string>   (tool_input.subagent_type)
+# CWD_MODE:      omit | <literal path>     (top-level .cwd)
+# PROMPT_MODE:   omit | <literal string>   (tool_input.prompt, default omit)
+# DESC_MODE:     omit | <literal string>   (tool_input.description, default omit)
+# MODEL_MODE:    omit | <literal string>   (tool_input.model, default omit)
+#
+# PROMPT_MODE/DESC_MODE/MODEL_MODE default to "omit" so every existing call
+# site (built before dispatch-capability-guard.sh joined GATE_SCRIPTS'
+# composition coverage) keeps building the same payload shape it always did.
+mk_composed_payload() {
+  local tool="$1" rib="$2" name="$3" subtype="$4" cwd="$5"
+  local prompt="${6:-omit}" desc="${7:-omit}" model="${8:-omit}"
+  local ti='{}'
+  case "$rib" in
+    false) ti=$(jq -cn --argjson b "$ti" '$b + {run_in_background:false}') ;;
+    true)  ti=$(jq -cn --argjson b "$ti" '$b + {run_in_background:true}') ;;
+    omit)  ;;
+  esac
+  if [[ "$name" != "omit" ]]; then
+    ti=$(jq -cn --argjson b "$ti" --arg n "$name" '$b + {name:$n}')
+  fi
+  if [[ "$subtype" != "omit" ]]; then
+    ti=$(jq -cn --argjson b "$ti" --arg s "$subtype" '$b + {subagent_type:$s}')
+  fi
+  if [[ "$prompt" != "omit" ]]; then
+    ti=$(jq -cn --argjson b "$ti" --arg p "$prompt" '$b + {prompt:$p}')
+  fi
+  if [[ "$desc" != "omit" ]]; then
+    ti=$(jq -cn --argjson b "$ti" --arg d "$desc" '$b + {description:$d}')
+  fi
+  if [[ "$model" != "omit" ]]; then
+    ti=$(jq -cn --argjson b "$ti" --arg m "$model" '$b + {model:$m}')
+  fi
+  local payload
+  payload=$(jq -cn --arg tool "$tool" --argjson ti "$ti" '{tool_name:$tool, tool_input:$ti}')
+  if [[ "$cwd" != "omit" ]]; then
+    payload=$(jq -cn --argjson b "$payload" --arg c "$cwd" '$b + {cwd:$c}')
+  fi
+  echo "$payload"
+}
+
+# run_one_gate SCRIPT PAYLOAD [env_overrides...]
+# Sets: ONE_GATE_EXIT, ONE_GATE_STDERR
+#
+# Same escape-hatch/fail-open isolation discipline as the sibling
+# run_*_guard helpers above: a BLOCK case here must not silently PASS
+# because the invoking shell happens to carry one of these five vars for an
+# unrelated reason. This runner is shared across every gate discovered by
+# discover_agent_gates/discover_task_gates (dispatch-sync-guard.sh,
+# dispatch-capability-guard.sh, pre-dispatch-channel-guard.sh) — it must
+# clear the union of all their escape hatches, not just the ones the gate
+# under test in a given call happens to read, since a caller composing a
+# payload for one gate may still route it through this same helper for
+# another gate in the set.
+run_one_gate() {
+  local script="$1" payload="$2"
+  shift 2
+  ONE_GATE_EXIT=0
+  local stderr_file
+  stderr_file=$(mktemp)
+  if [[ "${1:-}" != "" ]]; then
+    printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH "$@" bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
+  else
+    printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
+  fi
+  ONE_GATE_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
 }

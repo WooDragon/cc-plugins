@@ -2,7 +2,7 @@
 
 Subagent dispatch contract enforcement for Claude Code — a `%%DONE%%` finalization gate plus a methodology skill for reliable subagent delegation.
 
-The plugin has five parts: a **PreToolUse hook** that blocks dispatch calls omitting `run_in_background:false`, a second **PreToolUse hook** that blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
+The plugin has six parts: three **PreToolUse hooks** — one blocks dispatch calls omitting `run_in_background:false`, a second blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, a third blocks a `name`-carrying dispatch (upgrading a one-shot subagent to a teammate) whose `subagent_type` is not a recognized team-ops role — a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
 
 ## Installation
 
@@ -22,15 +22,24 @@ PreToolUse (matcher: Agent, Task)
   │      drops completion notifications at a measured 92.7% loss rate with
   │      no resend path. Passes silently (fail-open) on teammate context
   │      (agent_id present), Lead-starts-a-teammate calls (tool_input.name
-  │      present), the CLAUDE_CODE_DISABLE_BACKGROUND_TASKS env var, and any
-  │      malformed or missing payload field.
+  │      present), the CLAUDE_CODE_DISABLE_BACKGROUND_TASKS env var, the
+  │      CLAUDE_AUTO_BACKGROUND_TASKS env var handled by its own dedicated
+  │      block (see below), and any malformed or missing payload field.
   │
-  └─ dispatch-capability-guard.sh (5s timeout)
-         Blocks a dispatch call whose subagent_type/model cannot deliver
-         what the prompt itself asks for — a read-only declaration sent to
-         a full-privilege agent, or a write/exec-needing task sent to a
-         read-only agent type or the haiku model tier. See "The Dispatch
-         Capability Guard" below for the full judgment matrix.
+  ├─ dispatch-capability-guard.sh (5s timeout)
+  │      Blocks a dispatch call whose subagent_type/model cannot deliver
+  │      what the prompt itself asks for — a read-only declaration sent to
+  │      a full-privilege agent, or a write/exec-needing task sent to a
+  │      read-only agent type or the haiku model tier. See "The Dispatch
+  │      Capability Guard" below for the full judgment matrix.
+  │
+  └─ pre-dispatch-channel-guard.sh (5s timeout)
+         Blocks a dispatch call that carries a non-blank tool_input.name
+         (upgrading a one-shot subagent to a teammate) whose subagent_type
+         does not resolve to a role file in the agents/ roster. Judges only
+         the domain dispatch-sync-guard.sh does NOT: a blank/absent name is
+         entirely out of scope for this hook and falls straight through —
+         see § Two-Domain Split below.
 
 SubagentStart (matcher: *)
   │
@@ -58,9 +67,9 @@ skills/subagent-dispatch  (no hook — loaded by description match)
          contract is reachable at dispatch time rather than only after a block.
 ```
 
-This plugin registers four hooks: `PreToolUse` (dispatch-sync-guard,
-dispatch-capability-guard), `SubagentStart` (dispatch-rules-inject), and
-`SubagentStop` (subagent-done-gate).
+This plugin registers five hooks: `PreToolUse` (dispatch-sync-guard,
+dispatch-capability-guard, pre-dispatch-channel-guard), `SubagentStart`
+(dispatch-rules-inject), and `SubagentStop` (subagent-done-gate).
 There is no dispatch-side hook that guesses whether a given task needs a
 `%%DONE%%` deliverable — that judgment is semantic, and a keyword guess would
 misfire often enough to be ignored. The skill closes that gap instead.
@@ -127,7 +136,14 @@ turns — and applies this decision chain, each step fail-opening before the nex
 5. `tool_name` is not `Agent` or `Task` → pass.
 6. `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` is set → pass.
 7. `agent_id` is present and non-blank → pass (teammate context).
-8. `tool_input.name` is present and non-blank → pass (Lead starting a teammate).
+8. `tool_input.name` is present and non-blank → pass (Lead starting a teammate;
+   whether that teammate spawn itself is legitimate is
+   pre-dispatch-channel-guard.sh's domain, not this hook's — see
+   § Two-Domain Split below).
+8b. `CLAUDE_AUTO_BACKGROUND_TASKS` is set (truthy) → block (exit 2). Checked
+    after steps 7/8's exemptions (those two shapes deliver through the
+    mailbox and are unaffected by auto-backgrounding) and before step 9
+    (the very check this variable defeats).
 9. `tool_input.run_in_background` is the JSON boolean `false` → pass.
 9b. `run_in_background` field absent → block (exit 2), fork-aware stderr (4 lines).
 10. Otherwise (field present but not `false`, e.g. `true` or a non-boolean) →
@@ -149,6 +165,13 @@ regardless of this hook, so blocking it would be a false positive.
 Step 8 is load-bearing for team-ops: a non-empty `tool_input.name` is the only entry
 point for starting a teammate. Removing this step would block Lead from starting any
 teammate.
+
+Step 8b (`CLAUDE_AUTO_BACKGROUND_TASKS`) exists because a passing step 9 check does
+not actually guarantee synchronous delivery when this variable is truthy: the
+runtime's synchronous branch sets `autoBackgroundMs: U ? void 0 : oEb() || void 0`,
+and `oEb()` returns `120000` under this variable — a synchronous agent still auto-flips
+to the background channel after running past 120 seconds. Adding `run_in_background:false`
+does not fix this; the only fix is clearing the variable.
 
 **Fork world (step 9b)**: the Agent input schema also drops `run_in_background`
 entirely when the `fork-subagent` feature (server-side rollout flag, internally named
@@ -272,6 +295,71 @@ Collapsing the two into one silent fail-open, as this plugin's sibling hooks
 do, would make a grep for real breakage indistinguishable from a session that
 simply has the hatch on.
 
+## Two-Domain Split: Sync Guard vs Channel Guard
+
+Both hooks fire on the same `PreToolUse(Agent|Task)` event and inspect the same
+`tool_input.name` field, so their input space is split by that one field into two
+domains that are disjoint and jointly exhaustive:
+
+| `tool_input.name` | Owning gate | Judgment |
+|---|---|---|
+| Blank or absent | `dispatch-sync-guard.sh` | Is `run_in_background:false` present? |
+| Non-blank | `pre-dispatch-channel-guard.sh` | Does `subagent_type` resolve to a role in the `agents/` roster? |
+
+Each hook exits 0 immediately on the domain it does not own, without inspecting or
+describing the other hook's internal judgment — the only thing that crosses the
+boundary is a forward-pointing instruction: dropping `name` to escape the channel
+guard moves the dispatch into the sync guard's domain, so the re-dispatch must carry
+`run_in_background:false` or it simply trades one gate's block for the other's.
+
+## The Dispatch Channel Guard
+
+`pre-dispatch-channel-guard.sh` runs on `PreToolUse` for `Agent` and `Task` calls,
+immediately after `dispatch-sync-guard.sh`. It owns the non-blank-`name` domain
+described above: passing `name` upgrades a one-shot subagent into a teammate, whose
+output then travels through the mailbox (an explicit `SendMessage(to:"main")` from
+the subagent side) rather than the tool's return value — miss that step and the
+result is silently lost.
+
+Decision chain, each step fail-opening before the next runs. `gate_preamble` checks
+the escape hatch before the degrade conditions — a human deliberately opening the
+door must not be reported as a malfunction, so `[GATE-BYPASS]` is checked ahead of
+`[GATE-DEGRADE]`, not after it:
+
+1. `ALLOW_UNMANAGED_TEAMMATE=1` → pass (escape hatch, `[GATE-BYPASS]`).
+2. Empty stdin / `jq` unavailable / parse failure → pass (`[GATE-DEGRADE]`).
+3. `tool_name` is not `Agent` or `Task` → pass (`gate_preamble` rc 2, silent).
+4. `tool_input.name` is blank or absent → pass (not this hook's domain).
+5. `tool_input.subagent_type` resolves to a role file in the `agents/` roster → pass
+   (structural exemption — this dispatch is a legitimate team-ops teammate spawn).
+6. Otherwise → block (exit 2), three-line stderr with two exits.
+
+**Roster resolution (step 5)** walks the ancestor-directory chain of the dispatching
+cwd (`.cwd` field on the hook payload, falling back to `$PWD` when absent), checking
+`<D>/.claude/agents/<subagent_type>.md` at each level — `.claude` is a hardcoded path
+component. The first hit at any level wins. If `$HOME` is not on that ancestor chain,
+`$HOME/.claude/agents/<subagent_type>.md` is checked once more as a final fallback.
+This matches the actual runtime resolution behavior (verified against Claude Code
+2.1.223): a project that defines its own `<project>/.claude/agents/<type>.md` role is
+recognized the same as a user-level role, rather than being misjudged as an unmanaged
+teammate because only `~/.claude/agents/` was checked.
+
+If the roster directory (at every level checked) does not contain the requested
+`subagent_type`, the dispatch is **blocked**, not passed — a missing roster file is
+treated as a possible misconfiguration, not as "this session doesn't use team-ops",
+because exit ① (drop `name`, take the sync-guard path) is always reachable without
+the escape hatch.
+
+The two exits offered on block are: ① drop `name` and re-dispatch as a one-shot
+subagent (see § Two-Domain Split for the follow-on `run_in_background:false`
+requirement), or ② name a `subagent_type` from the `agents/` roster (`dev`, `ops`,
+`pm`, `redteam`, `worker`) to take the team-ops path, which this gate then passes
+structurally. There is no third "lightweight AND teammate" option.
+
+**Escape hatch**: `ALLOW_UNMANAGED_TEAMMATE=1` in `settings.json`'s `env` section —
+the same propagation caveat as `ALLOW_BACKGROUND_DISPATCH` applies (`export` in a
+Bash tool call does not reach the hook process).
+
 ## The SubagentStart Rules Injector
 
 `dispatch-rules-inject.sh` runs on `SubagentStart` for every spawned subagent
@@ -311,6 +399,8 @@ The skill triggers on dispatch-related requests: "派发 subagent", "dispatch su
 bats plugins/dispatch-contract/tests/subagent-done-gate.bats
 bats plugins/dispatch-contract/tests/dispatch-sync-guard.bats
 bats plugins/dispatch-contract/tests/dispatch-capability-guard.bats
+bats plugins/dispatch-contract/tests/dispatch-channel-guard.bats
+bats plugins/dispatch-contract/tests/gate-composition.bats
 ```
 
 `subagent-done-gate.bats` has 26 test cases covering: core judgment (marker
@@ -346,16 +436,32 @@ missing-`jq`, and the EN/CN defect-noun objects pinned by two separate cases
 `WRITE_OBJ` word present) since the two token tables are matched independently
 and a deletion on one side would otherwise pass silently under a shared test.
 
+`dispatch-channel-guard.bats` has 22 test cases covering: the domain split
+(blank/absent `name` passes straight through untouched), roster resolution at
+each ancestor-directory level plus the `$HOME` fallback, the block/pass matrix
+across recognized vs unrecognized `subagent_type` values, the escape hatch,
+and fail-open paths (empty stdin, missing `jq`, malformed JSON, `tool_name`
+outside `{Agent, Task}`).
+
+`gate-composition.bats` has 7 test cases that discover every `PreToolUse`
+hook this plugin declares against the `Agent` matcher directly from
+`hooks.json` (see `discover_agent_gates` in `test_helper/common-setup.bash`)
+and run each against a shared payload, so an outroute one gate's own test
+file exercises is also verified not to still get caught by a sibling gate —
+see `gate-composition.bats`'s header for the issue-shaped failure mode this
+exists to catch mechanically rather than by header comment.
+
 ## Block Response Shape (Deliberate Choice)
 
-All three blocking hooks in this plugin — `dispatch-sync-guard.sh` (PreToolUse),
-`dispatch-capability-guard.sh` (PreToolUse), and `subagent-done-gate.sh`
+All four blocking hooks in this plugin — `dispatch-sync-guard.sh`
+(PreToolUse), `dispatch-capability-guard.sh` (PreToolUse),
+`pre-dispatch-channel-guard.sh` (PreToolUse), and `subagent-done-gate.sh`
 (SubagentStop) — block via `exit 2` plus a stderr message. Some sibling plugins
 in this repo use a different shape instead: `plan-review`'s `dispatch-check.sh`
 and `doc-gate`'s `skill-gate.sh` return JSON `permissionDecision: deny`. This
 repo does not use one block-response shape across all plugins — `guardrails`'
 `git-push-guard.sh` also blocks via `exit 2`. Within this plugin, consistency
-across the three blocking hooks takes priority over matching an unrelated
+across the four blocking hooks takes priority over matching an unrelated
 plugin's shape. The two forms are functionally equivalent here. The runtime
 routes the `exit 2` stderr text through `blockingError` into the tool result
 the model sees. The correction message reaches model context either way.
@@ -367,5 +473,7 @@ the model sees. The correction message reaches model context either way.
 | `ALLOW_UNMARKED_FINAL` | _(unset)_ | `1` disables the `%%DONE%%` finalization gate entirely |
 | `ALLOW_BACKGROUND_DISPATCH` | _(unset)_ | `1` disables the background-dispatch sync guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
 | `ALLOW_NO_RULES_INJECT` | _(unset)_ | `1` disables the SubagentStart rules injector entirely |
+| `ALLOW_UNMANAGED_TEAMMATE` | _(unset)_ | `1` disables the dispatch channel guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
 | `CLAUDE_CODE_FORK_SUBAGENT` | _(unset)_ | `0` disables the fork-subagent feature — restores `run_in_background` to the Agent input schema, the correct fix for step 9b's fork-world block |
 | `ALLOW_DISPATCH_CAPABILITY_MISMATCH` | _(unset)_ | `1` disables the dispatch-capability guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
+| `CLAUDE_AUTO_BACKGROUND_TASKS` | _(unset)_ | Truthy value defeats `run_in_background:false`'s synchronous-delivery guarantee past 120s runtime — the sync guard blocks (step 8b) rather than silently misjudge a passing dispatch as safe; clear this variable to fix |

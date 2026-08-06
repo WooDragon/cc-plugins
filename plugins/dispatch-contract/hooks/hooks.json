@@ -1,19 +1,21 @@
 {
-  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop, background-dispatch sync guard and dispatch-capability guard on PreToolUse, dispatch-rules injection on SubagentStart",
+  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop, background-dispatch sync guard, dispatch-capability guard and channel guard on PreToolUse, dispatch-rules injection on SubagentStart",
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Agent",
         "hooks": [
           { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-sync-guard.sh", "timeout": 5 },
-          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-capability-guard.sh", "timeout": 5 }
+          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-capability-guard.sh", "timeout": 5 },
+          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-dispatch-channel-guard.sh", "timeout": 5 }
         ]
       },
       {
         "matcher": "Task",
         "hooks": [
           { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-sync-guard.sh", "timeout": 5 },
-          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-capability-guard.sh", "timeout": 5 }
+          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-capability-guard.sh", "timeout": 5 },
+          { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-dispatch-channel-guard.sh", "timeout": 5 }
         ]
       }
     ],
