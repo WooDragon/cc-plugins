@@ -2,7 +2,9 @@
 # SubagentStop hook: enforce that a subagent's final message ends with a
 # standalone %%DONE%% marker line when its dispatch prompt required one, so a
 # handoff report can't be silently truncated, replaced by a "done" summary,
-# or diverted into a file instead of the final message.
+# or diverted into a file *in place of* the final message (a file deliverable
+# alongside a final-message report is fine and expected; see the
+# subagent-dispatch skill's 定稿标记 section).
 #
 # Judgment source: the dispatch prompt itself, never the subagent's own words.
 # The hook reads the transcript's first line. If that first line is a
@@ -72,6 +74,6 @@ grep -qF "$MARK" <<< "$PROMPT_SRC" || exit 0
 LAST_LINE=$(printf '%s' "$LAST" | grep -v '^[[:space:]]*$' | tail -1)
 [[ "$LAST_LINE" =~ ^[[:space:]]*"$MARK"[[:space:]]*$ ]] && exit 0
 
-printf '[subagent-done-gate] 最终消息末尾未检测到独立成行的 %s，说明报告没写完。请把完整报告直接输出在最终消息里（不要写进文件，也不要只写完成说明），并在末尾单独一行输出 %s——该行只能有这个标记本身，不要加粗、不要代码块或反引号、不要列表符号或标题符号、后面不要跟标点或其他文字。某一节做不到就保留该节并写明原因，不要留空。\n' "$MARK" "$MARK" >&2
+printf '[subagent-done-gate] 最终消息末尾未检测到独立成行的 %s，说明报告没写完。完整报告要写在最终消息里；若任务同时要求落盘交付物，按派发约定写 .wip 并 promote，但不要把报告只写进文件、也不要只写完成说明。并在末尾单独一行输出 %s——该行只能有这个标记本身，不要加粗、不要代码块或反引号、不要列表符号或标题符号、后面不要跟标点或其他文字。某一节做不到就保留该节并写明原因，不要留空。\n' "$MARK" "$MARK" >&2
 printf '[subagent-done-gate] 逃生舱：export ALLOW_UNMARKED_FINAL=1\n' >&2
 exit 2
