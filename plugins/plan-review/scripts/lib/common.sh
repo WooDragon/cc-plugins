@@ -32,11 +32,11 @@
 #   - agy.sh assigns AGY_PROMPT as a double-quoted string, which also
 #     performs parameter expansion — ${DELTA_REVIEW_RULES} expands in place.
 DELTA_REVIEW_RULES=$(cat <<'DELTA_RULES_EOF'
-1. Re-check every prior Critical against the CURRENT plan: if resolved, drop
-   it; if effectively rebutted, withdraw it.
+1. Re-check every prior Critical against the CURRENT artifact: if resolved,
+   drop it; if effectively rebutted, withdraw it.
 2. A new non-Critical finding on text that is UNCHANGED since the last round
-   is a forfeited relitigation — it burns a round without improving the plan.
-   Do not raise it.
+   is a forfeited relitigation — it burns a round without improving the
+   artifact. Do not raise it.
 3. Focus new-finding attention on text that has changed since the last round.
 4. Evidence burden is symmetric. A rebuttal resting on an unverifiable
    factual claim about the codebase does NOT clear a finding — keep the

@@ -2395,19 +2395,19 @@ Use Task( for analysis.
 # Prompt content integrity
 # ---------------------------------------------------------------------------
 @test "system-instructions: Testability criterion has structured sub-items" {
-  grep -q "Test strategy presence" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "E2E selector cascade" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "evidence-gated" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "Deletion completeness" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "3000 characters" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Test strategy presence" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "E2E selector cascade" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "evidence-gated" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "Deletion completeness" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "3000 characters" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
 }
 
-@test "system-instructions: Scope Boundary has training-cutoff / version-identifier ground-truth directive" {
-  grep -q "GROUND TRUTH" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "verify against your memory" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "training knowledge has a cutoff" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "NOT common knowledge" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "never Critical" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+@test "system-instructions: Version Identifiers Are Ground Truth has training-cutoff / version-identifier ground-truth directive" {
+  grep -q "GROUND TRUTH" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -q "verify against your memory" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -q "training knowledge has a cutoff" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -q "NOT common knowledge" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -q "never Critical" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
 }
 
 # ---------------------------------------------------------------------------
@@ -2417,40 +2417,40 @@ Use Task( for analysis.
 # We assert the four gap-closing directives are present in SYSTEM_INSTRUCTIONS.
 # ---------------------------------------------------------------------------
 @test "system-instructions: Finding Quality Gate section present" {
-  grep -q "Finding Quality Gate" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Finding Quality Gate" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
 }
 
 @test "quality-gate: gap1 confidence threshold + drop-low-confidence directive" {
-  grep -q "Confidence" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "DROP" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Confidence" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -q "DROP" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
 }
 
 @test "quality-gate: gap1 gradient exit — low-confidence Critical kept as UNVERIFIED, not dropped" {
-  grep -q "UNVERIFIED" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "not REJECT" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "UNVERIFIED" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -q "not REJECT" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
 }
 
 @test "quality-gate: gap2 false-positive registry present" {
-  grep -q "False-positive registry" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -qi "never raise" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "False-positive registry" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -qi "never raise" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
 }
 
 @test "quality-gate: gap3 verdict-severity pre-flight self-check (prompt-layer, not body-scan)" {
-  grep -q "Verdict↔severity" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Verdict↔severity" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
   # Routing must remain verdict-only: the hook must NOT grep the body for severity tags
   ! grep -qE "grep[^|]*'\[Critical\]'" "${HOOK_SCRIPT:?Missing hook script}"
 }
 
 @test "quality-gate: gap4 severity calibration anti-drift" {
-  grep -q "Severity calibration" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "never Major" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Severity calibration" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -q "never Major" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
 }
 
 @test "quality-gate: UNVERIFIED routes to CONCERNS in verdict rules + output format" {
   # CONCERNS bucket explicitly includes UNVERIFIED suspicions
-  grep -q "UNVERIFIED.*suspicion.*but no confirmed Critical\|including any .UNVERIFIED" "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "UNVERIFIED.*suspicion.*but no confirmed Critical\|including any .UNVERIFIED" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
   # output format documents the [Major] [UNVERIFIED] emission shape
-  grep -q '\[Major\] \[UNVERIFIED\]' "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q '\[Major\] \[UNVERIFIED\]' "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
 }
 
 # =============================================================================
@@ -2472,13 +2472,13 @@ Use Task( for analysis.
 
 # 116. Criterion 7 token presence — new prompt content has not been reverted
 @test "dispatch-economy: Criterion 7 tokens present in SYSTEM_INSTRUCTIONS" {
-  grep -q "Dispatch Economy"      "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "Full hoarding"         "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "Partial hoarding"      "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "Retrieval work"        "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "split-brain"           "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "Decision work"         "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
-  grep -q "Implementation work"   "${SYSTEM_PROMPT_FILE:?Missing system prompt asset}"
+  grep -q "Dispatch Economy"      "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "Full hoarding"         "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "Partial hoarding"      "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "Retrieval work"        "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "split-brain"           "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "Decision work"         "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "Implementation work"   "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
 }
 
 # 117. manifest detection survives prompt refactor — Task( + manifest reaches engine
@@ -2965,7 +2965,53 @@ MOCK_INNER
   local prompt
   prompt=$(cat "${MOCK_BIN}/../.agy-prompt-agy")
   [[ "$prompt" == *"Consultation Context"* ]]
-  [[ "$prompt" == *"Plan to Review"* ]]
+  [[ "$prompt" == *"Artifact to Review"* ]]
+}
+
+# assembly: SYSTEM_INSTRUCTIONS internal ordering — review-plan.md's framing
+# layer must lead, review-common.md's shared discipline/format layer must
+# trail. Grepping for substring presence alone (as the other system-
+# instructions / quality-gate tests do) cannot catch an assembly-order
+# regression where plan-review.sh:493 accidentally swapped the two
+# `tr -d '\r' < ...` operands — both substrings would still be present, just
+# in the wrong order. This test captures the agy FIRST-round -p argument
+# (round 1 always sends the full AGY_PROMPT = SYSTEM_INSTRUCTIONS + '\n\n' +
+# PROMPT_FILE — see agy.sh's engine_invoke, CONV_ID empty branch), which is
+# the one point where the raw assembled SYSTEM_INSTRUCTIONS bytes are
+# observable end-to-end. Byte-position comparison (not a golden file) so the
+# test survives unrelated wording edits to either asset.
+@test "assembly: SYSTEM_INSTRUCTIONS orders review-plan.md ahead of review-common.md" {
+  cat > "${MOCK_BIN}/agy" <<'MOCK_INNER'
+#!/bin/bash
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-p" ]; then printf '%s' "$a" > "$(dirname "$0")/../.agy-prompt-agy"; fi
+  prev="$a"
+done
+printf '%s\n' "$*" > "$(dirname "$0")/../.agy-args-agy"
+printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","response":"<verdict>APPROVE</verdict>","usage":{}}\n'
+MOCK_INNER
+  chmod +x "${MOCK_BIN}/agy"
+  INPUT=$(build_input)
+  run_hook   # round 1 — first round, sends the full static+dynamic prompt
+  assert_ack_approve_json
+
+  local prompt_file="${MOCK_BIN}/../.agy-prompt-agy"
+  [ -s "$prompt_file" ]
+
+  local pos_criteria pos_ground_truth pos_scope pos_gate
+  pos_criteria=$(grep -boF 'Review Criteria' "$prompt_file" | head -1 | cut -d: -f1)
+  pos_ground_truth=$(grep -boF 'Version Identifiers Are Ground Truth' "$prompt_file" | head -1 | cut -d: -f1)
+  pos_scope=$(grep -boF '## Scope Boundary' "$prompt_file" | head -1 | cut -d: -f1)
+  pos_gate=$(grep -boF '## Finding Quality Gate' "$prompt_file" | head -1 | cut -d: -f1)
+
+  [ -n "$pos_criteria" ]
+  [ -n "$pos_ground_truth" ]
+  [ -n "$pos_scope" ]
+  [ -n "$pos_gate" ]
+
+  [ "$pos_criteria" -lt "$pos_ground_truth" ]
+  [ "$pos_scope" -lt "$pos_gate" ]
 }
 
 # conv: non-capacity CLI failure (exit≠0) → resume handle dropped
@@ -3578,11 +3624,26 @@ MOCK_EOF
 }
 
 # bootstrap: prompt asset file missing entirely → allow + [WARNING].
+# The prompt asset guard (plan-review.sh:476-482) loops over BOTH
+# review-plan.md and review-common.md, so each half needs its own coverage —
+# a regression that only checks one file would otherwise slip past.
 # See REVIEW_DRY_RUN note above the first bootstrap test — same rationale.
-@test "bootstrap: missing prompt asset → allow JSON with WARNING" {
+@test "bootstrap: missing prompt asset (review-plan.md) → allow JSON with WARNING" {
   export REVIEW_DRY_RUN=1
   setup_script_copy
-  rm -f "${COPY_SCRIPT_DIR}/assets/review-system-prompt.md"
+  rm -f "${COPY_SCRIPT_DIR}/assets/review-plan.md"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"prompt asset missing/empty"* ]]
+}
+
+@test "bootstrap: missing prompt asset (review-common.md) → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  rm -f "${COPY_SCRIPT_DIR}/assets/review-common.md"
 
   run_hook_copy
 
@@ -3592,11 +3653,24 @@ MOCK_EOF
 }
 
 # bootstrap: prompt asset present but zero bytes → allow + [WARNING].
+# Same per-file split rationale as the missing-asset pair above.
 # See REVIEW_DRY_RUN note above the first bootstrap test — same rationale.
-@test "bootstrap: empty prompt asset → allow JSON with WARNING" {
+@test "bootstrap: empty prompt asset (review-plan.md) → allow JSON with WARNING" {
   export REVIEW_DRY_RUN=1
   setup_script_copy
-  : > "${COPY_SCRIPT_DIR}/assets/review-system-prompt.md"
+  : > "${COPY_SCRIPT_DIR}/assets/review-plan.md"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"prompt asset missing/empty"* ]]
+}
+
+@test "bootstrap: empty prompt asset (review-common.md) → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  : > "${COPY_SCRIPT_DIR}/assets/review-common.md"
 
   run_hook_copy
 
@@ -3610,11 +3684,18 @@ MOCK_EOF
 # exactly the gap Fix 5's <verdict> anchor check closes: without it, a
 # truncated-to-whitespace asset would silently proceed to review with an
 # empty instruction set instead of failing open visibly.
+# Post-split, the <verdict> anchor literal lives in review-common.md (see
+# assets/review-common.md's Output Format section), so truncating THAT file
+# is what must trip the anchor check — truncating review-plan.md alone
+# leaves review-common.md's `<verdict>` tag intact in the concatenated
+# SYSTEM_INSTRUCTIONS, so the anchor check must NOT fire in that case
+# (verified manually: truncating review-plan.md alone still produces a
+# normal dry-run APPROVE flow, not a truncated-asset WARNING).
 # See REVIEW_DRY_RUN note above the first bootstrap test — same rationale.
-@test "bootstrap: prompt asset truncated to whitespace-only → allow JSON with WARNING (anchor check)" {
+@test "bootstrap: prompt asset truncated to whitespace-only (review-common.md) → allow JSON with WARNING (anchor check)" {
   export REVIEW_DRY_RUN=1
   setup_script_copy
-  printf ' ' > "${COPY_SCRIPT_DIR}/assets/review-system-prompt.md"
+  printf ' ' > "${COPY_SCRIPT_DIR}/assets/review-common.md"
 
   run_hook_copy
 
@@ -3710,6 +3791,59 @@ MOCK_EOF
   assert_approve_json
   [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
   [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}
+
+# bootstrap: lib/consult.sh (the third member of the second bootstrap block's
+# loop, alongside rest.sh + the REVIEW_ENGINE-selected engine lib — see
+# plan-review.sh:193's `for _lib in "$LIB_REST" "$LIB_ENGINE_SELECTED"
+# "$LIB_CONSULT"` and its `_source_lib` call at :212) missing entirely →
+# allow + [WARNING]. Same rationale as the other lib-file bootstrap tests:
+# proves the loop's existence/non-emptiness check covers this newly
+# extracted file too, not just rest.sh and the engine lib.
+@test "bootstrap: missing consult.sh lib file → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  rm -f "${COPY_SCRIPT_DIR}/lib/consult.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}
+
+# bootstrap: consult.sh exists but is empty (zero bytes) — passes `[ -f ]`
+# clean, `source` of zero bytes "succeeds", and the first call into a helper
+# it was supposed to define (run_consultation) would die with "command not
+# found" (exit 127) absent the `[ -s ]` guard — silent fail-closed.
+@test "bootstrap: empty consult.sh lib file → allow JSON with WARNING" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  : > "${COPY_SCRIPT_DIR}/lib/consult.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"lib file missing"* ]]
+}
+
+# bootstrap: consult.sh exists and is non-empty (passes `[ -s ]`) but has a
+# real bash syntax error — `source` itself fails even though the
+# existence/non-emptiness check does not. Proves consult.sh routes through
+# `_source_lib`'s fail-open-on-source-failure path like the other libs.
+@test "bootstrap: syntax-broken consult.sh lib file → allow JSON with WARNING (source fails, not missing)" {
+  export REVIEW_DRY_RUN=1
+  setup_script_copy
+  # Unbalanced quote + stray paren: guaranteed bash syntax error, file still
+  # exists and is readable.
+  printf '%s\n' 'this is " not valid bash (' >> "${COPY_SCRIPT_DIR}/lib/consult.sh"
+
+  run_hook_copy
+
+  assert_approve_json
+  [[ "$HOOK_STDOUT" == *"[WARNING]"* ]]
+  [[ "$HOOK_STDOUT" == *"failed to load"* ]]
 }
 
 # =============================================================================

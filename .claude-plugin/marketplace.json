@@ -8,7 +8,7 @@
     {
       "name": "plan-review",
       "description": "Adversarial plan review via cross-model consultation (agy/Claude/Codex)",
-      "version": "1.5.0",
+      "version": "1.6.0",
       "author": {
         "name": "WooDragon"
       },

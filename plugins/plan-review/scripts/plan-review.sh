@@ -57,7 +57,9 @@ LIB_COMMON="$SCRIPT_DIR/lib/common.sh"
 LIB_PLAN_SOURCE="$SCRIPT_DIR/lib/plan-source.sh"
 LIB_MANIFEST="$SCRIPT_DIR/lib/manifest.sh"
 LIB_VERDICT="$SCRIPT_DIR/lib/verdict.sh"
-PROMPT_ASSET="$SCRIPT_DIR/assets/review-system-prompt.md"
+LIB_CONSULT="$SCRIPT_DIR/lib/consult.sh"
+PROMPT_ASSET_PLAN="$SCRIPT_DIR/assets/review-plan.md"
+PROMPT_ASSET_COMMON="$SCRIPT_DIR/assets/review-common.md"
 
 for _lib in "$LIB_COMMON" "$LIB_PLAN_SOURCE" "$LIB_MANIFEST" "$LIB_VERDICT"; do
   # `-s` (exists AND non-empty) catches both gaps in one test: a missing
@@ -188,7 +190,7 @@ LIB_ENGINES_DIR="$SCRIPT_DIR/lib/engines"
 LIB_REST="$LIB_ENGINES_DIR/rest.sh"
 LIB_ENGINE_SELECTED="$LIB_ENGINES_DIR/$ENGINE_LIB"
 
-for _lib in "$LIB_REST" "$LIB_ENGINE_SELECTED"; do
+for _lib in "$LIB_REST" "$LIB_ENGINE_SELECTED" "$LIB_CONSULT"; do
   # Same `-s` rationale as the first bootstrap block above: an empty file
   # passes `-f` clean, `source` "succeeds" on zero bytes, and the first call
   # into a helper this lib was supposed to define (e.g. engine_probe) then
@@ -206,6 +208,8 @@ unset _lib
 _source_lib "$LIB_REST"
 # shellcheck disable=SC1090  # dynamic path — engine chosen by the whitelisted case above
 _source_lib "$LIB_ENGINE_SELECTED"
+# shellcheck source=lib/consult.sh
+_source_lib "$LIB_CONSULT"
 unset -f _source_lib
 
 # --- Unified field extraction (single jq fork, reused by guards + logging) ---
@@ -456,8 +460,12 @@ fi
 # Static instructions: single canonical source, injected per-channel (see
 # variant A below): claude → --system-prompt; agy → inline concat; REST →
 # messages[0]. PROMPT_FILE itself carries dynamic content only.
-# SYSTEM_INSTRUCTIONS content lives in $PROMPT_ASSET (scripts/assets/
-# review-system-prompt.md), not inline — keeps the review rubric editable
+# SYSTEM_INSTRUCTIONS content lives in two assets under scripts/assets/ —
+# review-plan.md (plan-specific framing/criteria) and review-common.md
+# (engine-agnostic rubric, also consumable by an out-of-plugin caller via
+# --system-prompt-file) — concatenated in that order (review-plan.md's
+# framing language must come first; review-common.md was originally the
+# TAIL of the single asset), not inline, so the review rubric stays editable
 # without touching bash. Missing/empty asset fails open (same allow +
 # [WARNING] shape as the jq-missing guard above). A plain $(...) would
 # silently strip the file's trailing newline; the original `read -r -d ''`
@@ -465,29 +473,41 @@ fi
 # with \n, and `read -d ''` never finds its NUL delimiter so nothing gets
 # stripped), so we append a sentinel byte before capture and strip only the
 # sentinel back off — this reproduces the exact prior byte sequence.
-if [ ! -f "$PROMPT_ASSET" ] || [ ! -s "$PROMPT_ASSET" ]; then
-  echo "plan-review: missing/empty prompt asset $PROMPT_ASSET, allowing." >&2
-  echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] prompt asset missing/empty, plan-review skipped"}}'
-  exit 0
-fi
-# Anchor check: `-s` only proves the file has SOME bytes — a truncated asset
+for PROMPT_ASSET in "$PROMPT_ASSET_PLAN" "$PROMPT_ASSET_COMMON"; do
+  if [ ! -f "$PROMPT_ASSET" ] || [ ! -s "$PROMPT_ASSET" ]; then
+    echo "plan-review: missing/empty prompt asset $PROMPT_ASSET, allowing." >&2
+    echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] prompt asset missing/empty, plan-review skipped"}}'
+    exit 0
+  fi
+done
+unset PROMPT_ASSET
+# The `printf '\n'` between the two tr streams is load-bearing, not
+# decorative: review-plan.md ends mid-paragraph (criterion 8's prose) and
+# review-common.md opens with a `## ` heading (Version Identifiers Are Ground
+# Truth) — markdown requires a blank line before a heading or it gets glued
+# to the preceding paragraph on render. Before the split, this exact boundary
+# sat inside one file with a blank line separating the sections; splitting
+# into two files and concatenating them back-to-back silently dropped that
+# blank line, so it has to be reinserted here to reproduce the original byte
+# layout at the seam.
+SYSTEM_INSTRUCTIONS=$( { tr -d '\r' < "$PROMPT_ASSET_PLAN"; printf '\n'; tr -d '\r' < "$PROMPT_ASSET_COMMON"; }; printf 'x')
+SYSTEM_INSTRUCTIONS="${SYSTEM_INSTRUCTIONS%x}"
+# Anchor check: `-s` only proves each file has SOME bytes — a truncated asset
 # (e.g. left as a single space or a lone newline by a bad edit) still passes
 # `-s` but carries no real reviewing instructions. `<verdict>` is the one
-# string this file MUST contain: it is the literal tag extract_verdict()
-# (lib/verdict.sh) greps the engine's response for — if the prompt asset
-# doesn't instruct the engine to emit that tag, no review response will ever
-# parse, silently degrading every verdict to the CONCERNS fallback instead of
-# failing open visibly. Reusing that same load-bearing string as the anchor
-# (rather than an arbitrary section heading that could be renamed with zero
-# functional impact) means this check can only pass if the asset still does
-# the one thing the rest of the pipeline actually depends on.
-if ! grep -qF '<verdict>' "$PROMPT_ASSET"; then
-  echo "plan-review: prompt asset $PROMPT_ASSET missing <verdict> anchor (truncated?), allowing." >&2
+# string the CONCATENATED result MUST contain: it is the literal tag
+# extract_verdict() (lib/verdict.sh) greps the engine's response for — if the
+# assembled prompt doesn't instruct the engine to emit that tag, no review
+# response will ever parse, silently degrading every verdict to the CONCERNS
+# fallback instead of failing open visibly. The tag lives in review-common.md
+# post-split, but the check validates the assembled SYSTEM_INSTRUCTIONS
+# (rather than either single file) because that is what the engine actually
+# receives — the one thing the rest of the pipeline depends on.
+if ! grep -qF '<verdict>' <<< "$SYSTEM_INSTRUCTIONS"; then
+  echo "plan-review: prompt assets ($PROMPT_ASSET_PLAN + $PROMPT_ASSET_COMMON) missing <verdict> anchor (truncated?), allowing." >&2
   echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"[WARNING] prompt asset truncated, plan-review skipped"}}'
   exit 0
 fi
-SYSTEM_INSTRUCTIONS=$(tr -d '\r' < "$PROMPT_ASSET"; printf 'x')
-SYSTEM_INSTRUCTIONS="${SYSTEM_INSTRUCTIONS%x}"
 
 ENGINE_OUT=""
 ENGINE_STATUS=""
@@ -622,62 +642,22 @@ if [ "$REVIEW_DRY_RUN" = "1" ]; then
   REVIEW="<verdict>APPROVE</verdict>
 [DRY-RUN] 审阅调用已跳过。"
 else
-  # Portable timeout: timeout (GNU/Homebrew) > gtimeout (coreutils) > none
-  TIMEOUT_CMD=""
-  if command -v timeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="timeout"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="gtimeout"
-  fi
-  # Engine-specific timeout defaults:
-  # - agy/Claude: 595s = hook timeout budget, one CLI attempt then REST fallback.
-  #   Time-budget guard blocks retry (remaining < ENGINE_TIMEOUT), preserving REST budget.
-  ENGINE_TIMEOUT="${REVIEW_ENGINE_TIMEOUT:-595}"
+  # consult.sh's run_consultation() is engine-neutral, so it reads ARTIFACT/
+  # ROUND_INDEX instead of this hook's own PLAN/TOTAL_ROUNDS — see agy.sh's
+  # resume branch (Section B rename) for why: a future out-of-plugin driver
+  # (second-opinion.sh) has no "plan" concept, only "an artifact under review".
+  ARTIFACT="$PLAN"
+  ROUND_INDEX="$TOTAL_ROUNDS"
 
-  # --- Gemini degraded-state check ---
-  # If Gemini was capacity-exhausted recently and REST is configured,
-  # skip CLI entirely — gives REST the full ~115s budget.
-  REVIEW_ENGINE_DEGRADE_TTL="${REVIEW_ENGINE_DEGRADE_TTL:-600}"
-  _gemini_skip_cli=0
-  _fail_reason=""
-  if [ "$REVIEW_ENGINE" = "gemini" ] && [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
-    if [ -f "$DEGRADE_FILE" ]; then
-      degrade_ts=$(cat "$DEGRADE_FILE" 2>/dev/null)
-      [[ "$degrade_ts" =~ ^[0-9]+$ ]] || degrade_ts=0
-      now_ts=$(date +%s)
-      degrade_age=$(( now_ts - degrade_ts ))
-      if (( degrade_age < REVIEW_ENGINE_DEGRADE_TTL )); then
-        remaining_degrade=$(( REVIEW_ENGINE_DEGRADE_TTL - degrade_age ))
-        echo "plan-review: gemini degraded state active (${degrade_age}s ago, TTL=${REVIEW_ENGINE_DEGRADE_TTL}s, ${remaining_degrade}s remaining), skipping CLI → REST fallback" >&2
-        log_decision "gemini-degraded skip-cli remaining_degrade=${remaining_degrade}s"
-        _gemini_skip_cli=1
-        _fail_reason="Gemini: degraded state (${degrade_age}s ago, expires in ${remaining_degrade}s)"
-      fi
-    fi
-  fi
+  # Weak hooks consumed by run_consultation() (see lib/consult.sh's own
+  # header comment) — this hook is the "plan-review" caller, so all three
+  # simply forward to inject_review_thread(), exactly as the pre-extraction
+  # inline call sites did.
+  consult_on_round_end() { inject_review_thread; }
+  consult_on_rest_prepare() { inject_review_thread force; }
+  consult_on_rest_success() { rm -f "${CONV_FILE:-}"; }
 
-  # --- Engine invocation with retry (2 attempts: 1 initial + 1 retry) ---
-  # Background + wait pattern: tracks ENGINE_PID so _cleanup can kill the engine
-  # process if the hook script itself is terminated (e.g. hook timeout SIGTERM).
-  ENGINE_OUT=$(mktemp)
-  ENGINE_STATUS="${ENGINE_OUT}.status"
-  # Orchestrator owns the stderr CHANNEL for every engine (agy/claude/codex
-  # alike) — allocated unconditionally here, not codex-private. Each engine
-  # redirects its own invocation's stderr into it (2>"$ENGINE_ERR") and
-  # declares, via $ENGINE_ERR_POLICY (set in its engine_probe()), what the
-  # orchestrator is allowed to do with the CONTENT: "verbatim" (agy/claude)
-  # backfills it into LOG_FILE unconditionally; "filtered" (codex) only logs
-  # a privacy-filtered excerpt on failure, via the engine's own
-  # engine_err_filter() hook — see backfill_engine_err() in lib/common.sh.
-  ENGINE_ERR="${ENGINE_OUT}.err"
-  REVIEW=""
-  HOOK_BUDGET="${REVIEW_HOOK_BUDGET:-595}"
-
-  # --- Pre-flight: CLI existence check (permanent failure, no retry) + one-
-  #     time per-engine setup (model resolution, temp resource prep) —
-  #     delegated to the sourced engine's engine_probe(), called once outside
-  #     the retry loop below. ---
-  if ! engine_probe; then
+  if ! run_consultation; then
     log_decision "decision=allow reason=engine-not-found engine=$REVIEW_ENGINE"
     # Orphan-out cleanup: no engine call will ever happen this cycle, but the
     # cycle itself is NOT over (COUNTER_FILE/CONV_FILE deliberately survive —
@@ -688,192 +668,6 @@ else
     # COUNTER_FILE (a stale count is merely inaccurate, not cross-plan noise).
     rm -f "${HISTORY_FILE:-}"
     allow_with_reason "[WARNING] REVIEW_ENGINE=$REVIEW_ENGINE but '$ENGINE_PROBE_REASON' not found"
-  fi
-
-  for (( engine_attempt=1; engine_attempt<=2; engine_attempt++ )); do
-    # Degraded-state skip: jump out of CLI retry immediately on first iteration.
-    if (( engine_attempt == 1 )) && [ "$_gemini_skip_cli" = "1" ]; then
-      break
-    fi
-
-    # Time-budget guard: on retry, check remaining wall-clock time can fit
-    # a full ENGINE_TIMEOUT. Prevents hook timeout SIGTERM from killing
-    # the script mid-retry, making REST fallback unreachable.
-    if (( engine_attempt > 1 )); then
-      remaining=$(( HOOK_BUDGET - SECONDS ))
-      if (( remaining < ENGINE_TIMEOUT )); then
-        echo "plan-review: time budget exhausted for retry (${remaining}s remaining < ${ENGINE_TIMEOUT}s needed), breaking to fallback..." >&2
-        log_decision "skip-retry reason=time-budget remaining=${remaining}s timeout=${ENGINE_TIMEOUT}s budget=${HOOK_BUDGET}s"
-        break
-      fi
-    fi
-    engine_exit=0
-
-    # --- Call the sourced engine's invoke hook. agy's invoke may set
-    #     _ENGINE_ABORT_RETRY=1 (oversized prompt, ARG_MAX defense) to signal
-    #     an immediate break BEFORE extraction/exit-code handling — mirroring
-    #     the pre-refactor inline `break`. A literal `break` inside the
-    #     function itself would be bash-version-dependent (verified: bash 3.2
-    #     propagates it to this loop, bash 5.x does not), so an explicit flag
-    #     is the only portable signal.
-    _ENGINE_ABORT_RETRY=0
-    engine_invoke
-    if [ "$_ENGINE_ABORT_RETRY" = "1" ]; then
-      break
-    fi
-
-    # Capacity-exhaustion detection (used further below) MUST scan the raw
-    # $ENGINE_ERR before backfill_engine_err (next) truncates it (see
-    # lib/common.sh) — capture into a flag now, consumed later instead of
-    # re-grepping a file that will already be empty by then.
-    _capacity_hit=0
-    grep -qE "RESOURCE_EXHAUSTED|MODEL_CAPACITY" "$ENGINE_ERR" 2>/dev/null && _capacity_hit=1
-
-    # Backfill this round's $ENGINE_ERR into LOG_FILE per the engine's own
-    # $ENGINE_ERR_POLICY (see lib/common.sh) — unconditionally for
-    # "verbatim" engines (success and failure alike), failure-only and
-    # filtered for codex. Also truncates $ENGINE_ERR once backfilled, so a
-    # later defensive re-backfill (_cleanup on hook-kill) is a harmless no-op
-    # in the normal exit path.
-    backfill_engine_err "$engine_exit"
-
-    engine_extract
-
-    # Orchestrator-level CONV_FILE invalidation: a non-zero CLI exit (timeout
-    # 124, resume-rejected, network, plain 1) means engine_extract()'s own
-    # outer guard (`[ "$engine_exit" = "0" ] && [ -s "$ENGINE_OUT" ]`) never
-    # ran, so agy's internal persist/rm logic never touched CONV_FILE this
-    # round — the orchestrator is the ONLY thing that can invalidate it here.
-    # Drop it so the next round starts a fresh full first round instead of
-    # re-sending a --conversation onto a session that just failed. (A 0-exit-
-    # but-malformed-envelope round is the other invalidation path, handled
-    # entirely inside engine_extract() itself — see lib/engines/agy.sh.)
-    if [ "$engine_exit" != "0" ]; then
-      rm -f "${CONV_FILE:-}"
-    fi
-
-    # Call site 2: by this point this round's native-handle state is FINAL,
-    # whichever of the paths above (or agy's own internal rm inside
-    # engine_extract) got it there — see inject_review_thread's own comment
-    # for why this single point replaces per-rm-site patches.
-    inject_review_thread
-
-    : > "$ENGINE_OUT"
-    if [ "$engine_exit" != "0" ]; then
-      REVIEW=""
-      _fail_reason="${REVIEW_ENGINE}: exit ${engine_exit}"
-      if [ "$engine_attempt" -lt 2 ]; then
-        # Detect capacity-exhausted 429 (MODEL_CAPACITY_EXHAUSTED via cloudcode-pa.googleapis.com).
-        # These outages last minutes — the default 2s retry delay is useless;
-        # a longer wait gives the server time to recover.
-        # $_capacity_hit was captured above (BEFORE backfill_engine_err ran)
-        # from this round's raw, un-truncated $ENGINE_ERR directly — NOT
-        # LOG_FILE. This is the fix for the codex fast-break bug: codex's raw
-        # stderr never reaches LOG_FILE wholesale (privacy filter, see
-        # engine_err_filter in lib/engines/codex.sh), so grepping LOG_FILE
-        # only ever caught this pattern for agy/claude by coincidence —
-        # codex's fast-break depended on the capacity keyword happening to
-        # survive the 500-byte filtered codex-diag excerpt. All three engines
-        # are treated identically here because $ENGINE_ERR always held this
-        # round's complete, unfiltered stderr regardless of engine (at the
-        # time it was captured, before this same round's backfill truncated it).
-        if [ "$_capacity_hit" = "1" ]; then
-          _fail_reason="${REVIEW_ENGINE}: capacity exhausted (MODEL_CAPACITY_EXHAUSTED)"
-          # CONV_FILE was already dropped and re-injected (if needed) by call
-          # site 2 above, right after engine_extract() — a capacity-flavored
-          # non-zero exit is still a non-zero exit, no separate handling
-          # needed here (the old duplicate rm+inject pinned to this branch
-          # specifically was provably a no-op: this code only runs inside the
-          # `engine_exit != 0` branch, whose invalidation already ran).
-          # If REST fallback is configured, skip retry immediately — retrying a
-          # capacity-exhausted endpoint wastes the time budget REST needs.
-          if [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
-            # Persist degraded state: subsequent hooks skip CLI for TTL seconds.
-            if [ "$REVIEW_ENGINE" = "gemini" ]; then
-              printf '%s' "$(date +%s)" > "$DEGRADE_FILE" 2>/dev/null || true
-              log_decision "gemini-degrade-write ts=$(date +%s)"
-            fi
-            echo "plan-review: $REVIEW_ENGINE capacity exhausted, skipping retry (REST fallback available)" >&2
-            log_decision "rest-skip=capacity-fast-break engine=$REVIEW_ENGINE attempt=$engine_attempt"
-            break
-          fi
-          retry_delay="${REVIEW_CAPACITY_DELAY:-25}"
-          echo "plan-review: $REVIEW_ENGINE capacity exhausted, waiting ${retry_delay}s for recovery..." >&2
-        else
-          retry_delay="${REVIEW_RETRY_DELAY:-2}"
-          echo "plan-review: $REVIEW_ENGINE failed (attempt $engine_attempt/2, exit $engine_exit), retrying in ${retry_delay}s..." >&2
-        fi
-        sleep "$retry_delay"
-      fi
-      continue
-    fi
-
-    # Engine succeeded (exit 0) but returned empty → retry
-    if [ -z "$REVIEW" ]; then
-      if [ "$engine_attempt" -lt 2 ]; then
-        echo "plan-review: engine returned empty response (attempt $engine_attempt/2), retrying..." >&2
-        sleep "${REVIEW_RETRY_DELAY:-2}"
-      fi
-      continue
-    fi
-
-    # Non-empty response obtained — exit retry loop
-    break
-  done
-
-  # --- REST API fallback: CLI exhausted, try OpenAI-compatible endpoint ---
-  # Zero-intrusion: only fires when CLI produced no result AND env vars are set.
-  # REVIEW_API_URL/REVIEW_API_KEY empty → skip (preserves original fail-open).
-  if [ -z "$REVIEW" ] && [ -n "${REVIEW_API_URL:-}" ] && [ -n "${REVIEW_API_KEY:-}" ]; then
-    # Persist (or refresh) Gemini degraded state for any failure mode.
-    # Covers timeout (exit 124), network errors (ECONNRESET), empty responses, etc.
-    # Always refreshes the timestamp — even if the file already exists but has expired.
-    # Without refresh, an expired degrade file blocks TTL renewal: the check above lets
-    # Gemini run again (_gemini_skip_cli=0), it fails again, but the stale file prevents
-    # writing a new timestamp, creating an infinite retry-with-40s-REST-budget loop.
-    if [ "$REVIEW_ENGINE" = "gemini" ] && [ "$_gemini_skip_cli" = "0" ]; then
-      printf '%s' "$(date +%s)" > "$DEGRADE_FILE" 2>/dev/null || true
-      log_decision "gemini-degrade-write ts=$(date +%s) reason=rest-fallback-triggered"
-    fi
-    echo "plan-review: CLI exhausted, trying REST API fallback..." >&2
-    log_decision "rest-start url=${REVIEW_API_URL:+(set)} key=${REVIEW_API_KEY:+(set)}"
-
-    # Call site 3 (force): REST is a DIFFERENT engine, not "agy with a maybe-
-    # cleared CONV_FILE" — it never has session memory of its own, so gating
-    # its injection on agy's CONV_FILE state is a category error. `force`
-    # skips that condition entirely; this is what closes the gap where a
-    # round aborts BEFORE ever reaching engine_extract() (agy's own ARG_MAX
-    # guard, ${TIMEOUT_CMD:+...} never invoked, ${_ENGINE_ABORT_RETRY}=1) —
-    # CONV_FILE is untouched in that path and can still look perfectly live,
-    # even though REST, about to receive this exact prompt, has no way to
-    # consume that liveness. HISTORY_INJECTED still guards this from
-    # double-injecting on top of call site 1 or 2 if either already injected
-    # this round.
-    inject_review_thread force
-    rest_invoke
-    rest_extract
-
-    # Cross-ROUND fix (different dimension from the three same-round
-    # injection call sites above — do not fold this into any of them). This
-    # round's CONV_FILE can still be live even after REST — not agy — just
-    # produced the authoritative REVIEW for it (e.g. the ARG_MAX-abort path:
-    # agy's own CLI never ran, so nothing ever touched CONV_FILE). If left
-    # alone, agy's server-side session history silently stops one round
-    # short of current: the NEXT round's composition-time check
-    # (call site 1) sees a non-empty CONV_FILE, concludes agy has native
-    # memory, and skips thread injection — but agy's actual session never
-    # saw this round's REST-produced finding, so the next round gets NEITHER
-    # the injected thread NOR a native memory of what REST just found.
-    # Dropping CONV_FILE here forces the next round onto the thread path
-    # instead, which DOES have this round's finding (written into
-    # HISTORY_FILE via A3 further below). Gated on REVIEW being non-empty:
-    # if REST also failed, this round produced no authoritative result at
-    # all, so agy's (possibly still-valid) session must not be invalidated
-    # for nothing.
-    [ -z "$REVIEW" ] || rm -f "${CONV_FILE:-}"
-
-    : > "$ENGINE_OUT"
-    [ -z "$REVIEW" ] || echo "plan-review: REST API fallback succeeded." >&2
   fi
 
   # All attempts exhausted
