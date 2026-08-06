@@ -354,6 +354,46 @@ teardown() {
 }
 
 # =============================================================================
+# REVIEW_DISABLED / REVIEW_DRY_RUN are hook-only — this driver ignores both
+# =============================================================================
+
+# 19. REVIEW_DISABLED=1 does NOT bypass the driver — the hook's own bypass
+#     (plan-review.sh:232) is a hook-specific convenience for skipping the
+#     review gate on demand; the driver has no such gate to skip, so it must
+#     still make a real engine call and return the real review body.
+@test "env: REVIEW_DISABLED=1 does not bypass the driver — still calls the engine" {
+  create_mock_engine "agy" "UNIQUE_REAL_REVIEW_BODY_MARKER"
+  local sys_file="${TEST_TEMP_DIR}/sys.md"
+  local artifact_file="${TEST_TEMP_DIR}/artifact.md"
+  printf 'System rubric.' > "$sys_file"
+  printf 'Artifact body.' > "$artifact_file"
+
+  REVIEW_DISABLED=1 run_second_opinion --system-prompt-file "$sys_file" --prompt-file "$artifact_file"
+
+  [ "$SO_EXIT" -eq 0 ]
+  [[ "$SO_STDOUT" == *"UNIQUE_REAL_REVIEW_BODY_MARKER"* ]]
+}
+
+# 20. REVIEW_DRY_RUN=1 does NOT trigger the hook's synthetic-APPROVE
+#     shortcut (plan-review.sh:641) — the driver has no such branch (see the
+#     "Explicitly NOT read" header comment in second-opinion.sh), so it must
+#     still make a real engine call and return the engine's real output, not
+#     a synthesized "<verdict>APPROVE</verdict>" body.
+@test "env: REVIEW_DRY_RUN=1 does not synthesize APPROVE — still calls the engine" {
+  create_mock_engine "agy" "UNIQUE_REAL_REVIEW_BODY_MARKER"
+  local sys_file="${TEST_TEMP_DIR}/sys.md"
+  local artifact_file="${TEST_TEMP_DIR}/artifact.md"
+  printf 'System rubric.' > "$sys_file"
+  printf 'Artifact body.' > "$artifact_file"
+
+  REVIEW_DRY_RUN=1 run_second_opinion --system-prompt-file "$sys_file" --prompt-file "$artifact_file"
+
+  [ "$SO_EXIT" -eq 0 ]
+  [[ "$SO_STDOUT" == *"UNIQUE_REAL_REVIEW_BODY_MARKER"* ]]
+  [[ "$SO_STDOUT" != *"<verdict>APPROVE</verdict>"* ]]
+}
+
+# =============================================================================
 # bash -n coverage note
 # =============================================================================
 # second-opinion.sh's syntax is already covered by plan-review.bats test 115

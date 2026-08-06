@@ -85,6 +85,7 @@ _fail() {
 SYS_PROMPT_FILES=()
 PROMPT_FILE_ARG=""
 SESSION_LABEL=""
+SESSION_LABEL_GIVEN=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -101,6 +102,7 @@ while [ $# -gt 0 ]; do
     --session)
       [ $# -ge 2 ] || _fail "--session requires a value"
       SESSION_LABEL="$2"
+      SESSION_LABEL_GIVEN=1
       shift 2
       ;;
     *)
@@ -108,6 +110,25 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+# --- Reject an explicitly-empty --session value. `--session ""` sets
+#     SESSION_LABEL to an empty string, which the later `[ -n "$SESSION_LABEL" ]`
+#     check cannot distinguish from "flag omitted" — it silently falls to the
+#     stateless single-round else-branch. A caller who passed --session
+#     believes it opened a session; it didn't. Fail loud instead of
+#     downgrading silently. ---
+if [ "$SESSION_LABEL_GIVEN" -eq 1 ] && [ -z "$SESSION_LABEL" ]; then
+  _fail "invalid --session label (must not be empty)"
+fi
+
+# --- Charset-validate a given --session label up front, before this driver
+#     consumes stdin for the artifact body (a rejected label should fail
+#     before stdin is read, not after). ---
+if [ -n "$SESSION_LABEL" ]; then
+  case "$SESSION_LABEL" in
+    *[!A-Za-z0-9._-]*) _fail "invalid --session label (allowed charset: [A-Za-z0-9._-]): $SESSION_LABEL" ;;
+  esac
+fi
 
 # --- Validate --system-prompt-file: required, repeatable, each must exist
 #     and be non-empty. Fail loud on any violation — no fallback rubric. ---
@@ -123,10 +144,15 @@ unset _f
 #     sentinel byte is appended before capture and stripped back off after —
 #     this preserves the exact byte sequence of the concatenated files
 #     (no separator is inserted between files; "concatenate in order" is
-#     read literally as back-to-back bytes). ---
+#     read literally as back-to-back bytes). Each file is piped through
+#     `tr -d '\r'` — same normalization plan-review.sh:493 applies to its own
+#     two prompt assets — so a CRLF-authored rubric file doesn't change the
+#     bytes actually sent to the engine (and therefore doesn't change the
+#     --session hash, which is derived from these assembled bytes) relative
+#     to an LF-only file with identical content. ---
 SYSTEM_INSTRUCTIONS=$(
   for _f in "${SYS_PROMPT_FILES[@]}"; do
-    cat "$_f"
+    tr -d '\r' < "$_f"
   done
   printf 'x'
 )
@@ -144,6 +170,12 @@ else
   ARTIFACT=$(cat; printf 'x')
   ARTIFACT="${ARTIFACT%x}"
 fi
+
+# --- Reject an empty artifact body. A `--prompt-file` pointing at a
+#     zero-byte file, or an empty stdin stream, would otherwise silently send
+#     the engine an empty artifact and still return "a review" — symmetric
+#     with the empty-system-prompt-file rejection above (line ~117). ---
+[ -n "$ARTIFACT" ] || _fail "artifact body is empty (--prompt-file or stdin)"
 
 # --- Bootstrap: source shared libs (same pattern as plan-review.sh, but
 #     fail-loud instead of fail-open — a driver invoked directly has no
@@ -205,11 +237,9 @@ COUNTER_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
 mkdir -p "$COUNTER_DIR"
 DEGRADE_FILE="$COUNTER_DIR/.gemini-degraded"
 
-# --- Session key derivation + CONV_FILE assignment ---
+# --- Session key derivation + CONV_FILE assignment. Charset already
+#     validated up-front (before stdin was consumed) — no re-check here. ---
 if [ -n "$SESSION_LABEL" ]; then
-  case "$SESSION_LABEL" in
-    *[!A-Za-z0-9._-]*) _fail "invalid --session label (allowed charset: [A-Za-z0-9._-]): $SESSION_LABEL" ;;
-  esac
   # Fold the ASSEMBLED system-prompt bytes into the hash input (not just the
   # label) — a newline separator keeps label/content from concatenating into
   # an ambiguous boundary. plan_hash() (lib/common.sh) is reused verbatim,
@@ -249,9 +279,26 @@ REQ_FILE=""
 
 # --- Call the engine state machine. No REVIEW_DRY_RUN synthetic-APPROVE
 #     branch here (this driver does not read that var at all — see header).
-#     No weak hooks defined (consult_on_round_end / consult_on_rest_prepare /
-#     consult_on_rest_success) — this driver has no HISTORY_FILE/round-memory
-#     concept, so `declare -F` inside consult.sh finds nothing and no-ops. ---
+#
+#     consult_on_round_end / consult_on_rest_prepare deliberately stay
+#     UNDEFINED: both exist (in plan-review.sh) only to drive
+#     inject_review_thread() against HISTORY_FILE, the orchestrator-owned
+#     cross-round memory this driver simply doesn't have — it relies solely
+#     on agy's own server-side --conversation session for continuity. With
+#     no HISTORY_FILE concept, `declare -F` inside consult.sh finds neither
+#     and no-ops, exactly as intended.
+#
+#     consult_on_rest_success IS defined, unlike the two above — it isn't
+#     about HISTORY_FILE at all. When the CLI path fails and REST produces a
+#     usable REVIEW, consult.sh calls this hook to invalidate CONV_FILE. The
+#     REST call never went through agy, so its output was never appended to
+#     any agy server-side session history; leaving a stale CONV_FILE behind
+#     would make the NEXT round's --conversation resume a session that is
+#     silently missing this round's finding, while the engine believes its
+#     own history is complete. Dropping CONV_FILE forces a clean first round
+#     next time instead of resuming a session with a gap in it.
+consult_on_rest_success() { rm -f "${CONV_FILE:-}"; }
+
 if ! run_consultation; then
   _fail "engine not found: $ENGINE_PROBE_REASON"
 fi

@@ -2965,7 +2965,53 @@ MOCK_INNER
   local prompt
   prompt=$(cat "${MOCK_BIN}/../.agy-prompt-agy")
   [[ "$prompt" == *"Consultation Context"* ]]
-  [[ "$prompt" == *"Plan to Review"* ]]
+  [[ "$prompt" == *"Artifact to Review"* ]]
+}
+
+# assembly: SYSTEM_INSTRUCTIONS internal ordering — review-plan.md's framing
+# layer must lead, review-common.md's shared discipline/format layer must
+# trail. Grepping for substring presence alone (as the other system-
+# instructions / quality-gate tests do) cannot catch an assembly-order
+# regression where plan-review.sh:493 accidentally swapped the two
+# `tr -d '\r' < ...` operands — both substrings would still be present, just
+# in the wrong order. This test captures the agy FIRST-round -p argument
+# (round 1 always sends the full AGY_PROMPT = SYSTEM_INSTRUCTIONS + '\n\n' +
+# PROMPT_FILE — see agy.sh's engine_invoke, CONV_ID empty branch), which is
+# the one point where the raw assembled SYSTEM_INSTRUCTIONS bytes are
+# observable end-to-end. Byte-position comparison (not a golden file) so the
+# test survives unrelated wording edits to either asset.
+@test "assembly: SYSTEM_INSTRUCTIONS orders review-plan.md ahead of review-common.md" {
+  cat > "${MOCK_BIN}/agy" <<'MOCK_INNER'
+#!/bin/bash
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-p" ]; then printf '%s' "$a" > "$(dirname "$0")/../.agy-prompt-agy"; fi
+  prev="$a"
+done
+printf '%s\n' "$*" > "$(dirname "$0")/../.agy-args-agy"
+printf '{"conversation_id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee","response":"<verdict>APPROVE</verdict>","usage":{}}\n'
+MOCK_INNER
+  chmod +x "${MOCK_BIN}/agy"
+  INPUT=$(build_input)
+  run_hook   # round 1 — first round, sends the full static+dynamic prompt
+  assert_ack_approve_json
+
+  local prompt_file="${MOCK_BIN}/../.agy-prompt-agy"
+  [ -s "$prompt_file" ]
+
+  local pos_criteria pos_ground_truth pos_scope pos_gate
+  pos_criteria=$(grep -boF 'Review Criteria' "$prompt_file" | head -1 | cut -d: -f1)
+  pos_ground_truth=$(grep -boF 'Version Identifiers Are Ground Truth' "$prompt_file" | head -1 | cut -d: -f1)
+  pos_scope=$(grep -boF '## Scope Boundary' "$prompt_file" | head -1 | cut -d: -f1)
+  pos_gate=$(grep -boF '## Finding Quality Gate' "$prompt_file" | head -1 | cut -d: -f1)
+
+  [ -n "$pos_criteria" ]
+  [ -n "$pos_ground_truth" ]
+  [ -n "$pos_scope" ]
+  [ -n "$pos_gate" ]
+
+  [ "$pos_criteria" -lt "$pos_ground_truth" ]
+  [ "$pos_scope" -lt "$pos_gate" ]
 }
 
 # conv: non-capacity CLI failure (exit≠0) → resume handle dropped

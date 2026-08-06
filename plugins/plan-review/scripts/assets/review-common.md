@@ -13,7 +13,7 @@ emit it as `[UNVERIFIED]` (never Critical), never as a confident correction.
 - Every issue MUST cite specific evidence from the artifact or its project context.
 
 ## Finding Quality Gate (pre-report self-check)
-False positives burn scarce negotiation rounds. Gate EVERY finding:
+False positives waste review budget. Gate EVERY finding:
 
 1. **Confidence** — Low confidence + Minor/Major → DROP silently. Low confidence +
    suspected Critical → keep as `[UNVERIFIED]`, downgrade to Major (→ CONCERNS, not REJECT).

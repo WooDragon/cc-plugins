@@ -98,14 +98,14 @@ engine_invoke() {
     # is bypassed), so it must not claim one may exist above.
     AGY_PROMPT="## Consultation Context
 This is round $((ROUND_INDEX + 1)) of adversarial review.
-The plan author may have revised or added rebuttals since the previous round.
-Evaluate the CURRENT plan on its merits — if prior concerns have been addressed, APPROVE.
+The author may have revised the artifact or added rebuttals since the previous round.
+Evaluate the CURRENT artifact on its merits — if prior concerns have been addressed, APPROVE.
 
 Delta review rules (this round builds on prior rounds — see your own session
 memory):
 ${DELTA_REVIEW_RULES}
 
-## Plan to Review
+## Artifact to Review
 ${ARTIFACT}"
   fi
 

@@ -324,12 +324,18 @@ adding a separate extraction mechanism — not currently in scope.
 
 ```bash
 SO=~/.claude/plugins/marketplaces/cc-plugins/plugins/plan-review/scripts/second-opinion.sh
-"$SO" --system-prompt-file <plugin>/scripts/assets/review-common.md \
-      --system-prompt-file <your-own-rubric>.md \
+"$SO" --system-prompt-file <your-own-rubric>.md \
+      --system-prompt-file <plugin>/scripts/assets/review-common.md \
       --session my-review-t7 <<'EOF'
 <artifact under review>
 EOF
 ```
+
+Order matters: your own rubric goes first, `review-common.md` goes last. The plugin's own
+`review-plan.md` follows the same rule (see [Review Criteria](#review-criteria) above) because it
+opens with framing language ("You are a senior software architect performing...") that must lead
+the assembled prompt; `review-common.md` is the shared review discipline and output-format layer,
+so it belongs at the end regardless of what precedes it.
 
 ## Fault Tolerance
 
