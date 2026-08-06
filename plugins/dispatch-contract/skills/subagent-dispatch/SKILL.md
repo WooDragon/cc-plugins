@@ -84,4 +84,4 @@ description: |
 
 team-ops 语境下派发由 team-ops 协议（handoff/control-signal）接管，不适用本 skill；web-search 的搜索隔离用 web-search skill 自己的规范。
 
-**即席派发经济性**：可另配 PreToolUse hook 拦截省略 `model` 的派发调用，逼显式指定档位；注册 agent（frontmatter 已钉 model）可豁免。紧急放行：`export ALLOW_AGENT_MODEL_INHERIT=1`。
+**即席派发经济性**：分两件事，别混同。model/agent 取值与任务能力是否匹配（该派 Explore 还是全权 agent、该用 sonnet 还是 haiku）已落地进本插件的 `hooks/dispatch-capability-guard.sh`（PreToolUse，判据 A/B/C），逃生舱 `ALLOW_DISPATCH_CAPABILITY_MISMATCH=1`。「`model` 字段在不在场」是另一件事——仍是插件外可选配置，可另配 PreToolUse hook 拦截省略 `model` 的派发调用逼显式指定档位；注册 agent（frontmatter 已钉 model）可豁免；紧急放行写在 `~/.claude/settings.json` 的 `env` 段设 `"ALLOW_AGENT_MODEL_INHERIT": "1"`（Bash 内 `export` 传不进 hook 进程）。

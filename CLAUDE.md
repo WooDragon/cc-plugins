@@ -13,7 +13,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 | Plugin | deep-research（1 skill + 4 agents + 1 hook） | 7-Stage 深度研究管线 + 多模型采集引擎 + 引用验证门禁 |
 | Plugin | guardrails（2 hooks） | 代码规模提示（信息性）+ git push 防手滑（拦截误推 main/master，非防绕过安全边界） |
 | Plugin | pr-review（1 skill + 2 scripts） | 已开 PR 的 AI 评审：grok 本地同步评审（默认，含多轮对抗复评的 session 状态管理）+ Copilot bot 异步评审（可选） |
-| Plugin | dispatch-contract（1 skill + 1 hook） | 子 agent 派发契约：四条派发铁律 + `%%DONE%%` 定稿门禁（SubagentStop） |
+| Plugin | dispatch-contract（1 skill + 4 hooks） | 子 agent 派发契约：四条派发铁律 + `%%DONE%%` 定稿门禁（SubagentStop）+ background-dispatch 同步守卫 + 派发能力匹配守卫（均 PreToolUse）+ 派发规则注入（SubagentStart） |
 
 ## 版本变更铁律
 
@@ -118,10 +118,13 @@ plugins/
       references/copilot-review.md # Copilot 后端三条路径（REST 首触 / GraphQL 重触 / 状态查询）
     tests/grok-review.bats       # 60 个测试用例（stub grok/gh/uuidgen，git 用真实临时仓库）
     README.md                    # 面向安装者说明
-  dispatch-contract/             # 子 agent 派发契约插件（1 skill + 1 hook）
-    .claude-plugin/plugin.json   # 插件元数据（声明 skill + SubagentStop hook）
-    hooks/hooks.json             # SubagentStop → subagent-done-gate.sh（%%DONE%% 定稿门禁，fail-open）
+  dispatch-contract/             # 子 agent 派发契约插件（1 skill + 4 hooks）
+    .claude-plugin/plugin.json   # 插件元数据（声明 skill + 4 个 hook）
+    hooks/hooks.json             # PreToolUse(Agent,Task) → dispatch-sync-guard.sh + dispatch-capability-guard.sh；SubagentStart → dispatch-rules-inject.sh；SubagentStop → subagent-done-gate.sh（均 fail-open）
     hooks/subagent-done-gate.sh  # 门禁脚本：末行精确匹配 %%DONE%%，不匹配则 deny 并回灌纠正指令
+    hooks/dispatch-sync-guard.sh # PreToolUse 门禁：拦截省略 run_in_background:false 的派发调用
+    hooks/dispatch-rules-inject.sh # SubagentStart 门禁：向每个 spawn 的 subagent 注入派发三铁律
+    hooks/dispatch-capability-guard.sh # PreToolUse 门禁：拦截 subagent_type/model 与任务能力需求不匹配的派发（判据 A/B/C）
     skills/subagent-dispatch/
       SKILL.md                   # 四铁律速查 + %%DONE%% 契约 + 己方端 / 派发端补充纪律
       references/dispatch-contract.md   # 四铁律正反例、persona 规避发作区/安全区展开
@@ -130,6 +133,8 @@ plugins/
       references/workflow-schema.md     # Workflow agent() 强结构化产物 + JSON schema 用法
     tests/
       subagent-done-gate.bats    # 26 个测试用例（门禁行为全覆盖）
+      dispatch-sync-guard.bats   # 同步守卫 + 规则注入器测试
+      dispatch-capability-guard.bats # 40 个测试用例（判据 A/B/C + fail-open + 逃生舱）
       test_helper/
         common-setup.bash        # 测试基础设施
 ```
@@ -144,7 +149,7 @@ plugins/
 | doc-gate | `SKILL_GATE_*`、`RECALL_GATE_*` | [plugins/doc-gate/README.md](plugins/doc-gate/README.md#environment-variables) |
 | deep-research | `GATEWAY_API_KEY`、`TAVILY_API_KEY`、`JINA_API_KEY`（可选凭证） | [plugins/deep-research/README.md](plugins/deep-research/README.md#prerequisites) |
 | pr-review | `GROK_MODEL`、`GROK_EFFORT`、`XDG_STATE_HOME`（session 落盘根） | [plugins/pr-review/README.md](plugins/pr-review/README.md#prerequisites) |
-| dispatch-contract | `ALLOW_UNMARKED_FINAL`（`%%DONE%%` 门禁逃生舱） | [plugins/dispatch-contract/README.md](plugins/dispatch-contract/README.md#environment-variables) |
+| dispatch-contract | `ALLOW_UNMARKED_FINAL`、`ALLOW_BACKGROUND_DISPATCH`、`ALLOW_NO_RULES_INJECT`、`CLAUDE_CODE_FORK_SUBAGENT`、`ALLOW_DISPATCH_CAPABILITY_MISMATCH` | [plugins/dispatch-contract/README.md](plugins/dispatch-contract/README.md#environment-variables) |
 
 敏感变量（如 `REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
 
