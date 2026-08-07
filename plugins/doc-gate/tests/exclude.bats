@@ -59,6 +59,31 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "excluded: .agents/intel/5-intel.md (team-ops runtime artifact, #176)" {
+  run doc_gate_is_excluded_path "/project/.agents/intel/5-intel.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "excluded: .agents/handoffs/x-dev-report.md (team-ops runtime artifact, #176)" {
+  run doc_gate_is_excluded_path "/project/.agents/handoffs/x-dev-report.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "excluded: .agents/tasks/t-1.md (team-ops runtime artifact, #176)" {
+  run doc_gate_is_excluded_path "/project/.agents/tasks/t-1.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "excluded: .agents/directives/sprint-x.md (regression, original exemption retained)" {
+  run doc_gate_is_excluded_path "/project/.agents/directives/sprint-x.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "excluded: relative .agents/intel/a.md" {
+  run doc_gate_is_excluded_path ".agents/intel/a.md"
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # NOT excluded (return 1)
 # ============================================================
@@ -70,5 +95,15 @@ setup() {
 
 @test "not excluded: CLAUDE.md" {
   run doc_gate_is_excluded_path "/project/CLAUDE.md"
+  [ "$status" -eq 1 ]
+}
+
+@test "not excluded: docs/foo.md (no dot-prefix, gate must not be pierced)" {
+  run doc_gate_is_excluded_path "/project/docs/foo.md"
+  [ "$status" -eq 1 ]
+}
+
+@test "not excluded: agents/foo.md (no dot-prefix, distinct from .agents)" {
+  run doc_gate_is_excluded_path "/project/agents/foo.md"
   [ "$status" -eq 1 ]
 }

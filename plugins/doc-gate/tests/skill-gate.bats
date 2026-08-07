@@ -139,6 +139,18 @@ teardown() {
   assert_allowed
 }
 
+@test "path exclude: .agents/intel/5-intel.md → silent allow (team-ops runtime artifact, #176)" {
+  INPUT=$(build_edit_input file_path=/project/.agents/intel/5-intel.md)
+  run_gate
+  assert_allowed
+}
+
+@test "path exclude: .agents/handoffs/x-dev-report.md → silent allow (team-ops runtime artifact, #176)" {
+  INPUT=$(build_edit_input file_path=/project/.agents/handoffs/x-dev-report.md)
+  run_gate
+  assert_allowed
+}
+
 @test "path exclude: relative path .claude/plans/x.md → silent allow" {
   INPUT=$(build_edit_input file_path=.claude/plans/x.md)
   run_gate

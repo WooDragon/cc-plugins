@@ -70,11 +70,13 @@ Both gates skip files that shouldn't be governed:
 | Category | Examples |
 |----------|---------|
 | **Basename** | `MEMORY.md`, `SKILL.md`, `CHANGELOG.md`, `LICENSE.md` (case-insensitive) |
-| **Path** | `.claude/*`, `.claude-plugin/*`, `.agents/directives/*`, `node_modules/*`, `.git/*`, `logs/*`, `pipeline/*`, `intake/*`, `deliverables/*` |
+| **Path** | `.claude/*`, `.claude-plugin/*`, `.agents/*`, `node_modules/*`, `.git/*`, `logs/*`, `pipeline/*`, `intake/*`, `deliverables/*` |
 | **Temp dirs** | `/tmp/*`, `/var/tmp/*`, `/var/folders/*`, `/private/tmp/*` |
 | **Non-.md** | Any file not ending in `.md` (case-insensitive) |
 
 `pipeline/*` covers deep-research's machine-generated intermediate artifacts (e.g. `pipeline/verification/*.json`-adjacent notes) — the doc-maintenance workflow doesn't apply to them. `intake/*` covers deep-research's G0 requirement-gate products (e.g. `intake/requirements/research-goal.md`), which the Lead generates semi-automatically before doc-maintenance is relevant.
+
+`.agents/*` covers the whole team-ops runtime workspace, not just `.agents/directives/*` as an earlier version scoped it (#176). `directives/`, `intel/`, `handoffs/`, and `tasks/` are all protocol intermediate artifacts consumed by protocol machinery, not human readers, and downstream `.gitignore` setups already ignore the directory as a whole. The narrower scoping used to deny non-directives roles (e.g. `intel`) that have no `Skill` tool and thus no way to self-invoke doc-maintenance to unlock — and because teammates share `session_id` with the main session while the marker is keyed by `session_id`, the failure showed up intermittently rather than consistently.
 
 As of **v1.6.0**, `*/deliverables/*` is also excluded from the gate. It used to stay governed, but that conflicted structurally with ADR-010 (main-session cost remediation): deliverables writes always go through a subagent, and the gate marker is keyed by `session_id` — since each subagent gets its own session id, no legitimate pass-through path exists, and the gate measured a 100% bypass rate on deliverables edits in practice. deliverables content is governed by its own quality system instead (G1–G3 sufficiency gates + Stage 6 validation review), so excluding it removes pure friction without losing coverage.
 
@@ -164,10 +166,10 @@ python3 -m unittest tests/test_recall_gate.py -v
 
 | Suite | Tests | Coverage |
 |-------|-------|----------|
-| `skill-gate.bats` | 57 | Filters, exclusions, gate enforcement, fail-open, CLAUDE.md governance, stale cleanup, e2e |
+| `skill-gate.bats` | 64 | Filters, exclusions, gate enforcement, fail-open, CLAUDE.md governance, stale cleanup, e2e |
 | `skill-marker.bats` | 13 | Tracked/untracked skills, marker creation, namespacing, kill switch |
 | `recall-gate.bats` | 37 | Filters, kill switch, fail-open, markers, double-deny, BM25 integration, orphan, broken outlinks, monorepo root detection, e2e |
-| `exclude.bats` | 12 | Shared `_doc_gate_exclude.sh` predicate — pipeline/intake/logs/tmp/git/node_modules/deliverables (incl. relative & nested paths) excluded, docs/CLAUDE.md governed |
+| `exclude.bats` | 19 | Shared `_doc_gate_exclude.sh` predicate — pipeline/intake/logs/tmp/git/node_modules/deliverables/`.agents/*` (incl. relative & nested paths) excluded, docs/CLAUDE.md/no-dot-prefix paths governed |
 | `test_recall_gate.py` | 67 | Tokenization, BM25 scoring, link extraction/resolution, corpus building, orphan/broken checks, cmd_gate output, detect_root |
 | `test_exclude.py` | 1 | `build_corpus_and_graph` excludes `pipeline/`, includes `deliverables/` and `docs/` |
 
@@ -175,6 +177,7 @@ python3 -m unittest tests/test_recall_gate.py -v
 
 See [GitHub Issues](https://github.com/WooDragon/cc-plugins/issues) for detailed change logs:
 
+- **v1.7.2** — `.agents/*` exclusion widened from `.agents/directives/*` — the narrower scope denied other team-ops runtime artifacts (`intel/`, `handoffs/`, `tasks/`), and non-`Skill`-equipped roles like `intel` had no way to self-unlock (#176)
 - **v1.7.1** — Removed the writing-standards item digest from both delivery points (SKILL.md §2 table and the `skill-gate.sh` deny message): a readable digest created false satiety, so the model skipped `references/writing-standards.md` and self-checked against rules it never read. Both now carry an unconditional imperative plus the authoritative path only; §5.1/§5.2 checklist pointers go straight to the reference instead of hopping through §2 (#139)
 - **v1.7.0** — Writing-standards reference added (`references/writing-standards.md`): an ambiguity layer (§A, STE-inspired hard constraints) and a typography layer (§B, mechanical/tool-deferrable); SKILL.md §5.1/§5.2 checklists gained corresponding checks; `skill-gate.sh` deny messages now inject a condensed summary with an absolute path to the full reference (#136)
 - **v1.6.0** — `*/deliverables/*` excluded from the gate (ADR-010 conflict: no legitimate pass-through path under subagent-scoped markers, 100% observed bypass); gate exclusion list intentionally diverges from the recall-gate corpus's `EXCLUDED_DIRS`, which still indexes deliverables (#124)
