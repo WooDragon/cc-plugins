@@ -15,8 +15,13 @@ doc_gate_is_excluded_path() {
   # deliverables: 与 ADR-010（主 session 成本根治）结构性冲突而排除——
   # deliverables 写入必走 subagent、marker 按 session_id 落盘，合法过门路径不存在，
   # 实测 100% 旁路率；且有自己的质量体系（G1-G3 + Stage 6），管辖对象与本 gate 不同。
+  # .agents: team-ops 运行时工作区整体排除，不止 directives——handoffs/intel/tasks
+  # 同属协议中间产物，消费者是协议机器而非人类读者，使用侧 .gitignore 也按整目录
+  # 忽略。曾只排除 directives，intel 等角色 tools 不含 Skill、无法自行调
+  # doc-maintenance 解锁而被拦死无法自救；且 teammate 与主 session 共享 session_id
+  # 而 marker 按 session_id 落盘，故障呈间歇性（#176）。
   case "/$fp" in
-    */.claude/*|*/.claude-plugin/*|*/.agents/directives/*|*/node_modules/*|*/.git/*|*/logs/*|*/pipeline/*|*/intake/*|*/deliverables/*) return 0 ;;
+    */.claude/*|*/.claude-plugin/*|*/.agents/*|*/node_modules/*|*/.git/*|*/logs/*|*/pipeline/*|*/intake/*|*/deliverables/*) return 0 ;;
   esac
   # 临时目录排除（绝对路径直配）
   case "$fp" in
