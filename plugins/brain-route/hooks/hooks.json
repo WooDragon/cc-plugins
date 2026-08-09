@@ -1,0 +1,17 @@
+{
+  "description": "Brain routing advisory — soft reminder to consider second-brain for cross-project memory writes",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/brain-route-gate.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

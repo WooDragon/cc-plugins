@@ -92,6 +92,17 @@
       "source": "./plugins/dispatch-contract",
       "category": "development",
       "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "brain-route",
+      "description": "Routing reminder — soft advisory that prompts consideration of second-brain (cross-project) vs local memory (project-local) when writing project memory .md files",
+      "version": "1.0.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/brain-route",
+      "category": "development",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
     }
   ]
 }
