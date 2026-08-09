@@ -24,11 +24,11 @@ PreToolUse:Write|Edit
 
 ### Path Filter
 
-Only fires on paths matching `*/memory/*.md`, excluding `MEMORY.md` (index file, not a memory entry).
+Only fires on paths matching `*/memory/*.md`, excluding `memory.md` (index file, not a memory entry). Both the path glob and the basename exclusion are case-insensitive (macOS/APFS is case-insensitive by default, so `MEMORY.md` / `Memory.md` / `memory.md` are the same file).
 
 ### Content Judge
 
-Scores content against a fixed signal-word list (`worktree`, `hook`, `门禁`, `printf`, `subagent`, `commit`, `fail-open`, `逃生舱`, `夹具`, `假绿`, `payload`, `timeout`, `并行`, `git`, `bats`, `pathspec`, `index`). Fires only when the count of distinct matched words reaches `BRAIN_ROUTE_MIN_HITS` (default 2). This is intentionally conservative — a missed reminder costs nothing, a spurious deny costs a retry.
+Scores content against a fixed signal-word list (`worktree`, `门禁`, `printf`, `subagent`, `fail-open`, `逃生舱`, `夹具`, `假绿`, `payload`, `并行`, `bats`, `pathspec`). Fires only when the count of distinct matched words reaches `BRAIN_ROUTE_MIN_HITS` (default 2). ASCII/hyphenated words are matched with a word boundary (not a bare substring), so e.g. `fail-open` won't fire inside an unrelated longer token; CJK words are matched by substring since CJK text has no whitespace word boundaries. Generic single-word ASCII tech vocabulary (`git`, `index`, `commit`, `timeout`, `hook`) is intentionally excluded from the list — those words show up constantly in ordinary project-local notes with no discriminative power on their own. This is intentionally conservative — a missed reminder costs nothing, a spurious deny costs a retry.
 
 ### Marker Protocol
 
@@ -57,7 +57,9 @@ bats plugins/brain-route/tests/
 
 | Suite | Tests | Coverage |
 |-------|-------|----------|
-| `brain-route-gate.bats` | 11 | Path filter, MEMORY.md exclusion, content threshold, per-file marker, kill switch, jq-missing fail-open, malformed stdin fail-open, Edit tool field, missing session_id |
+| `brain-route-gate.bats` | see `grep -c '@test' tests/brain-route-gate.bats` | Path filter, memory.md exclusion (case-insensitive), content threshold, signal-word false-positive/true-positive cases, per-file marker, kill switch, jq-missing fail-open, malformed stdin fail-open, Edit tool field, missing session_id |
+
+Note: the explicit `command -v jq` check in Phase 2 is a redundant safety net — the script's outer catch-all (`_main 2>/dev/null || true`) already fail-opens on a missing jq, so no output-based assertion can distinguish the explicit check being present from it being absent.
 
 ## Version History
 

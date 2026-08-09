@@ -25,6 +25,18 @@ teardown() {
   assert_allowed
 }
 
+@test "memory path but memory.md (lowercase) → allow (case-insensitive basename)" {
+  INPUT=$(build_write_input file_path=/project/projects/x/memory/memory.md content="worktree 门禁 fail-open") \
+    run_gate
+  assert_allowed
+}
+
+@test "memory path but Memory.md (mixed case) → allow (case-insensitive basename)" {
+  INPUT=$(build_write_input file_path=/project/projects/x/memory/Memory.md content="worktree 门禁 fail-open") \
+    run_gate
+  assert_allowed
+}
+
 # --- Content threshold ---
 
 @test "memory path + content signal words below threshold → allow" {
@@ -44,6 +56,46 @@ teardown() {
 @test "BRAIN_ROUTE_MIN_HITS is configurable: lowering threshold to 1 turns a single-signal-word write into deny" {
   INPUT=$(build_write_input file_path=/project/projects/x/memory/lesson.md content="just a note about worktree setup") \
     BRAIN_ROUTE_MIN_HITS=1 run_gate
+  assert_deny_json
+}
+
+# --- Word-boundary false positives (generic ASCII words dropped from signal list) ---
+
+@test "false positive guard: 'digital github commitment' (git/commit substrings) → allow" {
+  INPUT=$(build_write_input file_path=/project/projects/x/memory/lesson.md content="digital github commitment 的产品规划文档") \
+    run_gate
+  assert_allowed
+}
+
+@test "false positive guard: 'timeout 30s, index built on user_id' → allow" {
+  INPUT=$(build_write_input file_path=/project/projects/x/memory/lesson.md content="这个 API 的 timeout 设成 30s，index 建在 user_id 上") \
+    run_gate
+  assert_allowed
+}
+
+@test "false positive guard: 'git branch/commit naming convention note' → allow" {
+  INPUT=$(build_write_input file_path=/project/projects/x/memory/lesson.md content="git 分支命名约定：feature/xxx，commit 用中文") \
+    run_gate
+  assert_allowed
+}
+
+# --- Genuine cross-project lessons still deny after signal-word list narrowing ---
+
+@test "genuine lesson: worktree stale main branch causes fake green → deny" {
+  INPUT=$(build_write_input file_path=/project/projects/x/memory/lesson.md content="worktree 里跑测试打到主仓旧码，全绿是假绿") \
+    run_gate
+  assert_deny_json
+}
+
+@test "genuine lesson: printf eats percent sign in gate fixtures → deny" {
+  INPUT=$(build_write_input file_path=/project/projects/x/memory/lesson.md content="造门禁夹具时 printf 会吃掉百分号，须用 heredoc") \
+    run_gate
+  assert_deny_json
+}
+
+@test "genuine lesson: parallel subagents share .git state, commit dangles → deny" {
+  INPUT=$(build_write_input file_path=/project/projects/x/memory/lesson.md content="并行派 subagent 时 .git 是共享状态，commit 会悬空") \
+    run_gate
   assert_deny_json
 }
 
@@ -83,13 +135,34 @@ teardown() {
 
 # --- Dependency check ---
 
+# NOTE (mutation-testing scope, verified by hand): this test asserts an
+# observable behavior — jq missing → silent allow, exit 0, empty stdout.
+# It does NOT prove that Phase 2's explicit `command -v jq` check exists.
+# Mutation test performed: deleting that check line and re-running with jq
+# absent from PATH produces the *same* observable outcome (silent allow),
+# because the script's outermost guard — `_main 2>/dev/null || true` — also
+# swallows the failure that a missing jq would otherwise cause downstream.
+# So the explicit jq check is not distinguishable from its absence by any
+# assertion on this script's output: it is redundant given the outer
+# fail-open, a consequence of the two-layer fail-open design, not a test
+# gap. This test still has value — it locks in the correct *behavior* — but
+# it cannot be read as coverage of the explicit check itself.
 @test "fail-open: jq missing → silent allow" {
   local mock_bin="${TEST_TEMP_DIR}/nojq"
   mkdir -p "$mock_bin"
   # Real jq lives at /usr/bin/jq on macOS, so a mock-first PATH alone doesn't
-  # remove it — isolate PATH to only the mock dir (plus a minimal shell/coreutils
-  # dir) to truly simulate absence.
-  ln -sf /bin/bash "$mock_bin/bash"
+  # remove it — isolate PATH to only the mock dir. Every binary the script
+  # touches BEFORE the jq check (Phase 2: cat via `$(cat)`, plus bash itself)
+  # must still be reachable, or the script fails earlier than the jq check
+  # and the test would pass for the wrong reason (i.e. it would look like a
+  # jq-missing test while actually just testing an almost-empty PATH). jq
+  # itself is deliberately NOT symlinked here — that absence is what this
+  # test asserts on.
+  for bin in bash cat; do
+    local real_bin
+    real_bin=$(command -v "$bin")
+    ln -sf "$real_bin" "$mock_bin/$bin"
+  done
   local raw_input='{"tool_name":"Write","session_id":"test-session","tool_input":{"file_path":"/project/projects/x/memory/lesson.md","content":"worktree hook fail-open"}}'
   HOOK_STDOUT="" HOOK_STDERR="" HOOK_EXIT=0
   local stderr_file

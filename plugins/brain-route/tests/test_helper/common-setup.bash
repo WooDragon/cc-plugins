@@ -78,17 +78,6 @@ build_edit_input() {
     }'
 }
 
-# --- Marker Helpers ---
-
-# create_route_marker [file_path] [session_id]
-create_route_marker() {
-  local file_path="${1:-/project/projects/x/memory/lesson.md}"
-  local session="${2:-test-session}"
-  local hash
-  hash=$(printf '%s' "$file_path" | shasum -a 256 | cut -c1-16)
-  printf '%s' "$(date +%s)" > "$BRAIN_ROUTE_GATE_DIR/.brain-route-${session}-${hash}"
-}
-
 # --- Run Helpers ---
 
 # run_gate
