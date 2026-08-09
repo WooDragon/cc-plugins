@@ -14,6 +14,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 | Plugin | guardrails（2 hooks） | 代码规模提示（信息性）+ git push 防手滑（拦截误推 main/master，非防绕过安全边界） |
 | Plugin | pr-review（1 skill + 2 scripts） | 已开 PR 的 AI 评审：grok 本地同步评审（默认，含多轮对抗复评的 session 状态管理）+ Copilot bot 异步评审（可选） |
 | Plugin | dispatch-contract（1 skill + 5 hooks） | 子 agent 派发契约：四条派发铁律 + `%%DONE%%` 定稿门禁（SubagentStop）+ background-dispatch 同步守卫 + 派发能力匹配守卫 + 派发通道守卫（均 PreToolUse）+ 派发规则注入（SubagentStart） |
+| Plugin | brain-route（2 skills + 1 hook） | second-brain 跨项目记忆路由：`brain-recall` 召回与写入规约 + `brain-curate` 复核去重流程 + 本地 memory 写入时的路由提醒 hook |
 
 ## 版本变更铁律
 
@@ -141,6 +142,19 @@ plugins/
       gate-composition.bats      # 门禁组合测试：从 hooks.json 动态发现同 matcher 下全部门禁并逐一验证
       test_helper/
         common-setup.bash        # 测试基础设施
+  brain-route/                   # second-brain 跨项目记忆路由插件（2 skills + 1 hook）
+    .claude-plugin/plugin.json   # 插件元数据（声明 2 个 skill + 1 个 hook）
+    hooks/hooks.json             # 本地 memory 写入时的路由提醒 hook 声明
+    scripts/
+      brain-route-gate.sh        # 路由提醒脚本：本地 MEMORY.md 写入时提示跨项目教训应走 second-brain
+    skills/
+      brain-recall/SKILL.md      # 召回规约：查询构造、结果解读、写入去重、边界
+      brain-curate/SKILL.md      # 复核规约：两层触发时机、去重/陈旧清单、合并决策
+    tests/
+      brain-route-gate.bats      # 路由提醒 hook 测试
+      skills-packaging.bats      # skill 打包与内容断言（含 fail-loud 机制锁定）
+      test_helper/
+        common-setup.bash        # 测试基础设施
 ```
 
 ## 环境变量
@@ -154,6 +168,7 @@ plugins/
 | deep-research | `GATEWAY_API_KEY`、`TAVILY_API_KEY`、`JINA_API_KEY`（可选凭证） | [plugins/deep-research/README.md](plugins/deep-research/README.md#prerequisites) |
 | pr-review | `GROK_MODEL`、`GROK_EFFORT`、`XDG_STATE_HOME`（session 落盘根） | [plugins/pr-review/README.md](plugins/pr-review/README.md#prerequisites) |
 | dispatch-contract | `ALLOW_UNMARKED_FINAL`、`ALLOW_BACKGROUND_DISPATCH`、`ALLOW_NO_RULES_INJECT`、`CLAUDE_CODE_FORK_SUBAGENT`、`ALLOW_DISPATCH_CAPABILITY_MISMATCH`、`ALLOW_UNMANAGED_TEAMMATE`、`CLAUDE_AUTO_BACKGROUND_TASKS` | [plugins/dispatch-contract/README.md](plugins/dispatch-contract/README.md#environment-variables) |
+| brain-route | `BRAIN_ROUTE_*`、`SECOND_BRAIN_URL`、`SECOND_BRAIN_TOKEN` | [plugins/brain-route/README.md](plugins/brain-route/README.md#environment-variables) |
 
 敏感变量（如 `REVIEW_API_KEY`）配置在 `~/.claude/settings.json` 的 `"env"` 字段中。Claude Code 启动时自动注入到所有 hook 进程环境，无需污染 shell profile。`~/.claude/settings.local.json` 不是合法的用户级配置路径，env 字段在此处不生效。
 

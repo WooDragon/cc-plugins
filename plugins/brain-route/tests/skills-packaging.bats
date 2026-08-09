@@ -50,6 +50,32 @@ GATE_SCRIPT="${PLUGIN_DIR}/scripts/brain-route-gate.sh"
   grep -q 'SECOND_BRAIN_URL' "$CURATE_SKILL_MD"
 }
 
+# --- 3b. Endpoint and token are fail-loud, not just env-derived (core: PR #179 review) ---
+#
+# Assertion 3 above only checks the bare string "SECOND_BRAIN_URL" appears
+# somewhere in the file — a plain unguarded "$SECOND_BRAIN_URL" satisfies it
+# just as well as "${SECOND_BRAIN_URL:?...}". That was the actual defect
+# under review: TOKEN silently sent an unauthenticated-looking request
+# instead of erroring out when unset. These assertions pin the fail-loud
+# `${VAR:?...}` form specifically, so reverting to a bare variable turns
+# these red even though assertion 3 would stay green.
+
+@test "brain-recall SKILL.md uses fail-loud \${SECOND_BRAIN_URL:?...} form" {
+  grep -qE '\$\{SECOND_BRAIN_URL:\?' "$RECALL_SKILL_MD"
+}
+
+@test "brain-curate SKILL.md uses fail-loud \${SECOND_BRAIN_URL:?...} form" {
+  grep -qE '\$\{SECOND_BRAIN_URL:\?' "$CURATE_SKILL_MD"
+}
+
+@test "brain-recall SKILL.md uses fail-loud \${SECOND_BRAIN_TOKEN:?...} form" {
+  grep -qE '\$\{SECOND_BRAIN_TOKEN:\?' "$RECALL_SKILL_MD"
+}
+
+@test "brain-curate SKILL.md uses fail-loud \${SECOND_BRAIN_TOKEN:?...} form" {
+  grep -qE '\$\{SECOND_BRAIN_TOKEN:\?' "$CURATE_SKILL_MD"
+}
+
 # --- 4. Deny text's referenced skill resolves inside this plugin (core: issue #248) ---
 
 @test "every skill name referenced by gate deny text resolves in plugin.json AND has an on-disk SKILL.md" {

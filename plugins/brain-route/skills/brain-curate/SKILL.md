@@ -41,7 +41,7 @@ REST base 由 `SECOND_BRAIN_URL` 指定，鉴权 `Authorization: Bearer $SECOND_
 
 ```bash
 curl -sS -m 30 -A "curl/8.7.1" \
-  -H "Authorization: Bearer $SECOND_BRAIN_TOKEN" \
+  -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
   -G "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/list" \
   --data-urlencode "n=100" \
   --data-urlencode "tag=duplicate-candidate"
@@ -51,7 +51,7 @@ curl -sS -m 30 -A "curl/8.7.1" \
 
 ```bash
 curl -sS -m 30 -A "curl/8.7.1" \
-  -H "Authorization: Bearer $SECOND_BRAIN_TOKEN" \
+  -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
   -G "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/list" \
   --data-urlencode "n=100" \
   --data-urlencode "tag=stale:as-of"
@@ -60,13 +60,16 @@ curl -sS -m 30 -A "curl/8.7.1" \
 **全量含统计**（PR 归并前兜底用，一次调用拿到 `recall_count` / `importance_score`）：
 
 ```bash
+BRAIN_EXPORT=$(mktemp -t brain_export)
 curl -sS -m 30 -A "curl/8.7.1" \
-  -H "Authorization: Bearer $SECOND_BRAIN_TOKEN" \
-  "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/export" > /tmp/brain_export.json
+  -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
+  "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/export" > "$BRAIN_EXPORT"
 
 jq '[.[] | select(.recall_count == 0)] | .[] | select(
   (now - (.created_at | fromdateiso8601)) > (60*86400)
-)' /tmp/brain_export.json
+)' "$BRAIN_EXPORT"
+
+rm -f "$BRAIN_EXPORT"
 ```
 
 筛出 `recall_count == 0` 且 `created_at` 超 60 天的条目——这些是写进去后从未被任何查询命中的沉底条目，是盲区，只能靠这条命令找到。
@@ -84,14 +87,14 @@ jq '[.[] | select(.recall_count == 0)] | .[] | select(
    ```bash
    # 整段替换成合并后内容
    curl -sS -m 30 -A "curl/8.7.1" \
-     -H "Authorization: Bearer $SECOND_BRAIN_TOKEN" \
+     -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
      -H "Content-Type: application/json" \
      -d '{"id":"<保留条目id>", "content":"<合并后完整内容>", "tags":["..."]}' \
      "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/update"
 
    # 删除被合并掉的那条
    curl -sS -m 30 -A "curl/8.7.1" \
-     -H "Authorization: Bearer $SECOND_BRAIN_TOKEN" \
+     -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
      -H "Content-Type: application/json" \
      -d '{"id":"<被合并条目id>"}' \
      "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/forget"

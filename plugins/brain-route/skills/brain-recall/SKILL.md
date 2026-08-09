@@ -62,7 +62,7 @@ description: |
 ```bash
 curl -sS -m 30 \
   -A "curl/8.7.1" \
-  -H "Authorization: Bearer $SECOND_BRAIN_TOKEN" \
+  -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
   --data-urlencode "query=<把 100-200 字处境摘要原样放这里>" \
   --data-urlencode "topK=5" \
   -G "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/recall"
@@ -70,7 +70,7 @@ curl -sS -m 30 \
 
 **必须带 UA 头** `-H "User-Agent: curl/8.7.1"`（等价于上面的 `-A`）。Cloudflare 对默认 UA（如 curl 不带 `-A` 时的默认串，或空 UA）返回 403 + `error code: 1010`，症状与 token 失效同形——排障时先查这个,再怀疑 token。
 
-也可走 MCP endpoint `${SECOND_BRAIN_URL}/mcp` 的 `recall` 工具，效果等价于上面的 REST 调用。
+也可走 MCP endpoint `${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/mcp` 的 `recall` 工具，效果等价于上面的 REST 调用。
 
 **延迟预期**：recall 实测 5.7-11s，不是即时返回，规划 Task timeout 时留够。
 
@@ -99,7 +99,7 @@ brain 挂了或超时就照常干活,不阻塞主任务——它是补充层不�
 ```bash
 curl -sS -m 30 \
   -A "curl/8.7.1" \
-  -H "Authorization: Bearer $SECOND_BRAIN_TOKEN" \
+  -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
   -H "Content-Type: application/json" \
   -d '{"content":"...", "tags":["..."], "volatility":"durable", "source":"claude"}' \
   "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/capture"

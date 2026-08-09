@@ -84,7 +84,7 @@ Two different consumers read environment variables in this plugin: the hook read
 
 Both variables must be set in the `env` section of `~/.claude/settings.json`. A Bash `export` does not propagate into the hook process or into new sessions, and `~/.claude/settings.local.json` is not a valid location for user-level `env` configuration.
 
-If either variable is unset, the skill's reference text still reads normally — it is a protocol document, not a live call. The `curl` commands inside the skills use `${SECOND_BRAIN_URL:?...}`, so an unset variable makes the command fail with the variable name in the error message rather than silently sending the request to the wrong endpoint.
+If either variable is unset, the skill's reference text still reads normally — it is a protocol document, not a live call. The `curl` commands inside the skills use `${SECOND_BRAIN_URL:?...}` and `${SECOND_BRAIN_TOKEN:?...}`, so an unset variable makes the command fail with the variable name in the error message rather than silently sending the request to the wrong endpoint. `SECOND_BRAIN_URL` must not have a trailing slash — a trailing slash produces a double slash (e.g. `//recall`) when the skills append the path suffix.
 
 ## Skills
 
