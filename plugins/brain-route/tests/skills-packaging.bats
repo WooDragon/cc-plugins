@@ -16,6 +16,21 @@ PLUGIN_JSON="${PLUGIN_DIR}/.claude-plugin/plugin.json"
 MARKETPLACE_JSON="${REPO_ROOT}/.claude-plugin/marketplace.json"
 GATE_SCRIPT="${PLUGIN_DIR}/scripts/brain-route-gate.sh"
 
+# Extract lines inside ```bash ... ``` fences, prefixed with their 1-based
+# line number as "NR:content". Matching is anchored on the fence token
+# itself (with optional leading whitespace), not on column 0 — this is
+# required to cover brain-curate's "合并决策规约" fences, which sit inside a
+# numbered list and are indented 3 spaces. A column-0-anchored matcher
+# silently skips those blocks (verified: only counts 3 of the file's 5
+# Authorization headers).
+_fenced_bash_lines() {
+  awk '
+    /^[[:space:]]*```bash[[:space:]]*$/ { infence=1; next }
+    /^[[:space:]]*```[[:space:]]*$/ { if (infence) { infence=0; next } }
+    infence { print NR":"$0 }
+  ' "$1"
+}
+
 # --- 1. Both skill files exist and are non-empty ---
 
 @test "brain-recall SKILL.md exists and is non-empty" {
@@ -74,6 +89,105 @@ GATE_SCRIPT="${PLUGIN_DIR}/scripts/brain-route-gate.sh"
 
 @test "brain-curate SKILL.md uses fail-loud \${SECOND_BRAIN_TOKEN:?...} form" {
   grep -qE '\$\{SECOND_BRAIN_TOKEN:\?' "$CURATE_SKILL_MD"
+}
+
+# --- 3c. Universality: EVERY bash-fenced auth header / URL ref is fail-loud ---
+#
+# The 3b assertions above are existence checks — one compliant occurrence
+# anywhere in the file satisfies them even if four other occurrences in the
+# same file regressed to a bare variable. That's the realistic regression
+# shape (partial revert on a multi-occurrence file), and it's more dangerous
+# than a full revert because a full revert would still be caught by 3b.
+# These assertions require every fenced-code occurrence to be fail-loud, not
+# just one. Prose occurrences outside fences (e.g. the explanatory sentences
+# at brain-recall:30 and brain-curate:24) are deliberately excluded — they
+# describe the mechanism in running text and are not runtime code.
+
+@test "brain-recall SKILL.md: every fenced Authorization header is fail-loud" {
+  local bad
+  bad=$(_fenced_bash_lines "$RECALL_SKILL_MD" | grep 'Authorization: Bearer' | grep -vE '\$\{SECOND_BRAIN_TOKEN:\?' || true)
+  if [ -n "$bad" ]; then
+    echo "Non-fail-loud Authorization header(s) in fenced bash code:"
+    echo "$bad"
+    return 1
+  fi
+  # Sanity: must have found at least one Authorization header to guard
+  # against a broken fence parser vacuously passing on an empty set.
+  local total
+  total=$(_fenced_bash_lines "$RECALL_SKILL_MD" | grep -c 'Authorization: Bearer' || true)
+  [ "${total:-0}" -gt 0 ]
+}
+
+@test "brain-curate SKILL.md: every fenced Authorization header is fail-loud" {
+  local bad
+  bad=$(_fenced_bash_lines "$CURATE_SKILL_MD" | grep 'Authorization: Bearer' | grep -vE '\$\{SECOND_BRAIN_TOKEN:\?' || true)
+  if [ -n "$bad" ]; then
+    echo "Non-fail-loud Authorization header(s) in fenced bash code:"
+    echo "$bad"
+    return 1
+  fi
+  local total
+  total=$(_fenced_bash_lines "$CURATE_SKILL_MD" | grep -c 'Authorization: Bearer' || true)
+  [ "${total:-0}" -gt 0 ]
+}
+
+@test "brain-recall SKILL.md: every fenced SECOND_BRAIN_URL reference is fail-loud" {
+  local bad
+  # Match any SECOND_BRAIN_URL occurrence, then exclude the compliant
+  # ${SECOND_BRAIN_URL:?...} form — whatever's left is bare ($SECOND_BRAIN_URL
+  # or ${SECOND_BRAIN_URL}).
+  bad=$(_fenced_bash_lines "$RECALL_SKILL_MD" | grep 'SECOND_BRAIN_URL' | grep -vE '\$\{SECOND_BRAIN_URL:\?' || true)
+  if [ -n "$bad" ]; then
+    echo "Non-fail-loud SECOND_BRAIN_URL reference(s) in fenced bash code:"
+    echo "$bad"
+    return 1
+  fi
+  local total
+  total=$(_fenced_bash_lines "$RECALL_SKILL_MD" | grep -c 'SECOND_BRAIN_URL' || true)
+  [ "${total:-0}" -gt 0 ]
+}
+
+@test "brain-curate SKILL.md: every fenced SECOND_BRAIN_URL reference is fail-loud" {
+  local bad
+  bad=$(_fenced_bash_lines "$CURATE_SKILL_MD" | grep 'SECOND_BRAIN_URL' | grep -vE '\$\{SECOND_BRAIN_URL:\?' || true)
+  if [ -n "$bad" ]; then
+    echo "Non-fail-loud SECOND_BRAIN_URL reference(s) in fenced bash code:"
+    echo "$bad"
+    return 1
+  fi
+  local total
+  total=$(_fenced_bash_lines "$CURATE_SKILL_MD" | grep -c 'SECOND_BRAIN_URL' || true)
+  [ "${total:-0}" -gt 0 ]
+}
+
+# --- 3d. mktemp portability: no BSD-only "-t <name>" form ---
+#
+# `mktemp -t brain_export` works on BSD/macOS but dies on GNU coreutils
+# (`mktemp: too few X's in template`, rc=1) — a Linux runner would fail
+# before ever reaching the curl call. The fix in place uses an explicit
+# XXXXXX template, which is portable across both. This pins that form.
+
+@test "brain-curate SKILL.md: any mktemp call uses a portable XXXXXX template, not BSD -t" {
+  local mktemp_lines bad
+  mktemp_lines=$(grep -n 'mktemp' "$CURATE_SKILL_MD" || true)
+
+  if [ -z "$mktemp_lines" ]; then
+    skip "no mktemp call present in brain-curate SKILL.md"
+  fi
+
+  bad=$(echo "$mktemp_lines" | grep -E 'mktemp[[:space:]]+-t[[:space:]]+[^X]' || true)
+  if [ -n "$bad" ]; then
+    echo "BSD-only 'mktemp -t <name>' form found (fails on GNU coreutils):"
+    echo "$bad"
+    return 1
+  fi
+
+  bad=$(echo "$mktemp_lines" | grep -v 'XXXXXX' || true)
+  if [ -n "$bad" ]; then
+    echo "mktemp call without an explicit XXXXXX template:"
+    echo "$bad"
+    return 1
+  fi
 }
 
 # --- 4. Deny text's referenced skill resolves inside this plugin (core: issue #248) ---

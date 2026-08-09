@@ -60,7 +60,8 @@ curl -sS -m 30 -A "curl/8.7.1" \
 **全量含统计**（PR 归并前兜底用，一次调用拿到 `recall_count` / `importance_score`）：
 
 ```bash
-BRAIN_EXPORT=$(mktemp -t brain_export)
+BRAIN_EXPORT=$(mktemp "${TMPDIR:-/tmp}/brain_export.XXXXXX")
+trap 'rm -f "$BRAIN_EXPORT"' EXIT
 curl -sS -m 30 -A "curl/8.7.1" \
   -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
   "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/export" > "$BRAIN_EXPORT"
