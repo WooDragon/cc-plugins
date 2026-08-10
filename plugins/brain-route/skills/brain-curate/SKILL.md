@@ -66,14 +66,26 @@ curl -sS -m 30 -A "curl/8.7.1" \
   -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
   "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/export" > "$BRAIN_EXPORT"
 
-jq '[.[] | select(.recall_count == 0)] | .[] | select(
-  (now - (.created_at | fromdateiso8601)) > (60*86400)
-)' "$BRAIN_EXPORT"
+jq '[.entries[]
+     | select(.recall_count == 0)
+     | select((now - (.created_at / 1000)) > (60 * 86400))]' "$BRAIN_EXPORT"
 
 rm -f "$BRAIN_EXPORT"
 ```
 
 筛出 `recall_count == 0` 且 `created_at` 超 60 天的条目——这些是写进去后从未被任何查询命中的沉底条目，是盲区，只能靠这条命令找到。
+
+**返回 `[]` 先别当命令坏了**：库里最老条目不足 60 天时，空结果就是正确答案。先用 `jq '[.entries[]|select(.recall_count==0)]|length'` 看有多少零召回条目、用 `jq -r '[.entries[]|(now-(.created_at/1000))/86400]|max // 0|floor'` 看最老条目多少天，再判断是筛空还是解析错——两条命令在 `entries` 为空时都返回 `0`，不会报错（`max` 在空数组上原生返回 `null` 会导致后续 `floor` 报 `number required` 崩掉，`// 0` 兜底避免这个问题）。
+
+**三个端点的返回形态不同，jq 不能照抄**：
+
+| 端点 | 条目在哪 | `tags` | `created_at` |
+|---|---|---|---|
+| `/recall` | `.results[]` | 数组 | number（epoch **毫秒**） |
+| `/list` | 顶层就是数组，`.[]` | **JSON 字符串**，需 `fromjson` 才能当数组用 | number（毫秒） |
+| `/export` | `.entries[]`（顶层是 `{ok, version, exported_at, entries, edges}`） | 数组 | number（毫秒） |
+
+两个易错点：对 `/export` 写 `.[]` 会迭代到 `ok`（布尔）并报 `Cannot index boolean with string ...`；`created_at` 是毫秒数字，`fromdateiso8601` 只吃 ISO 字符串，对它用必然失败——要除 1000 而不是转换。
 
 ---
 

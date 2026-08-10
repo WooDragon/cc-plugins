@@ -15,6 +15,7 @@ CURATE_SKILL_MD="${PLUGIN_DIR}/skills/brain-curate/SKILL.md"
 PLUGIN_JSON="${PLUGIN_DIR}/.claude-plugin/plugin.json"
 MARKETPLACE_JSON="${REPO_ROOT}/.claude-plugin/marketplace.json"
 GATE_SCRIPT="${PLUGIN_DIR}/scripts/brain-route-gate.sh"
+FIXTURE_EXPORT="${BATS_TEST_DIRNAME}/fixtures/export-shape.json"
 
 # Extract lines inside ```bash ... ``` fences, prefixed with their 1-based
 # line number as "NR:content". Matching is anchored on the fence token
@@ -188,6 +189,108 @@ _fenced_bash_lines() {
     echo "$bad"
     return 1
   fi
+}
+
+# --- 3e. /export jq filter shape: entries[] not bare .[], created_at as epoch-ms ---
+#
+# `/export` returns a top-level OBJECT {ok, version, exported_at, entries,
+# edges} — a bare `.[]` on that object iterates into `ok` (a boolean) and
+# blows up with "Cannot index boolean with string ...". The fix reads
+# through `.entries[]` instead. Separately, `created_at` is an epoch
+# millisecond NUMBER on every endpoint, not an ISO 8601 string, so
+# `fromdateiso8601` (which only parses strings) fails outright on it; the
+# correct conversion divides by 1000. Both defects were verified live
+# against a real /export response before the SKILL.md fix landed.
+
+
+# Extracts the /export jq filter expression from fenced bash code: finds the
+# first fenced line containing "jq", then accumulates lines (stripping "\"
+# line-continuations) until a line ending in "]'" closes the single-quoted
+# jq program. Tolerates the jq invocation and its opening "'[.entries[]"
+# being reflowed across two lines (e.g. "jq \\\n'[.entries[]") -- a
+# semantically-identical rewrite that a same-line text grep cannot survive
+# (verified live: reflowing turns a same-line grep red with zero behavior
+# change).
+_extract_export_jq_filter() {
+  local file="$1" sq="'" raw expr
+  raw=$(_fenced_bash_lines "$file" | awk -F: '
+    { line = substr($0, index($0, ":") + 1) }
+    !capturing && line ~ /jq/ { capturing = 1 }
+    capturing {
+      sub(/\\[[:space:]]*$/, "", line)
+      buf = buf line "\n"
+      if (line ~ /\]'"'"'/) exit
+    }
+    END { printf "%s", buf }
+  ')
+  expr="${raw#*$sq}"
+  expr="${expr%$sq*}"
+  printf '%s' "$expr"
+}
+
+@test "brain-curate SKILL.md: /export jq filter reads entries via .entries[], not bare .[]" {
+  # Executes the actual jq filter extracted from fenced bash code against a
+  # fixed fixture (fixtures/export-shape.json) and asserts the exact
+  # selected id set, instead of grepping for a specific token arrangement.
+  # A prior text-form state machine here required "jq" and "[.entries[]" on
+  # the SAME line -- reflowing them across two lines (a semantically
+  # identical, legal rewrite) turned it red with zero behavior change
+  # (verified live). Executing the real filter against a real fixture
+  # survives that reflow and catches the real defect (a boolean-indexing
+  # crash on bare `.[]`, or selecting the wrong entries) by its real
+  # symptom instead of by text shape.
+  local expr result status ids
+
+  expr="$(_extract_export_jq_filter "$CURATE_SKILL_MD")"
+  [ -n "$expr" ] || {
+    echo "Could not extract a jq filter expression from fenced bash code in $CURATE_SKILL_MD -- the /export filter block may have been deleted"
+    return 1
+  }
+
+  result=$(printf '%s' "$expr" | jq -f /dev/stdin "$FIXTURE_EXPORT" 2>&1)
+  status=$?
+
+  if [ "$status" -ne 0 ]; then
+    echo "Extracted jq filter failed to execute against fixture (exit $status):"
+    echo "Filter: $expr"
+    echo "Error: $result"
+    return 1
+  fi
+
+  ids=$(printf '%s' "$result" | jq -r '[.[].id] | sort | join(",")')
+  [ "$ids" = "entry-old-zero-recall" ] || {
+    echo "Expected selected id set to be exactly {entry-old-zero-recall}, got: $ids"
+    echo "Filter: $expr"
+    return 1
+  }
+}
+
+@test "brain-curate SKILL.md: created_at treated as epoch milliseconds, not ISO date string" {
+  # fromdateiso8601 only parses ISO 8601 strings; created_at is an
+  # epoch-millisecond number on every endpoint (per the format table),
+  # so applying fromdateiso8601 to it fails outright. Must never reappear
+  # in runnable jq code. Scoped to fenced bash blocks (via
+  # _fenced_bash_lines), NOT the whole file -- the prose at line 88
+  # deliberately names fromdateiso8601 as the documented anti-pattern to
+  # avoid, so a whole-file grep would false-positive on that sentence.
+  local bad
+  bad=$(_fenced_bash_lines "$CURATE_SKILL_MD" | grep 'fromdateiso8601' || true)
+  if [ -n "$bad" ]; then
+    echo "fromdateiso8601 found in fenced bash code -- created_at is an epoch-millisecond number, not an ISO string:"
+    echo "$bad"
+    return 1
+  fi
+
+  # The correct handling divides created_at by 1000 to convert ms -> s.
+  # Tolerate whitespace variance around the '/' (e.g. "created_at / 1000"
+  # or "created_at/1000"). Scoped to fenced bash blocks -- the prose at
+  # line 78 also mentions "created_at/1000" as running text (a worked
+  # example for humans, not runnable jq), which would let this check pass
+  # even after the real division in the executable jq filter was removed.
+  _fenced_bash_lines "$CURATE_SKILL_MD" | grep -qE '\.created_at[[:space:]]*/[[:space:]]*1000' || {
+    echo "No '.created_at / 1000' (epoch-ms to seconds) conversion found in fenced bash code in $CURATE_SKILL_MD"
+    return 1
+  }
 }
 
 # --- 4. Deny text's referenced skill resolves inside this plugin (core: issue #248) ---

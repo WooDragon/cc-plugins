@@ -1,0 +1,36 @@
+{
+  "ok": true,
+  "version": 1,
+  "exported_at": 1700000000000,
+  "entries": [
+    {
+      "id": "entry-old-zero-recall",
+      "content": "recall_count 0, created_at 2020 (old) -- should be selected",
+      "tags": ["fixture"],
+      "recall_count": 0,
+      "created_at": 1577836800000
+    },
+    {
+      "id": "entry-new-zero-recall",
+      "content": "recall_count 0, created_at 2099 (new) -- should NOT be selected",
+      "tags": ["fixture"],
+      "recall_count": 0,
+      "created_at": 4070908800000
+    },
+    {
+      "id": "entry-old-nonzero-recall",
+      "content": "recall_count 5, created_at 2020 (old) -- should NOT be selected",
+      "tags": ["fixture"],
+      "recall_count": 5,
+      "created_at": 1577836800000
+    },
+    {
+      "id": "entry-new-nonzero-recall",
+      "content": "recall_count 3, created_at 2099 (new) -- should NOT be selected",
+      "tags": ["fixture"],
+      "recall_count": 3,
+      "created_at": 4070908800000
+    }
+  ],
+  "edges": []
+}

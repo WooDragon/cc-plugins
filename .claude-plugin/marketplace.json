@@ -96,7 +96,7 @@
     {
       "name": "brain-route",
       "description": "Second-brain routing — brain-recall / brain-curate skills (recall, capture, curation protocol) + soft advisory hook that prompts consideration of second-brain (cross-project) vs local memory (project-local) when writing project memory .md files",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": {
         "name": "WooDragon"
       },
