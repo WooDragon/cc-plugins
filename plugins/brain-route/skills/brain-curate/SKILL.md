@@ -75,7 +75,7 @@ rm -f "$BRAIN_EXPORT"
 
 筛出 `recall_count == 0` 且 `created_at` 超 60 天的条目——这些是写进去后从未被任何查询命中的沉底条目，是盲区，只能靠这条命令找到。
 
-**返回 `[]` 先别当命令坏了**：库里最老条目不足 60 天时，空结果就是正确答案。先用 `jq '[.entries[]|select(.recall_count==0)]|length'` 看有多少零召回条目、用 `jq -r '[.entries[]|(now-(.created_at/1000))/86400]|max|floor'` 看最老条目多少天，再判断是筛空还是解析错。
+**返回 `[]` 先别当命令坏了**：库里最老条目不足 60 天时，空结果就是正确答案。先用 `jq '[.entries[]|select(.recall_count==0)]|length'` 看有多少零召回条目、用 `jq -r '[.entries[]|(now-(.created_at/1000))/86400]|max // 0|floor'` 看最老条目多少天，再判断是筛空还是解析错——两条命令在 `entries` 为空时都返回 `0`，不会报错（`max` 在空数组上原生返回 `null` 会导致后续 `floor` 报 `number required` 崩掉，`// 0` 兜底避免这个问题）。
 
 **三个端点的返回形态不同，jq 不能照抄**：
 

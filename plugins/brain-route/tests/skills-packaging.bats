@@ -15,6 +15,7 @@ CURATE_SKILL_MD="${PLUGIN_DIR}/skills/brain-curate/SKILL.md"
 PLUGIN_JSON="${PLUGIN_DIR}/.claude-plugin/plugin.json"
 MARKETPLACE_JSON="${REPO_ROOT}/.claude-plugin/marketplace.json"
 GATE_SCRIPT="${PLUGIN_DIR}/scripts/brain-route-gate.sh"
+FIXTURE_EXPORT="${BATS_TEST_DIRNAME}/fixtures/export-shape.json"
 
 # Extract lines inside ```bash ... ``` fences, prefixed with their 1-based
 # line number as "NR:content". Matching is anchored on the fence token
@@ -201,44 +202,67 @@ _fenced_bash_lines() {
 # correct conversion divides by 1000. Both defects were verified live
 # against a real /export response before the SKILL.md fix landed.
 
-@test "brain-curate SKILL.md: /export jq filter reads entries via .entries[], not bare .[]" {
-  # Scoped to fenced bash blocks only (via _fenced_bash_lines) -- the prose
-  # in the "返回 [] 先别当命令坏了" paragraph includes an inline worked
-  # example (`jq '[.entries[]|select(.recall_count==0)]|length'`) as running
-  # text for humans, not runnable code from the actual /export filter block.
-  # An unscoped whole-file scan would let that prose satisfy both the
-  # sanity check and the entries-vs-bare-[] check even if the real filter
-  # block were deleted or reverted -- both must be fenced-scoped together.
-  local recall_lines
-  recall_lines=$(_fenced_bash_lines "$CURATE_SKILL_MD" | grep 'select(\.recall_count' || true)
 
-  # Sanity: at least one recall_count filter must exist in fenced code,
-  # otherwise this assertion would vacuously pass if the whole filter
-  # block were deleted.
-  [ -n "$recall_lines" ] || {
-    echo "No 'select(.recall_count' line found in fenced bash code in $CURATE_SKILL_MD -- the zero-recall filter block may have been deleted"
+# Extracts the /export jq filter expression from fenced bash code: finds the
+# first fenced line containing "jq", then accumulates lines (stripping "\"
+# line-continuations) until a line ending in "]'" closes the single-quoted
+# jq program. Tolerates the jq invocation and its opening "'[.entries[]"
+# being reflowed across two lines (e.g. "jq \\\n'[.entries[]") -- a
+# semantically-identical rewrite that a same-line text grep cannot survive
+# (verified live: reflowing turns a same-line grep red with zero behavior
+# change).
+_extract_export_jq_filter() {
+  local file="$1" sq="'" raw expr
+  raw=$(_fenced_bash_lines "$file" | awk -F: '
+    { line = substr($0, index($0, ":") + 1) }
+    !capturing && line ~ /jq/ { capturing = 1 }
+    capturing {
+      sub(/\\[[:space:]]*$/, "", line)
+      buf = buf line "\n"
+      if (line ~ /\]'"'"'/) exit
+    }
+    END { printf "%s", buf }
+  ')
+  expr="${raw#*$sq}"
+  expr="${expr%$sq*}"
+  printf '%s' "$expr"
+}
+
+@test "brain-curate SKILL.md: /export jq filter reads entries via .entries[], not bare .[]" {
+  # Executes the actual jq filter extracted from fenced bash code against a
+  # fixed fixture (fixtures/export-shape.json) and asserts the exact
+  # selected id set, instead of grepping for a specific token arrangement.
+  # A prior text-form state machine here required "jq" and "[.entries[]" on
+  # the SAME line -- reflowing them across two lines (a semantically
+  # identical, legal rewrite) turned it red with zero behavior change
+  # (verified live). Executing the real filter against a real fixture
+  # survives that reflow and catches the real defect (a boolean-indexing
+  # crash on bare `.[]`, or selecting the wrong entries) by its real
+  # symptom instead of by text shape.
+  local expr result status ids
+
+  expr="$(_extract_export_jq_filter "$CURATE_SKILL_MD")"
+  [ -n "$expr" ] || {
+    echo "Could not extract a jq filter expression from fenced bash code in $CURATE_SKILL_MD -- the /export filter block may have been deleted"
     return 1
   }
 
-  # Walk the fenced bash lines top to bottom, tracking whether the most
-  # recently opened jq array comprehension entered via .entries[] (ok) or
-  # a bare .[] (bad). Any select(.recall_count...) line reached while the
-  # bad state is active is a violation -- this catches the exact mutation
-  # of "[.entries[]" back to "[.[]" without needing to parse the full
-  # multi-line jq expression.
-  local bad
-  bad=$(_fenced_bash_lines "$CURATE_SKILL_MD" | awk -F: '
-    { line = substr($0, index($0, ":") + 1) }
-    line ~ /jq.*\[\.entries\[\]/ { entries_ok=1 }
-    line ~ /jq.*\[\.\[\]/ { entries_ok=0 }
-    line ~ /select\(\.recall_count/ { if (!entries_ok) print $0 }
-  ')
+  result=$(printf '%s' "$expr" | jq -f /dev/stdin "$FIXTURE_EXPORT" 2>&1)
+  status=$?
 
-  if [ -n "$bad" ]; then
-    echo "recall_count filter not reached via .entries[] (bare .[] iteration on /export's object root):"
-    echo "$bad"
+  if [ "$status" -ne 0 ]; then
+    echo "Extracted jq filter failed to execute against fixture (exit $status):"
+    echo "Filter: $expr"
+    echo "Error: $result"
     return 1
   fi
+
+  ids=$(printf '%s' "$result" | jq -r '[.[].id] | sort | join(",")')
+  [ "$ids" = "entry-old-zero-recall" ] || {
+    echo "Expected selected id set to be exactly {entry-old-zero-recall}, got: $ids"
+    echo "Filter: $expr"
+    return 1
+  }
 }
 
 @test "brain-curate SKILL.md: created_at treated as epoch milliseconds, not ISO date string" {
