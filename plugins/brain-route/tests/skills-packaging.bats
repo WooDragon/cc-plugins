@@ -405,21 +405,42 @@ _extract_export_jq_filter() {
 # array contents, and the exact prose phrasing are all expected to drift as
 # the docs get maintained — pinning them would manufacture false reds on
 # every routine edit. What must never silently disappear is: (a) the
-# write-time /tags lookup call, (b) the three-tier skeleton (topic domain /
-# specific mechanism / forbidden), (c) the three named forbidden categories,
-# (d) the hygiene section header that anchors 6.4's extractor, and (e) the
-# three hygiene jq filters actually being runnable code, not prose that
-# silently bit-rotted into something jq can no longer parse.
+# write-time /tags lookup call (and that it happens BEFORE /capture, not
+# just that it exists anywhere in the file), (b) the three-tier skeleton
+# (topic domain / specific mechanism / forbidden), (c) the three named
+# forbidden categories, (d) the hygiene section header that anchors 6.4's
+# extractor, (e) the three hygiene jq filters actually being runnable code,
+# not prose that silently bit-rotted into something jq can no longer parse,
+# and (f) every /update payload in brain-curate's merge procedure omitting
+# the server-dropped "tags" key and including the required "volatility" key
+# (PR review core defect: an example that silently drifts on this contract
+# produces data loss with zero error, discoverable only by diffing backups).
 
 @test "brain-recall SKILL.md: write section has a /tags lookup call before capture" {
-  # Must be scoped to fenced bash code -- prose elsewhere in the write
-  # section discusses "/tags" as a concept without it being a runtime call.
-  local hits
-  hits=$(_fenced_bash_lines "$RECALL_SKILL_MD" | grep -E '/tags"$' || true)
-  if [ -z "$hits" ]; then
+  # Compares the actual line numbers of the /tags and /capture references
+  # inside fenced bash code and asserts /tags comes strictly first. The test
+  # name always said "before capture", but the prior body only checked that
+  # a /tags line existed anywhere in the file -- moving the /tags curl block
+  # to AFTER the /capture block would still pass that check. This pins the
+  # ordering, not just presence.
+  local tags_line capture_line
+
+  tags_line=$(_fenced_bash_lines "$RECALL_SKILL_MD" | grep -E '/tags"$' | head -1 | cut -d: -f1)
+  capture_line=$(_fenced_bash_lines "$RECALL_SKILL_MD" | grep -E '/capture"$' | head -1 | cut -d: -f1)
+
+  [ -n "$tags_line" ] || {
     echo "No fenced bash line ending in a '/tags' URL reference found in $RECALL_SKILL_MD -- the pre-write tag-vocabulary lookup call may have been removed"
     return 1
-  fi
+  }
+  [ -n "$capture_line" ] || {
+    echo "No fenced bash line ending in a '/capture' URL reference found in $RECALL_SKILL_MD -- the capture call may have been removed"
+    return 1
+  }
+
+  [ "$tags_line" -lt "$capture_line" ] || {
+    echo "/tags (line $tags_line) does not appear before /capture (line $capture_line) in fenced bash code -- the write-time tag lookup must happen before capture, not after"
+    return 1
+  }
 }
 
 @test "brain-recall SKILL.md: three-tier tag table names all three tiers" {
@@ -541,4 +562,77 @@ EOF
     echo "Expected exactly 3 tag-hygiene jq filters, extracted $fcount"
     return 1
   }
+}
+
+# --- 6f. /update payload contract: no "tags" key, "volatility" key required ---
+#
+# Core defect under review (PR): the merge-decision procedure's /update
+# example carried a "tags" field the endpoint silently discards (never the
+# actual bug -- just noise) while any /update example that DROPS or
+# hardcodes "volatility" is the real bug -- /update's handler
+# (src/routes/capture.ts:136) only reads {id, content, volatility}, and
+# tagsAfterWrite strips volatility: on every write, so an example missing
+# "volatility" silently loses that entry's decay tier with zero error.
+# Before this assertion existed, re-adding a "tags" key to the example
+# payload left all 45 prior tests green -- the contract was documented in
+# prose (line ~103) but never locked in a runnable check.
+#
+# Anchoring: extracts every "-d '{...}'" JSON payload line that sits inside
+# a fenced bash block which ALSO contains the literal string "/update"
+# somewhere in that same block. Deliberately NOT anchored by position (e.g.
+# "the Nth -d line in the file") -- this PR already burned once on a
+# position anchor (the jq extractor) silently retargeting when an unrelated
+# block was inserted earlier in the file. Content anchoring on /update
+# co-occurring in the same fenced block survives reordering and insertion.
+_extract_update_payloads() {
+  local file="$1"
+  awk '
+    /^[[:space:]]*```bash[[:space:]]*$/ { infence=1; buf=""; has_update=0; next }
+    /^[[:space:]]*```[[:space:]]*$/ {
+      if (infence && has_update) { printf "%s", buf }
+      infence=0; buf=""; has_update=0; next
+    }
+    infence {
+      buf = buf $0 "\n"
+      if ($0 ~ /\/update/) has_update=1
+    }
+  ' "$file" | grep -E "^[[:space:]]*-d '\{.*\}'[[:space:]]*\\\\?[[:space:]]*$"
+}
+
+@test "brain-curate SKILL.md: /update payloads omit tags and include volatility" {
+  local payloads count=0 line json bad_tags=0 bad_volatility=0
+
+  payloads="$(_extract_update_payloads "$CURATE_SKILL_MD")"
+  [ -n "$payloads" ] || {
+    echo "Could not find any /update payload ('-d ... /update' in the same fenced bash block) in $CURATE_SKILL_MD -- the merge-procedure example may have been removed or reworded"
+    return 1
+  }
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    count=$((count + 1))
+    # Extract the single-quoted JSON body between the first and last '.
+    json="${line#*\'}"
+    json="${json%\'*}"
+
+    if echo "$json" | grep -q '"tags"'; then
+      echo "/update payload contains forbidden \"tags\" key (server silently discards it, and this was the exact regression under review): $json"
+      bad_tags=1
+    fi
+
+    if ! echo "$json" | grep -q '"volatility"'; then
+      echo "/update payload is missing required \"volatility\" key (omitting it silently drops that entry's decay tier on write): $json"
+      bad_volatility=1
+    fi
+  done <<< "$payloads"
+
+  # Sanity: must have found at least one /update payload, otherwise the
+  # anchor silently matched nothing and every check above vacuously passed.
+  [ "$count" -gt 0 ] || {
+    echo "Extracted zero /update payloads from $CURATE_SKILL_MD -- anchor may be broken"
+    return 1
+  }
+
+  [ "$bad_tags" -eq 0 ] || return 1
+  [ "$bad_volatility" -eq 0 ] || return 1
 }

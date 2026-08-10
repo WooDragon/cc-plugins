@@ -67,19 +67,19 @@ curl -sS -m 30 -A "curl/8.7.1" \
   "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/export" > "$BRAIN_EXPORT"
 
 # 1. 纯数字 tag —— issue/PR 号被当 tag，聚类和过滤都没用，应移进 content 正文
-jq '[.entries[] | .tags[] | select(test("^[0-9]+$"))] | unique' "$BRAIN_EXPORT"
+jq '[.entries[] | (.tags // []) | .[] | select(test("^[0-9]+$"))] | unique' "$BRAIN_EXPORT"
 
 # 2. 全覆盖 tag —— 覆盖率 >=50% 的 tag，零区分度且会被 graph 聚类判为过泛降级
 #    排除 kind:/status:/volatility:/cctype: 四类系统派生前缀（本来就高覆盖，不算欠账）
 jq '(.entries|length) as $total
-    | [.entries[] | .tags[]]
+    | [.entries[] | (.tags // []) | .[]]
     | group_by(.)
     | map({tag: .[0], count: length, coverage: (length/$total)})
     | map(select(.coverage >= 0.5))
     | map(select(.tag | test("^(kind|status|volatility|cctype):") | not))' "$BRAIN_EXPORT"
 
 # 3. 孤词 tag —— 只有 1 条用到的 tag，仅供人工过目，不是自动欠账
-jq '[.entries[] | .tags[]]
+jq '[.entries[] | (.tags // []) | .[]]
     | group_by(.)
     | map({tag: .[0], count: length})
     | map(select(.count == 1))
@@ -90,7 +90,13 @@ rm -f "$BRAIN_EXPORT"
 
 **孤词 tag 不是错**：具体机制档允许 df=1（`false_green`、`bsd_vs_gnu` 这种是精确检索锚点，本来就该只挂一条）。第 3 条命令的输出只作人工过目，判据是「它是不是一个能容纳后续条目的领域概念被误当成了一次性专名」——是则该并入已有主题域，不是则留着，不要见到 df=1 就一律清理。
 
-三类欠账（纯数字、全覆盖、以及经人工判断确认要处理的孤词）都走下面的合并决策规约：人工裁决、不自动改数据。
+三类欠账治法不同，**不要**统一导向下面的合并决策规约——合并决策规约是重复条目合并 + `/forget` 删条目的流程，跟 tag 卫生不是同一件事：
+
+- **全覆盖 tag** → 不删，补足主题域 tag 让它被 `GENERIC_CEIL` 自然排除（见下文「所以「删掉坏 tag」不是可选动作」一段）。
+- **纯数字 tag** → 把号码补进 content 正文。**tag 本身删不掉**——它会作为历史残留继续留在词表里，直到该条最后一次引用消失，由每日词表重建自动清理。
+- **孤词 tag** → 人工判定它是不是一个能容纳后续条目的领域概念被误当成了一次性专名（见上文「孤词 tag 不是错」一段的判据）：是则补对应主题域 tag，不是则留着。
+
+合并决策规约本身不变——它对重复/陈旧候选条目仍然有效，只是不再是 tag 欠账的默认出口。
 
 **tag 只能加,不能删——这是 REST 面的硬限制,规划整理动作前先认清**：
 
@@ -150,9 +156,13 @@ rm -f "$BRAIN_EXPORT"
    curl -sS -m 30 -A "curl/8.7.1" \
      -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
      -H "Content-Type: application/json" \
-     -d '{"id":"<保留条目id>", "content":"<合并后完整内容> #tag1 #tag2", "volatility":"durable"}' \
+     -d '{"id":"<保留条目id>", "content":"<合并后完整内容> #tag1 #tag2", "volatility":"<该条原值，从 /export 抄回>"}' \
      "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/update"
+   ```
 
+   `volatility` 必须从 `/export`（或 `/list`）里该条的原值原样抄回,不能随手填一个值或漏传——漏传或写错跟误传 `tags` 字段是同级事故:都是静默生效、不报错,事后只能靠比对备份才能发现。
+
+   ```bash
    # 删除被合并掉的那条
    curl -sS -m 30 -A "curl/8.7.1" \
      -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
