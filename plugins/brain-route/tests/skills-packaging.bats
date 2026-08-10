@@ -190,6 +190,85 @@ _fenced_bash_lines() {
   fi
 }
 
+# --- 3e. /export jq filter shape: entries[] not bare .[], created_at as epoch-ms ---
+#
+# `/export` returns a top-level OBJECT {ok, version, exported_at, entries,
+# edges} — a bare `.[]` on that object iterates into `ok` (a boolean) and
+# blows up with "Cannot index boolean with string ...". The fix reads
+# through `.entries[]` instead. Separately, `created_at` is an epoch
+# millisecond NUMBER on every endpoint, not an ISO 8601 string, so
+# `fromdateiso8601` (which only parses strings) fails outright on it; the
+# correct conversion divides by 1000. Both defects were verified live
+# against a real /export response before the SKILL.md fix landed.
+
+@test "brain-curate SKILL.md: /export jq filter reads entries via .entries[], not bare .[]" {
+  # Scoped to fenced bash blocks only (via _fenced_bash_lines) -- the prose
+  # in the "返回 [] 先别当命令坏了" paragraph includes an inline worked
+  # example (`jq '[.entries[]|select(.recall_count==0)]|length'`) as running
+  # text for humans, not runnable code from the actual /export filter block.
+  # An unscoped whole-file scan would let that prose satisfy both the
+  # sanity check and the entries-vs-bare-[] check even if the real filter
+  # block were deleted or reverted -- both must be fenced-scoped together.
+  local recall_lines
+  recall_lines=$(_fenced_bash_lines "$CURATE_SKILL_MD" | grep 'select(\.recall_count' || true)
+
+  # Sanity: at least one recall_count filter must exist in fenced code,
+  # otherwise this assertion would vacuously pass if the whole filter
+  # block were deleted.
+  [ -n "$recall_lines" ] || {
+    echo "No 'select(.recall_count' line found in fenced bash code in $CURATE_SKILL_MD -- the zero-recall filter block may have been deleted"
+    return 1
+  }
+
+  # Walk the fenced bash lines top to bottom, tracking whether the most
+  # recently opened jq array comprehension entered via .entries[] (ok) or
+  # a bare .[] (bad). Any select(.recall_count...) line reached while the
+  # bad state is active is a violation -- this catches the exact mutation
+  # of "[.entries[]" back to "[.[]" without needing to parse the full
+  # multi-line jq expression.
+  local bad
+  bad=$(_fenced_bash_lines "$CURATE_SKILL_MD" | awk -F: '
+    { line = substr($0, index($0, ":") + 1) }
+    line ~ /jq.*\[\.entries\[\]/ { entries_ok=1 }
+    line ~ /jq.*\[\.\[\]/ { entries_ok=0 }
+    line ~ /select\(\.recall_count/ { if (!entries_ok) print $0 }
+  ')
+
+  if [ -n "$bad" ]; then
+    echo "recall_count filter not reached via .entries[] (bare .[] iteration on /export's object root):"
+    echo "$bad"
+    return 1
+  fi
+}
+
+@test "brain-curate SKILL.md: created_at treated as epoch milliseconds, not ISO date string" {
+  # fromdateiso8601 only parses ISO 8601 strings; created_at is an
+  # epoch-millisecond number on every endpoint (per the format table),
+  # so applying fromdateiso8601 to it fails outright. Must never reappear
+  # in runnable jq code. Scoped to fenced bash blocks (via
+  # _fenced_bash_lines), NOT the whole file -- the prose at line 88
+  # deliberately names fromdateiso8601 as the documented anti-pattern to
+  # avoid, so a whole-file grep would false-positive on that sentence.
+  local bad
+  bad=$(_fenced_bash_lines "$CURATE_SKILL_MD" | grep 'fromdateiso8601' || true)
+  if [ -n "$bad" ]; then
+    echo "fromdateiso8601 found in fenced bash code -- created_at is an epoch-millisecond number, not an ISO string:"
+    echo "$bad"
+    return 1
+  fi
+
+  # The correct handling divides created_at by 1000 to convert ms -> s.
+  # Tolerate whitespace variance around the '/' (e.g. "created_at / 1000"
+  # or "created_at/1000"). Scoped to fenced bash blocks -- the prose at
+  # line 78 also mentions "created_at/1000" as running text (a worked
+  # example for humans, not runnable jq), which would let this check pass
+  # even after the real division in the executable jq filter was removed.
+  _fenced_bash_lines "$CURATE_SKILL_MD" | grep -qE '\.created_at[[:space:]]*/[[:space:]]*1000' || {
+    echo "No '.created_at / 1000' (epoch-ms to seconds) conversion found in fenced bash code in $CURATE_SKILL_MD"
+    return 1
+  }
+}
+
 # --- 4. Deny text's referenced skill resolves inside this plugin (core: issue #248) ---
 
 @test "every skill name referenced by gate deny text resolves in plugin.json AND has an on-disk SKILL.md" {
