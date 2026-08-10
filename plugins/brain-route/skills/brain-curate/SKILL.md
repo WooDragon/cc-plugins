@@ -57,6 +57,60 @@ curl -sS -m 30 -A "curl/8.7.1" \
   --data-urlencode "tag=stale:as-of"
 ```
 
+**tag 卫生**（`brain-recall` 写入节定了 tag 三档规约——主题域 1-2 个必须 / 具体机制 0-2 个可选 / 禁止全覆盖标记·纯数字·`kind:`·`status:`·`volatility:` 手写值——但 `/capture` 不做校验，违规 tag 会静默进库，靠这里兜底扫）：
+
+```bash
+BRAIN_EXPORT=$(mktemp "${TMPDIR:-/tmp}/brain_export.XXXXXX")
+trap 'rm -f "$BRAIN_EXPORT"' EXIT
+curl -sS -m 30 -A "curl/8.7.1" \
+  -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
+  "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/export" > "$BRAIN_EXPORT"
+
+# 1. 纯数字 tag —— issue/PR 号被当 tag，聚类和过滤都没用，应移进 content 正文
+jq '[.entries[] | (.tags // []) | .[] | select(test("^[0-9]+$"))] | unique' "$BRAIN_EXPORT"
+
+# 2. 全覆盖 tag —— 覆盖率 >=50% 的 tag，零区分度且会被 graph 聚类判为过泛降级
+#    排除 kind:/status:/volatility:/cctype: 四类系统派生前缀（本来就高覆盖，不算欠账）
+jq '(.entries|length) as $total
+    | [.entries[] | (.tags // []) | .[]]
+    | group_by(.)
+    | map({tag: .[0], count: length, coverage: (length/$total)})
+    | map(select(.coverage >= 0.5))
+    | map(select(.tag | test("^(kind|status|volatility|cctype):") | not))' "$BRAIN_EXPORT"
+
+# 3. 孤词 tag —— 只有 1 条用到的 tag，仅供人工过目，不是自动欠账
+jq '[.entries[] | (.tags // []) | .[]]
+    | group_by(.)
+    | map({tag: .[0], count: length})
+    | map(select(.count == 1))
+    | map(.tag)' "$BRAIN_EXPORT"
+
+rm -f "$BRAIN_EXPORT"
+```
+
+**孤词 tag 不是错**：具体机制档允许 df=1（`false_green`、`bsd_vs_gnu` 这种是精确检索锚点，本来就该只挂一条）。第 3 条命令的输出只作人工过目，判据是「它是不是一个能容纳后续条目的领域概念被误当成了一次性专名」——是则该并入已有主题域，不是则留着，不要见到 df=1 就一律清理。
+
+三类欠账治法不同，**不要**统一导向下面的合并决策规约——合并决策规约是重复条目合并 + `/forget` 删条目的流程，跟 tag 卫生不是同一件事：
+
+- **全覆盖 tag** → 不删，补足主题域 tag 让它被 `GENERIC_CEIL` 自然排除（见下文「所以「删掉坏 tag」不是可选动作」一段）。
+- **纯数字 tag** → 把号码补进 content 正文。**tag 本身删不掉**——词表重建扫的是 `SELECT DISTINCT value FROM entries, json_each(entries.tags)`，即条目上仍挂着的 tag；只要条目不删，tag 就一直挂在词表里，df 永不归零，重建清不掉它。**不要为了清这个 tag 去 `/forget` 整条条目**——那会连带丢掉 `recall_count`（进召回权重）、`importance_score`、`status:` 分类、edges，代价远大于留一个残留词条。残留是可接受的：纯数字 tag df 极低，进不了任何档位，不影响聚类与过滤。
+- **孤词 tag** → 人工判定它是不是一个能容纳后续条目的领域概念被误当成了一次性专名（见上文「孤词 tag 不是错」一段的判据）：是则补对应主题域 tag，不是则留着。
+
+合并决策规约本身不变——它对重复/陈旧候选条目仍然有效，只是不再是 tag 欠账的默认出口。
+
+**tag 只能加,不能删——这是 REST 面的硬限制,规划整理动作前先认清**：
+
+- `/update` 的 body 只读 `{id, content, volatility}`（`src/routes/capture.ts:136`），**没有 `tags` 字段**。传了会被静默丢弃,不报错。
+- 实际写入是 `tagsAfterWrite(existingTags ∪ hashtags)`（`src/capture/store.ts:147`）——旧 tag 一律保留,新 tag 只能靠 content 里嵌 `#tag` 带进去。
+- 全部 31 个 REST 端点里**没有一个能删 tag**。`/status` 只改 `status:`，`/patterns/resolve` 只碰 `auto-pattern`。
+- `tagsAfterWrite` 会剥掉 `volatility:` 与 `stale:as-of`。所以每次 `/update` **必须按原值回传 `volatility` 字段**,否则该条的 volatility 判定会静默丢失（实测踩过：漏传导致 `volatility:durable` 消失,召回衰减下限从 0.9 掉回 0.6）。
+- `#tag` 会被 `extractHashtags` 从正文剔除（`src/text/hashtags.ts:3`）,不污染 content;但同一函数会把 `\s+` 压成单空格,**换行与代码围栏保不住**——正文形态要紧时改用 `/append`。
+- hashtag 正则是 `/#\w+/`,`\w` 不含连字符,`#gate-design` 只会被截成 `gate`。tag 名一律用 `[a-z0-9_]`。
+
+**所以「删掉坏 tag」不是可选动作。**遇到零区分度的全覆盖 tag（如某个每条都打的来源标记），治法是**补足主题域 tag 让它自然降级**,而不是想办法删它：`assignGraphClusters` 的 `GENERIC_CEIL`（`public/utils.js:202`，总数的 50%）会主动排除高覆盖 tag,只要库里存在覆盖率低于该线的主题域 tag,过泛 tag 就自己落选。实测 47 条：补主题域后最大簇从 35/47 降到 10/47,`cc-mem`（85% 覆盖）一个没删。
+
+真要物理删 tag,只剩 `wrangler d1 execute --remote` 直改 D1 一条路,且会绕过 Vectorize metadata 同步——属于需要单独裁决的动作,不在日常复核范围。
+
 **全量含统计**（PR 归并前兜底用，一次调用拿到 `recall_count` / `importance_score`）：
 
 ```bash
@@ -102,9 +156,13 @@ rm -f "$BRAIN_EXPORT"
    curl -sS -m 30 -A "curl/8.7.1" \
      -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
      -H "Content-Type: application/json" \
-     -d '{"id":"<保留条目id>", "content":"<合并后完整内容>", "tags":["..."]}' \
+     -d '{"id":"<保留条目id>", "content":"<合并后完整内容> #tag1 #tag2", "volatility":"<该条原值，从 /export 抄回>"}' \
      "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/update"
+   ```
 
+   `volatility` 必须从 `/export`（或 `/list`）里该条的原值原样抄回,不能随手填一个值或漏传——漏传或写错跟误传 `tags` 字段是同级事故:都是静默生效、不报错,事后只能靠比对备份才能发现。
+
+   ```bash
    # 删除被合并掉的那条
    curl -sS -m 30 -A "curl/8.7.1" \
      -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \

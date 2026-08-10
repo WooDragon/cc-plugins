@@ -203,25 +203,47 @@ _fenced_bash_lines() {
 # against a real /export response before the SKILL.md fix landed.
 
 
-# Extracts the /export jq filter expression from fenced bash code: finds the
-# first fenced line containing "jq", then accumulates lines (stripping "\"
-# line-continuations) until a line ending in "]'" closes the single-quoted
-# jq program. Tolerates the jq invocation and its opening "'[.entries[]"
-# being reflowed across two lines (e.g. "jq \\\n'[.entries[]") -- a
-# semantically-identical rewrite that a same-line text grep cannot survive
-# (verified live: reflowing turns a same-line grep red with zero behavior
-# change).
+# Extracts the /export jq filter expression from fenced bash code. Anchored
+# on CONTENT (the filter body containing "recall_count"), not on POSITION
+# ("the first fenced line containing jq"). A position anchor silently
+# retargets whenever an unrelated jq block is inserted earlier in the file --
+# exactly what happened when brain-curate's tag-hygiene section (three more
+# jq filters, none of them this one) landed above this block: the old
+# position anchor grabbed the wrong block, and the red it produced pointed
+# nowhere near the actual filter being pinned.
+#
+# Mechanics: scan for candidate jq programs, each starting at a line whose
+# fenced content begins with "jq" (optionally reflowed as "jq \\" alone with
+# the opening "'[.entries[]" on the next line -- a semantically-identical
+# rewrite that a same-line text grep cannot survive, verified live) and
+# accumulating (stripping "\" line-continuations) until a line ending in
+# "]'" closes the single-quoted jq program. Whenever a new "jq"-opening line
+# is seen, the previous (possibly still-open, if it never hit "]'") candidate
+# is discarded unless its body already contains "recall_count", in which
+# case that candidate is the answer and extraction stops immediately. This
+# naturally skips over the tag-hygiene filters -- none of them mention
+# recall_count -- regardless of how many of them sit before this block or in
+# what order.
 _extract_export_jq_filter() {
   local file="$1" sq="'" raw expr
   raw=$(_fenced_bash_lines "$file" | awk -F: '
     { line = substr($0, index($0, ":") + 1) }
-    !capturing && line ~ /jq/ { capturing = 1 }
+    line ~ /^[[:space:]]*jq([[:space:]]|\\|$)/ {
+      if (capturing && buf ~ /recall_count/) { found = buf; exit }
+      capturing = 1; buf = ""
+    }
     capturing {
       sub(/\\[[:space:]]*$/, "", line)
       buf = buf line "\n"
-      if (line ~ /\]'"'"'/) exit
+      if (line ~ /\]'"'"'/) {
+        if (buf ~ /recall_count/) { found = buf; exit }
+        capturing = 0; buf = ""
+      }
     }
-    END { printf "%s", buf }
+    END {
+      if (found == "" && capturing && buf ~ /recall_count/) found = buf
+      printf "%s", found
+    }
   ')
   expr="${raw#*$sq}"
   expr="${expr%$sq*}"
@@ -375,4 +397,258 @@ _extract_export_jq_filter() {
   [ -n "$plugin_version" ]
   [ -n "$marketplace_version" ]
   [ "$plugin_version" = "$marketplace_version" ]
+}
+
+# --- 6. Tag contract convention (brain-recall write-time rule + brain-curate hygiene sweep) ---
+#
+# Locks EXISTENCE, not wording. The 三档 table's row wording, the 正反例
+# array contents, and the exact prose phrasing are all expected to drift as
+# the docs get maintained — pinning them would manufacture false reds on
+# every routine edit. What must never silently disappear is: (a) the
+# write-time /tags lookup call (and that it happens BEFORE /capture, not
+# just that it exists anywhere in the file), (b) the three-tier skeleton
+# (topic domain / specific mechanism / forbidden), (c) the three named
+# forbidden categories, (d) the hygiene section header that anchors 6.4's
+# extractor, (e) the three hygiene jq filters actually being runnable code,
+# not prose that silently bit-rotted into something jq can no longer parse,
+# and (f) every /update payload in brain-curate's merge procedure omitting
+# the server-dropped "tags" key and including the required "volatility" key
+# (PR review core defect: an example that silently drifts on this contract
+# produces data loss with zero error, discoverable only by diffing backups).
+
+@test "brain-recall SKILL.md: write section has a /tags lookup call before capture" {
+  # Compares the actual line numbers of the /tags and /capture references
+  # inside fenced bash code and asserts /tags comes strictly first. The test
+  # name always said "before capture", but the prior body only checked that
+  # a /tags line existed anywhere in the file -- moving the /tags curl block
+  # to AFTER the /capture block would still pass that check. This pins the
+  # ordering, not just presence.
+  local tags_line capture_line
+
+  tags_line=$(_fenced_bash_lines "$RECALL_SKILL_MD" | grep -E '/tags"$' | head -1 | cut -d: -f1)
+  capture_line=$(_fenced_bash_lines "$RECALL_SKILL_MD" | grep -E '/capture"$' | head -1 | cut -d: -f1)
+
+  [ -n "$tags_line" ] || {
+    echo "No fenced bash line ending in a '/tags' URL reference found in $RECALL_SKILL_MD -- the pre-write tag-vocabulary lookup call may have been removed"
+    return 1
+  }
+  [ -n "$capture_line" ] || {
+    echo "No fenced bash line ending in a '/capture' URL reference found in $RECALL_SKILL_MD -- the capture call may have been removed"
+    return 1
+  }
+
+  [ "$tags_line" -lt "$capture_line" ] || {
+    echo "/tags (line $tags_line) does not appear before /capture (line $capture_line) in fenced bash code -- the write-time tag lookup must happen before capture, not after"
+    return 1
+  }
+}
+
+@test "brain-recall SKILL.md: three-tier tag table names all three tiers" {
+  local missing=""
+  for tier in "主题域" "具体机制" "禁止"; do
+    grep -q "$tier" "$RECALL_SKILL_MD" || missing="${missing}${tier} "
+  done
+  if [ -n "$missing" ]; then
+    echo "Missing tag-tier name(s) in $RECALL_SKILL_MD: $missing"
+    return 1
+  fi
+}
+
+@test "brain-recall SKILL.md: forbidden tag tier names all three category markers" {
+  local missing=""
+  grep -q 'cc-mem' "$RECALL_SKILL_MD" || missing="${missing}cc-mem(全覆盖来源标记示例) "
+  grep -q '纯数字' "$RECALL_SKILL_MD" || missing="${missing}纯数字(说明文字) "
+  for prefix in 'kind:' 'status:' 'volatility:'; do
+    grep -qF "$prefix" "$RECALL_SKILL_MD" || missing="${missing}${prefix} "
+  done
+  if [ -n "$missing" ]; then
+    echo "Missing forbidden-tag category marker(s) in $RECALL_SKILL_MD: $missing"
+    return 1
+  fi
+}
+
+@test "brain-curate SKILL.md: tag hygiene section header is present" {
+  grep -qF '**tag 卫生**' "$CURATE_SKILL_MD"
+}
+
+# Extracts the three tag-hygiene jq filter programs from fenced bash code in
+# brain-curate's "tag 卫生" block. Scoped between the "# 1. 纯数字" comment
+# marker (the block's first labeled filter) and the following "rm -f"
+# cleanup line, so it cannot drift onto the unrelated /export filters
+# earlier in the file or the /update|/forget calls later in the file.
+# _extract_export_jq_filter (used by assertion 3e above) accumulates until a
+# line ending in "]'" closes a single-quoted jq program -- it stops at the
+# FIRST such close, so it cannot be reused here where three separate jq
+# programs sit back to back in the same fenced block. This extractor
+# instead treats each "jq " line as opening a new program and closes each
+# one on its own trailing `' "$BRAIN_EXPORT"` invocation line.
+_extract_tag_hygiene_jq_filters() {
+  local file="$1" region
+  region=$(_fenced_bash_lines "$file" | awk -F: '
+    {
+      line = ""
+      for (i = 2; i <= NF; i++) { line = (i==2) ? $i : line ":" $i }
+    }
+    line ~ /^# 1\. 纯数字/ { inregion=1 }
+    inregion { print line }
+    inregion && line ~ /^rm -f/ { exit }
+  ')
+  printf '%s\n' "$region" | awk '
+    /^jq / { capturing=1; buf=$0 }
+    !/^jq / && capturing { buf = buf "\n" $0 }
+    capturing && $0 ~ /\x27[[:space:]]+"\$BRAIN_EXPORT"$/ { print buf; print "@@@FILTER@@@"; capturing=0; buf="" }
+  '
+}
+
+_strip_jq_single_quotes() {
+  local jqraw="$1" sq="'" jqexpr
+  jqexpr="${jqraw#*$sq}"
+  jqexpr="${jqexpr%$sq*}"
+  printf '%s' "$jqexpr"
+}
+
+@test "brain-curate SKILL.md: tag hygiene jq filters are extractable and runnable" {
+  local raw fcount=0 current="" line jqexpr jqresult jqrc
+
+  raw="$(_extract_tag_hygiene_jq_filters "$CURATE_SKILL_MD")"
+  [ -n "$raw" ] || {
+    echo "Could not extract any tag-hygiene jq filter from fenced bash code in $CURATE_SKILL_MD -- the '# 1. 纯数字' ... 'rm -f' block may have been deleted or restructured"
+    return 1
+  }
+
+  while IFS= read -r line; do
+    if [ "$line" = "@@@FILTER@@@" ]; then
+      fcount=$((fcount + 1))
+      jqexpr="$(_strip_jq_single_quotes "$current")"
+      jqresult=$(printf '%s' "$jqexpr" | jq -f /dev/stdin "$FIXTURE_EXPORT" 2>&1)
+      jqrc=$?
+      if [ "$jqrc" -ne 0 ]; then
+        echo "Tag-hygiene jq filter #$fcount failed to execute against fixture (exit $jqrc):"
+        echo "Filter: $jqexpr"
+        echo "Error: $jqresult"
+        return 1
+      fi
+      if [ "$fcount" -eq 2 ]; then
+        # This is the coverage-sweep filter (jq program #2, the "全覆盖 tag"
+        # check). All 4 fixture entries share the same stub tag "fixture" --
+        # 100% coverage -- so this is the one filter whose result we can pin
+        # to an exact value without over-fitting to prose. It's a real
+        # logic anchor, not just a syntax check: a bug in the group_by /
+        # coverage arithmetic (e.g. wrong denominator, off-by-one on the
+        # >=0.5 threshold) would silently produce a different count/coverage
+        # here even though the filter still parses and runs.
+        local tag coverage
+        tag=$(printf '%s' "$jqresult" | jq -r '.[0].tag // "MISSING"')
+        coverage=$(printf '%s' "$jqresult" | jq -r '.[0].coverage // "MISSING"')
+        if [ "$tag" != "fixture" ] || [ "$coverage" != "1" ]; then
+          echo "Coverage-sweep filter (#2) expected exactly one tag 'fixture' at coverage 1 on the fixture, got:"
+          echo "$jqresult"
+          echo "Filter: $jqexpr"
+          return 1
+        fi
+      fi
+      current=""
+    else
+      current="${current}${line}"$'\n'
+    fi
+  done <<EOF
+$raw
+EOF
+
+  # Sanity: must have extracted exactly the three documented filters (pure
+  # numeric / full-coverage / singleton), not a broken extractor vacuously
+  # passing on an empty or partial set.
+  [ "$fcount" -eq 3 ] || {
+    echo "Expected exactly 3 tag-hygiene jq filters, extracted $fcount"
+    return 1
+  }
+}
+
+# --- 6f. /update payload contract: no "tags" key, "volatility" key required ---
+#
+# Core defect under review (PR): the merge-decision procedure's /update
+# example carried a "tags" field the endpoint silently discards (never the
+# actual bug -- just noise) while any /update example that DROPS or
+# hardcodes "volatility" is the real bug -- /update's handler
+# (src/routes/capture.ts:136) only reads {id, content, volatility}, and
+# tagsAfterWrite strips volatility: on every write, so an example missing
+# "volatility" silently loses that entry's decay tier with zero error.
+# Before this assertion existed, re-adding a "tags" key to the example
+# payload left all 45 prior tests green -- the contract was documented in
+# prose (line ~103) but never locked in a runnable check.
+#
+# Anchoring: extracts every "-d '{...}'" JSON payload line that sits inside
+# a fenced bash block which ALSO contains the literal string "/update"
+# somewhere in that same block. Deliberately NOT anchored by position (e.g.
+# "the Nth -d line in the file") -- this PR already burned once on a
+# position anchor (the jq extractor) silently retargeting when an unrelated
+# block was inserted earlier in the file. Content anchoring on /update
+# co-occurring in the same fenced block survives reordering and insertion.
+_extract_update_payloads() {
+  local file="$1"
+  awk '
+    /^[[:space:]]*```bash[[:space:]]*$/ { infence=1; buf=""; has_update=0; next }
+    /^[[:space:]]*```[[:space:]]*$/ {
+      if (infence && has_update) { printf "%s", buf }
+      infence=0; buf=""; has_update=0; next
+    }
+    infence {
+      buf = buf $0 "\n"
+      if ($0 ~ /\/update/) has_update=1
+    }
+  ' "$file" | grep -E "^[[:space:]]*-d '\{.*\}'[[:space:]]*\\\\?[[:space:]]*$"
+}
+
+@test "brain-curate SKILL.md: /update payloads omit tags and include volatility" {
+  local payloads count=0 line json bad_tags=0 bad_volatility=0 bad_volatility_literal=0 volatility_value
+
+  payloads="$(_extract_update_payloads "$CURATE_SKILL_MD")"
+  [ -n "$payloads" ] || {
+    echo "Could not find any /update payload ('-d ... /update' in the same fenced bash block) in $CURATE_SKILL_MD -- the merge-procedure example may have been removed or reworded"
+    return 1
+  }
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    count=$((count + 1))
+    # Extract the single-quoted JSON body between the first and last '.
+    json="${line#*\'}"
+    json="${json%\'*}"
+
+    if echo "$json" | grep -q '"tags"'; then
+      echo "/update payload contains forbidden \"tags\" key (server silently discards it, and this was the exact regression under review): $json"
+      bad_tags=1
+    fi
+
+    if ! echo "$json" | grep -q '"volatility"'; then
+      echo "/update payload is missing required \"volatility\" key (omitting it silently drops that entry's decay tier on write): $json"
+      bad_volatility=1
+    else
+      # The volatility VALUE must be a placeholder ("copy the entry's actual
+      # value back from /export"), not a hardcoded literal tier. Hardcoding
+      # any tier value here is the exact Major this assertion locks against:
+      # a reader who copies the example verbatim would silently stamp every
+      # merged entry with the same tier regardless of its real prior value.
+      volatility_value=$(echo "$json" | grep -oE '"volatility"[[:space:]]*:[[:space:]]*"[^"]*"')
+      if echo "$volatility_value" | grep -qE '"volatility"[[:space:]]*:[[:space:]]*"(durable|state|volatile)"'; then
+        echo "/update payload hardcodes a literal volatility tier instead of a placeholder (this is the exact regression under review -- the value must be copied per-entry from /export, not a fixed literal): $json"
+        bad_volatility_literal=1
+      fi
+      if ! echo "$volatility_value" | grep -q '<.*>'; then
+        echo "/update payload's volatility value is not in placeholder form (expected an angle-bracket placeholder like \"<该条原值，从 /export 抄回>\"): $json"
+        bad_volatility_literal=1
+      fi
+    fi
+  done <<< "$payloads"
+
+  # Sanity: must have found at least one /update payload, otherwise the
+  # anchor silently matched nothing and every check above vacuously passed.
+  [ "$count" -gt 0 ] || {
+    echo "Extracted zero /update payloads from $CURATE_SKILL_MD -- anchor may be broken"
+    return 1
+  }
+
+  [ "$bad_tags" -eq 0 ] || return 1
+  [ "$bad_volatility" -eq 0 ] || return 1
+  [ "$bad_volatility_literal" -eq 0 ] || return 1
 }

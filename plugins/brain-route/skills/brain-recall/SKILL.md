@@ -96,6 +96,38 @@ brain 挂了或超时就照常干活,不阻塞主任务——它是补充层不�
 
 新学到跨项目工程教训时:
 
+### 写入前先看词表
+
+写入前拉一次 `/tags` 看库里已有哪些主题域 tag,优先复用而不是新造。原因是"哪个主题域已经存在"这个信息不看库是想不出来的,凭印象打标必然两极化——要么打成人人都有的泛词(零区分度),要么打成一次性孤词(无法聚类)。
+
+```bash
+curl -sS -m 30 -A "curl/8.7.1" \
+  -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
+  "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/tags"
+```
+
+### tag 三档规约
+
+| 档位 | 数量 | 判据 | 例 |
+|---|---|---|---|
+| 主题域 | 1-2(必须) | 从 `/tags` 挑复用;确无合适才新建,且新建的须是能容纳后续多条的领域概念,不是本次内容的专名 | `bats` `testing` `git` `hooks` `gate_design` |
+| 具体机制 | 0-2(可选) | 允许只有一条用到,价值在精确检索不在聚类 | `false_green` `mktemp` `bsd_vs_gnu` |
+| 禁止 | — | 全覆盖来源标记、纯数字、`kind:`/`status:`/`volatility:` 手写值 | `cc-mem` `241` |
+
+**tag 名只用 `[a-z0-9_]`,多词用下划线,不要连字符。**服务端 hashtag 提取正则是 `/#\w+/`(`src/text/hashtags.ts:2`),`\w` 不含 `-`,所以 `#gate-design` 只会被截成 `gate`。这条不是风格偏好,是写入通道的硬约束。
+
+- `kind:`/`status:` 由服务端分类自动打,`volatility:` 由服务端从请求的 `volatility` 字段派生——手写这三类前缀等于跟服务端抢方向盘。**注意区分**:请求体的 `volatility` 字段仍要传 `"durable"`(理由见本节后面那段,不变),禁的只是把 `volatility:durable` 这个字符串塞进 `tags` 数组。
+- issue / PR 号写进 content 正文,不进 tags。tag 用于聚类和过滤,唯一标识符这两件事都干不了。
+- 全覆盖来源标记(每条都打的那种,如 `cc-mem`)零区分度,不要打。真要按来源过滤,`/capture` 的 `source` 字段就是干这个的。
+
+### 正反例
+
+- 反例:`["cc-mem", "cctype:feedback", "volatility:durable", "241"]` —— 4 个 tag 里 3 个是全覆盖标记或服务端该自动打的,1 个是 issue 号。等效于零 tag:聚类时全库挤成一簇,过滤时选不出任何子集。
+- 正例:`["testing", "bats", "false_green"]` —— 两个主题域(可复用、能容纳后续条目)加一个具体机制(精确检索锚点)。
+- 差别一句话:反例的每个 tag 都对全库成立,正例的 tag 能把这条从全库里切出来。
+
+`cctype:` 前缀(CC memory 的 type 字段派生)可以留,它有过滤价值,但不计入主题域的 1-2 个配额。
+
 ```bash
 curl -sS -m 30 \
   -A "curl/8.7.1" \
