@@ -600,7 +600,7 @@ _extract_update_payloads() {
 }
 
 @test "brain-curate SKILL.md: /update payloads omit tags and include volatility" {
-  local payloads count=0 line json bad_tags=0 bad_volatility=0
+  local payloads count=0 line json bad_tags=0 bad_volatility=0 bad_volatility_literal=0 volatility_value
 
   payloads="$(_extract_update_payloads "$CURATE_SKILL_MD")"
   [ -n "$payloads" ] || {
@@ -623,6 +623,21 @@ _extract_update_payloads() {
     if ! echo "$json" | grep -q '"volatility"'; then
       echo "/update payload is missing required \"volatility\" key (omitting it silently drops that entry's decay tier on write): $json"
       bad_volatility=1
+    else
+      # The volatility VALUE must be a placeholder ("copy the entry's actual
+      # value back from /export"), not a hardcoded literal tier. Hardcoding
+      # any tier value here is the exact Major this assertion locks against:
+      # a reader who copies the example verbatim would silently stamp every
+      # merged entry with the same tier regardless of its real prior value.
+      volatility_value=$(echo "$json" | grep -oE '"volatility"[[:space:]]*:[[:space:]]*"[^"]*"')
+      if echo "$volatility_value" | grep -qE '"volatility"[[:space:]]*:[[:space:]]*"(durable|state|volatile)"'; then
+        echo "/update payload hardcodes a literal volatility tier instead of a placeholder (this is the exact regression under review -- the value must be copied per-entry from /export, not a fixed literal): $json"
+        bad_volatility_literal=1
+      fi
+      if ! echo "$volatility_value" | grep -q '<.*>'; then
+        echo "/update payload's volatility value is not in placeholder form (expected an angle-bracket placeholder like \"<该条原值，从 /export 抄回>\"): $json"
+        bad_volatility_literal=1
+      fi
     fi
   done <<< "$payloads"
 
@@ -635,4 +650,5 @@ _extract_update_payloads() {
 
   [ "$bad_tags" -eq 0 ] || return 1
   [ "$bad_volatility" -eq 0 ] || return 1
+  [ "$bad_volatility_literal" -eq 0 ] || return 1
 }
