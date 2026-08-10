@@ -203,25 +203,47 @@ _fenced_bash_lines() {
 # against a real /export response before the SKILL.md fix landed.
 
 
-# Extracts the /export jq filter expression from fenced bash code: finds the
-# first fenced line containing "jq", then accumulates lines (stripping "\"
-# line-continuations) until a line ending in "]'" closes the single-quoted
-# jq program. Tolerates the jq invocation and its opening "'[.entries[]"
-# being reflowed across two lines (e.g. "jq \\\n'[.entries[]") -- a
-# semantically-identical rewrite that a same-line text grep cannot survive
-# (verified live: reflowing turns a same-line grep red with zero behavior
-# change).
+# Extracts the /export jq filter expression from fenced bash code. Anchored
+# on CONTENT (the filter body containing "recall_count"), not on POSITION
+# ("the first fenced line containing jq"). A position anchor silently
+# retargets whenever an unrelated jq block is inserted earlier in the file --
+# exactly what happened when brain-curate's tag-hygiene section (three more
+# jq filters, none of them this one) landed above this block: the old
+# position anchor grabbed the wrong block, and the red it produced pointed
+# nowhere near the actual filter being pinned.
+#
+# Mechanics: scan for candidate jq programs, each starting at a line whose
+# fenced content begins with "jq" (optionally reflowed as "jq \\" alone with
+# the opening "'[.entries[]" on the next line -- a semantically-identical
+# rewrite that a same-line text grep cannot survive, verified live) and
+# accumulating (stripping "\" line-continuations) until a line ending in
+# "]'" closes the single-quoted jq program. Whenever a new "jq"-opening line
+# is seen, the previous (possibly still-open, if it never hit "]'") candidate
+# is discarded unless its body already contains "recall_count", in which
+# case that candidate is the answer and extraction stops immediately. This
+# naturally skips over the tag-hygiene filters -- none of them mention
+# recall_count -- regardless of how many of them sit before this block or in
+# what order.
 _extract_export_jq_filter() {
   local file="$1" sq="'" raw expr
   raw=$(_fenced_bash_lines "$file" | awk -F: '
     { line = substr($0, index($0, ":") + 1) }
-    !capturing && line ~ /jq/ { capturing = 1 }
+    line ~ /^[[:space:]]*jq([[:space:]]|\\|$)/ {
+      if (capturing && buf ~ /recall_count/) { found = buf; exit }
+      capturing = 1; buf = ""
+    }
     capturing {
       sub(/\\[[:space:]]*$/, "", line)
       buf = buf line "\n"
-      if (line ~ /\]'"'"'/) exit
+      if (line ~ /\]'"'"'/) {
+        if (buf ~ /recall_count/) { found = buf; exit }
+        capturing = 0; buf = ""
+      }
     }
-    END { printf "%s", buf }
+    END {
+      if (found == "" && capturing && buf ~ /recall_count/) found = buf
+      printf "%s", found
+    }
   ')
   expr="${raw#*$sq}"
   expr="${expr%$sq*}"
@@ -375,4 +397,148 @@ _extract_export_jq_filter() {
   [ -n "$plugin_version" ]
   [ -n "$marketplace_version" ]
   [ "$plugin_version" = "$marketplace_version" ]
+}
+
+# --- 6. Tag contract convention (brain-recall write-time rule + brain-curate hygiene sweep) ---
+#
+# Locks EXISTENCE, not wording. The 三档 table's row wording, the 正反例
+# array contents, and the exact prose phrasing are all expected to drift as
+# the docs get maintained — pinning them would manufacture false reds on
+# every routine edit. What must never silently disappear is: (a) the
+# write-time /tags lookup call, (b) the three-tier skeleton (topic domain /
+# specific mechanism / forbidden), (c) the three named forbidden categories,
+# (d) the hygiene section header that anchors 6.4's extractor, and (e) the
+# three hygiene jq filters actually being runnable code, not prose that
+# silently bit-rotted into something jq can no longer parse.
+
+@test "brain-recall SKILL.md: write section has a /tags lookup call before capture" {
+  # Must be scoped to fenced bash code -- prose elsewhere in the write
+  # section discusses "/tags" as a concept without it being a runtime call.
+  local hits
+  hits=$(_fenced_bash_lines "$RECALL_SKILL_MD" | grep -E '/tags"$' || true)
+  if [ -z "$hits" ]; then
+    echo "No fenced bash line ending in a '/tags' URL reference found in $RECALL_SKILL_MD -- the pre-write tag-vocabulary lookup call may have been removed"
+    return 1
+  fi
+}
+
+@test "brain-recall SKILL.md: three-tier tag table names all three tiers" {
+  local missing=""
+  for tier in "主题域" "具体机制" "禁止"; do
+    grep -q "$tier" "$RECALL_SKILL_MD" || missing="${missing}${tier} "
+  done
+  if [ -n "$missing" ]; then
+    echo "Missing tag-tier name(s) in $RECALL_SKILL_MD: $missing"
+    return 1
+  fi
+}
+
+@test "brain-recall SKILL.md: forbidden tag tier names all three category markers" {
+  local missing=""
+  grep -q 'cc-mem' "$RECALL_SKILL_MD" || missing="${missing}cc-mem(全覆盖来源标记示例) "
+  grep -q '纯数字' "$RECALL_SKILL_MD" || missing="${missing}纯数字(说明文字) "
+  for prefix in 'kind:' 'status:' 'volatility:'; do
+    grep -qF "$prefix" "$RECALL_SKILL_MD" || missing="${missing}${prefix} "
+  done
+  if [ -n "$missing" ]; then
+    echo "Missing forbidden-tag category marker(s) in $RECALL_SKILL_MD: $missing"
+    return 1
+  fi
+}
+
+@test "brain-curate SKILL.md: tag hygiene section header is present" {
+  grep -qF '**tag 卫生**' "$CURATE_SKILL_MD"
+}
+
+# Extracts the three tag-hygiene jq filter programs from fenced bash code in
+# brain-curate's "tag 卫生" block. Scoped between the "# 1. 纯数字" comment
+# marker (the block's first labeled filter) and the following "rm -f"
+# cleanup line, so it cannot drift onto the unrelated /export filters
+# earlier in the file or the /update|/forget calls later in the file.
+# _extract_export_jq_filter (used by assertion 3e above) accumulates until a
+# line ending in "]'" closes a single-quoted jq program -- it stops at the
+# FIRST such close, so it cannot be reused here where three separate jq
+# programs sit back to back in the same fenced block. This extractor
+# instead treats each "jq " line as opening a new program and closes each
+# one on its own trailing `' "$BRAIN_EXPORT"` invocation line.
+_extract_tag_hygiene_jq_filters() {
+  local file="$1" region
+  region=$(_fenced_bash_lines "$file" | awk -F: '
+    {
+      line = ""
+      for (i = 2; i <= NF; i++) { line = (i==2) ? $i : line ":" $i }
+    }
+    line ~ /^# 1\. 纯数字/ { inregion=1 }
+    inregion { print line }
+    inregion && line ~ /^rm -f/ { exit }
+  ')
+  printf '%s\n' "$region" | awk '
+    /^jq / { capturing=1; buf=$0 }
+    !/^jq / && capturing { buf = buf "\n" $0 }
+    capturing && $0 ~ /\x27[[:space:]]+"\$BRAIN_EXPORT"$/ { print buf; print "@@@FILTER@@@"; capturing=0; buf="" }
+  '
+}
+
+_strip_jq_single_quotes() {
+  local jqraw="$1" sq="'" jqexpr
+  jqexpr="${jqraw#*$sq}"
+  jqexpr="${jqexpr%$sq*}"
+  printf '%s' "$jqexpr"
+}
+
+@test "brain-curate SKILL.md: tag hygiene jq filters are extractable and runnable" {
+  local raw fcount=0 current="" line jqexpr jqresult jqrc
+
+  raw="$(_extract_tag_hygiene_jq_filters "$CURATE_SKILL_MD")"
+  [ -n "$raw" ] || {
+    echo "Could not extract any tag-hygiene jq filter from fenced bash code in $CURATE_SKILL_MD -- the '# 1. 纯数字' ... 'rm -f' block may have been deleted or restructured"
+    return 1
+  }
+
+  while IFS= read -r line; do
+    if [ "$line" = "@@@FILTER@@@" ]; then
+      fcount=$((fcount + 1))
+      jqexpr="$(_strip_jq_single_quotes "$current")"
+      jqresult=$(printf '%s' "$jqexpr" | jq -f /dev/stdin "$FIXTURE_EXPORT" 2>&1)
+      jqrc=$?
+      if [ "$jqrc" -ne 0 ]; then
+        echo "Tag-hygiene jq filter #$fcount failed to execute against fixture (exit $jqrc):"
+        echo "Filter: $jqexpr"
+        echo "Error: $jqresult"
+        return 1
+      fi
+      if [ "$fcount" -eq 2 ]; then
+        # This is the coverage-sweep filter (jq program #2, the "全覆盖 tag"
+        # check). All 4 fixture entries share the same stub tag "fixture" --
+        # 100% coverage -- so this is the one filter whose result we can pin
+        # to an exact value without over-fitting to prose. It's a real
+        # logic anchor, not just a syntax check: a bug in the group_by /
+        # coverage arithmetic (e.g. wrong denominator, off-by-one on the
+        # >=0.5 threshold) would silently produce a different count/coverage
+        # here even though the filter still parses and runs.
+        local tag coverage
+        tag=$(printf '%s' "$jqresult" | jq -r '.[0].tag // "MISSING"')
+        coverage=$(printf '%s' "$jqresult" | jq -r '.[0].coverage // "MISSING"')
+        if [ "$tag" != "fixture" ] || [ "$coverage" != "1" ]; then
+          echo "Coverage-sweep filter (#2) expected exactly one tag 'fixture' at coverage 1 on the fixture, got:"
+          echo "$jqresult"
+          echo "Filter: $jqexpr"
+          return 1
+        fi
+      fi
+      current=""
+    else
+      current="${current}${line}"$'\n'
+    fi
+  done <<EOF
+$raw
+EOF
+
+  # Sanity: must have extracted exactly the three documented filters (pure
+  # numeric / full-coverage / singleton), not a broken extractor vacuously
+  # passing on an empty or partial set.
+  [ "$fcount" -eq 3 ] || {
+    echo "Expected exactly 3 tag-hygiene jq filters, extracted $fcount"
+    return 1
+  }
 }

@@ -57,6 +57,54 @@ curl -sS -m 30 -A "curl/8.7.1" \
   --data-urlencode "tag=stale:as-of"
 ```
 
+**tag 卫生**（`brain-recall` 写入节定了 tag 三档规约——主题域 1-2 个必须 / 具体机制 0-2 个可选 / 禁止全覆盖标记·纯数字·`kind:`·`status:`·`volatility:` 手写值——但 `/capture` 不做校验，违规 tag 会静默进库，靠这里兜底扫）：
+
+```bash
+BRAIN_EXPORT=$(mktemp "${TMPDIR:-/tmp}/brain_export.XXXXXX")
+trap 'rm -f "$BRAIN_EXPORT"' EXIT
+curl -sS -m 30 -A "curl/8.7.1" \
+  -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
+  "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/export" > "$BRAIN_EXPORT"
+
+# 1. 纯数字 tag —— issue/PR 号被当 tag，聚类和过滤都没用，应移进 content 正文
+jq '[.entries[] | .tags[] | select(test("^[0-9]+$"))] | unique' "$BRAIN_EXPORT"
+
+# 2. 全覆盖 tag —— 覆盖率 >=50% 的 tag，零区分度且会被 graph 聚类判为过泛降级
+#    排除 kind:/status:/volatility:/cctype: 四类系统派生前缀（本来就高覆盖，不算欠账）
+jq '(.entries|length) as $total
+    | [.entries[] | .tags[]]
+    | group_by(.)
+    | map({tag: .[0], count: length, coverage: (length/$total)})
+    | map(select(.coverage >= 0.5))
+    | map(select(.tag | test("^(kind|status|volatility|cctype):") | not))' "$BRAIN_EXPORT"
+
+# 3. 孤词 tag —— 只有 1 条用到的 tag，仅供人工过目，不是自动欠账
+jq '[.entries[] | .tags[]]
+    | group_by(.)
+    | map({tag: .[0], count: length})
+    | map(select(.count == 1))
+    | map(.tag)' "$BRAIN_EXPORT"
+
+rm -f "$BRAIN_EXPORT"
+```
+
+**孤词 tag 不是错**：具体机制档允许 df=1（`false_green`、`bsd_vs_gnu` 这种是精确检索锚点，本来就该只挂一条）。第 3 条命令的输出只作人工过目，判据是「它是不是一个能容纳后续条目的领域概念被误当成了一次性专名」——是则该并入已有主题域，不是则留着，不要见到 df=1 就一律清理。
+
+三类欠账（纯数字、全覆盖、以及经人工判断确认要处理的孤词）都走下面的合并决策规约：人工裁决、不自动改数据。
+
+**tag 只能加,不能删——这是 REST 面的硬限制,规划整理动作前先认清**：
+
+- `/update` 的 body 只读 `{id, content, volatility}`（`src/routes/capture.ts:136`），**没有 `tags` 字段**。传了会被静默丢弃,不报错。
+- 实际写入是 `tagsAfterWrite(existingTags ∪ hashtags)`（`src/capture/store.ts:147`）——旧 tag 一律保留,新 tag 只能靠 content 里嵌 `#tag` 带进去。
+- 全部 31 个 REST 端点里**没有一个能删 tag**。`/status` 只改 `status:`，`/patterns/resolve` 只碰 `auto-pattern`。
+- `tagsAfterWrite` 会剥掉 `volatility:` 与 `stale:as-of`。所以每次 `/update` **必须按原值回传 `volatility` 字段**,否则该条的 volatility 判定会静默丢失（实测踩过：漏传导致 `volatility:durable` 消失,召回衰减下限从 0.9 掉回 0.6）。
+- `#tag` 会被 `extractHashtags` 从正文剔除（`src/text/hashtags.ts:3`）,不污染 content;但同一函数会把 `\s+` 压成单空格,**换行与代码围栏保不住**——正文形态要紧时改用 `/append`。
+- hashtag 正则是 `/#\w+/`,`\w` 不含连字符,`#gate-design` 只会被截成 `gate`。tag 名一律用 `[a-z0-9_]`。
+
+**所以「删掉坏 tag」不是可选动作。**遇到零区分度的全覆盖 tag（如某个每条都打的来源标记），治法是**补足主题域 tag 让它自然降级**,而不是想办法删它：`assignGraphClusters` 的 `GENERIC_CEIL`（`public/utils.js:202`，总数的 50%）会主动排除高覆盖 tag,只要库里存在覆盖率低于该线的主题域 tag,过泛 tag 就自己落选。实测 47 条：补主题域后最大簇从 35/47 降到 10/47,`cc-mem`（85% 覆盖）一个没删。
+
+真要物理删 tag,只剩 `wrangler d1 execute --remote` 直改 D1 一条路,且会绕过 Vectorize metadata 同步——属于需要单独裁决的动作,不在日常复核范围。
+
 **全量含统计**（PR 归并前兜底用，一次调用拿到 `recall_count` / `importance_score`）：
 
 ```bash
@@ -102,7 +150,7 @@ rm -f "$BRAIN_EXPORT"
    curl -sS -m 30 -A "curl/8.7.1" \
      -H "Authorization: Bearer ${SECOND_BRAIN_TOKEN:?未配置 SECOND_BRAIN_TOKEN，见 brain-route 插件 README 的 Environment Variables 节}" \
      -H "Content-Type: application/json" \
-     -d '{"id":"<保留条目id>", "content":"<合并后完整内容>", "tags":["..."]}' \
+     -d '{"id":"<保留条目id>", "content":"<合并后完整内容> #tag1 #tag2", "volatility":"durable"}' \
      "${SECOND_BRAIN_URL:?未配置 second-brain 端点，请设置 SECOND_BRAIN_URL，见 brain-route 插件 README 的 Environment Variables 节}/update"
 
    # 删除被合并掉的那条
