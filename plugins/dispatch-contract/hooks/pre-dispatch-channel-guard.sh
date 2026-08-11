@@ -159,5 +159,6 @@ fi
 
 printf '[dispatch-channel-guard] name="%s" 把一次性 subagent 提升为 teammate，产物改走 mailbox，需子 agent 显式 SendMessage(to:"main") 回传，漏发即静默丢失。背景见 skills/subagent-dispatch/references/mailbox-liveness.md。\n' "$name" >&2
 printf '[dispatch-channel-guard] 两条出路，按任务性质二选一：① 轻量一次性任务——去掉 name 重派，产物走工具返回值（可靠）；注意去掉 name 后 dispatch-sync-guard 的 name 豁免同时失效，该次派发需显式带 run_in_background:false。② 确需常驻多轮协作——按 team-ops 协议起 teammate，subagent_type 取 agents/ 名册内角色（dev/ops/pm/redteam/worker），本门禁结构性放行，不需要设任何 env。中间不设第三档。\n' >&2
+printf '[dispatch-channel-guard] mailbox 到达时刻绑定派发方空闲：SendMessage 不是即时投递，派发方主循环有工具在飞时消息会积压，直到派发方停下来才 flush，实测积压约 5 分钟且时长不可预测。teammate 通道因此不适合"拿到产物才能往下走"的同步决策——延迟到决策点之后等价于丢失；需要即时产物就走出路①。\n' >&2
 printf '[dispatch-channel-guard] 逃生舱只用于本门禁误判，不是「既要轻量又要 teammate」的第三条路——那种任务属出路①，去掉 name 即可：在 ~/.claude/settings.json 的 env 段设置 "ALLOW_UNMANAGED_TEAMMATE": "1"，临时开启后须销账关闭（历史上它被长期常开致本门禁全局失效、丢失三份 subagent 产物，claude-config 仓的 issue 164）。Bash 内 export 对 hook 进程不生效，仅可作直接调用本脚本时的同进程调试用。\n' >&2
 exit 2

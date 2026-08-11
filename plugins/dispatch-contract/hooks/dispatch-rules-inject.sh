@@ -14,6 +14,15 @@
 # times in aggregate context; full positive/negative examples belong in the
 # skill, not in every subagent's startup context.
 #
+# RULE1 carries a teammate-channel branch (not just "output is the artifact")
+# because this hook can only read `.agent_type` from the SubagentStart
+# payload — there is no teammate/name flag in that payload, so the hook has
+# no way to tell a plain subagent dispatch from a named-teammate dispatch and
+# branch the wording accordingly. The rule is written to cover both cases in
+# one sentence instead: for a plain dispatch the final message already reaches
+# the dispatcher; for a teammate dispatch it does not, and a SendMessage(to:
+# "main") call is required to actually deliver it.
+#
 # Tiering by agent_type: read-only agent types (Explore, Plan — case
 # insensitive) have Edit/Write physically disabled by the platform, so
 # injecting rule ②'s "only touch the files you were told to" wording would
@@ -56,7 +65,7 @@ jq . >/dev/null 2>&1 <<< "$INPUT" || exit 0
 AGENT_TYPE=$(jq -r '.agent_type // empty' <<< "$INPUT" 2>/dev/null) || exit 0
 AGENT_TYPE_LC=$(printf '%s' "$AGENT_TYPE" | tr '[:upper:]' '[:lower:]')
 
-RULE1='[dispatch-contract] 铁律①输出即产物：最终返回消息本身就是产物，禁止写完成说明或元总结。'
+RULE1='[dispatch-contract] 铁律①输出即产物：最终消息本身就是产物，禁止写完成说明或元总结。若你被赋了 name（teammate），最终消息不会自动回到派发方，须再用 SendMessage(to:"main") 送出同一份产物。'
 RULE2='[dispatch-contract] 铁律②范围围栏：只改指定文件/只做指定事，范围外只报告不擅动。'
 RULE3='[dispatch-contract] 铁律③渐进产出：长任务分段读、尽早吐中间进展。'
 POINTER='[dispatch-contract] 详规见 Skill(subagent-dispatch)。'
