@@ -18,9 +18,10 @@ PreToolUse (matcher: Agent, Task)
   │
   ├─ dispatch-sync-guard.sh (5s timeout)
   │      Blocks a dispatch call that omits run_in_background:false.
-  │      Omission selects the background delivery channel, and that channel
-  │      drops completion notifications at a measured 92.7% loss rate with
-  │      no resend path. Passes silently (fail-open) on teammate context
+  │      Omission selects the background delivery channel, so the product
+  │      depends on the completion notification queue; a synchronous dispatch
+  │      returns it in the tool_result and never enters that queue.
+  │      Passes silently (fail-open) on teammate context
   │      (agent_id present), Lead-starts-a-teammate calls (tool_input.name
   │      present), the CLAUDE_CODE_DISABLE_BACKGROUND_TASKS env var, the
   │      CLAUDE_AUTO_BACKGROUND_TASKS env var handled by its own dedicated

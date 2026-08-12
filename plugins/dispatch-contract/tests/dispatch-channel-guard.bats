@@ -300,3 +300,22 @@ teardown() {
     return 1
   }
 }
+
+@test "channel #18b: BLOCK message states mailbox arrival-time semantics (idle-bound, unpredictable)" {
+  local cwd="$TEST_TEMP_DIR/wording18b"
+  mkdir -p "$cwd"
+  local fakehome="$TEST_TEMP_DIR/fakehome18b"
+  mkdir -p "$fakehome"
+  local payload
+  payload=$(mk_channel_payload "Agent" "lead" "general-purpose" "$cwd")
+  run_channel_guard "$payload" "HOME=$fakehome"
+  assert_channel_block
+  [[ "$CHANNEL_STDERR" == *"到达时刻绑定派发方空闲"* ]] || {
+    echo "Expected arrival-time wording (到达时刻绑定派发方空闲) in stderr, got: $CHANNEL_STDERR"
+    return 1
+  }
+  [[ "$CHANNEL_STDERR" == *"不可预测"* ]] || {
+    echo "Expected unpredictability wording (不可预测) in stderr, got: $CHANNEL_STDERR"
+    return 1
+  }
+}

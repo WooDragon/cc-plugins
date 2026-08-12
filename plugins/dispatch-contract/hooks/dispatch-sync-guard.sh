@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # PreToolUse hook (matcher: Agent, Task): block subagent dispatch calls that
 # omit run_in_background:false, because the omission silently selects the
-# background delivery channel — and that channel drops completion
-# notifications with a measured 92.7% loss rate when the main loop is mid-tool
-# at delivery time, with no resend and no recovery path (SendMessage does not
-# replay lost notifications). See feedback-notification-lost-midturn-fold.md.
+# background delivery channel — the product then depends on the completion
+# notification queue, whereas a synchronous dispatch returns the product in
+# the tool_result and never enters that queue at all. The gate rests on that
+# structural difference, not on any loss-rate figure: an earlier claim that
+# notifications are dropped at a measured rate when the main loop is mid-tool
+# has been withdrawn pending observation, because the step from "removed from
+# the queue" to "the model never sees it" was never established.
+# See feedback-notification-lost-midturn-fold.md.
 #
 # Judgment source: fields carried by the dispatch call itself. This hook does
 # NOT read any session state, transcript, or prior turn — only tool_name and
@@ -234,7 +238,7 @@ jq -e '.tool_input.run_in_background == false' <<< "$INPUT" >/dev/null 2>&1 && e
 # the generic "add run_in_background:false" advice is unfollowable there,
 # because the field is not in the schema to begin with.
 if ! jq -e '.tool_input | has("run_in_background")' <<< "$INPUT" >/dev/null 2>&1; then
-  printf '[dispatch-sync-guard] tool_input 里没有 run_in_background。若你只是漏传了 → 补 run_in_background:false 重派即可,产物走 tool_result,不进那个会被折叠吃掉的队列(丢失率实测 92.7%%,无补发、无恢复通道)。\n' >&2
+  printf '[dispatch-sync-guard] tool_input 里没有 run_in_background。若你只是漏传了 → 补 run_in_background:false 重派即可,产物直接走 tool_result 返回,不依赖完成通知队列这一环。\n' >&2
   printf '[dispatch-sync-guard] 若重派时发现该字段根本不在 Agent 的 inputSchema 里(传了也被剥掉),说明 fork-subagent 特性已开启(tengu_copper_fox)。此时后台不是"不存在"而是被强制:运行时里 bEe() 是决定异步的独立析取项,Z 恒真,所有派发都走 async_launched;zod 会剥掉 schema 外的键,硬传 run_in_background:false 也进不去 —— 所以这里同样不放行。\n' >&2
   printf '[dispatch-sync-guard] fork 世界的解法:在 ~/.claude/settings.json 的 env 段加 "CLAUDE_CODE_FORK_SUBAGENT":"0"(需重启 CC 生效)。该假值分支在运行时里排在 rollout 检查之前,能压过服务端 flag,字段随即回到 schema、同步派发重新可表达。代价仅是放弃 fork 的上下文继承。\n' >&2
   printf '[dispatch-sync-guard] 两种情形都不要改用 ALLOW_BACKGROUND_DISPATCH=1 绕过 —— 那会让本门禁在所有环境一起失效,包括后台通道真实存在、真正需要它的场景。\n' >&2
@@ -244,7 +248,7 @@ fi
 # 省略的情形已被上面的 field-absent 分支截走,这里只可能是"字段在场但值非法"
 # (显式 true,或字符串 "false" 之类非布尔值)。文案必须与控制流一致,否则等于
 # 对模型撒谎。
-printf '[dispatch-sync-guard] run_in_background 显式设为 true、或传入非布尔值(如字符串 "false")时都会选中后台通道：完成通知在主循环正跑工具时到达会被丢弃，实测丢失率 92.7%%，且无补发、无恢复通道（SendMessage 续跑不补发旧通知）。\n' >&2
-printf '[dispatch-sync-guard] 需要产物才能往下走 → 加 run_in_background:false 重派，产物走 tool_result，根本不进那个会被折叠吃掉的队列。真要后台并行 → 派完立刻结束本轮交还主循环，禁止 sleep/轮询/紧接 AskUserQuestion。\n' >&2
+printf '[dispatch-sync-guard] run_in_background 显式设为 true、或传入非布尔值(如字符串 "false")时都会选中后台通道：产物改为依赖完成通知队列送达,而同步派发的产物直接走 tool_result、根本不进该队列。需要产物才能往下走就用同步派发。\n' >&2
+printf '[dispatch-sync-guard] 需要产物才能往下走 → 加 run_in_background:false 重派，产物直接走 tool_result 返回，根本不进完成通知队列这一环。真要后台并行 → 派完立刻结束本轮交还主循环，禁止 sleep/轮询/紧接 AskUserQuestion。\n' >&2
 printf '[dispatch-sync-guard] 确需后台：在 ~/.claude/settings.json 的 env 段加 "ALLOW_BACKGROUND_DISPATCH":"1"（Bash 里 export 传不进 hook 进程）。\n' >&2
 exit 2
