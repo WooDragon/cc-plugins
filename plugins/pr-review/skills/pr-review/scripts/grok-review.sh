@@ -23,6 +23,7 @@ set -euo pipefail
 
 MODEL="${GROK_MODEL:-grok-4.5}"
 EFFORT="${GROK_EFFORT:-high}"
+ENV_EFFORT="${GROK_EFFORT:-}"
 # 命令行是否显式给出 model/effort（复核轮据此决定沿用 state 还是尊重 flag；set -u 下必须先初始化）
 MODEL_EXPLICIT=0
 EFFORT_EXPLICIT=0
@@ -42,9 +43,14 @@ die() { echo "错误: $*" >&2; exit 1; }
 # effort 合法值校验（首轮入口 + 复核轮 state 读回后各调一次，单一事实源）
 check_effort() {
   case "$1" in
-    none|minimal|low|medium|high|xhigh) ;;
-    *) die "非法 effort: $1（合法: none/minimal/low/medium/high/xhigh）" ;;
+    none|minimal|low|medium|high) ;;
+    *) die "非法 effort: $1（合法: none/minimal/low/medium/high）" ;;
   esac
+}
+
+# 老版 xhigh 只允许从持久 state 迁移；新的 CLI/环境输入一律拒绝。
+is_legacy_xhigh() {
+  [[ "$1" == "xhigh" ]]
 }
 
 # 疑似敏感文件名判定（单一事实源，untracked 跳过 + tracked 告警共用）：$1=basename，命中返回 0。
@@ -123,6 +129,23 @@ state_write() {
   } > "$sw_tmp"
   chmod 600 "$sw_tmp"
   mv -f "$sw_tmp" "$STATE_FILE"
+}
+
+# 将旧 state 的 EFFORT=xhigh 原子迁到 high，同时逐行保留 SID 和其余字段。
+migrate_legacy_effort() {
+  local sw_tmp line
+  [[ -f "$STATE_FILE" ]] || return 0
+  sw_tmp=$(mktemp "$STATE_DIR/.tmp.XXXXXX") || die "mktemp 失败"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == EFFORT=xhigh ]]; then
+      printf 'EFFORT=high\n'
+    else
+      printf '%s\n' "$line"
+    fi
+  done < "$STATE_FILE" > "$sw_tmp"
+  chmod 600 "$sw_tmp"
+  mv -f "$sw_tmp" "$STATE_FILE"
+  echo "警告: 已将旧 session 的 EFFORT=xhigh 迁移为 high。" >&2
 }
 
 # 首轮：拉 PR 元信息 + 全量 diff，组装 prompt-file。设 PROMPT_FILE 全局变量暴露路径。
@@ -341,6 +364,11 @@ FOLLOWUP_MODE=0
 if (( ! FOLLOWUP_MODE )) || (( EFFORT_EXPLICIT )); then
   check_effort "$EFFORT"
 fi
+# 环境变量也是新输入；xhigh 即使复核轮会优先读 state 也必须在调用 grok 前拒绝。
+# 其他旧环境脏值仍不可挡住合法 state 回放，维持既有兼容行为。
+if (( FOLLOWUP_MODE )) && (( ! EFFORT_EXPLICIT )) && is_legacy_xhigh "$ENV_EFFORT"; then
+  die "非法 effort: xhigh（合法: none/minimal/low/medium/high）"
+fi
 # MODEL 同理：首轮或显式 --model 立即校验；复核轮非显式推迟到 state 读回后校验最终值
 if (( ! FOLLOWUP_MODE )) || (( MODEL_EXPLICIT )); then
   check_model "$MODEL"
@@ -397,9 +425,15 @@ if (( FOLLOWUP_MODE )); then
   if (( ! MODEL_EXPLICIT )); then
     _s=$(state_get MODEL); [[ -n "$_s" ]] && { check_model "$_s"; MODEL="$_s"; }
   fi
-  if (( ! EFFORT_EXPLICIT )); then
-    _s=$(state_get EFFORT)
-    [[ -n "$_s" ]] && { check_effort "$_s"; EFFORT="$_s"; }
+  _s=$(state_get EFFORT)
+  if is_legacy_xhigh "$_s"; then
+    # 旧 state 是唯一允许出现 xhigh 的来源：保留其余 state 字段并在调用 grok 前完成迁移。
+    migrate_legacy_effort
+    _s=high
+  fi
+  if (( ! EFFORT_EXPLICIT )) && [[ -n "$_s" ]]; then
+    check_effort "$_s"
+    EFFORT="$_s"
   fi
   # 校验最终生效的 MODEL/EFFORT（覆盖 state 无值却 env GROK_MODEL/GROK_EFFORT 非法的情形）
   check_model "$MODEL"

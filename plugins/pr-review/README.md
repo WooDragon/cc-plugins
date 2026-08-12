@@ -66,7 +66,7 @@ Guardrails baked into the script:
 | grok | `grok` CLI on `PATH`, `gh` (authenticated), `git` |
 | copilot | `gh` (authenticated), Copilot code review enabled on the repo |
 
-`GROK_MODEL` (default `grok-4.5`) and `GROK_EFFORT` (default `high`) override the model and reasoning effort; on a follow-up round the persisted session's values win unless the flag is given explicitly.
+`GROK_MODEL` (default `grok-4.5`) and `GROK_EFFORT` (default `high`) override the model and reasoning effort. Supported effort values are exactly `none`, `minimal`, `low`, `medium`, and `high`; `xhigh` is not supported. On a follow-up round, persisted session values win unless the flag is given explicitly. If a persisted legacy session records `xhigh`, the script migrates that value to `high` once before the review runs.
 
 ## Tests
 
@@ -74,4 +74,4 @@ Guardrails baked into the script:
 bats plugins/pr-review/tests/grok-review.bats
 ```
 
-60 cases covering argument parsing, session state files, path construction, fail-fast semantics, directory permissions, GC, and the secret-file heuristics. External commands (`grok`, `gh`, `uuidgen`) are stubbed; `git` is real, against a per-test temp repo.
+66 cases covering argument parsing, session state files, path construction, fail-fast semantics, directory permissions, GC, effort validation and migration, and the secret-file heuristics. External commands (`grok`, `gh`, `uuidgen`) are stubbed; `git` is real, against a per-test temp repo.

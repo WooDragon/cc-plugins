@@ -64,7 +64,7 @@ session 状态本就落盘（state file），复核轮的派发 A 用同一 sess
 "${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/grok-review.sh" <PR> [--repo owner/name]
 ```
 
-**cwd 必须是被评审 PR 所在的仓库工作区**——脚本按 `git rev-parse --show-toplevel` 钉死 session 身份、按 cwd 取增量 diff，不是"不依赖 cwd"。结果直接打印到终端，不发 PR 评论。参数细节、工作原理、故障排查见 `references/grok-review.md`。
+**cwd 必须是被评审 PR 所在的仓库工作区**——脚本按 `git rev-parse --show-toplevel` 钉死 session 身份、按 cwd 取增量 diff，不是"不依赖 cwd"。结果直接打印到终端，不发 PR 评论。支持的 `--effort` / `GROK_EFFORT` 值严格为 `none`、`minimal`、`low`、`medium`、`high`，默认 `high`；不支持 `xhigh`。复核轮读到旧持久 state 的 `EFFORT=xhigh` 时，脚本会在调用前一次性迁移为 `high`。参数细节、工作原理、故障排查见 `references/grok-review.md`。
 
 **派发给子任务时的路径发现**：`${CLAUDE_PLUGIN_ROOT}` 在 subagent 正文里不展开。解析命令已内置于 `references/grok-review.md`「派发 A 模板」，复制该模板即可——路径解析只留这一处，避免主线与模板各解析一次形成双轨。
 

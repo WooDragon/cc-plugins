@@ -49,7 +49,7 @@ scripts/grok-review.sh <PR> --followup "<复核指令>" [--since <ref>] [--sessi
 | `<PR>` | PR 编号（必填，纯数字） | — |
 | `--repo owner/name` | 目标仓库，跨仓库评审时指定 | 当前 `gh` 仓库 |
 | `--model M` | grok 模型 | `grok-4.5`（可用环境变量 `GROK_MODEL` 覆盖） |
-| `--effort E` | 推理强度，合法值 `none/minimal/low/medium/high/xhigh` | `high`（可用环境变量 `GROK_EFFORT` 覆盖）。日常想省 token 可 `--effort low/medium` 或 `GROK_EFFORT=low` |
+| `--effort E` | 推理强度。支持的值严格为 `none/minimal/low/medium/high`；不支持 `xhigh`。 | `high`（可用环境变量 `GROK_EFFORT` 覆盖）。日常想省 token 可 `--effort low/medium` 或 `GROK_EFFORT=low`。旧持久 state 中的 `EFFORT=xhigh` 会在复核前一次性迁移为 `high`。 |
 | `--followup "<文本>"` | 进入复核轮：`-r` 续接同一 session，只发 followup 文本 + 本轮增量 diff（不重发首轮全量） | 不传即为首轮 |
 | `--since <ref>` | 仅复核轮生效：增量 diff 改用 `git diff <ref>` 计算基准（会先 `rev-parse --verify` 校验 ref） | 默认 `git diff <状态文件 BASE_SHA>`（首轮 HEAD）＋ untracked；`BASE_SHA` 从未记录时用 `git diff HEAD`，记录存在却不可达则 **Fail Fast**（不静默降级） |
 | `--session <UUID>` | 显式覆盖本轮使用的 SID，优先级高于状态文件 | 读状态文件里的 `SID` |
@@ -129,7 +129,7 @@ grok 的 `--output-format json` 输出**不是合法 JSON**——`thought` 字�
 - 内容：简单 KV——`SID` / `MODEL` / `EFFORT` / `CWD`（首轮工作区 toplevel；**只要在 git 仓就记录**，与是否给 grok 传 `--cwd` 解耦，供复核轮"工作区身份钉"比对）/ `BASE_SHA`（首轮 HEAD，作复核默认基线；只要在 git 仓就记录）/ `CREATED`（epoch 秒）。
 - 生命周期：首轮**在 grok 成功返回后**才写入/覆盖同 PR 的旧文件——首轮失败不会留下误导性 SID/BASE_SHA（"不覆盖进行中会话"**仅对 grok 失败路径成立**）。成功路径**会**覆写同 PR 既有 state：因此无参重跑首轮（漏写 `--followup`）会用新 SID 覆盖活跃 session、丢掉旧会话记忆并再烧一轮全量 diff token——脚本在**调 grok 前**就大字警告"覆写已存在的活跃 session（旧 SID→新 SID）……若本意是复核请改用 --followup"，误触可当场 Ctrl-C 止损；不默认 Fail Fast，因为重跑首轮求全新 session 是合法常见操作。复核轮只读 SID/BASE_SHA，但**成功后会 `touch` 状态文件刷新 mtime**，防止活跃 session 被 GC 误清。不建 TTL 有效性判断（靠 Fail Fast 兜底失效场景）。每次首轮写入前顺手做 30 天 GC（`find ... -name '*.session' -mtime +30 -delete`），防止状态文件无限累积。
 
-- 复核轮默认**沿用首轮的 model/effort**（从状态文件 `MODEL`/`EFFORT` 读回，保证同一 session 各轮推理强度一致）；命令行显式给出 `--model` / `--effort` 时以命令行为准（优先级：命令行 flag > 状态文件 > 默认/环境变量）。**显式覆盖仅本轮生效、不写回 state**——下一轮不带 flag 会回到首轮记录值（非 sticky）；state 里 `MODEL` 读回时也过 `check_model` 校验（防损坏值注入 `-m`）。
+- 复核轮默认**沿用首轮的 model/effort**（从状态文件 `MODEL`/`EFFORT` 读回，保证同一 session 各轮推理强度一致）；命令行显式给出 `--model` / `--effort` 时以命令行为准（优先级：命令行 flag > 状态文件 > 默认/环境变量）。支持的 effort 值严格为 `none/minimal/low/medium/high`，默认 `high`，不支持 `xhigh`。旧持久 state 中唯一允许出现的 `EFFORT=xhigh` 会在复核前一次性迁移为 `high`；新的命令行或环境输入 `xhigh` 会被拒绝。**显式覆盖仅本轮生效、不写回 state**——下一轮不带 flag 会回到首轮记录值（非 sticky）；state 里 `MODEL` 读回时也过 `check_model` 校验（防损坏值注入 `-m`）。
 
 ## 设计说明
 
