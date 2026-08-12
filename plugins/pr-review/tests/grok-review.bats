@@ -658,3 +658,65 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"无法获取 PR #42 head"* ]]
 }
+
+# ---------- 14. effort 收敛：xhigh 只允许作为旧 state 一次性迁移 ----------
+
+@test "effort: 新 CLI 输入 xhigh 在调用 grok 前被拒绝" {
+  run bash "$SCRIPT" 42 --effort xhigh
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"非法 effort: xhigh"* ]]
+  [ ! -f "$GROK_ARGS_LOG" ]
+}
+
+@test "effort: 新环境输入 xhigh 在调用 grok 前被拒绝" {
+  run env GROK_EFFORT=xhigh bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"非法 effort: xhigh"* ]]
+  [ ! -f "$GROK_ARGS_LOG" ]
+}
+
+@test "effort: 所有有效值精确转发给 grok" {
+  for effort in none minimal low medium high; do
+    rm -f "$GROK_ARGS_LOG"
+    run bash "$SCRIPT" 42 --effort "$effort"
+    [ "$status" -eq 0 ]
+    [ "$(get_arg_value "$GROK_ARGS_LOG" "--effort")" = "$effort" ]
+  done
+}
+
+@test "effort: 旧 state xhigh 迁移为 high，保留 SID 和其他字段并设为 600" {
+  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+  cwd=$(git -C "$WORK/repo" rev-parse --show-toplevel)
+  printf 'SID=SID-LEGACY\nMODEL=grok-4.5\nEFFORT=xhigh\nCWD=%s\nBASE_SHA=\nCREATED=123\n' "$cwd" > "$STATE_FILE_42"
+  chmod 644 "$STATE_FILE_42"
+  run env -u GROK_EFFORT bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"迁移为 high"* ]]
+  grep -qx 'SID=SID-LEGACY' "$STATE_FILE_42"
+  grep -qx 'MODEL=grok-4.5' "$STATE_FILE_42"
+  grep -qx 'EFFORT=high' "$STATE_FILE_42"
+  grep -qx "CWD=$cwd" "$STATE_FILE_42"
+  grep -qx 'BASE_SHA=' "$STATE_FILE_42"
+  grep -qx 'CREATED=123' "$STATE_FILE_42"
+  [ "$(get_perm "$STATE_FILE_42")" = "600" ]
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--effort")" = "high" ]
+}
+
+@test "effort: 显式有效值优先于旧 state，但仍迁移 xhigh" {
+  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+  printf 'SID=SID-PRECEDENCE\nMODEL=grok-4.5\nEFFORT=xhigh\nCWD=%s\nBASE_SHA=\nCREATED=1\n' "$(git -C "$WORK/repo" rev-parse --show-toplevel)" > "$STATE_FILE_42"
+  run bash "$SCRIPT" 42 --followup "复核" --effort medium
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"迁移为 high"* ]]
+  grep -qx 'EFFORT=high' "$STATE_FILE_42"
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--effort")" = "medium" ]
+}
+
+@test "effort: 复核轮非显式环境 xhigh 即使 state 合法也在调用 grok 前被拒绝" {
+  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+  printf 'SID=SID-VALID\nMODEL=grok-4.5\nEFFORT=high\nCWD=%s\nBASE_SHA=\nCREATED=1\n' "$(git -C "$WORK/repo" rev-parse --show-toplevel)" > "$STATE_FILE_42"
+  run env GROK_EFFORT=xhigh bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"非法 effort: xhigh"* ]]
+  [ ! -f "$GROK_ARGS_LOG" ]
+}
