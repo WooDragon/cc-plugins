@@ -21,7 +21,7 @@
 #     （followup 常预设 grok 记得前几轮 finding，发给无记忆新会话必然幻觉）。
 set -euo pipefail
 
-MODEL="${GROK_MODEL:-grok-4.5}"
+MODEL="${GROK_MODEL:-grok-4.6}"
 EFFORT="${GROK_EFFORT:-high}"
 ENV_EFFORT="${GROK_EFFORT:-}"
 # 命令行是否显式给出 model/effort（复核轮据此决定沿用 state 还是尊重 flag；set -u 下必须先初始化）

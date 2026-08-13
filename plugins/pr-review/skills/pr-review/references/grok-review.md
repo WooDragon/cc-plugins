@@ -48,7 +48,7 @@ scripts/grok-review.sh <PR> --followup "<复核指令>" [--since <ref>] [--sessi
 |---|---|---|
 | `<PR>` | PR 编号（必填，纯数字） | — |
 | `--repo owner/name` | 目标仓库，跨仓库评审时指定 | 当前 `gh` 仓库 |
-| `--model M` | grok 模型 | `grok-4.5`（可用环境变量 `GROK_MODEL` 覆盖） |
+| `--model M` | grok 模型 | `grok-4.6`（可用环境变量 `GROK_MODEL` 覆盖） |
 | `--effort E` | 推理强度。支持的值严格为 `none/minimal/low/medium/high`；不支持 `xhigh`。 | `high`（可用环境变量 `GROK_EFFORT` 覆盖）。日常想省 token 可 `--effort low/medium` 或 `GROK_EFFORT=low`。旧持久 state 中的 `EFFORT=xhigh` 会在复核前一次性迁移为 `high`。 |
 | `--followup "<文本>"` | 进入复核轮：`-r` 续接同一 session，只发 followup 文本 + 本轮增量 diff（不重发首轮全量） | 不传即为首轮 |
 | `--since <ref>` | 仅复核轮生效：增量 diff 改用 `git diff <ref>` 计算基准（会先 `rev-parse --verify` 校验 ref） | 默认 `git diff <状态文件 BASE_SHA>`（首轮 HEAD）＋ untracked；`BASE_SHA` 从未记录时用 `git diff HEAD`，记录存在却不可达则 **Fail Fast**（不静默降级） |

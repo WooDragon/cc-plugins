@@ -144,7 +144,7 @@ EOF
   [ "$status" -eq 0 ]
   [ -f "$STATE_FILE_42" ]
   grep -qx 'SID=TESTUUID-1' "$STATE_FILE_42"
-  grep -qx 'MODEL=grok-4.5' "$STATE_FILE_42"
+  grep -qx 'MODEL=grok-4.6' "$STATE_FILE_42"
   grep -qx 'EFFORT=high' "$STATE_FILE_42"
   grep -q '^CWD=' "$STATE_FILE_42"
 }

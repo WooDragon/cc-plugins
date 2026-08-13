@@ -66,7 +66,7 @@ Guardrails baked into the script:
 | grok | `grok` CLI on `PATH`, `gh` (authenticated), `git` |
 | copilot | `gh` (authenticated), Copilot code review enabled on the repo |
 
-`GROK_MODEL` (default `grok-4.5`) and `GROK_EFFORT` (default `high`) override the model and reasoning effort. Supported effort values are exactly `none`, `minimal`, `low`, `medium`, and `high`; `xhigh` is not supported. On a follow-up round, persisted session values win unless the flag is given explicitly. If a persisted legacy session records `xhigh`, the script migrates that value to `high` once before the review runs.
+`GROK_MODEL` (default `grok-4.6`) and `GROK_EFFORT` (default `high`) override the model and reasoning effort. Supported effort values are exactly `none`, `minimal`, `low`, `medium`, and `high`; `xhigh` is not supported. On a follow-up round, persisted session values win unless the flag is given explicitly. If a persisted legacy session records `xhigh`, the script migrates that value to `high` once before the review runs.
 
 ## Tests
 
