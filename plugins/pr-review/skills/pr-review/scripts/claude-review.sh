@@ -12,10 +12,17 @@
 #   - 首轮 claude -p --session-id <uuid> 建会话、发全量 PR diff；复核轮 --resume <uuid> 续接。
 #   - session 状态文件：${XDG_STATE_HOME:-$HOME/.local/state}/pr-review/<owner>__<name>__<PR>.claude.session
 #     （后缀 .claude.session，与 grok 的 .session 互不覆盖，同一 PR 可各自独立跑一条评审 session）。
-#   - 隔离旗标：--setting-sources "" --tools "" --disable-slash-commands，调用前
-#     unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT——防止在当前 Claude Code 会话内部拉起 claude -p
-#     子进程时递归加载 hook/plugin（复用 plugins/plan-review/scripts/lib/engines/claude.sh 已验证
-#     的隔离手法）。**不加** --no-session-persistence：那会导致会话不落盘、--resume 完全失效，
+#   - 隔离旗标：--setting-sources "" --tools "" --disable-slash-commands --safe-mode
+#     --strict-mcp-config，调用前 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT——防止在当前
+#     Claude Code 会话内部拉起 claude -p 子进程时递归加载 hook/plugin（复用
+#     plugins/plan-review/scripts/lib/engines/claude.sh 已验证的隔离手法）。--safe-mode 关闭
+#     CLAUDE.md/skills/plugins/hooks/MCP servers/自定义命令与 agent/output styles/workflows/
+#     主题/键位绑定全部通道——覆盖面比 --setting-sources "" 更广：`.mcp.json`（项目级 MCP
+#     server 自动发现）独立于 --setting-sources，未受信 PR checkout 根目录放一个恶意
+#     `.mcp.json` 可在"连接 MCP server"这一步（先于 --tools "" 能不能被后续调用）就执行任意
+#     命令，--safe-mode 把这条通道也关掉。--strict-mcp-config 双保险：即使显式传了
+#     --mcp-config，也只信那份、忽略其余 MCP 配置来源。四个旗标并存，不互斥、不替代。
+#     **不加** --no-session-persistence：那会导致会话不落盘、--resume 完全失效，
 #     与本脚本要的多轮对抗复评需求矛盾——这是与 plan-review 的 claude engine 的关键差异，勿抄错。
 #   - --setting-sources "" 必须是空字符串，不能是 "local"：实测 --setting-sources local 仍会
 #     加载 cwd 下 .claude/settings.local.json 里的 SessionStart 等 hook 并真实执行（即使
@@ -23,12 +30,17 @@
 #     的运行前提是 cwd 通常是 `gh pr checkout <PR>` 之后的外部贡献者分支工作区——恶意 PR 可以把
 #     .claude/settings.local.json track 进分支、挂一个恶意 hook，一旦本脚本在该工作区跑就等于
 #     在本机执行 PR 作者的任意命令。传空字符串彻底关闭 settings 加载，消除这个面。
-#   - 调用前除 unset CLAUDECODE/CLAUDE_CODE_ENTRYPOINT 外，同时 unset 一组 ANTHROPIC_*/
-#     CLAUDE_AGENT_* 路由变量（API_KEY/BASE_URL/AUTH_TOKEN/DEFAULT_*_MODEL 等）：当前会话若经
-#     `~/.claude/scripts/claude-wrapper.sh` 的 grok 分支启动，这些变量会注入整个进程环境、被
-#     本子进程继承——不清理的话 resolve-backend.sh 判给 claude 后端，但 claude -p 子进程仍带着
-#     grok 网关的 BASE_URL/API_KEY，请求根本没有脱离 grok 路径，功能名存实亡。清空后子进程只能
-#     走 claude 正常的 OAuth/keychain 登录态。
+#   - 调用前除 unset CLAUDECODE/CLAUDE_CODE_ENTRYPOINT 外，同时调用共享的
+#     unset_provider_routing_env（lib/pr-review-common.sh，两处调用点共用，单一事实源）
+#     清理两类变量：① ANTHROPIC_*/CLAUDE_AGENT_API_BASE_URL 路由变量（API_KEY/BASE_URL/
+#     AUTH_TOKEN/DEFAULT_*_MODEL 等）——当前会话若经 `~/.claude/scripts/claude-wrapper.sh`
+#     的 grok 分支启动，这些变量会注入整个进程环境、被本子进程继承——不清理的话
+#     resolve-backend.sh 判给 claude 后端，但 claude -p 子进程仍带着 grok 网关的
+#     BASE_URL/API_KEY，请求根本没有脱离 grok 路径，功能名存实亡；② CLAUDE_CODE_MESSAGING_*/
+#     CLAUDE_CODE_SESSION_ID/CLAUDE_CODE_CHILD_SESSION（Claude Code 自身 team-messaging IPC
+#     变量）+ CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY（wrapper 的 grok 分支注入，见
+#     claude-wrapper.sh:1059/1268/1328）——同样可能被子进程继承，与"独立干净子进程"语义不符。
+#     清空后子进程只能走 claude 正常的 OAuth/keychain 登录态。
 #   - --tools "" 已让 claude 完全没有文件读取能力（比 grok 的 --sandbox read-only 更强——grok
 #     还能靠 --cwd 读工作区文件，claude 这条路径下连"读"都不允许），故不需要传等价的
 #     --cwd/sandbox 参数；全部上下文都在 prompt-file 里以文本形式喂给它。BASE_SHA/CWD 身份钉死
@@ -175,27 +187,19 @@ if (( FOLLOWUP_MODE )); then
   echo ">> claude 复核 PR #$PR ($OWNER/$NAME) — session=$SID model=$MODEL effort=$EFFORT" >&2
 
   # Strip Claude Code internal env vars to prevent recursive hook/plugin loading（复用
-  # plan-review 的 claude engine 隔离手法）。同时清空 ANTHROPIC_*/CLAUDE_AGENT_* 路由变量：
-  # 当前会话若经 claude-wrapper.sh 的 grok 分支启动，这些变量会注入整个进程环境、被本子进程
-  # 继承——不清理的话 resolve-backend.sh 判给 claude 后端，但 claude -p 子进程仍带着 grok
-  # 网关的 BASE_URL/API_KEY，请求根本没有脱离 grok 路径，功能名存实亡。清空后子进程只能走
-  # claude 正常的 OAuth/keychain 登录态。stderr 直接重定向到文件（不用 2> >(tee ...) 进程替换）：
-  # 评审正文走 stdout 仍直接流式，只有 claude 的 stderr 进度延后到结束才刷——换来消除 rc/tee
-  # 竞态、不依赖 /dev/fd（受限 shell/沙箱也稳）。
+  # plan-review 的 claude engine 隔离手法）。unset_provider_routing_env（lib，两处调用点
+  # 共用）同时清空 ANTHROPIC_*/CLAUDE_AGENT_* 路由变量与 CLAUDE_CODE_MESSAGING_*/
+  # CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY 等 IPC/wrapper 变量——详见文件头注释与该
+  # 函数定义处注释。stderr 直接重定向到文件（不用 2> >(tee ...) 进程替换）：评审正文走
+  # stdout 仍直接流式，只有 claude 的 stderr 进度延后到结束才刷——换来消除 rc/tee 竞态、
+  # 不依赖 /dev/fd（受限 shell/沙箱也稳）。
   unset CLAUDECODE
   unset CLAUDE_CODE_ENTRYPOINT
-  unset ANTHROPIC_API_KEY
-  unset ANTHROPIC_BASE_URL
-  unset ANTHROPIC_API_BASE_URL
-  unset CLAUDE_AGENT_API_BASE_URL
-  unset ANTHROPIC_AUTH_TOKEN
-  unset ANTHROPIC_DEFAULT_OPUS_MODEL
-  unset ANTHROPIC_DEFAULT_SONNET_MODEL
-  unset ANTHROPIC_DEFAULT_HAIKU_MODEL
-  unset ANTHROPIC_SMALL_FAST_MODEL
+  unset_provider_routing_env
   set +e
   claude -p --model "$MODEL" --effort "$EFFORT" \
     --setting-sources "" --tools "" --disable-slash-commands \
+    --safe-mode --strict-mcp-config \
     --system-prompt "$RULES_FOLLOWUP" \
     --resume "$SID" \
     < "$PROMPT_FILE" 2>"$ERR_LOG"
@@ -262,27 +266,19 @@ else
   echo ">> claude 评审 PR #$PR ($OWNER/$NAME) — session=$SID model=$MODEL effort=$EFFORT" >&2
 
   # Strip Claude Code internal env vars to prevent recursive hook/plugin loading（复用
-  # plan-review 的 claude engine 隔离手法）。同时清空 ANTHROPIC_*/CLAUDE_AGENT_* 路由变量：
-  # 当前会话若经 claude-wrapper.sh 的 grok 分支启动，这些变量会注入整个进程环境、被本子进程
-  # 继承——不清理的话 resolve-backend.sh 判给 claude 后端，但 claude -p 子进程仍带着 grok
-  # 网关的 BASE_URL/API_KEY，请求根本没有脱离 grok 路径，功能名存实亡。清空后子进程只能走
-  # claude 正常的 OAuth/keychain 登录态。**不加** --no-session-persistence（会导致会话不落盘、
-  # --resume 无法生效，与多轮复评需求矛盾）。先调 claude，成功（set -e 未中断）后再落盘 state：
-  # 首轮失败不留误导性 SID/BASE_SHA。注意：成功路径**会**无条件覆写同 PR 的既有 state（若存在
-  # 活跃 session，上面已大字警告）——"不覆盖进行中会话"仅对 claude 失败路径成立。
+  # plan-review 的 claude engine 隔离手法）。unset_provider_routing_env（lib，两处调用点
+  # 共用）同时清空 ANTHROPIC_*/CLAUDE_AGENT_* 路由变量与 CLAUDE_CODE_MESSAGING_*/
+  # CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY 等 IPC/wrapper 变量——详见文件头注释与该
+  # 函数定义处注释。**不加** --no-session-persistence（会导致会话不落盘、--resume 无法生效，
+  # 与多轮复评需求矛盾）。先调 claude，成功（set -e 未中断）后再落盘 state：首轮失败不留
+  # 误导性 SID/BASE_SHA。注意：成功路径**会**无条件覆写同 PR 的既有 state（若存在活跃
+  # session，上面已大字警告）——"不覆盖进行中会话"仅对 claude 失败路径成立。
   unset CLAUDECODE
   unset CLAUDE_CODE_ENTRYPOINT
-  unset ANTHROPIC_API_KEY
-  unset ANTHROPIC_BASE_URL
-  unset ANTHROPIC_API_BASE_URL
-  unset CLAUDE_AGENT_API_BASE_URL
-  unset ANTHROPIC_AUTH_TOKEN
-  unset ANTHROPIC_DEFAULT_OPUS_MODEL
-  unset ANTHROPIC_DEFAULT_SONNET_MODEL
-  unset ANTHROPIC_DEFAULT_HAIKU_MODEL
-  unset ANTHROPIC_SMALL_FAST_MODEL
+  unset_provider_routing_env
   claude -p --model "$MODEL" --effort "$EFFORT" \
     --setting-sources "" --tools "" --disable-slash-commands \
+    --safe-mode --strict-mcp-config \
     --system-prompt "$RULES" \
     --session-id "$SID" \
     < "$PROMPT_FILE"

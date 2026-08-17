@@ -6,8 +6,10 @@
 # 参数记到临时文件供断言）；git 用真实二进制 + 每个测试自己的临时仓库。
 #
 # 覆盖：首轮 --session-id / 复核轮 --resume、effort 合法值集合（与 grok 刻意不同）、
-# model 默认值与环境变量覆盖、隔离旗标齐全（含各旗标的精确值，不只是旗标名存在）+
-# unset 内部变量与 ANTHROPIC_*/CLAUDE_AGENT_* 路由变量（防 grok 网关泄漏进 claude 子进程）、
+# model 默认值与环境变量覆盖、隔离旗标齐全（含各旗标的精确值，不只是旗标名存在，含
+# --safe-mode/--strict-mcp-config 存在性）+ unset 内部变量与 ANTHROPIC_*/CLAUDE_AGENT_* 路由
+# 变量、CLAUDE_CODE_MESSAGING_*/CLAUDE_CODE_SESSION_ID/CLAUDE_CODE_CHILD_SESSION/
+# CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY（防 grok 网关/IPC 变量泄漏进 claude 子进程）、
 # state 文件 .claude.session 后缀与 grok 的 .session 互不覆盖、会话失效 Fail Fast。
 
 SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/skills/pr-review/scripts/claude-review.sh"
@@ -25,7 +27,7 @@ setup() {
   cat > "$WORK/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$CLAUDE_ARGS_LOG"
-{ env | grep -E '^CLAUDECODE=|^CLAUDE_CODE_ENTRYPOINT=|^ANTHROPIC_API_KEY=|^ANTHROPIC_BASE_URL=|^ANTHROPIC_API_BASE_URL=|^CLAUDE_AGENT_API_BASE_URL=|^ANTHROPIC_AUTH_TOKEN=|^ANTHROPIC_DEFAULT_OPUS_MODEL=|^ANTHROPIC_DEFAULT_SONNET_MODEL=|^ANTHROPIC_DEFAULT_HAIKU_MODEL=|^ANTHROPIC_SMALL_FAST_MODEL='; } > "$CLAUDE_ENV_SNAPSHOT" || true
+{ env | grep -E '^CLAUDECODE=|^CLAUDE_CODE_ENTRYPOINT=|^ANTHROPIC_API_KEY=|^ANTHROPIC_BASE_URL=|^ANTHROPIC_API_BASE_URL=|^CLAUDE_AGENT_API_BASE_URL=|^ANTHROPIC_AUTH_TOKEN=|^ANTHROPIC_DEFAULT_OPUS_MODEL=|^ANTHROPIC_DEFAULT_SONNET_MODEL=|^ANTHROPIC_DEFAULT_HAIKU_MODEL=|^ANTHROPIC_SMALL_FAST_MODEL=|^CLAUDE_CODE_MESSAGING_SOCKET=|^CLAUDE_CODE_MESSAGING_TOKEN=|^CLAUDE_CODE_SESSION_ID=|^CLAUDE_CODE_CHILD_SESSION=|^CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY='; } > "$CLAUDE_ENV_SNAPSHOT" || true
 cat - > "$CLAUDE_PROMPT_CAPTURE"
 case "${CLAUDE_STUB_MODE:-success}" in
   fail_session_invalid)
@@ -177,6 +179,18 @@ EOF
   grep -qx -- '--disable-slash-commands' "$CLAUDE_ARGS_LOG"
 }
 
+@test "隔离旗标: --safe-mode 出现在首轮调用里（关闭 CLAUDE.md/skills/plugins/hooks/MCP servers 等全部通道，覆盖面比 --setting-sources \"\" 更广）" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  grep -qx -- '--safe-mode' "$CLAUDE_ARGS_LOG"
+}
+
+@test "隔离旗标: --strict-mcp-config 出现在首轮调用里（.mcp.json 项目级 MCP server 自动发现独立于 --setting-sources，未受信 PR checkout 可借此在连接 MCP server 时就执行任意命令）" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  grep -qx -- '--strict-mcp-config' "$CLAUDE_ARGS_LOG"
+}
+
 @test "隔离旗标: --no-session-persistence 不出现在调用里（本设计与 plan-review 的 claude engine 的关键差异——加了这个旗标会话不落盘，--resume 完全失效）" {
   run bash "$SCRIPT" 42
   [ "$status" -eq 0 ]
@@ -210,7 +224,7 @@ EOF
   [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--model")" = "claude-opus-5" ]
 }
 
-@test "复核轮隔离旗标: --tools/--setting-sources 在 --resume 路径上同样齐全（防止两份独立维护的旗标行只有首轮那份被测试钉住）" {
+@test "复核轮隔离旗标: --tools/--setting-sources/--safe-mode/--strict-mcp-config 在 --resume 路径上同样齐全（防止独立维护的旗标行只有首轮那份被测试钉住）" {
   bash "$SCRIPT" 42 >/dev/null 2>&1
   rm -f "$CLAUDE_ARGS_LOG"
   run bash "$SCRIPT" 42 --followup "请复核这处"
@@ -219,6 +233,8 @@ EOF
   [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--tools")" = "" ]
   grep -qx -- '--setting-sources' "$CLAUDE_ARGS_LOG"
   [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--setting-sources")" = "" ]
+  grep -qx -- '--safe-mode' "$CLAUDE_ARGS_LOG"
+  grep -qx -- '--strict-mcp-config' "$CLAUDE_ARGS_LOG"
 }
 
 @test "复核轮安全: --resume 路径上 claude -p 子进程同样不继承 grok 网关的 ANTHROPIC_*/CLAUDE_AGENT_* 路由变量" {
@@ -239,6 +255,24 @@ EOF
   [ "$status" -eq 0 ]
   [ ! -s "$CLAUDE_ENV_SNAPSHOT" ]
   [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--model")" = "claude-opus-5" ]
+}
+
+@test "安全: CLAUDE_CODE_MESSAGING_*/CLAUDE_CODE_SESSION_ID/CLAUDE_CODE_CHILD_SESSION/CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY 在首轮与复核轮均不泄漏进 claude -p 子进程（unset_provider_routing_env 统一清理）" {
+  export CLAUDE_CODE_MESSAGING_SOCKET="/tmp/fake.sock"
+  export CLAUDE_CODE_MESSAGING_TOKEN="fake-msg-token"
+  export CLAUDE_CODE_SESSION_ID="fake-session-id"
+  export CLAUDE_CODE_CHILD_SESSION="1"
+  export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY="1"
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [ ! -s "$CLAUDE_ENV_SNAPSHOT" ]
+
+  rm -f "$CLAUDE_ARGS_LOG"
+  run bash "$SCRIPT" 42 --followup "请复核这处"
+  unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID \
+    CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
+  [ "$status" -eq 0 ]
+  [ ! -s "$CLAUDE_ENV_SNAPSHOT" ]
 }
 
 @test "state 文件: 用 .claude.session 后缀，且与同 PR 的 grok state 文件互不覆盖" {

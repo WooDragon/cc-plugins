@@ -3,7 +3,7 @@
 # PR 全量/增量 diff 组装、评审规则文案。被两个后端脚本 source（绝对路径解析）。
 #
 # 本文件是 grok-review.sh 原有函数体的逐字搬移，不改一行逻辑——纯粹换文件位置。
-# 偏离原版共 3 处，分布在 2 个函数：
+# 偏离原版共 4 处，分布在 2 个函数：
 #   1. build_incremental_prompt 内一处 die 文案原硬编码了字面量 "grok-review.sh $PR"
 #      （重开首轮的提示语）。这是后端专属脚本名，不属于 tests/grok-review.bats 锁定的
 #      可观察行为（该文件无用例断言这段消息的精确文本），故已改为 $(basename "$0")，
@@ -12,6 +12,8 @@
 #   2. build_full_prompt 与 3. build_incremental_prompt 内各一处告警文案，原文写死
 #      "可能超出 grok 上下文窗口"，已去 grok 特化改为"可能超出评审模型上下文窗口"——
 #      同一份 lib 现在同时被 grok/claude 两个后端 source，告警措辞不应只提其中一个。
+#   4. build_incremental_prompt 内另一处告警文案（空增量 + 无 BASE_SHA 分支），原文写死
+#      "grok 只能靠会话记忆"，同理去 grok 特化改为"评审模型只能靠会话记忆"。
 #
 # 调用方约定（source 前/source 后、调用各函数前需自行满足）：
 #   - die() 供本文件其余函数调用，随本文件一起提供。
@@ -45,6 +47,38 @@ is_sensitive_name() {
 check_model() {
   [[ -n "$1" ]] || die "model 为空"
   [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "非法 model: $1（仅允许 字母/数字/. _ -）"
+}
+
+# claude -p 子进程调用前统一清理路由/IPC 类环境变量（claude-review.sh 首轮/复核轮两处调用点
+# 共用，单一事实源）。分两类：
+#   1. ANTHROPIC_*/CLAUDE_AGENT_API_BASE_URL（9 个）：当前会话若经 ~/.claude/scripts/
+#      claude-wrapper.sh 的 grok 分支启动，这些变量会注入整个进程环境、被子进程继承——不清理
+#      的话 resolve-backend.sh 判给 claude 后端，但 claude -p 子进程仍带着 grok 网关的
+#      BASE_URL/API_KEY，请求根本没有脱离 grok 路径，功能名存实亡。清空后子进程只能走 claude
+#      正常的 OAuth/keychain 登录态。
+#   2. CLAUDE_CODE_MESSAGING_SOCKET/CLAUDE_CODE_MESSAGING_TOKEN/CLAUDE_CODE_SESSION_ID/
+#      CLAUDE_CODE_CHILD_SESSION（Claude Code 自身 team-messaging IPC 相关变量）+
+#      CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY（claude-wrapper.sh 的 grok 分支会注入这个，
+#      见 ~/.claude/scripts/claude-wrapper.sh:1059/1268/1328）：当前会话若处于 team-messaging
+#      通道或 wrapper 的 grok 分支下，这些变量同样会被子进程继承，与本脚本要求的独立、干净
+#      claude -p 子进程语义不符。
+# 不在此函数管的：CLAUDECODE/CLAUDE_CODE_ENTRYPOINT——调用方各自 unset（防递归加载 hook/plugin
+# 这条逻辑与"路由/IPC 变量清理"是两件事，保持调用方显式可见）。
+unset_provider_routing_env() {
+  unset ANTHROPIC_API_KEY
+  unset ANTHROPIC_BASE_URL
+  unset ANTHROPIC_API_BASE_URL
+  unset CLAUDE_AGENT_API_BASE_URL
+  unset ANTHROPIC_AUTH_TOKEN
+  unset ANTHROPIC_DEFAULT_OPUS_MODEL
+  unset ANTHROPIC_DEFAULT_SONNET_MODEL
+  unset ANTHROPIC_DEFAULT_HAIKU_MODEL
+  unset ANTHROPIC_SMALL_FAST_MODEL
+  unset CLAUDE_CODE_MESSAGING_SOCKET
+  unset CLAUDE_CODE_MESSAGING_TOKEN
+  unset CLAUDE_CODE_SESSION_ID
+  unset CLAUDE_CODE_CHILD_SESSION
+  unset CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY
 }
 
 # UUID 生成兜底：uuidgen 缺失时退到 /proc/sys/kernel/random/uuid，再退到 openssl 拼装
@@ -256,7 +290,7 @@ build_incremental_prompt() {
       if [[ -z "$(state_get BASE_SHA)" ]]; then
         # 无 BASE_SHA（首轮非 git 仓 / --session 覆盖无 state）+ 空增量：已 commit 的修复不可见，
         # 是"假收敛"的高级参数入口，重提示（脚本侧无法硬拦，配合 RULES_FOLLOWUP 软约束）。
-        echo ">> 增量 diff 为空（工作区干净）——【注意】本 session 无 BASE_SHA，git diff HEAD 只含未提交改动，**已 commit 的修复不可见**。若刚 commit 了修复，请用 --since <首轮基线> 明确基线；否则 grok 只能靠会话记忆、勿据空 diff 轻发 LGTM。仅发送 followup 文本。" >&2
+        echo ">> 增量 diff 为空（工作区干净）——【注意】本 session 无 BASE_SHA，git diff HEAD 只含未提交改动，**已 commit 的修复不可见**。若刚 commit 了修复，请用 --since <首轮基线> 明确基线；否则评审模型只能靠会话记忆、勿据空 diff 轻发 LGTM。仅发送 followup 文本。" >&2
       else
         echo ">> 增量 diff 为空（工作区干净），仅发送 followup 文本。" >&2
       fi
