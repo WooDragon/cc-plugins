@@ -12,7 +12,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 | Plugin | code-search（1 skill） | 代码搜索与符号导航方法论（纯 skill，零 hook） |
 | Plugin | deep-research（1 skill + 4 agents + 1 hook） | 7-Stage 深度研究管线 + 多模型采集引擎 + 引用验证门禁 |
 | Plugin | guardrails（2 hooks） | 代码规模提示（信息性）+ git push 防手滑（拦截误推 main/master，非防绕过安全边界） |
-| Plugin | pr-review（1 skill + 2 scripts） | 已开 PR 的 AI 评审：grok 本地同步评审（默认，含多轮对抗复评的 session 状态管理）+ Copilot bot 异步评审（可选） |
+| Plugin | pr-review（1 skill + 5 scripts） | 已开 PR 的 AI 评审：grok/claude 本地同步评审（`pr-review.sh` 统一入口自动路由，均含多轮对抗复评的 session 状态管理）+ Copilot bot 异步评审（可选） |
 | Plugin | dispatch-contract（1 skill + 5 hooks） | 子 agent 派发契约：四条派发铁律 + `%%DONE%%` 定稿门禁（SubagentStop）+ background-dispatch 同步守卫 + 派发能力匹配守卫 + 派发通道守卫（均 PreToolUse）+ 派发规则注入（SubagentStart） |
 | Plugin | brain-route（2 skills + 1 hook） | second-brain 跨项目记忆路由：`brain-recall` 召回与写入规约 + `brain-curate` 复核去重流程 + 写本地 memory 条目文件时的路由提醒 hook（软提醒，重试即放行） |
 
@@ -112,12 +112,19 @@ plugins/
   pr-review/                     # 已开 PR 的 AI 评审插件（纯 skill，零 hook）
     .claude-plugin/plugin.json   # 插件元数据（纯 skill）
     skills/pr-review/
-      SKILL.md                   # 后端选择 + 执行分工 + grok 多轮复评流程
+      SKILL.md                   # 后端选择 + 执行分工 + grok/claude 自动路由 + 多轮复评流程
+      scripts/pr-review.sh       # 统一入口：调 resolve-backend.sh 解析后端，exec 路由到 grok/claude-review.sh
+      scripts/resolve-backend.sh # 机械化后端解析（PR_REVIEW_BACKEND 显式覆盖 > 自动探测 > 默认 grok）
       scripts/grok-review.sh     # grok CLI 本地同步评审（session 落盘 + 增量 diff + 工作区身份钉死）
+      scripts/claude-review.sh   # claude CLI（claude -p）本地同步评审，与 grok-review.sh 同构、CLI 参数形态一致
       scripts/copilot-review.sh  # gh 触发 Copilot bot（request / rerequest / status）
+      scripts/lib/pr-review-common.sh # grok/claude 两后端共享的纯逻辑（state CRUD、diff 组装、敏感文件启发式等）
       references/grok-review.md  # grok 后端参数、机制、故障排查
+      references/claude-review.md # claude 后端特有部分：隔离旗标原理、会话续接、state 文件后缀
       references/copilot-review.md # Copilot 后端三条路径（REST 首触 / GraphQL 重触 / 状态查询）
-    tests/grok-review.bats       # 60 个测试用例（stub grok/gh/uuidgen，git 用真实临时仓库）
+    tests/grok-review.bats       # 66 个测试用例（stub grok/gh/uuidgen，git 用真实临时仓库）
+    tests/claude-review.bats     # 21 个测试用例（stub claude，覆盖隔离旗标/会话续接/state 文件隔离，隔离旗标在首轮与 --resume 复核轮两条路径均有断言）
+    tests/resolve-backend.bats   # 10 个测试用例（后端解析优先级 + pr-review.sh 路由）
     README.md                    # 面向安装者说明
   dispatch-contract/             # 子 agent 派发契约插件（1 skill + 5 hooks）
     .claude-plugin/plugin.json   # 插件元数据（声明 skill + 5 个 hook）
@@ -166,7 +173,7 @@ plugins/
 | plan-review | `REVIEW_*`、`AGY_MODEL`、`CLAUDE_MODEL`、`GEMINI_MODEL`、`CODEX_BIN`、`CODEX_MODEL`、`DISPATCH_CHECK_DISABLED` | [plugins/plan-review/README.md](plugins/plan-review/README.md#environment-variables) |
 | doc-gate | `SKILL_GATE_*`、`RECALL_GATE_*` | [plugins/doc-gate/README.md](plugins/doc-gate/README.md#environment-variables) |
 | deep-research | `GATEWAY_API_KEY`、`TAVILY_API_KEY`、`JINA_API_KEY`（可选凭证） | [plugins/deep-research/README.md](plugins/deep-research/README.md#prerequisites) |
-| pr-review | `GROK_MODEL`、`GROK_EFFORT`、`XDG_STATE_HOME`（session 落盘根） | [plugins/pr-review/README.md](plugins/pr-review/README.md#prerequisites) |
+| pr-review | `GROK_MODEL`、`GROK_EFFORT`、`CLAUDE_REVIEW_MODEL`、`CLAUDE_REVIEW_EFFORT`、`PR_REVIEW_BACKEND`、`XDG_STATE_HOME`（session 落盘根） | [plugins/pr-review/README.md](plugins/pr-review/README.md#environment-variables) |
 | dispatch-contract | `ALLOW_UNMARKED_FINAL`、`ALLOW_BACKGROUND_DISPATCH`、`ALLOW_NO_RULES_INJECT`、`CLAUDE_CODE_FORK_SUBAGENT`、`ALLOW_DISPATCH_CAPABILITY_MISMATCH`、`ALLOW_UNMANAGED_TEAMMATE`、`CLAUDE_AUTO_BACKGROUND_TASKS` | [plugins/dispatch-contract/README.md](plugins/dispatch-contract/README.md#environment-variables) |
 | brain-route | `BRAIN_ROUTE_*`、`SECOND_BRAIN_URL`、`SECOND_BRAIN_TOKEN` | [plugins/brain-route/README.md](plugins/brain-route/README.md#environment-variables) |
 
