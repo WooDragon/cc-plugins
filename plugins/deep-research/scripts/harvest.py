@@ -1070,11 +1070,11 @@ def _cleaned_dir_from_raw(raw_dir):
     node = Path(raw_dir)
     while node.name and node.name != "pipeline":
         if node.parent == node:
-            return Path(raw_dir).parent / "2_cleaned"
+            return None
         node = node.parent
     if node.name == "pipeline":
         return node / "2_cleaned"
-    return Path(raw_dir).parent / "2_cleaned"
+    return None
 
 
 def _unlink_handoff_artifacts(cleaned_dir, track_name=None):
@@ -1906,6 +1906,25 @@ def _assert_inside_project(path, project_dir, label):
     return resolved
 
 
+def _assert_finalize_verify(verify):
+    """Refuse finalize unless this verify is an OK record awaiting or already READY."""
+    if not isinstance(verify, dict):
+        raise harvest_handoff.HandoffError("verify must be an object")
+    verdict = verify.get("verdict")
+    if verdict != "OK":
+        raise harvest_handoff.HandoffError(
+            f"finalize requires verdict OK, got {verdict!r}"
+        )
+    present = [key for key in _HANDOFF_KEYS if key in verify]
+    if len(present) != 3:
+        raise harvest_handoff.HandoffError("handoff marker incomplete")
+    status = verify.get("handoff_status")
+    if status not in ("PENDING_SANITIZATION", "READY"):
+        raise harvest_handoff.HandoffError(
+            f"finalize requires PENDING_SANITIZATION or READY, got {status!r}"
+        )
+
+
 def cmd_finalize_handoff(args):
     """Publish WIP → evidence + manifest, then bind READY hashes on verify."""
     try:
@@ -1925,6 +1944,8 @@ def _finalize_handoff(args):
     raw_dir = Path(args.out)
     cleaned_dir = pipeline_dir / "2_cleaned"
     track_name = raw_dir.name if is_supplementary else None
+    if is_supplementary and track_name in ("", ".", ".."):
+        raise harvest_handoff.HandoffError("invalid supplementary track_name")
     names = harvest_handoff.artifact_names(track_name)
 
     wip_path = _assert_inside_project(args.wip, project_dir, "wip")
@@ -1939,13 +1960,16 @@ def _finalize_handoff(args):
     raw = json.loads(raw_merged.read_text(encoding="utf-8"))
     wip = json.loads(wip_path.read_text(encoding="utf-8"))
     verify = json.loads(verify_path.read_text(encoding="utf-8"))
+    _assert_finalize_verify(verify)
     harvest_handoff.validate_wip(wip)
     harvest_handoff.check_coverage(wip, raw)
 
     goal_hash = verify.get("goal_file_sha256") or ""
     goal_file = resolve_goal_file(project_dir)
     if goal_file is not None:
-        goal_hash = hashlib.sha256(goal_file.read_bytes()).hexdigest()
+        current_hash = hashlib.sha256(goal_file.read_bytes()).hexdigest()
+        if current_hash != goal_hash:
+            raise harvest_handoff.HandoffError("goal_file_sha256 mismatch")
     raw_hash = harvest_handoff.file_sha256(raw_merged)
     alive = list(verify.get("models_alive") or [])
 

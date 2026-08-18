@@ -3338,6 +3338,108 @@ class TestHarvestHandoffGate(unittest.TestCase):
         data = json.loads(before)
         self.assertEqual(data["handoff_status"], "PENDING_SANITIZATION")
 
+    def test_finalize_rejects_goal_change_and_keeps_pending(self):
+        raw, wip = self._sample()
+        (self.raw_dir / harvest.MERGED_FINDINGS_FILE).write_text(
+            json.dumps(raw), encoding="utf-8")
+        harvest.write_verify_json(self.verify_dir, self.goal_hash, "OK", {
+            "quorum_met": True, "total_claims": 2, "invalid_citation_rate": 0.0,
+            "models_alive": ["m1", "m2"],
+            "handoff_version": 1, "handoff_required": True,
+            "handoff_status": "PENDING_SANITIZATION",
+        })
+        verify_path = self.verify_dir / harvest.VERIFY_FILE
+        before = verify_path.read_bytes()
+        wip_path = self.cleaned / "harvest-handoff.wip.json"
+        wip_path.write_text(json.dumps(wip), encoding="utf-8")
+        self.goal.write_text("goal changed before finalize", encoding="utf-8")
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_finalize_handoff(argparse_ns(
+                project_dir=str(self.project_dir), out=str(self.raw_dir), wip=str(wip_path)))
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertEqual(verify_path.read_bytes(), before)
+        data = json.loads(before)
+        self.assertEqual(data["handoff_status"], "PENDING_SANITIZATION")
+        self.assertEqual(data["goal_file_sha256"], self.goal_hash)
+        self.assertFalse((self.cleaned / "harvest-manifest.json").exists())
+
+    def test_finalize_rejects_local_verify_without_writing(self):
+        raw, wip = self._sample()
+        (self.raw_dir / harvest.MERGED_FINDINGS_FILE).write_text(
+            json.dumps(raw), encoding="utf-8")
+        harvest.write_verify_json(self.verify_dir, self.goal_hash, "LOCAL", {
+            "reason": "no-api",
+        })
+        verify_path = self.verify_dir / harvest.VERIFY_FILE
+        before = verify_path.read_bytes()
+        wip_path = self.cleaned / "harvest-handoff.wip.json"
+        wip_path.write_text(json.dumps(wip), encoding="utf-8")
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_finalize_handoff(argparse_ns(
+                project_dir=str(self.project_dir), out=str(self.raw_dir), wip=str(wip_path)))
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertEqual(verify_path.read_bytes(), before)
+        self.assertEqual(json.loads(before)["verdict"], "LOCAL")
+        self.assertFalse((self.cleaned / "harvest-manifest.json").exists())
+
+    def test_finalize_ready_rerun_is_byte_identical(self):
+        raw, wip = self._publish_ready()
+        wip_path = self.cleaned / "harvest-handoff.wip.json"
+        wip_path.write_text(json.dumps(wip), encoding="utf-8")
+        man_path = self.cleaned / "harvest-manifest.json"
+        ev_path = self.cleaned / "harvest-evidence.jsonl"
+        before_man = man_path.read_bytes()
+        before_ev = ev_path.read_bytes()
+        harvest.cmd_finalize_handoff(argparse_ns(
+            project_dir=str(self.project_dir), out=str(self.raw_dir), wip=str(wip_path)))
+        self.assertEqual(man_path.read_bytes(), before_man)
+        self.assertEqual(ev_path.read_bytes(), before_ev)
+        data = json.loads((self.verify_dir / harvest.VERIFY_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(data["handoff_status"], "READY")
+        self.assertEqual(data["verdict"], "OK")
+        self.assertEqual(data["goal_file_sha256"], self.goal_hash)
+
+    def test_supplementary_invalid_track_name_leaves_primary(self):
+        raw, wip = self._sample()
+        (self.raw_dir / harvest.MERGED_FINDINGS_FILE).write_text(
+            json.dumps(raw), encoding="utf-8")
+        harvest.write_verify_json(self.verify_dir, self.goal_hash, "OK", {
+            "quorum_met": True, "total_claims": 2, "invalid_citation_rate": 0.0,
+            "handoff_version": 1, "handoff_required": True,
+            "handoff_status": "PENDING_SANITIZATION",
+        })
+        primary_verify = (self.verify_dir / harvest.VERIFY_FILE).read_bytes()
+        primary_manifest = self.cleaned / "harvest-manifest.json"
+        primary_manifest.write_text("primary-keep", encoding="utf-8")
+        supp_raw_dir = self.raw_dir / "gap_A"
+        supp_raw_dir.mkdir()
+        (supp_raw_dir / harvest.MERGED_FINDINGS_FILE).write_text(
+            json.dumps(raw), encoding="utf-8")
+        harvest.write_verify_json(self.verify_dir, self.goal_hash, "OK", {
+            "quorum_met": True, "total_claims": 2, "invalid_citation_rate": 0.0,
+            "models_alive": ["m1", "m2"],
+            "handoff_version": 1, "handoff_required": True,
+            "handoff_status": "PENDING_SANITIZATION",
+        }, verify_filename=harvest.track_verify_filename(supp_raw_dir))
+        track_verify = (self.verify_dir / harvest.track_verify_filename(supp_raw_dir)).read_bytes()
+        wip_path = self.cleaned / "harvest-handoff.wip.json"
+        wip_path.write_text(json.dumps(wip), encoding="utf-8")
+        # Path('gap_A/nested/..').name is '..' while resolve() stays supplementary.
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.cmd_finalize_handoff(argparse_ns(
+                project_dir=str(self.project_dir),
+                out=str(supp_raw_dir / "nested" / ".."),
+                wip=str(wip_path)))
+        self.assertNotEqual(ctx.exception.code, 0)
+        self.assertEqual((self.verify_dir / harvest.VERIFY_FILE).read_bytes(), primary_verify)
+        self.assertEqual(primary_manifest.read_text(encoding="utf-8"), "primary-keep")
+        self.assertEqual(
+            (self.verify_dir / harvest.track_verify_filename(supp_raw_dir)).read_bytes(),
+            track_verify,
+        )
+        self.assertFalse((self.cleaned / "track_gap_A-harvest-manifest.json").exists())
+        self.assertFalse((self.cleaned / "track_..-harvest-manifest.json").exists())
+
     def test_t1_supplementary_finalize_does_not_touch_primary(self):
         primary_raw, primary_wip = self._sample()
         (self.raw_dir / harvest.MERGED_FINDINGS_FILE).write_text(
@@ -3443,6 +3545,18 @@ class TestStateCleanup(unittest.TestCase):
         for name in ("harvest-manifest.json", "harvest-evidence.jsonl", "harvest-handoff.wip.json"):
             self.assertFalse((cleaned / name).exists())
         self.assertTrue((cleaned / "keep-me.md").exists())
+
+    def test_cleaned_dir_from_raw_without_pipeline_returns_none(self):
+        stray = Path(self.tmpdir.name) / "outside" / "1_raw"
+        stray.mkdir(parents=True)
+        victim = Path(self.tmpdir.name) / "outside" / "2_cleaned"
+        victim.mkdir()
+        keep = victim / "keep.txt"
+        keep.write_text("stay", encoding="utf-8")
+        self.assertIsNone(harvest._cleaned_dir_from_raw(stray))
+        harvest._unlink_handoff_artifacts(harvest._cleaned_dir_from_raw(stray))
+        self.assertTrue(keep.exists())
+        self.assertEqual(keep.read_text(encoding="utf-8"), "stay")
 
     def test_cleanup_no_op_when_nothing_present(self):
         harvest.cleanup_stale_state(self.pipeline_dir, self.verify_dir, self.raw_dir)  # must not raise
@@ -4048,6 +4162,10 @@ class TestSupplementaryRunIsolation(unittest.TestCase):
         # Primary state never touched.
         self.assertTrue(primary_verify_file.exists())
         self.assertTrue(primary_exemption_file.exists())
+        self.assertTrue(primary_merged.exists())
+        self.assertEqual(primary_merged.read_text(encoding="utf-8"), "{}")
+        self.assertTrue((primary_harvest_dir / "marker.txt").exists())
+        self.assertEqual((primary_harvest_dir / "marker.txt").read_text(encoding="utf-8"), "keep me")
 
     def test_supplementary_cleanup_removes_only_track_handoff_files(self):
         verify_dir = self.project_dir / "pipeline" / "verification"

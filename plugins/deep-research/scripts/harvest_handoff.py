@@ -179,8 +179,8 @@ def validate_wip(wip: Any) -> dict[str, Any]:
             raise HandoffError(f"{label}.cluster_id must be a non-empty string")
         if not isinstance(cluster["summary"], str):
             raise HandoffError(f"{label}.summary must be a string")
-        if not isinstance(cluster["relation"], str) or not cluster["relation"]:
-            raise HandoffError(f"{label}.relation must be a non-empty string")
+        if cluster["relation"] not in ("agree", "contradict"):
+            raise HandoffError(f"{label}.relation must be agree or contradict")
         if not isinstance(cluster["claims"], list) or not cluster["claims"]:
             raise HandoffError(f"{label}.claims must be a non-empty list")
         for cidx, claim in enumerate(cluster["claims"]):
@@ -295,10 +295,13 @@ def check_coverage(wip: Mapping[str, Any], raw: Mapping[str, Any]) -> None:
             raise HandoffError(f"unknown claim: {extra[0]}")
         raise HandoffError(f"missing claim: {missing[0]}")
 
-    for field in ("coverage_gaps", "blind_spots", "unique_insights"):
+    for field in ("coverage_gaps", "blind_spots"):
         raw_vals = _as_str_list(raw.get(field, []), f"raw.{field}")
-        if sorted(wip[field]) != sorted(raw_vals):
+        if len(wip[field]) != len(raw_vals):
             raise HandoffError(f"{field} coverage mismatch")
+    raw_insights = _as_str_list(raw.get("unique_insights", []), "raw.unique_insights")
+    if sorted(wip["unique_insights"]) != sorted(raw_insights):
+        raise HandoffError("unique_insights coverage mismatch")
 
 
 def supporting_models(claims: Iterable[Mapping[str, Any]]) -> list[str]:
@@ -307,7 +310,7 @@ def supporting_models(claims: Iterable[Mapping[str, Any]]) -> list[str]:
 
 def classify_consensus(relation: str, models: list[str]) -> str:
     """Navigation label only — not a truth claim."""
-    if relation == "contradict":
+    if relation != "agree":
         return "disputed"
     if len(models) >= 2:
         return "corroborated"
@@ -602,7 +605,9 @@ def atomic_write(path: Path, data: bytes) -> None:
 
 
 def artifact_names(track_name: str | None = None) -> dict[str, str]:
-    if track_name:
+    if track_name is not None:
+        if track_name in ("", ".", ".."):
+            raise HandoffError("invalid track_name")
         stem = f"track_{track_name}-"
     else:
         stem = ""
@@ -705,14 +710,11 @@ def check_published_against_raw(raw, manifest, evidence_text):
     raw_un = raw.get("unclustered_claim_ids", [])
     if sorted(raw_un) != sorted(manifest["unclustered_claim_ids"]):
         raise HandoffError("unclustered_claim_ids mismatch")
-    pairs = (
-        ("coverage_gaps", "coverage_gaps"),
-        ("blind_spots", "blind_spots"),
-        ("unique_insights", "unique_insight_ids"),
-    )
-    for raw_field, man_field in pairs:
-        if sorted(raw.get(raw_field, [])) != sorted(manifest.get(man_field, [])):
-            raise HandoffError(f"{raw_field} coverage mismatch")
+    for field in ("coverage_gaps", "blind_spots"):
+        if len(raw.get(field, [])) != len(manifest.get(field, [])):
+            raise HandoffError(f"{field} coverage mismatch")
+    if sorted(raw.get("unique_insights", [])) != sorted(manifest.get("unique_insight_ids", [])):
+        raise HandoffError("unique_insights coverage mismatch")
 
 
 def check_ready_invariants(raw, manifest, evidence_text):

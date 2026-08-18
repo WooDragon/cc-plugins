@@ -63,7 +63,7 @@ fetch-report 必填字段：tier 分层（T1/T2/T3）、翻页统计、错误汇
 | 执行者 | research-harvester（同一 Task，与 Acquisition 串行） |
 | 输入目录 | `pipeline/1_raw/` |
 | 输出目录 | `pipeline/2_cleaned/` |
-| 产物 | 脱敏后数据文件。handoff-enabled 的 panel 路径另产确定性交接：从 raw merged 做 L1/L2 脱敏，写入 `pipeline/2_cleaned/harvest-handoff.wip.json`（supplementary 为 `track_<raw_dir.name>-harvest-handoff.wip.json`；unclustered 脱敏正文走 `unclustered_claims`），再执行 `python3 harvest.py finalize-handoff --project-dir <proj> --out <raw_dir> --wip <wip>`。primary 正式产物为 `pipeline/2_cleaned/harvest-manifest.json`（compact，Lead 可读）与 `pipeline/2_cleaned/harvest-evidence.jsonl`（行寻址完整证据；Lead 禁读，即使远小于 8KiB）。finalize 成功后，verify 才变为 `READY` 并绑定 hashes。local / `--no-api` 不走 v1 确定性交接 |
+| 产物 | 脱敏后数据文件。handoff-enabled 的 panel 路径另产确定性交接：从 raw merged 做 L1/L2 脱敏，写入 `pipeline/2_cleaned/harvest-handoff.wip.json`（supplementary 为 `track_<raw_dir.name>-harvest-handoff.wip.json`；unclustered 脱敏正文走 `unclustered_claims`；`coverage_gaps` / `blind_spots` 只核条数，正文以 WIP 脱敏文本为准），再执行 `python3 harvest.py finalize-handoff --project-dir <proj> --out <raw_dir> --wip <wip>`。primary 正式产物为 `pipeline/2_cleaned/harvest-manifest.json`（compact，Lead 可读）与 `pipeline/2_cleaned/harvest-evidence.jsonl`（行寻址完整证据；Lead 禁读，即使远小于 8KiB）。finalize 成功后，verify 才变为 `READY` 并绑定 hashes。local / `--no-api` 不走 v1 确定性交接 |
 
 脱敏协议见 deep-research 插件的 research-harvester subagent。Acquisition 与 Sanitization 仍在同一 Task。
 

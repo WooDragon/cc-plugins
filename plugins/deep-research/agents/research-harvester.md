@@ -49,7 +49,7 @@ Lead 的采集指令，必须包含：
 | 2 | 准备本地材料（可选）：PDF 等二进制先转文本，**前置完成 L1/L2 脱敏**后放入 `intake/local_sources/` | 见下「本地材料前置脱敏」 |
 | 3 | 执行 `python3 <harvest.py绝对路径> run --goal-file <goal-file> --out pipeline/1_raw/` | `pipeline/1_raw/harvest/<model>/findings.json`、`merged-findings.json`、`fetch-report.md`、`pipeline/verification/harvest-verify.json`（`verdict=OK`，`handoff_status=PENDING_SANITIZATION`） |
 | 4 | 读 merged 的 `coverage_gaps` / `blind_spots`，按需补采。不应解读 consensus 标签——标签由 `finalize-handoff` 写入 manifest，不是 raw merge 产物 | 补采裁判指出的 gaps（若有） |
-| 5 | 对 raw merged 做 L1/L2 脱敏，写 WIP，再 finalize | `pipeline/2_cleaned/harvest-handoff.wip.json`（supplementary：`track_<raw_dir.name>-harvest-handoff.wip.json`；unclustered 脱敏正文走 `unclustered_claims`），然后 `python3 harvest.py finalize-handoff --project-dir <proj> --out <raw_dir> --wip <wip>`。primary 正式产物：`harvest-manifest.json` + `harvest-evidence.jsonl`。verify 变为 `READY` 后才可请求 G1 |
+| 5 | 对 raw merged 做 L1/L2 脱敏，写 WIP，再 finalize | `pipeline/2_cleaned/harvest-handoff.wip.json`（supplementary：`track_<raw_dir.name>-harvest-handoff.wip.json`；unclustered 脱敏正文走 `unclustered_claims`；`coverage_gaps` / `blind_spots` 只核条数，正文以 WIP 脱敏文本为准），然后 `python3 harvest.py finalize-handoff --project-dir <proj> --out <raw_dir> --wip <wip>`。primary 正式产物：`harvest-manifest.json` + `harvest-evidence.jsonl`。verify 变为 `READY` 后才可请求 G1 |
 
 **单模型 step 预算耗尽 = 强制收尾，非该模型失败**：每个 panel 模型的 agentic loop 有 `max_steps_per_model` 轮工具预算。预算耗尽时 harvest.py **不丢弃该模型已 fetch 的证据**，而是强制发一次收尾 synthesis 调用（用 prompt 指令要求模型停止调工具、把已采证据收敛成 findings，tools 块保持不变以稳住 KV-cache 前缀），再走引用机械门校验；只有收尾仍无合法产出才判该模型 `step_limit_no_synthesis` 失败。因此单个模型跑到步数上限通常仍会贡献有效 claims，不必视为异常——真正影响整轮的是存活模型数是否达 quorum（见下 exit 3）。
 

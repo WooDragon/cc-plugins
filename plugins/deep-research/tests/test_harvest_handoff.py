@@ -200,6 +200,81 @@ class TestS1CoverageRejects(unittest.TestCase):
         self.assertIn("cluster membership incomplete", str(ctx.exception))
 
 
+class TestGapBlindCountOnly(unittest.TestCase):
+    def test_sanitized_gap_text_same_count_publishes_wip_text(self):
+        raw, wip = _raw_and_wip(
+            [_cluster("c001", [_claim("gpt-1"), _claim("gem-1", "gemini")])],
+            gaps=["email alice@example.com missing share"],
+            blinds=["phone 13800138000 no primary"],
+        )
+        wip["coverage_gaps"] = ["email [REDACTED] missing share"]
+        wip["blind_spots"] = ["phone [REDACTED] no primary"]
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = hh.publish_handoff(
+                Path(tmp), wip, raw,
+                goal_file_sha256=_goal_hash(),
+                raw_merged_sha256=_raw_hash(raw),
+                alive_models=["gpt", "gemini"],
+            )
+            evidence_text = (Path(tmp) / "harvest-evidence.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(manifest["coverage_gaps"], ["email [REDACTED] missing share"])
+        self.assertEqual(manifest["blind_spots"], ["phone [REDACTED] no primary"])
+        hh.check_published_against_raw(raw, manifest, evidence_text)
+        hh.check_ready_invariants(raw, manifest, evidence_text)
+
+    def test_gap_count_mismatch_rejected(self):
+        raw, wip = _raw_and_wip(
+            [_cluster("c001", [_claim("gpt-1")])],
+            gaps=["one", "two"],
+        )
+        wip["coverage_gaps"] = ["only-one"]
+        with self.assertRaises(hh.HandoffError) as ctx:
+            hh.check_coverage(wip, raw)
+        self.assertIn("coverage_gaps coverage mismatch", str(ctx.exception))
+
+    def test_insight_set_mismatch_still_rejected(self):
+        raw, wip = _raw_and_wip(
+            [_cluster("c001", [_claim("gpt-1"), _claim("gem-1", "gemini")])],
+            insights=["gpt-1"],
+        )
+        wip["unique_insights"] = ["gem-1"]
+        with self.assertRaises(hh.HandoffError) as ctx:
+            hh.check_coverage(wip, raw)
+        self.assertIn("unique_insights coverage mismatch", str(ctx.exception))
+
+
+class TestRelationClosedSet(unittest.TestCase):
+    def test_unknown_relation_wip_rejected(self):
+        raw, wip = _raw_and_wip([
+            _cluster("c001", [_claim("gpt-1")], relation="maybe"),
+        ])
+        with self.assertRaises(hh.HandoffError) as ctx:
+            hh.validate_wip(wip)
+        self.assertIn("relation", str(ctx.exception))
+        with self.assertRaises(hh.HandoffError):
+            hh.check_coverage(wip, raw)
+
+    def test_classify_consensus_unknown_relation_is_disputed(self):
+        self.assertEqual(hh.classify_consensus("weird", ["a", "b"]), "disputed")
+        self.assertEqual(hh.classify_consensus("contradict", ["a", "b"]), "disputed")
+        self.assertEqual(hh.classify_consensus("agree", ["a", "b"]), "corroborated")
+
+
+class TestArtifactNamesTrack(unittest.TestCase):
+    def test_empty_track_name_rejected(self):
+        with self.assertRaises(hh.HandoffError):
+            hh.artifact_names("")
+        with self.assertRaises(hh.HandoffError):
+            hh.artifact_names(".")
+        with self.assertRaises(hh.HandoffError):
+            hh.artifact_names("..")
+        self.assertEqual(hh.artifact_names(None)["manifest"], "harvest-manifest.json")
+        self.assertEqual(
+            hh.artifact_names("gap_A")["manifest"],
+            "track_gap_A-harvest-manifest.json",
+        )
+
+
 class TestR1CorroboratedCompressed(unittest.TestCase):
     def test_r1_agree_two_models_no_anomaly_is_corroborated_compressed(self):
         raw, wip = _raw_and_wip([
