@@ -254,6 +254,50 @@ class TestRelationClosedSet(unittest.TestCase):
         with self.assertRaises(hh.HandoffError):
             hh.check_coverage(wip, raw)
 
+    def test_wip_flipping_raw_contradict_to_agree_is_rejected(self):
+        raw, wip = _raw_and_wip([
+            _cluster("c001", [_claim("gpt-1"), _claim("gem-1", "gemini")], relation="contradict"),
+        ])
+        wip["clusters"][0]["relation"] = "agree"
+        with self.assertRaises(hh.HandoffError) as ctx:
+            hh.check_coverage(wip, raw)
+        self.assertIn("relation", str(ctx.exception))
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(hh.HandoffError) as pub_ctx:
+                hh.publish_handoff(
+                    Path(tmp), wip, raw,
+                    goal_file_sha256=_goal_hash(),
+                    raw_merged_sha256=_raw_hash(raw),
+                    alive_models=["gpt", "gemini"],
+                )
+            self.assertIn("relation", str(pub_ctx.exception))
+
+    def test_published_manifest_relation_flip_fails_raw_check(self):
+        raw, wip = _raw_and_wip([
+            _cluster("c001", [_claim("gpt-1"), _claim("gem-1", "gemini")], relation="contradict"),
+        ], contradictions=["c001"])
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = hh.publish_handoff(
+                Path(tmp), wip, raw,
+                goal_file_sha256=_goal_hash(),
+                raw_merged_sha256=_raw_hash(raw),
+                alive_models=["gpt", "gemini"],
+            )
+            evidence_text = (Path(tmp) / "harvest-evidence.jsonl").read_text(encoding="utf-8")
+        hh.check_published_against_raw(raw, manifest, evidence_text)
+        flipped = json.loads(json.dumps(manifest))
+        flipped["clusters"][0]["relation"] = "agree"
+        with self.assertRaises(hh.HandoffError) as ctx:
+            hh.check_published_against_raw(raw, flipped, evidence_text)
+        self.assertIn("relation", str(ctx.exception))
+
+    def test_raw_missing_relation_defaults_to_agree(self):
+        raw, wip = _raw_and_wip([
+            _cluster("c001", [_claim("gpt-1")]),
+        ])
+        del raw["clusters"][0]["relation"]
+        hh.check_coverage(wip, raw)
+
     def test_classify_consensus_unknown_relation_is_disputed(self):
         self.assertEqual(hh.classify_consensus("weird", ["a", "b"]), "disputed")
         self.assertEqual(hh.classify_consensus("contradict", ["a", "b"]), "disputed")

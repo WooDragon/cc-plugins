@@ -946,6 +946,8 @@ def merge_findings(worker_findings_by_alias, judge_data):
             continue
         claimed_ids.update(ids)
         relation = cluster.get("relation", "agree")
+        if relation not in ("agree", "contradict"):
+            relation = "contradict"
         if relation == "contradict":
             contradictions.append(summary)
         assembled = []
@@ -1081,7 +1083,11 @@ def _unlink_handoff_artifacts(cleaned_dir, track_name=None):
     if cleaned_dir is None:
         return
     target = Path(cleaned_dir)
-    names = harvest_handoff.artifact_names(track_name)
+    try:
+        names = harvest_handoff.artifact_names(track_name)
+    except harvest_handoff.HandoffError:
+        # Fail-open: skip handoff unlink rather than crash cmd_run cleanup.
+        return
     for name in names.values():
         path = target / name
         if path.is_file():

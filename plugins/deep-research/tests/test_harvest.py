@@ -2907,6 +2907,14 @@ class TestMergeFindings(unittest.TestCase):
         self.assertEqual(merged["unclustered_claims"][0]["id"], "m3-1")
         self.assertEqual(merged["unclustered_claims"][0]["source_model"], "m3")
 
+    def test_unknown_judge_relation_normalizes_to_contradict(self):
+        judge = {"clusters": [{"summary": "maybe-s", "source_claim_ids": ["m1-1", "m2-1"],
+                               "relation": "maybe"}],
+                 "coverage_gaps": [], "unique_insights": [], "blind_spots": []}
+        merged = harvest.merge_findings(self.worker_findings, judge)
+        self.assertEqual(merged["clusters"][0]["relation"], "contradict")
+        self.assertIn("maybe-s", merged["contradictions"])
+
 
 class TestJudgeFallback(unittest.TestCase):
     def test_judge_falls_back_to_next_panel_model_on_failure(self):
@@ -4184,6 +4192,19 @@ class TestSupplementaryRunIsolation(unittest.TestCase):
         self.assertFalse((cleaned / "track_gap_A-harvest-manifest.json").exists())
         self.assertFalse((cleaned / "track_gap_A-harvest-evidence.jsonl").exists())
         self.assertFalse((cleaned / "track_gap_A-harvest-handoff.wip.json").exists())
+
+    def test_cleanup_illegal_track_name_does_not_raise(self):
+        verify_dir = self.project_dir / "pipeline" / "verification"
+        verify_dir.mkdir(parents=True)
+        cleaned = self.project_dir / "pipeline" / "2_cleaned"
+        cleaned.mkdir(parents=True)
+        primary = cleaned / "harvest-manifest.json"
+        primary.write_text("primary-keep", encoding="utf-8")
+        raw_dir = self.project_dir / "pipeline" / "1_raw" / "gap" / ".."
+        harvest.cleanup_stale_supplementary_state(verify_dir, raw_dir, "track_x.json")
+        harvest._unlink_handoff_artifacts(cleaned, track_name="..")
+        self.assertTrue(primary.exists())
+        self.assertEqual(primary.read_text(encoding="utf-8"), "primary-keep")
 
     def test_no_project_dir_preserves_legacy_reverse_derivation(self):
         # No --project-dir at all (attribute absent from the args namespace,

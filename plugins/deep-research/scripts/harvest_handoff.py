@@ -238,12 +238,14 @@ def check_coverage(wip: Mapping[str, Any], raw: Mapping[str, Any]) -> None:
     raw_clusters = raw.get("clusters") or []
     raw_cluster_ids = []
     raw_cluster_claim_ids: dict[str, list[str]] = {}
+    raw_cluster_relations: dict[str, str] = {}
     for cluster in raw_clusters:
         cid = cluster.get("cluster_id")
         if not isinstance(cid, str) or not cid:
             raise HandoffError("raw cluster missing cluster_id")
         raw_cluster_ids.append(cid)
         raw_cluster_claim_ids[cid] = [claim["id"] for claim in cluster.get("claims") or []]
+        raw_cluster_relations[cid] = cluster.get("relation", "agree")
 
     seen: dict[str, str] = {}
     wip_cluster_ids = []
@@ -252,6 +254,8 @@ def check_coverage(wip: Mapping[str, Any], raw: Mapping[str, Any]) -> None:
         wip_cluster_ids.append(cid)
         if cid not in raw_cluster_claim_ids:
             raise HandoffError(f"unknown cluster: {cid}")
+        if cluster["relation"] != raw_cluster_relations[cid]:
+            raise HandoffError(f"relation mismatch: {cid}")
         wip_ids = [claim["id"] for claim in cluster["claims"]]
         for claim_id in wip_ids:
             if claim_id in seen:
@@ -698,6 +702,10 @@ def check_published_against_raw(raw, manifest, evidence_text):
         cluster["cluster_id"]: [claim["id"] for claim in cluster.get("claims") or []]
         for cluster in raw.get("clusters") or []
     }
+    raw_cluster_relations = {
+        cluster["cluster_id"]: cluster.get("relation", "agree")
+        for cluster in raw.get("clusters") or []
+    }
     man_clusters = {
         cluster["cluster_id"]: list(cluster["claim_ids"])
         for cluster in manifest["clusters"]
@@ -707,6 +715,10 @@ def check_published_against_raw(raw, manifest, evidence_text):
     for cid, ids in raw_clusters.items():
         if sorted(ids) != sorted(man_clusters[cid]):
             raise HandoffError(f"cluster membership incomplete: {cid}")
+    for cluster in manifest["clusters"]:
+        cid = cluster["cluster_id"]
+        if cluster.get("relation") != raw_cluster_relations.get(cid, "agree"):
+            raise HandoffError(f"relation mismatch: {cid}")
     raw_un = raw.get("unclustered_claim_ids", [])
     if sorted(raw_un) != sorted(manifest["unclustered_claim_ids"]):
         raise HandoffError("unclustered_claim_ids mismatch")
