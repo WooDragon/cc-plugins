@@ -74,6 +74,7 @@ receipt。
 - **候选集完备性**（G1，仅选型类）：候选基数 < 3 未补搜、或未做饱和判定 → 不通过
 - **RECYCLE**：G3 假设审计发现双环学习（结论推翻原始问题假设）→ 裁决 RECYCLE，强制回退 G0 重校准（区别于 FAIL 的原阶段补充）
 - **前提/判据 FAIL**（G3）：假设审计有 Unsupported 前提撑核心结论、或证伪审计任一子项（反驳搜索/cite 回链/证伪不可省）不通过 → FAIL
+- **G1 引用校验机械门**：宣称 `GATE_VERDICT: G1 PASS` 前，应跑 `python3 <harvest.py 路径> check <project-dir>`。handoff-enabled 的 panel 路径须为 `READY`。`PENDING_SANITIZATION`、残缺 marker、hash mismatch 均为 FAIL，阻塞 PASS。旧记录三字段全缺走原表。local / exemption / 无 verify 仍为 N/A。细则见 deep-research skill 的 references/quality-gates.md。不复制 schema。
 - 未通过时**必须**指出：哪个维度不足、当前分数、达标所需的具体改进
 
 ### Gate 评分输出格式

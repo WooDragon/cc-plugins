@@ -31,7 +31,8 @@
     `echo "$(<file)"`），且目标指向受管路径，则拦截。
 - **白名单放行**（小指针文件，主 session 可合法持有）：文件名匹配 `research-goal.md`、
   `*-manifest.*`、`*-receipt.*`、`INDEX.md`、`*.verdict`、`*-verdict.md`；或文件体积低于阈值
-  （建议 8KB，即指针与 receipt 的量级）。
+  （8KB，即指针与 receipt 的量级）。边界：`harvest-manifest.json` 命中既有 `*-manifest.*`，按白名单放行。
+  `harvest-evidence.jsonl` 与 `*-harvest-evidence.jsonl` 在体积阈值判定之前拒绝，即使远小于 8KiB。
 - **fail-open 硬约束**（任一条成立即放行，never break userspace）：非 deep-research 项目
   （查不到 `pipeline/`）；目标非受管路径；命中白名单；路径解析异常；Bash 命令解析不出明确的
   读大文件意图（不误伤 grep 检索、ls、find、git）。**fail-open 落在项目层、路径层与白名单层，

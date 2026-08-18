@@ -49,7 +49,7 @@ G0 与用户完成 primary_job / Non-Goals 对齐后、进入 Acquisition 前，
 
 1. **检测 `GATEWAY_API_KEY`**（或 config 中声明的 `gateway.api_key_env`）是否已配置
 2. 结果分支：
-   - **已配置** → 默认走 panel mode（三模型并行），不问用户
+   - **已配置** → 默认走 panel mode（configured panel，quorum 由 config），不问用户
    - **未配置** → 主动询问用户：
      > "当前未检测到聚合网关 API key。你可以：
      > 1. 提供 key（我来帮你配好环境变量）
@@ -92,7 +92,7 @@ python3 <路径> run --no-api --queries-json <queries.json> --goal-file <goal-fi
 - **exit 3**（`UNAVAILABLE`）：采集不可用（panel mode 法定人数未达标 / local mode 搜索全失败），须停止并上报用户裁决，**不自行降级到 legacy 链**
 - **exit 4**：curl_cffi 依赖未装，须 `pip install curl_cffi` 后重跑
 
-`harvest.py check <project-dir>` 用于 G1 的引用校验机械门（三态 exit code 0=PASS / 1=FAIL / 2=N/A），细则见 `references/quality-gates.md`。
+`harvest.py check <project-dir>` 用于 G1 的引用校验机械门（三态 exit code 0=PASS / 1=FAIL / 2=N/A），细则见 `references/quality-gates.md`。panel `run` 成功后须 `finalize-handoff` 使交接进入 `READY`，生命周期见 `references/pipeline.md`。
 
 ## 新建研究项目
 
@@ -118,9 +118,9 @@ Gate 评分细则：`assets/review-rubric.md`（审阅 5 评分维度 + 维度6 
 
 ## 依赖前置
 
-harvest.py 主路径依赖：网关 API key（`GATEWAY_API_KEY` 等，用于聚合网关调用 gemini/gpt/claude 三面板，以及主搜索后端 gemini-grounding 经网关直连）、`curl_cffi`（TLS 模拟搜索 + 直连 fetch，未装则 exit 4 阻塞）。搜索后端按序降级 gemini-grounding → tavily → duckduckgo，无本机检索 CLI 依赖。详见插件 README。
+harvest.py 主路径依赖：网关 API key（`GATEWAY_API_KEY` 等，用于聚合网关调用 configured panel，以及主搜索后端 gemini-grounding 经网关直连）、`curl_cffi`（TLS 模拟搜索 + 直连 fetch，未装则 exit 4 阻塞）。搜索后端按序降级 gemini-grounding → tavily → duckduckgo，无本机检索 CLI 依赖。详见插件 README。
 
 三种采集模式：
-- **panel mode**（默认）：有 gateway key → 三模型并行 + judge 聚类 + 机械引用校验
+- **panel mode**（默认）：有 gateway key → configured panel + quorum + judge merge + 机械引用校验；成功后须 finalize-handoff
 - **`--no-api` local mode**：无 gateway key 或用户选择 → harvest.py 只搜索+抓取，harvester subagent 做推理 + `verify-local` 做确定性引用校验
 - **legacy 手工链**：经用户显式豁免（`pipeline/verification/legacy-exemption.md`）或项目未启用 harvest.py → Gemini CLI / WebSearch / WebFetch

@@ -48,13 +48,13 @@ Lead 确定信息源策略：学术 / Web / API / 代码 / 文献。playbook 提
 
 | 项 | 说明 |
 |---|---|
-| 执行者 | research-harvester（Task subagent），主路径经 `harvest.py` 多模型采集（gemini/gpt/claude 三面板并行 + 裁判 merge，harvest.py 路径见 SKILL.md 的路径发现约定），未启用/经豁免项目走 legacy 手工采集 |
+| 执行者 | research-harvester（Task subagent），主路径经 `harvest.py` 的 configured panel + quorum + judge merge（`panel_models` 与 `quorum` 来自 `harvest.config.json`；harvest.py 路径见 SKILL.md 的路径发现约定），未启用/经豁免项目走 legacy 手工采集 |
 | 输入 | Lead 的采集指令 |
 | 输出目录 | `pipeline/1_raw/`（含 `harvest/<model>/findings.json`）+ `pipeline/verification/`（harvest.py 项目） |
-| 产物 | 原始数据文件 + fetch-report + `merged-findings.json`（harvest.py 项目，带共识标签）+ `harvest-verify.json`（机械门校验记录） |
+| 产物 | 原始数据文件 + fetch-report + `merged-findings.json`（harvest.py 项目，judge merge 后的 raw clusters）+ `harvest-verify.json`（机械门校验记录。panel `run` 成功时仍为 `verdict=OK`，并带 `handoff_version=1`、`handoff_required=true`、`handoff_status=PENDING_SANITIZATION`） |
 | 命名 | `YYYYMMDD_HHMMSS_{source}_{description}` |
 
-fetch-report 必填字段：tier 分层（T1/T2/T3）、翻页统计、错误汇总、中英文搜索覆盖率；harvest.py 项目另加多模型共识统计、引用校验统计、本地材料清单（见 deep-research 插件的 research-harvester subagent）。
+fetch-report 必填字段：tier 分层（T1/T2/T3）、翻页统计、错误汇总、中英文搜索覆盖率；harvest.py 项目另加 configured panel 参与统计、引用校验统计、本地材料清单（见 deep-research 插件的 research-harvester subagent）。
 
 ### Stage 3: Sanitization（harvester 执行）
 
@@ -63,13 +63,13 @@ fetch-report 必填字段：tier 分层（T1/T2/T3）、翻页统计、错误汇
 | 执行者 | research-harvester（同一 Task，与 Acquisition 串行） |
 | 输入目录 | `pipeline/1_raw/` |
 | 输出目录 | `pipeline/2_cleaned/` |
-| 产物 | 脱敏后数据文件 |
+| 产物 | 脱敏后数据文件。handoff-enabled 的 panel 路径另产确定性交接：从 raw merged 做 L1/L2 脱敏，写入 `pipeline/2_cleaned/harvest-handoff.wip.json`（supplementary 为 `track_<raw_dir.name>-harvest-handoff.wip.json`；unclustered 脱敏正文走 `unclustered_claims`；`coverage_gaps` / `blind_spots` 只核条数，正文以 WIP 脱敏文本为准），再执行 `python3 harvest.py finalize-handoff --project-dir <proj> --out <raw_dir> --wip <wip>`。primary 正式产物为 `pipeline/2_cleaned/harvest-manifest.json`（compact，Lead 可读）与 `pipeline/2_cleaned/harvest-evidence.jsonl`（行寻址完整证据；Lead 禁读，即使远小于 8KiB）。finalize 成功后，verify 才变为 `READY` 并绑定 hashes。local / `--no-api` 不走 v1 确定性交接 |
 
-脱敏协议见 deep-research 插件的 research-harvester subagent。
+脱敏协议见 deep-research 插件的 research-harvester subagent。Acquisition 与 Sanitization 仍在同一 Task。
 
 ### ❰G1❱ Sufficiency Gate: 采集充分性
 
-- 触发点：Acquisition + Sanitization 完成后
+- 触发点：Acquisition + Sanitization 完成后。handoff-enabled 路径应在交接 `READY` 之后再请求 G1
 - 执行者：research-reviewer（mode=sufficiency）
 - 适用维度：覆盖度、时效性、可信度、双语平衡
 - 通过条件：见 [quality-gates.md](./quality-gates.md)
@@ -83,6 +83,8 @@ fetch-report 必填字段：tier 分层（T1/T2/T3）、翻页统计、错误汇
 | 输入目录 | `pipeline/2_cleaned/`（只读） |
 | 输出目录 | `pipeline/3_structured/` |
 | 产物 | 域拆解文件（每域独立） |
+
+handoff-enabled track 应先读 `harvest-manifest.json`。应无条件展开 manifest 标出的 anomaly ranges。再按目标选其余 ledger ranges。仍可读其他 `2_cleaned` 文件。仍禁读 `1_raw`。旧项目 / local / legacy 继续全量读 cleaned。
 
 ### ❰G2❱ Sufficiency Gate: 拆解充分性
 
@@ -197,6 +199,7 @@ fetch-report 必填字段：tier 分层（T1/T2/T3）、翻页统计、错误汇
 6. **Gate 阻塞**：G0/G1/G2/G3 未通过时，后续 Stage 禁止启动
 7. **回退权限**：只有 Lead 可以决定 Stage 回退。G3 裁决 RECYCLE 时强制回退到 G0 重校准问题定义（区别于 FAIL 的原阶段补充）
 8. **主 session 只持指针**：Lead（主 session，`agent_id` 为空）对 `pipeline/**` 和 `deliverables/**` 下的文件只允许持有路径指针，禁止读取其内容（Read 工具 + Bash cat 类读取）。所有内容读取/生成/审阅由 subagent 在隔离上下文完成，回传 Lead 的只有 manifest/receipt/spec/delta-receipt（路径 + 结构化裁决摘要），永不含全文。物理焊死靠 PreToolUse `read_guard` hook。详见 [main-session-isolation-contracts.md](../../../docs/main-session-isolation-contracts.md)。
+9. **确定性交接（handoff-enabled panel）**：panel 成功后应先完成脱敏与 `finalize-handoff`，使 verify 进入 `READY`，再请求 G1。analyst 应先读 `harvest-manifest.json`，并展开 anomaly ranges。schema 权威在 `scripts/harvest_handoff.py`，本文不复制字段表。旧项目 / local / legacy 无此交接，继续全量读 cleaned。`check_project()` 只看 primary 文件名，不看 `track_*`。
 
 ### manifest / receipt / spec / delta-receipt 产物定义
 

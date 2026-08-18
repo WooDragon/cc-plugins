@@ -155,19 +155,31 @@ GATE_VERDICT: G<N> PASS|FAIL|RECYCLE
 
 ### 引用校验机械门（G1，harvest.py 项目）
 
-项目启用 `harvest.py` 采集时（通过 deep-research skill 说明的 harvest.py 路径发现约定获取，见 SKILL.md），G1 追加一道**确定性代码门**（非 LLM 判断），由 `python3 <harvest.py 路径> check <project-dir>` 执行，三态 exit code：
+项目启用 `harvest.py` 采集时（通过 deep-research skill 说明的 harvest.py 路径发现约定获取，见 SKILL.md），G1 追加一道**确定性代码门**（非 LLM 判断），由 `python3 <harvest.py 路径> check <project-dir>` 执行。`hooks/gate_check.py` 仍只调 `check_project()`，无新 hook。三态 exit code：
 
 | exit code | 含义 | G1 处置 |
 |-----------|------|---------|
-| 0 | PASS：引用校验通过、法定人数达标、claims > 0、（被拒 claim 数 < 2 或 INVALID 引用率 ≤ 5%） | 机械门通过，继续走上方 Sufficiency 评分 |
-| 1 | FAIL（含 `verdict: UNAVAILABLE`，即多模型采集全挂） | **G1 自动 FAIL 阻塞**，须上报用户裁决；**禁止静默转 legacy 继续采集**——不完整调研冒充完整调研比失败更糟。恢复路径：修复后重跑 `harvest.py run`，或经用户显式同意写入 `pipeline/verification/legacy-exemption.md` 后转 N/A |
-| 2 | N/A：项目从未启用 harvest.py（现行人工采集流程不受影响），或存在用户豁免记录 `legacy-exemption.md` | 机械门不适用，走现行人工 Sufficiency 审查 |
+| 0 | PASS：引用校验通过、法定人数达标、claims > 0、（被拒 claim 数 < 2 或 INVALID 引用率 ≤ 5%）；handoff-enabled 且 `READY` 时另加重算 primary hashes 与不变量 | 机械门通过，继续走上方 Sufficiency 评分 |
+| 1 | FAIL（含 `verdict: UNAVAILABLE`，即多模型采集全挂；也含交接未就绪，见下） | **G1 自动 FAIL 阻塞**，须上报用户裁决；**禁止静默转 legacy 继续采集**——不完整调研冒充完整调研比失败更糟。恢复路径：修复后重跑 `harvest.py run`（handoff-enabled 还须完成 `finalize-handoff`），或经用户显式同意写入 `pipeline/verification/legacy-exemption.md` 后转 N/A |
+| 2 | N/A：项目从未启用 harvest.py（无 verify）、存在用户豁免记录 `legacy-exemption.md`，或 `verdict=LOCAL`（`--no-api`） | 机械门不适用，走现行人工 Sufficiency 审查。local / exemption / 无 verify 仍为 N/A，不走 v1 确定性交接 |
+
+**v1 确定性交接协商**（只在 `verdict=OK` 记录上运行；`check_project()` 只看 primary 文件名，不看 `track_*`）：
+
+- 三个字段 `handoff_version` / `handoff_required` / `handoff_status` 全缺 → 旧路径（旧项目 / 手写 OK 测例），继续走上表既有 OK 检查。
+- 任一字段出现但不完整、`handoff_version` ≠ 1、或 `handoff_required` 不是 true → FAIL，不降级。
+- `handoff_status=PENDING_SANITIZATION` → FAIL。
+- `handoff_status=READY` → 先跑旧 OK 检查，再重算 primary `harvest-manifest.json` / `harvest-evidence.jsonl` / raw merged / goal hash 与不变量。
+- 字段 schema 的权威在 `scripts/harvest_handoff.py`。本文不复制字段表。
 
 引用率门槛是**双条件与**：被拒 claim 数 ≥ 2 **且** INVALID 引用率 > 5% 才判 FAIL——真实冒烟中出现过小样本下单条孤立被拒（已过一次重试、已被剔除出最终产物）把整锅判 FAIL 的假阳性，门槛本意是拦系统性造假，不是拦单条噪声。被拒 claim 的具体内容和拒绝原因见 `harvest/<alias>/rejected_claims.json`。
+
+citation 只证明 URL 已 fetch。产物标 `url_fetched_only`。不应把 citation 门写成 excerpt 子串门。
 
 法定人数达标但存在缺席模型（quorum_met = true，非全员存活）不算 FAIL，但 reviewer 须在报告中标注哪一路模型缺席及原因。
 
 机械门与 Sufficiency 评分是**与**关系：机械门 FAIL 直接阻塞，不进入评分；机械门 PASS/N/A 后仍须过既有覆盖度/时效性/可信度/双语平衡评分。
+
+hook 仍是技术 fail-open（拿不到项目路径、脚本异常时不拦）。业务 FAIL（`check_project()` 返回 FAIL，含交接未就绪）仍 fail-closed，阻塞 `GATE_VERDICT: G1 PASS`。
 
 ## 审阅 6 维度（mode=review）
 
