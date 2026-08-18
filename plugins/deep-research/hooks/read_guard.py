@@ -77,6 +77,10 @@ def _locate_project_root(start: Path):
 def _is_whitelisted(abs_path: str) -> bool:
     """小指针文件放行判定：文件名匹配白名单，或体积低于阈值。"""
     base = os.path.basename(abs_path)
+    # Evidence ledger is line-addressable raw claims — never a Lead pointer,
+    # even when the file is far below the 8KiB receipt threshold.
+    if base == "harvest-evidence.jsonl" or base.endswith("-harvest-evidence.jsonl"):
+        return False
     if base in _WHITELIST_BASENAMES:
         return True
     for pat in _WHITELIST_PATTERNS:

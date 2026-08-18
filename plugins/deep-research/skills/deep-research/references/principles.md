@@ -54,6 +54,12 @@ deliverables/          → 最终交付物（draft/ + final/）
 - 修正机制走 **Correction Record**（见原则 5）：追加补偿文档而非覆盖原文。修正流是 deliverables 层的独立合法路径，**不算「反向」**——它不回写 pipeline，只在派生层叠加新视图。
 - analyst 禁止直接读 `1_raw/`，必须读 `2_cleaned/`；下游角色对 pipeline 上游只有读权限。
 
+**确定性交接**（handoff-enabled 的 panel 路径）：
+
+- 完整记录应落在 evidence ledger（`pipeline/2_cleaned/harvest-evidence.jsonl`）。压缩只改默认读取集合，不应删除 ledger 行。
+- 异常优先展开：manifest 标出的 anomaly ranges 应先读。无异常的 `corroborated` 簇可走 compressed 默认集。
+- 字段 schema 的权威在 `scripts/harvest_handoff.py`。本文只定职责，不复制 schema。生命周期见 [pipeline.md](./pipeline.md)。
+
 > **为何不是「禁止反向」**：旧铁律把 pipeline 与 deliverables 混为一条单向链，导致落地回填看似违规。分层后矛盾消解：pipeline 冻结是铁律，deliverables 可重算是常态，回填是正常重算而非违规。详见「框架演进调研」结论 1。
 
 ## 3. 可追溯性原则
@@ -94,7 +100,7 @@ deliverables/          → 最终交付物（draft/ + final/）
 - 关键事实**必须**通过至少 2 个独立源验证
 - 中英文双语搜索是强制要求，不是可选项
 - 每个核心概念必须用中英文分别搜索，建立术语对照表
-- 交叉验证记录格式（`excerpt` 为逐字摘录，保证可比对溯源）：
+- 交叉验证记录格式（人工记录用 `excerpt` 摘录原文，便于对照）。harvest 引用门只证明 URL 已 fetch（`url_fetched_only`），不应把摘录当成已做子串验证：
 
 ```
 事实: {具体事实描述}
@@ -103,7 +109,7 @@ deliverables/          → 最终交付物（draft/ + final/）
 一致性: 一致 / 有差异（说明差异点）
 ```
 
-> **共识 ≠ 正确**：多源重合度是参考信号，不是真值判据——三源一致可能共享同一上游谣言，单源观点也可能是唯一说对的。[quality-gates.md](./quality-gates.md) G3 证伪审计不因多源重合而放松审查。
+> **共识 ≠ 正确**：确定性交接里的 consensus 是导航信号，不等于 truth。三个标签为 `disputed`（`relation=contradict`）、`corroborated`（不少于 2 个不同 `source_model`）、`single-model`。`corroborated` 只说明多模型重合，不应当作已证实。`disputed` 与 `single-model` 应强制展开。三源一致仍可能共享同一上游谣言。单源观点仍可能是唯一说对的。[quality-gates.md](./quality-gates.md) G3 证伪审计不因多源重合而放松审查。
 
 - 中英文信息出现矛盾时，必须在分析中标注并说明可能原因（地域差异、时间差异、翻译失真）
 - 单一信息源引用不得超过 3 次（防止单源偏见）

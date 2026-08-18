@@ -9,6 +9,7 @@
 | 模块 | 职责 |
 |------|------|
 | `scripts/harvest.py` | 主编排：pipeline / worker / judge / merge / verify / CLI |
+| `scripts/harvest_handoff.py` | harvest 交接：WIP 校验、compact manifest 与 evidence ledger、hash 绑定。本模块是零外部依赖叶子，不 import harvest。 |
 | `scripts/harvest_safety.py` | SSRF 守卫 / 域黑名单 / 路径沙箱 / 限流 / URL 规范化（零外部依赖叶子） |
 | `scripts/harvest_search/` | 3 个 web search backend（gemini-grounding/tavily/duckduckgo）+ do_search 编排 |
 | `scripts/harvest_search/social.py` | 独立社交搜索链（search_social tool，backend-agnostic，现仅 grok-x） |

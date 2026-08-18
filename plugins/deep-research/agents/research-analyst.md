@@ -31,6 +31,8 @@ color: blue
 
 **铁律**：禁止读 `pipeline/1_raw/`，禁止修改 `pipeline/2_cleaned/`。
 
+handoff-enabled track 的消费顺序：先读 `pipeline/2_cleaned/harvest-manifest.json`。应无条件展开 manifest 标出的 anomaly ranges。再按目标选其余 ledger ranges。仍可读其他 `2_cleaned` 文件。旧项目 / local / legacy 继续全量读 cleaned。不应重算 consensus 标签。schema 权威在 `scripts/harvest_handoff.py`。
+
 ## 输出
 
 | 产物 | 目录 | Stage |
@@ -50,7 +52,7 @@ color: blue
 按业务领域分割 cleaned 数据，每域产出独立分析文件。
 
 **执行步骤**：
-1. 扫描 `pipeline/2_cleaned/` 全部文件，建立内容索引
+1. 若存在 `harvest-manifest.json`，先读 manifest，展开 anomaly ranges，再按目标选其余 ledger ranges。否则扫描 `pipeline/2_cleaned/` 全部文件，建立内容索引
 2. 按 Lead 指定的域划分（或自动识别域边界）
 3. 每域产出一个独立文件到 `pipeline/3_structured/`
 4. 域文件命名：`YYYYMMDD_HHMMSS_domain_{domain_name}.md`

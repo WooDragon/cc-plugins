@@ -16,7 +16,7 @@ The methodology (skill + subagents) works out of the box. The **multi-model harv
 
 | Dependency | Needed for | How |
 |------------|-----------|-----|
-| `GATEWAY_API_KEY` (env) | harvest.py panel models (gemini/gpt/claude via your OpenAI-compatible gateway) **and the primary `gemini-grounding` search backend** | Set gateway `base_url` + key in `scripts/harvest.config.json` / env |
+| `GATEWAY_API_KEY` (env) | harvest.py configured panel (`panel_models` in `scripts/harvest.config.json`, via your OpenAI-compatible gateway) **and the primary `gemini-grounding` search backend** | Set gateway `base_url` + key in `scripts/harvest.config.json` / env |
 | `curl_cffi` (Python, optional) | `curl-cffi` fetch backend (direct free fetch) | `pip3 install --user curl_cffi` — else harvest.py exits 4 with install hint |
 | `TAVILY_API_KEY` / `JINA_API_KEY` (env, optional) | tavily/jina search & fetch fallbacks | Set as env vars if used |
 | `grok` CLI (optional, `grok login`) | `grok-4.5` panel model + `grok-x` social search backend | Install locally + authenticate; if absent, `grok-*` panel models and `grok-x` social backends are dropped/skipped and the pipeline still completes |

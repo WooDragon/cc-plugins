@@ -22,7 +22,7 @@ Lead 确定信息源策略，输出采集指令。
 
 ### 搜索关键词矩阵
 
-**harvest.py 项目（主路径）**：关键词矩阵不再由 Lead 预生成——由各面板模型（`panel_models` 配置，当前 gemini/gpt/claude）在 Acquisition 阶段自主分解研究目标、自定关键词，记录于各自 `findings.json` 的 `keywords_used: {zh: [], en: []}` 字段。三模型异构检索策略的并集由架构保证覆盖广度（消除单模型盲区）。Lead 在 Stage 1 只需定义研究目标/范围/约束，写入 goal-file，**不预生成关键词**。
+**harvest.py 项目（主路径）**：关键词矩阵不再由 Lead 预生成——由 configured panel（`harvest.config.json` 的 `panel_models`）在 Acquisition 阶段自主分解研究目标、自定关键词，记录于各自 `findings.json` 的 `keywords_used: {zh: [], en: []}` 字段。异构检索策略的并集由架构保证覆盖广度（消除单模型盲区）。Lead 在 Stage 1 只需定义研究目标/范围/约束，写入 goal-file，**不预生成关键词**。
 
 **legacy 链（未启用 harvest.py 或经用户豁免）**：仍需 Lead 建立中英文关键词矩阵：
 
@@ -63,7 +63,7 @@ harvester（Task subagent）执行采集。**禁止**在主上下文直接搜索
 python3 <harvest.py 路径> run --goal-file intake/requirements/research-goal.md --out pipeline/1_raw/ [--config <harvest.config.json 路径>] [--local-dir intake/local_sources]
 ```
 
-三个异构面板模型（由 `harvest.config.json` 的 `panel_models` 配置，当前为 gemini/gpt/claude 三家族）并行各跑独立 agentic loop 自主检索，内部 search 后端链按优先级降级（gemini-grounding → tavily → DuckDuckGo 兜底，见 [context-economics.md](./context-economics.md)）；merge 阶段裁判模型产出共识标签与 Fusion 五元组分析，落盘 `merged-findings.json` + 带机械门数据的 `fetch-report.md`。exit 3（`UNAVAILABLE`）时 harvester 停止并上报 Lead，**不自行转 fallback**（见 deep-research 插件的 research-harvester subagent 工具链）。
+configured panel（`harvest.config.json` 的 `panel_models` + `quorum`）并行各跑独立 agentic loop 自主检索，内部 search 后端链按优先级降级（gemini-grounding → tavily → DuckDuckGo 兜底，见 [context-economics.md](./context-economics.md)）；merge 阶段裁判模型产出 raw clusters（含 `relation`、`coverage_gaps`、`blind_spots`），落盘 `merged-findings.json` + 带机械门数据的 `fetch-report.md`。共识导航标签不在 raw merge 产物上，而由后续 `finalize-handoff` 写入 `harvest-manifest.json`。exit 3（`UNAVAILABLE`）时 harvester 停止并上报 Lead，**不自行转 fallback**（见 deep-research 插件的 research-harvester subagent 工具链）。
 
 **agentic loop 收敛语义（强制收尾兜底）**：每个 panel worker 的 loop 有 `max_steps_per_model` 轮工具预算（LLM 回合数，非工具调用数），system prompt 会告知该预算并引导「先双语搜索摸清源 → fetch 最相关几篇 → 主动停下吐 findings JSON」。**预算耗尽不再直接丢弃已采证据**：loop 结束后强制发一次收尾 synthesis 调用，让 worker 把已 fetch 的证据收敛成 findings，再走同一套引用机械门校验（追不到已 fetch 内容的 claim 照剔）。收尾仍无合法产出才判 `step_limit_no_synthesis` 失败。此设计避免「worker 采足证据却因未主动收尾被整个作废、进而拖垮 quorum」。`wall_clock_s` 超时是另一条独立硬停路径（濒临墙钟死线不再追加调用），不走强制收尾。
 

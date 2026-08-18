@@ -37,19 +37,19 @@ Lead 的采集指令，必须包含：
 
 ## 工具链
 
-**主路径：多模型采集脚本（异构 gemini/gpt/claude 三面板并行）**
+**主路径：configured panel 采集脚本（`harvest.config.json` 的 `panel_models` + `quorum`）**
 
-项目启用多模型采集脚本时，harvester 的职责从「自己搜索」转为「驱动脚本 + 解读产物」：
+项目启用多模型采集脚本时，harvester 的职责从「自己搜索」转为「驱动脚本 + 完成确定性交接」：
 
-执行多模型采集时，使用 **Lead 在 Task 指令中提供的 harvest.py 绝对路径**（Lead 已通过 deep-research skill 的路径发现约定解析出该路径）。命令形如 `python3 <Lead提供的harvest.py绝对路径> run --goal-file <goal-file> --out pipeline/1_raw/`。若 Task 指令未提供该路径，向 Lead 索要，不要自行猜测或硬编码。
+执行采集时，使用 **Lead 在 Task 指令中提供的 harvest.py 绝对路径**（Lead 已通过 deep-research skill 的路径发现约定解析出该路径）。命令形如 `python3 <Lead提供的harvest.py绝对路径> run --goal-file <goal-file> --out pipeline/1_raw/`。若 Task 指令未提供该路径，向 Lead 索要，不要自行猜测或硬编码。
 
 | 步骤 | 动作 | 产物/落点 |
 |------|------|----------|
 | 1 | 准备 `research-goal.md` 对应的 goal-file（研究目标/范围/约束） | 传给 `harvest.py run --goal-file` |
 | 2 | 准备本地材料（可选）：PDF 等二进制先转文本，**前置完成 L1/L2 脱敏**后放入 `intake/local_sources/` | 见下「本地材料前置脱敏」 |
-| 3 | 执行 `python3 <harvest.py绝对路径> run --goal-file <goal-file> --out pipeline/1_raw/` | `pipeline/1_raw/harvest/<model>/findings.json`、`merged-findings.json`、`fetch-report.md`、`pipeline/verification/harvest-verify.json` |
-| 4 | 解读 merged 输出：共识标签、coverage_gaps、blind_spots | 补采裁判指出的 gaps（若有） |
-| 5 | 执行 Sanitization（脱敏落盘到 `pipeline/2_cleaned/`） | 同现行流程 |
+| 3 | 执行 `python3 <harvest.py绝对路径> run --goal-file <goal-file> --out pipeline/1_raw/` | `pipeline/1_raw/harvest/<model>/findings.json`、`merged-findings.json`、`fetch-report.md`、`pipeline/verification/harvest-verify.json`（`verdict=OK`，`handoff_status=PENDING_SANITIZATION`） |
+| 4 | 读 merged 的 `coverage_gaps` / `blind_spots`，按需补采。不应解读 consensus 标签——标签由 `finalize-handoff` 写入 manifest，不是 raw merge 产物 | 补采裁判指出的 gaps（若有） |
+| 5 | 对 raw merged 做 L1/L2 脱敏，写 WIP，再 finalize | `pipeline/2_cleaned/harvest-handoff.wip.json`（supplementary：`track_<raw_dir.name>-harvest-handoff.wip.json`；unclustered 脱敏正文走 `unclustered_claims`），然后 `python3 harvest.py finalize-handoff --project-dir <proj> --out <raw_dir> --wip <wip>`。primary 正式产物：`harvest-manifest.json` + `harvest-evidence.jsonl`。verify 变为 `READY` 后才可请求 G1 |
 
 **单模型 step 预算耗尽 = 强制收尾，非该模型失败**：每个 panel 模型的 agentic loop 有 `max_steps_per_model` 轮工具预算。预算耗尽时 harvest.py **不丢弃该模型已 fetch 的证据**，而是强制发一次收尾 synthesis 调用（用 prompt 指令要求模型停止调工具、把已采证据收敛成 findings，tools 块保持不变以稳住 KV-cache 前缀），再走引用机械门校验；只有收尾仍无合法产出才判该模型 `step_limit_no_synthesis` 失败。因此单个模型跑到步数上限通常仍会贡献有效 claims，不必视为异常——真正影响整轮的是存活模型数是否达 quorum（见下 exit 3）。
 
@@ -103,7 +103,7 @@ Lead 的采集指令，必须包含：
 
 现行脱敏协议是「采集后脱敏」（`1_raw` → `2_cleaned`）。本地内部材料（`intake/local_sources/`）走 harvest.py 的 `read_local` 工具时是**唯一例外**：脱敏必须**前移到进入该目录之前**完成。
 
-原因：面板模型调用 = 内容上传外部聚合网关。一旦文件放进 `intake/local_sources/`，harvest.py 就会把它原文喂给 gemini/gpt/claude 三个外部面板模型——脱敏晚一步就是脱敏前已外发。因此：
+原因：面板模型调用 = 内容上传外部聚合网关。一旦文件放进 `intake/local_sources/`，harvest.py 就会把它原文喂给 configured panel 的存活模型——脱敏晚一步就是脱敏前已外发。因此：
 
 - 凡进入 `local_sources/` 的内容，必须先完成 L1/L2 脱敏（豁免清单同上）或命中豁免清单，才允许落盘
 - `scripts/harvest.config.json` 需显式 `local_sources.enabled = true` 才启用本地材料链路，默认 `false`，防误传
@@ -143,7 +143,7 @@ Lead 的采集指令，必须包含：
 - 候选基数: N (selection 类型须 ≥ 3，否则 G1 强制补搜)
 - 饱和轮次记录: [最近 2 轮有无新候选类别；无则 "saturation reached after N rounds"]
 ## 多模型参与情况（仅 harvest.py 项目；legacy 链填 N/A）
-- 参与模型: [gemini/gpt/claude 存活列表]
+- 参与模型: [configured panel 存活列表]
 - 法定人数状态: quorum_met (true/false)，未达标时列出缺席模型及原因
 ## 引用校验统计（仅 harvest.py 项目；legacy 链填 N/A）
 - 校验总数: N
@@ -179,7 +179,7 @@ Lead 的采集指令，必须包含：
 | 7 | 检查 verify-local exit code：exit 0 → 继续；exit 1 → 上报 Lead | — |
 | 8 | 写 `harvest/local/findings.json`（覆写 placeholder，标准 schema）| `pipeline/1_raw/harvest/local/findings.json` |
 | 9 | 写 `merged-findings.json`（覆写 placeholder，单源 flat clusters）| `pipeline/1_raw/merged-findings.json` |
-| 10 | 执行 Sanitization（同标准流程） | `pipeline/2_cleaned/` |
+| 10 | 执行 Sanitization（同标准流程）。local / `--no-api` **不**走 v1 确定性交接 | `pipeline/2_cleaned/` |
 
 **claims.json schema**（verify-local 输入）：
 
@@ -221,6 +221,7 @@ Lead 的采集指令，必须包含：
 - 无多模型交叉验证（单源）；reviewer 的 G1 Sufficiency Gate 会看到 `mode: "local"` 标记
 - citation verification 由 `verify-local` 子命令执行（确定性代码，非 LLM）
 - 脱敏按标准 post-acquisition 流程（local mode 不外发内容到第三方 LLM，无前置脱敏需求）
+- 不写 `handoff_*` 字段，不跑 `finalize-handoff`。`check_project()` 对 `verdict=LOCAL` 返回 N/A
 
 ---
 

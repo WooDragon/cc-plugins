@@ -121,6 +121,7 @@ def _emit(event, **kw):
         pass
 
 
+import harvest_handoff
 from harvest_safety import (  # re-export: safety layer moved to its own module
     RateLimiter,
     SSRFBlocked,
@@ -921,9 +922,11 @@ def merge_findings(worker_findings_by_alias, judge_data):
     # dedup_notes. The judge prompt asks for this too, but this invariant
     # must hold even if the judge ignores the instruction.
     all_claims = {}
+    source_of = {}
     for alias, data in worker_findings_by_alias.items():
         for c in data["claims"]:
             all_claims[c["_id"]] = c
+            source_of[c["_id"]] = alias
 
     clusters_out = []
     claimed_ids = set()
@@ -955,10 +958,29 @@ def merge_findings(worker_findings_by_alias, judge_data):
                 "url": c.get("url", ""),
                 "language": c.get("language", "unknown"),
                 "credibility": c.get("credibility", 3),
+                "source_model": source_of[cid],
             })
-        clusters_out.append({"summary": summary, "claims": assembled})
+        clusters_out.append({
+            "cluster_id": f"c{len(clusters_out) + 1:03d}",
+            "summary": summary,
+            "relation": relation,
+            "claims": assembled,
+        })
 
     unique_insights = [cid for cid in judge_data.get("unique_insights", []) if cid in all_claims]
+    unclustered_claim_ids = sorted(cid for cid in all_claims if cid not in claimed_ids)
+    unclustered_claims = []
+    for cid in unclustered_claim_ids:
+        c = all_claims[cid]
+        unclustered_claims.append({
+            "id": cid,
+            "claim": c.get("claim", ""),
+            "excerpt": c.get("excerpt", ""),
+            "url": c.get("url", ""),
+            "language": c.get("language", "unknown"),
+            "credibility": c.get("credibility", 3),
+            "source_model": source_of[cid],
+        })
     return {
         "clusters": clusters_out,
         "coverage_gaps": judge_data.get("coverage_gaps", []),
@@ -966,6 +988,8 @@ def merge_findings(worker_findings_by_alias, judge_data):
         "blind_spots": judge_data.get("blind_spots", []),
         "contradictions": contradictions,
         "dedup_notes": dedup_notes,
+        "unclustered_claim_ids": unclustered_claim_ids,
+        "unclustered_claims": unclustered_claims,
     }
 
 
@@ -1011,6 +1035,7 @@ def cleanup_stale_state(pipeline_dir, verify_dir, raw_dir):
     harvest_dir = raw_dir / HARVEST_SUBDIR
     if harvest_dir.exists():
         shutil.rmtree(harvest_dir)
+    _unlink_handoff_artifacts(pipeline_dir / "2_cleaned")
 
 
 def track_verify_filename(raw_dir):
@@ -1037,6 +1062,30 @@ def cleanup_stale_supplementary_state(verify_dir, raw_dir, verify_filename):
     harvest_dir = raw_dir / HARVEST_SUBDIR
     if harvest_dir.exists():
         shutil.rmtree(harvest_dir)
+    _unlink_handoff_artifacts(_cleaned_dir_from_raw(raw_dir), track_name=raw_dir.name)
+
+
+def _cleaned_dir_from_raw(raw_dir):
+    """pipeline/2_cleaned next to 1_raw, even when --out is nested under 1_raw."""
+    node = Path(raw_dir)
+    while node.name and node.name != "pipeline":
+        if node.parent == node:
+            return Path(raw_dir).parent / "2_cleaned"
+        node = node.parent
+    if node.name == "pipeline":
+        return node / "2_cleaned"
+    return Path(raw_dir).parent / "2_cleaned"
+
+
+def _unlink_handoff_artifacts(cleaned_dir, track_name=None):
+    if cleaned_dir is None:
+        return
+    target = Path(cleaned_dir)
+    names = harvest_handoff.artifact_names(track_name)
+    for name in names.values():
+        path = target / name
+        if path.is_file():
+            path.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -1072,6 +1121,16 @@ def check_project(project_dir):
     if verdict != "OK":
         return "FAIL", f"unknown or incomplete verdict: {verdict!r}"
 
+    # Handoff negotiation only runs on OK records, after exemption / missing
+    # / unreadable / UNAVAILABLE / LOCAL / not-OK. Three fields all absent
+    # keeps the historical path byte-for-byte.
+    negotiated = _negotiate_handoff(project_dir, data)
+    if negotiated is not None:
+        return negotiated
+    return _evaluate_ok_verify(project_dir, data)
+
+
+def _evaluate_ok_verify(project_dir, data):
     goal_note = None
     goal_file = resolve_goal_file(project_dir)
     if goal_file is not None:
@@ -1106,6 +1165,72 @@ def check_project(project_dir):
         return "FAIL", f"invalid_citation_rate {invalid_rate} exceeds 0.05 with {invalid_count} rejected claims"
 
     return "PASS", goal_note or "ok"
+
+
+_HANDOFF_KEYS = ("handoff_version", "handoff_required", "handoff_status")
+
+
+def _negotiate_handoff(project_dir, data):
+    present = [key for key in _HANDOFF_KEYS if key in data]
+    if not present:
+        return None
+    if len(present) != 3:
+        return "FAIL", "handoff marker incomplete"
+    if data.get("handoff_version") != 1:
+        return "FAIL", "handoff_version must be 1"
+    if data.get("handoff_required") is not True:
+        return "FAIL", "handoff_required must be true"
+    status = data.get("handoff_status")
+    if status == "PENDING_SANITIZATION":
+        return "FAIL", "handoff pending sanitization"
+    if status != "READY":
+        return "FAIL", f"handoff_status not READY: {status!r}"
+    legacy = _evaluate_ok_verify(project_dir, data)
+    if legacy[0] != "PASS":
+        return legacy
+    return _check_primary_handoff_ready(project_dir, data)
+
+
+def _check_primary_handoff_ready(project_dir, data):
+    """Primary artifacts only — never track_*. Delegates schema/hash to harvest_handoff."""
+    try:
+        return _check_primary_handoff_ready_inner(project_dir, data)
+    except harvest_handoff.HandoffError as exc:
+        return "FAIL", str(exc)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        return "FAIL", f"handoff artifact unreadable: {exc}"
+
+
+def _check_primary_handoff_ready_inner(project_dir, data):
+    pipeline = Path(project_dir) / "pipeline"
+    raw_path = pipeline / "1_raw" / MERGED_FINDINGS_FILE
+    man_path = pipeline / "2_cleaned" / "harvest-manifest.json"
+    ev_path = pipeline / "2_cleaned" / "harvest-evidence.jsonl"
+    for path, label in ((raw_path, "merged-findings.json"),
+                        (man_path, "harvest-manifest.json"),
+                        (ev_path, "harvest-evidence.jsonl")):
+        if not path.is_file():
+            return "FAIL", f"handoff artifact missing: {label}"
+    try:
+        raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        manifest = json.loads(man_path.read_text(encoding="utf-8"))
+        evidence_text = ev_path.read_text(encoding="utf-8")
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+        return "FAIL", f"handoff artifact unreadable: {exc}"
+    goal_file = resolve_goal_file(project_dir)
+    goal_hash = hashlib.sha256(goal_file.read_bytes()).hexdigest() if goal_file is not None else data.get("goal_file_sha256", "")
+    harvest_handoff.check_ready_payloads(
+        verify=data,
+        raw=raw,
+        manifest=manifest,
+        evidence_text=evidence_text,
+        goal_sha256=goal_hash,
+        raw_sha256=harvest_handoff.file_sha256(raw_path),
+        manifest_sha256=harvest_handoff.file_sha256(man_path),
+        evidence_sha256=harvest_handoff.file_sha256(ev_path),
+    )
+    harvest_handoff.check_ready_invariants(raw, manifest, evidence_text)
+    return "PASS", "ok"
 
 
 # ---------------------------------------------------------------------------
@@ -1646,6 +1771,9 @@ def cmd_run(args):
             "invalid_claim_count": invalid_total,
             "total_claims": total_claims,
             "harvest_wall_s": harvest_wall_s,
+            "handoff_version": 1,
+            "handoff_required": True,
+            "handoff_status": "PENDING_SANITIZATION",
         }, verify_filename=verify_filename)
         _emit("run_done", verdict=verdict, total_claims=total_claims, invalid_rate=round(invalid_rate, 4))
         print(f"harvest run complete: verdict={verdict}")
@@ -1760,6 +1888,96 @@ def cmd_verify_local(args):
         sys.exit(1)
 
 
+def _resolve_handoff_paths(project_dir, raw_dir):
+    """Primary vs supplementary + verify filename, without goal-file matching."""
+    project_dir = Path(project_dir).resolve()
+    raw_dir = Path(raw_dir)
+    pipeline_dir = project_dir / "pipeline"
+    verify_dir = pipeline_dir / "verification"
+    is_supplementary = raw_dir.resolve() != (pipeline_dir / "1_raw").resolve()
+    verify_filename = track_verify_filename(raw_dir) if is_supplementary else VERIFY_FILE
+    return project_dir, pipeline_dir, verify_dir, is_supplementary, verify_filename
+
+
+def _assert_inside_project(path, project_dir, label):
+    resolved = Path(path).resolve()
+    if not _is_relative_to(resolved, project_dir):
+        raise harvest_handoff.HandoffError(f"{label} outside project: {resolved}")
+    return resolved
+
+
+def cmd_finalize_handoff(args):
+    """Publish WIP → evidence + manifest, then bind READY hashes on verify."""
+    try:
+        _finalize_handoff(args)
+    except harvest_handoff.HandoffError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _finalize_handoff(args):
+    project_dir, pipeline_dir, verify_dir, is_supplementary, verify_filename = (
+        _resolve_handoff_paths(args.project_dir, args.out)
+    )
+    raw_dir = Path(args.out)
+    cleaned_dir = pipeline_dir / "2_cleaned"
+    track_name = raw_dir.name if is_supplementary else None
+    names = harvest_handoff.artifact_names(track_name)
+
+    wip_path = _assert_inside_project(args.wip, project_dir, "wip")
+    cleaned_dir = _assert_inside_project(cleaned_dir, project_dir, "cleaned")
+    raw_merged = _assert_inside_project(raw_dir / MERGED_FINDINGS_FILE, project_dir, "raw")
+    verify_path = _assert_inside_project(verify_dir / verify_filename, project_dir, "verify")
+    manifest_path = cleaned_dir / names["manifest"]
+    evidence_path = cleaned_dir / names["evidence"]
+    _assert_inside_project(manifest_path, project_dir, "manifest")
+    _assert_inside_project(evidence_path, project_dir, "evidence")
+
+    raw = json.loads(raw_merged.read_text(encoding="utf-8"))
+    wip = json.loads(wip_path.read_text(encoding="utf-8"))
+    verify = json.loads(verify_path.read_text(encoding="utf-8"))
+    harvest_handoff.validate_wip(wip)
+    harvest_handoff.check_coverage(wip, raw)
+
+    goal_hash = verify.get("goal_file_sha256") or ""
+    goal_file = resolve_goal_file(project_dir)
+    if goal_file is not None:
+        goal_hash = hashlib.sha256(goal_file.read_bytes()).hexdigest()
+    raw_hash = harvest_handoff.file_sha256(raw_merged)
+    alive = list(verify.get("models_alive") or [])
+
+    harvest_handoff.publish_handoff(
+        cleaned_dir, wip, raw,
+        goal_file_sha256=goal_hash,
+        raw_merged_sha256=raw_hash,
+        alive_models=alive,
+        track_name=track_name,
+    )
+    evidence_hash = harvest_handoff.file_sha256(evidence_path)
+    manifest_hash = harvest_handoff.file_sha256(manifest_path)
+
+    extra = dict(verify)
+    extra.update({
+        "handoff_version": 1,
+        "handoff_required": True,
+        "handoff_status": "READY",
+        "manifest_sha256": manifest_hash,
+        "evidence_sha256": evidence_hash,
+        "raw_merged_sha256": raw_hash,
+    })
+    extra.pop("verdict", None)
+    extra.pop("goal_file_sha256", None)
+    extra.pop("run_timestamp", None)
+    write_verify_json(verify_dir, goal_hash, verify.get("verdict", "OK"), extra,
+                      verify_filename=verify_filename)
+    if wip_path.exists():
+        wip_path.unlink()
+    print(f"handoff finalized: {manifest_path.name}")
+
+
 def build_arg_parser():
     parser = argparse.ArgumentParser(prog="harvest.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1793,6 +2011,13 @@ def build_arg_parser():
     verify_local_p.add_argument("--manifest", required=True)
     verify_local_p.add_argument("--out", required=True)
     verify_local_p.set_defaults(func=cmd_verify_local)
+
+    finalize_p = sub.add_parser("finalize-handoff")
+    finalize_p.add_argument("--project-dir", required=True)
+    finalize_p.add_argument("--out", required=True,
+                            help="raw_dir; same primary vs supplementary rule as run")
+    finalize_p.add_argument("--wip", required=True)
+    finalize_p.set_defaults(func=cmd_finalize_handoff)
 
     return parser
 

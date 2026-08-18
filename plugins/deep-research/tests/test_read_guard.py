@@ -96,6 +96,38 @@ class TestWhitelist(_ProjectFixture):
         )
 
 
+class TestHarvestHandoffReadGuard(_ProjectFixture):
+    def test_i1_lead_reads_small_harvest_manifest(self):
+        path = self.proj / "pipeline" / "2_cleaned" / "harvest-manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"schema":"harvest-handoff-manifest"}')
+        self.assertFalse(self._block("", "Read", {"file_path": str(path)}))
+
+    def test_i1_lead_reads_large_manifest_named_file(self):
+        path = self.proj / "pipeline" / "2_cleaned" / "harvest-manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("m" * 20000)
+        self.assertFalse(self._block("", "Read", {"file_path": str(path)}))
+
+    def test_i2_lead_blocked_from_tiny_harvest_evidence(self):
+        path = self.proj / "pipeline" / "2_cleaned" / "harvest-evidence.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+        self.assertTrue(self._block("", "Read", {"file_path": str(path)}))
+
+    def test_i2_lead_blocked_from_track_evidence_even_if_tiny(self):
+        path = self.proj / "pipeline" / "2_cleaned" / "track_gap-harvest-evidence.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+        self.assertTrue(self._block("", "Read", {"file_path": str(path)}))
+
+    def test_i2_subagent_can_read_harvest_evidence(self):
+        path = self.proj / "pipeline" / "2_cleaned" / "harvest-evidence.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+        self.assertFalse(self._block("harvester-1", "Read", {"file_path": str(path)}))
+
+
 class TestFailOpen(_ProjectFixture):
     def test_non_research_project_passes(self):
         # cwd 下无 pipeline/ → 非研究项目 → fail-open
