@@ -17,30 +17,23 @@ scripts/grok-review.sh <PR> --followup "<复核指令>" [--since <ref>] [--sessi
 
 不带 `--repo` 时自动用当前仓库。首轮与复核轮是两条独立路径，机制见下方"多轮 session 复用"。
 
-## 派发 A 模板（子任务 prompt）
+上面两行是**参数形态说明**，不是可直接照抄的调用式——agent 调用一律按下节「调用形态」两流分文件重定向。
 
-主线把「取评审」派给子任务时复制本块，替换 `<PR>` 与复核指令文本，其余原样。`${CLAUDE_PLUGIN_ROOT}` 在 subagent 正文里不展开，故模板自带路径解析命令。子任务只需认识 `pr-review.sh` 这一个命令（grok/claude 自动路由由该脚本内部处理，不需要子任务先跑 `resolve-backend.sh` 再自行选脚本）。
+## 调用形态：重定向落盘
 
-```text
-评审 PR <PR>，取回评审结果。
+评审正文只打到 stdout、诊断与告警走 stderr，两者都不落盘。主线调用时**两流分别重定向**，主线上下文里只留 `exit=` 一行，随后 Read `.log` 拿无损原文裁决：
 
-执行步骤：
-1. 解析脚本路径：
-   REVIEW=$(find ~/.claude/plugins -path '*/pr-review/skills/pr-review/scripts/pr-review.sh' 2>/dev/null | head -1)
-2. 在当前工作区（即被评审 PR 所在的仓库 checkout）前台执行：
-   "$REVIEW" <PR>
-   复核轮改用： "$REVIEW" <PR> --followup "<复核指令文本>"
-
-约束：
-- 前台同步执行：禁止 run_in_background / Monitor / nohup 等任何后台化手段，脚本未退出不得返回。脚本只把评审正文打到 stdout、不落盘，提前返回即丢失本轮产物，只能重跑。需要分段时是拿到完整输出后分段整理，不是分段回传进度。
-- 范围围栏：只跑脚本、只整理其输出。不改代码、不 commit、不 push、不动 PR 状态。
-- 输出即产物：最终返回消息本身就是下列摘要，不写完成说明或元总结。
-
-返回格式，每条 finding 一行：
-  [严重度] 文件:行 — 问题一句话 — 评审给出的依据或建议一句话
-严重度取 Critical / Major / Minor。判定无问题时回传 LGTM 及其原话理由。
-脚本非零退出时，回传退出码与 stderr 末段原文，不自行重试、不改用其他评审方式。
+```bash
+REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
+LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
+"$REVIEW" <PR> > "$LOG/<PR>-r1.log" 2> "$LOG/<PR>-r1.err"; echo "exit=$?"
 ```
+
+**不得写成 `2>&1`**：脚本有意分开两个流，而首轮的 grok 调用不做 stderr 隔离，合并会让进度与告警插进评审正文中间。脚本非零退出时读 `.err` 拿原文，不自行重试、不改用其他评审方式。
+
+只需认识 `pr-review.sh` 这一个命令——该脚本内部完成 grok/claude 路由，无须先跑 `resolve-backend.sh` 再自行选脚本。
+
+分工、裁决与收敛规则见 `SKILL.md` 的「执行分工」节。
 
 ## 参数语义
 
@@ -64,7 +57,7 @@ scripts/grok-review.sh <PR> --followup "<复核指令>" [--since <ref>] [--sessi
 
 ## 多轮 session 复用
 
-对同一个 PR 做多轮对抗式复评（Claude 研判 grok 意见 → 改代码 → 再评审 → 循环到 LGTM）时，若每轮都重新拉全量 diff 整包发送，token 与延迟随轮数线性放大，且模型每轮"从零重读"看不到上一轮提了什么、这轮改了什么。本脚本用 grok CLI 原生的会话续接能力解决：
+对同一个 PR 做多轮对抗式复评（主线研判 grok 意见 → 改代码 → 再评审 → 循环到主线的采纳清单为空；编排协议见 `SKILL.md`「执行分工」）时，若每轮都重新拉全量 diff 整包发送，token 与延迟随轮数线性放大，且模型每轮"从零重读"看不到上一轮提了什么、这轮改了什么。本脚本用 grok CLI 原生的会话续接能力解决：
 
 - **首轮**：`SID=$(uuidgen)` 生成一个会话 ID，`grok ... -s "$SID"` 建会话并发送全量 PR diff；SID 落盘到 session 状态文件（见下）。首轮全量 diff 从此留在 grok 服务端会话历史里，天然吃到其 prompt cache。
 - **复核轮**：`--followup "<复核指令>"` 触发；脚本按 PR 号读回上一轮的 SID，`grok ... -r "$SID"` 续接同一会话，prompt-file 只含 followup 文本 + **本地增量 diff**——不重发首轮那份远程全量 PR diff。grok 凭会话记忆知道自己上一轮说了什么，只需要看本地改了什么。
@@ -74,13 +67,16 @@ scripts/grok-review.sh <PR> --followup "<复核指令>" [--since <ref>] [--sessi
 典型两轮命令：
 
 ```bash
-# 第 1 轮：全量评审
-scripts/grok-review.sh 123
+LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"   # 与上节「调用形态」同一定义，本块可独立照抄
 
-# ...Claude 研判 grok 意见，改代码，git add...
+# 第 1 轮：全量评审
+scripts/grok-review.sh 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
+
+# ...主线 Read 123-r1.log 逐条裁决，派修复子任务改代码 + git commit...
 
 # 第 2 轮：复核，只发复核指令 + 本轮增量 diff
-scripts/grok-review.sh 123 --followup "已按你的意见修复 file.go:42 的空指针解引用，请复核"
+scripts/grok-review.sh 123 --followup "已按你的意见修复 file.go:42 的空指针解引用，请复核。以下维持驳回、无新证据不要重开：<驳回清单>" \
+  > "$LOG/123-r2.log" 2> "$LOG/123-r2.err"
 ```
 
 第 2 轮的 `--repo` 解析方式与首轮一致（传参则用传参值，否则取当前 `gh` 仓库），据此算出与首轮相同的状态文件路径才能读到 SID——若两轮所在目录/`--repo` 解析出不同仓库，会算出不同的状态文件路径而读不到 SID，触发 Fail Fast。`--model`/`--effort` 复核轮**默认沿用首轮值**（从状态文件读回，保证同一 session 各轮推理强度一致，详见下文「session 状态文件」）；显式传 `--model`/`--effort` 时以命令行为准。

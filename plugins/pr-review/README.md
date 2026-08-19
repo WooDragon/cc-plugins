@@ -54,7 +54,7 @@ COPILOT="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/copilot-review.sh"
 
 ## Adversarial multi-round follow-up (grok)
 
-Round 1 sends the full PR diff and opens a grok session, whose UUID is persisted to `${XDG_STATE_HOME:-$HOME/.local/state}/pr-review/<owner>__<name>__<PR>.session` (mode 600, GC'd after 30 days). Each follow-up round resumes that session and sends **only** the review instruction plus the diff since the last round — the full diff is never re-sent. Loop until grok says LGTM.
+Round 1 sends the full PR diff and opens a grok session, whose UUID is persisted to `${XDG_STATE_HOME:-$HOME/.local/state}/pr-review/<owner>__<name>__<PR>.session` (mode 600, GC'd after 30 days). Each follow-up round resumes that session and sends **only** the review instruction plus the diff since the last round — the full diff is never re-sent. Loop until the caller's accept list is empty — the review engine is a peer, not an authority, so its `LGTM` is not the exit condition. The orchestration protocol lives in `skills/pr-review/SKILL.md`.
 
 Guardrails baked into the script:
 

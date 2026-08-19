@@ -16,41 +16,71 @@ description: |
 
 对已开的 GitHub PR 做 AI 代码评审，三个后端按需选（grok/claude 由 `pr-review.sh` 自动路由，copilot 独立入口）。
 
-## 执行分工（主线只研判裁决）
+## 执行分工（主线裁决，评审正文落盘）
 
-本 skill 的机械性工作默认交给子任务（subagent）处理，主线只做逐条研判「这条 finding 站不站得住」+ 决定改哪。
+评审正文**重定向落盘**为评审日志，主线读原文裁决。取评审不派子任务（subagent），定位素材也不派——两者都是「评审正文不落盘」逼出来的补偿动作，落盘后一并消失。
 
-派发分两类，各自的约束无条件成立——派发时按「派的是哪类活」整组取用，不在规则内部做二选一判断。
+**一轮只派一次**：主线裁决 → 派修复子任务改一遍并跑一次复核 → 主线读新一轮日志再裁决。循环由主线驱动，子任务不自行收敛。
 
-### 派发 A —— 取评审
+### 1. 取评审：主线自跑，两流分文件
 
-跑 `pr-review.sh`（grok/claude 自动路由的统一入口），回传结构化 finding 摘要（每条 `文件:行` + 问题 + 严重度 + 依据）。写进子任务 prompt 的三条约束：
+```bash
+REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
+LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
 
-1. **输出即产物**——最终返回消息本身就是摘要，不写完成说明或元总结；
-2. **范围围栏**——只跑脚本、只整理其输出，不改代码、不 commit、不 push、不动 PR 状态；
-3. **前台同步执行**——禁止 `run_in_background`、Monitor、`nohup` 等后台化手段，`pr-review.sh` 未退出不得返回。
+gh pr checkout <PR>                                                    # 首轮前必须切到 PR 分支
+"$REVIEW" <PR> > "$LOG/<PR>-r1.log" 2> "$LOG/<PR>-r1.err"; echo "exit=$?"
+```
 
-第 3 条与「尽早吐中间进展」的通行做法**相反**，原因在脚本形态：`pr-review.sh` 路由到的 grok-review.sh/claude-review.sh 都只把评审正文流式打到 stdout、不落盘（state file 只存 SID/MODEL/EFFORT/CWD/BASE_SHA），子任务提前返回即丢失本轮产物，只能重跑。需要分段时是「拿到完整输出后分段整理」，不是分段回传进度。
+预期结果：主线上下文里只出现 `exit=0` 一行，评审正文进 `.log`，诊断与告警进 `.err`。「dump 不进主线」由重定向达成。相比派一个子任务去跑，这条路径少一个实例的 system prompt 与 skill 加载开销。**漏掉重定向就是错的**——正文会直接灌进主线上下文，旧失败模式原地复活。
 
-可复制的完整 prompt 模板（含脚本路径解析）见 `references/grok-review.md`「派发 A 模板」——填 PR 号与 followup 文本即可；模板已简化为只需认识 `pr-review.sh` 这一个命令。
+`$(git rev-parse --git-dir)` 在 worktree 里返回该 worktree 自己的 gitdir——评审日志随工作区走，不入版本库。
 
-### 派发 B —— 定位素材
+**两流必须分文件，不得 `2>&1` 合并**：脚本有意把评审正文放 stdout、诊断放 stderr，而首轮的引擎调用不做 stderr 隔离，`2>&1` 会让进度与告警插进评审正文中间。脚本非零退出时读 `.err` 拿原文，不自行重试、不改用其他评审方式。
 
-通读全量/增量 diff、按 finding 逐条读码定位，回传定位结论（finding → `文件:行` + 依据）。写进子任务 prompt 的三条约束：
+**路径用 `${CLAUDE_PLUGIN_ROOT}`，不要 `find … | head -1`**：本文件由主线读入，该变量在此展开。`find` 有两个实测失败模式——它解析到的是 marketplace 源码副本而非已安装的 cache（cache 路径含版本段，`*/pr-review/skills/…` 匹配不到），而远程安装无本地 clone 时零命中，`REVIEW=""` 会让 `"$REVIEW" <PR>` 变成执行 `<PR>` 本身。
 
-1. **输出即产物**——最终返回消息本身就是定位结论，不写完成说明或元总结；
-2. **范围围栏**——只读码定位，不改代码；
-3. **渐进产出**——大 diff 分段读、尽早吐中间进展，防 watchdog stall。
+**跑不完时等它跑完，不要重开一轮**：评审耗时随 PR 体量与 `--effort` 增长，前台调用应给足超时。命令若被中断，两条路径的补救不同——首轮的 `state_write` 在引擎成功返回之后才执行，此时 session 未建立，应丢弃残日志整轮重跑；复核轮 session 已在，应丢弃残日志**只重跑这一轮 `--followup`**，不要回头重开首轮（那会覆写 SID）。两种情况下半截日志都不得拿来裁决。
 
-派发 B 是调研、自身持续产出文本，第 3 条在此按常规成立。
+### 2. 裁决：主线 Read 评审日志（每轮都回到这一步）
 
-### 主线
+主线 Read `.log` 拿**无损原文**，逐条研判「这条 finding 站不站得住」。评审正文自带 reviewer 的推理与代码依据，主线无须再从代码里把评审已经说过的话重新推导一遍——这是「定位素材」这类派发被删掉的原因。
 
-两类子任务都不把原始 dump 灌进主线上下文。主线侧另有一条**定稿纪律**：据以改码的结论只采信子任务的完整定稿返回，不采信中间片段——这条约束派发端自己，不写进子任务 prompt。
+日志过大时按 offset/limit 分段读完。**不要只 grep 严重度标签**——那把无损原文重新压回一行摘要，删掉「定位素材」派发的理由也随之消失。
 
-session 状态本就落盘（state file），复核轮的派发 A 用同一 session 续接，主线不必吃全量 diff。
+主线**跨轮维护**两份清单：**采纳清单**（每条附评审原文摘录 + 落点 `文件:行`）与**驳回清单**（每条附驳回理由）。首轮建立，之后每轮用新日志**增量更新**——划掉已关闭项、接纳新项。复核规则要求评审方不重列未变化部分，故**不得只凭本轮正文重建清单**，否则上一轮采纳、本轮没被点名的项会凭空蒸发，提前判空。
 
-例外（不必卸载）：PR 极小、单文件、diff 一屏内可尽收——主线直接研判更省往返。
+**收敛判据是「本轮评审跑成了，且采纳清单为空」，不是「评审方说了 `LGTM`」**——评审引擎是对等 peer 不是权威，把它的措辞当出口就是让 peer 变回权威。
+
+**前置必须先验**：本轮 `exit=0` 且 `.log` 是完整评审正文。复核轮的 Fail Fast（cwd 钉死、`BASE_SHA` 非祖先、session 失效）走 `die()`，原因进 `.err`、**`.log` 是空的**——拿空 `.log` 当「本轮无 finding」会把采纳清单清成空、假收敛，失败与「没问题」同形。非零退出一律读 `.err` 按 §1 的失败路径处理：不重试、不换引擎，**也不收工**。
+
+前置成立后：采纳清单为空即收工，无论本轮评审是 `LGTM`、还是仍在复述已被驳回的 finding；采纳清单非空（未改净的旧项，或新 finding 经裁决进入）则回第 3 步再派一次。
+
+这条判据让常见分支自然落位，不必逐种枚举：仅驳回项复述 → 采纳为空 → 收工；新 finding 全被驳回 → 采纳仍空 → 收工；采纳项没改净 → 采纳非空 → 再派。
+
+复核走同一评审 session，**被驳回的 finding 常被原样复述**。驳回清单只给修复子任务挡不住这件事——评审 session 才是复述的源头，故工单的 `--followup` 正文应带上驳回清单（「以下维持驳回，无新证据不要重开」）。
+
+安全阀：连续 3 轮采纳清单不见空，停下来交人裁决，不要继续派。这是拦跑飞，不是预算闸。
+
+不要用 `diff` 两轮日志判「新增」：复核输出是 session 续写而非 finding 全量重列，`.err` 每轮还带变动的增量字节数，整文件比对与 finding 增没增无关。
+
+### 3. 修复：一轮一派
+
+主线把两份清单合成工单，派一个**修复子任务**。工单要素：
+
+- **采纳清单**逐条改；**驳回清单**随附——只给采纳清单，子任务会把主线已驳回的 finding 一并改掉
+- **cwd 钉死为首轮的仓库 toplevel，禁用 worktree 隔离**——脚本按 `git rev-parse --show-toplevel` 钉 session 身份，换路径直接 Fail Fast
+- 改完 `git commit` 新 commit（勿 `git amend` 首轮 tip），然后跑**一次**复核：
+  `<REVIEW 绝对路径> <PR> --followup "<复核指令 + 驳回清单>" > <日志目录>/<PR>-r<N>.log 2> <日志目录>/<PR>-r<N>.err`
+- **回传 exit code 与两个日志路径，到此为止**——不判定收敛、不循环、不自行裁决
+
+脚本路径与日志目录在工单里**应展开成字面绝对路径**：子任务不继承主线的 shell 变量，`${CLAUDE_PLUGIN_ROOT}` 在子任务 prompt 里也不展开。
+
+档位默认 `dev`。只有当工单把每条都钉到 `文件:行:改法`、子任务纯粹转录时才降 `dev-econ`——实现评审意见通常含改法取舍，塞进经济档不合其准入判据。
+
+### 例外
+
+PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改，不必落盘也不必派发。
 
 ## 后端选择
 
@@ -68,24 +98,25 @@ session 状态本就落盘（state file），复核轮的派发 A 用同一 sess
 "${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh" <PR> [--repo owner/name]
 ```
 
-**cwd 必须是被评审 PR 所在的仓库工作区**——底层脚本按 `git rev-parse --show-toplevel` 钉死 session 身份、按 cwd 取增量 diff，不是"不依赖 cwd"。结果直接打印到终端，不发 PR 评论。
+**cwd 必须是被评审 PR 所在的仓库工作区**——底层脚本按 `git rev-parse --show-toplevel` 钉死 session 身份、按 cwd 取增量 diff，不是"不依赖 cwd"。结果打到 stdout（按上文重定向落盘），不发 PR 评论。
 
 **强制指定后端**：设 `PR_REVIEW_BACKEND=grok` 或 `PR_REVIEW_BACKEND=claude` 后再调 `pr-review.sh`，或直接调用对应的 `grok-review.sh`/`claude-review.sh`。两个后端 CLI 参数形态完全一致（`<PR> [--repo] [--model] [--effort] [--followup] [--since] [--session] [--allow-divergent-base]`），仅 `--effort` 合法集合不同：grok 严格为 `none/minimal/low/medium/high`（默认 `high`，`GROK_EFFORT` 覆盖），claude 严格为 `low/medium/high/xhigh/max`（默认 `medium`，`CLAUDE_REVIEW_EFFORT` 覆盖，`CLAUDE_REVIEW_MODEL` 覆盖 model，默认 `claude-opus-5`）。grok 复核轮读到旧持久 state 的 `EFFORT=xhigh` 时会在调用前一次性迁移为 `high`（claude 无此历史包袱）。参数细节、工作原理、故障排查见 `references/grok-review.md`（grok）/ `references/claude-review.md`（claude）。
 
-**派发给子任务时的路径发现**：`${CLAUDE_PLUGIN_ROOT}` 在 subagent 正文里不展开。解析命令已内置于 `references/grok-review.md`「派发 A 模板」，复制该模板即可——子任务只需认识 `pr-review.sh` 这一个命令，不用先跑 `resolve-backend.sh` 再自行选脚本。
+**脚本路径发现**：主线用 `${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh`——该变量在本文件正文里展开。下发工单时把它**展开成字面绝对路径**写进去：子任务 prompt 里 `${CLAUDE_PLUGIN_ROOT}` 不展开，而 `find … | head -1` 有实测失败模式（见「执行分工」§1）。只需认识 `pr-review.sh` 这一个命令，不必先跑 `resolve-backend.sh` 再自行选脚本。
 
-**对抗式多轮复评**：首轮 `pr-review.sh <PR>` 全量评审建 session；之后每轮 Claude 研判评审意见、改代码，再用 `pr-review.sh <PR> --followup "<复核指令>"` 续接同一 session、只发复核指令 + 本轮增量 diff（不重发首轮全量），循环到 LGTM。三轮示例：
+**对抗式多轮复评**：首轮 `pr-review.sh <PR>` 全量评审建 session；复核轮 `--followup "<复核指令>"` 续接同一 session、只发复核指令 + 本轮增量 diff（不重发首轮全量）。每轮的正文与诊断各自落盘为 `<PR>-r<N>.log` / `<PR>-r<N>.err`。**轮次由主线驱动**，分工与收敛判据见上文「执行分工」；本段只讲脚本侧的 session 机制。
 
 ```bash
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
+LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
 
-gh pr checkout 123                                                  # 必须：先切到 PR 分支再跑首轮（本地 HEAD≠PR head 时首轮默认 Fail Fast，除非 --allow-divergent-base）
-"$REVIEW" 123                                                       # 第 1 轮：全量评审
-# Claude 研判 finding，改代码（在同一仓库/分支上）——修复请 git commit 新 commit，勿 git amend 首轮 tip
+gh pr checkout 123                                                # 必须：先切到 PR 分支再跑首轮（本地 HEAD≠PR head 时首轮默认 Fail Fast，除非 --allow-divergent-base）
+"$REVIEW" 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"            # 第 1 轮：主线跑，全量评审
+
+# 之后每轮的 --followup 由修复子任务按 §3 执行（形如下行），主线只 Read 它回传的路径：
+#   "$REVIEW" 123 --followup "<复核指令 + 驳回清单>" > "$LOG/123-r2.log" 2> "$LOG/123-r2.err"
+# 修复请 git commit 新 commit，勿 git amend 首轮 tip
 # （amend 会让首轮 BASE_SHA 不再是 HEAD 祖先 → 复核轮 Fail Fast，须重开首轮或 --since）
-"$REVIEW" 123 --followup "已修复 XX，请复核"                          # 第 2 轮：续 session 复核
-# Claude 继续研判/改代码
-"$REVIEW" 123 --followup "已修复 YY，是否 LGTM"                       # 第 3 轮：直到 LGTM
 ```
 
 **复核轮须在首轮同一工作区 toplevel 路径里跑**（脚本按 `git rev-parse --show-toplevel` 路径钉死身份、Fail Fast 拒绝在无关仓库续 session）——同一 worktree 内部自洽即可，**换到别的 worktree/clone 路径要重开首轮**（不是"可跨 worktree 续接"）。会话续接机制、增量 diff 语义、工作区身份钉死、Fail Fast 语义、敏感文件处理见 `references/grok-review.md`；claude 后端特有的隔离旗标、会话失效判定、state 文件后缀见 `references/claude-review.md`。
