@@ -57,7 +57,7 @@ LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
 
 ## 多轮 session 复用
 
-对同一个 PR 做多轮对抗式复评（Claude 研判 grok 意见 → 改代码 → 再评审 → 循环到 LGTM）时，若每轮都重新拉全量 diff 整包发送，token 与延迟随轮数线性放大，且模型每轮"从零重读"看不到上一轮提了什么、这轮改了什么。本脚本用 grok CLI 原生的会话续接能力解决：
+对同一个 PR 做多轮对抗式复评（主线研判 grok 意见 → 改代码 → 再评审 → 循环到主线的采纳清单为空；编排协议见 `SKILL.md`「执行分工」）时，若每轮都重新拉全量 diff 整包发送，token 与延迟随轮数线性放大，且模型每轮"从零重读"看不到上一轮提了什么、这轮改了什么。本脚本用 grok CLI 原生的会话续接能力解决：
 
 - **首轮**：`SID=$(uuidgen)` 生成一个会话 ID，`grok ... -s "$SID"` 建会话并发送全量 PR diff；SID 落盘到 session 状态文件（见下）。首轮全量 diff 从此留在 grok 服务端会话历史里，天然吃到其 prompt cache。
 - **复核轮**：`--followup "<复核指令>"` 触发；脚本按 PR 号读回上一轮的 SID，`grok ... -r "$SID"` 续接同一会话，prompt-file 只含 followup 文本 + **本地增量 diff**——不重发首轮那份远程全量 PR diff。grok 凭会话记忆知道自己上一轮说了什么，只需要看本地改了什么。
@@ -75,7 +75,7 @@ scripts/grok-review.sh 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
 # ...主线 Read 123-r1.log 逐条裁决，派修复子任务改代码 + git commit...
 
 # 第 2 轮：复核，只发复核指令 + 本轮增量 diff
-scripts/grok-review.sh 123 --followup "已按你的意见修复 file.go:42 的空指针解引用，请复核" \
+scripts/grok-review.sh 123 --followup "已按你的意见修复 file.go:42 的空指针解引用，请复核。以下维持驳回、无新证据不要重开：<驳回清单>" \
   > "$LOG/123-r2.log" 2> "$LOG/123-r2.err"
 ```
 
