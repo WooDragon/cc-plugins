@@ -67,6 +67,8 @@ LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
 典型两轮命令：
 
 ```bash
+LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"   # 与上节「调用形态」同一定义，本块可独立照抄
+
 # 第 1 轮：全量评审
 scripts/grok-review.sh 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
 
