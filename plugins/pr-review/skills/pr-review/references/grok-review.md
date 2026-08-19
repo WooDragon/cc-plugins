@@ -17,17 +17,21 @@ scripts/grok-review.sh <PR> --followup "<复核指令>" [--since <ref>] [--sessi
 
 不带 `--repo` 时自动用当前仓库。首轮与复核轮是两条独立路径，机制见下方"多轮 session 复用"。
 
+上面两行是**参数形态说明**，不是可直接照抄的调用式——agent 调用一律按下节「调用形态」两流分文件重定向。
+
 ## 调用形态：重定向落盘
 
-评审正文只打到 stdout、不落盘。主线调用时**重定向为评审日志**，主线上下文里只留 `exit=` 一行，随后 Read 该评审日志拿无损原文裁决：
+评审正文只打到 stdout、诊断与告警走 stderr，两者都不落盘。主线调用时**两流分别重定向**，主线上下文里只留 `exit=` 一行，随后 Read `.log` 拿无损原文裁决：
 
 ```bash
-REVIEW=$(find ~/.claude/plugins -path '*/pr-review/skills/pr-review/scripts/pr-review.sh' 2>/dev/null | head -1)
+REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
 LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
-"$REVIEW" <PR> > "$LOG/<PR>-r1.log" 2>&1; echo "exit=$?"
+"$REVIEW" <PR> > "$LOG/<PR>-r1.log" 2> "$LOG/<PR>-r1.err"; echo "exit=$?"
 ```
 
-只需认识 `pr-review.sh` 这一个命令——该脚本内部完成 grok/claude 路由，无须先跑 `resolve-backend.sh` 再自行选脚本。脚本非零退出时，读该评审日志末段拿 stderr 原文，不自行重试、不改用其他评审方式。
+**不得写成 `2>&1`**：脚本有意分开两个流，而首轮的 grok 调用不做 stderr 隔离，合并会让进度与告警插进评审正文中间。脚本非零退出时读 `.err` 拿原文，不自行重试、不改用其他评审方式。
+
+只需认识 `pr-review.sh` 这一个命令——该脚本内部完成 grok/claude 路由，无须先跑 `resolve-backend.sh` 再自行选脚本。
 
 分工、裁决与收敛规则见 `SKILL.md` 的「执行分工」节。
 
@@ -64,12 +68,13 @@ LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
 
 ```bash
 # 第 1 轮：全量评审
-scripts/grok-review.sh 123
+scripts/grok-review.sh 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
 
-# ...Claude 研判 grok 意见，改代码，git add...
+# ...主线 Read 123-r1.log 逐条裁决，派修复子任务改代码 + git commit...
 
 # 第 2 轮：复核，只发复核指令 + 本轮增量 diff
-scripts/grok-review.sh 123 --followup "已按你的意见修复 file.go:42 的空指针解引用，请复核"
+scripts/grok-review.sh 123 --followup "已按你的意见修复 file.go:42 的空指针解引用，请复核" \
+  > "$LOG/123-r2.log" 2> "$LOG/123-r2.err"
 ```
 
 第 2 轮的 `--repo` 解析方式与首轮一致（传参则用传参值，否则取当前 `gh` 仓库），据此算出与首轮相同的状态文件路径才能读到 SID——若两轮所在目录/`--repo` 解析出不同仓库，会算出不同的状态文件路径而读不到 SID，触发 Fail Fast。`--model`/`--effort` 复核轮**默认沿用首轮值**（从状态文件读回，保证同一 session 各轮推理强度一致，详见下文「session 状态文件」）；显式传 `--model`/`--effort` 时以命令行为准。
