@@ -17,18 +17,31 @@ scripts/grok-review.sh <PR> --followup "<复核指令>" [--since <ref>] [--sessi
 
 不带 `--repo` 时自动用当前仓库。首轮与复核轮是两条独立路径，机制见下方"多轮 session 复用"。
 
-上面两行是**参数形态说明**，不是可直接照抄的调用式——agent 调用一律按下节「调用形态」两流分文件重定向。
+上面两行是**参数形态说明**，不是可直接照抄的调用式——agent 调用一律按下节「调用形态」后台执行 + 两流分文件重定向。
 
-## 调用形态：重定向落盘
+## 调用形态：后台执行 + 重定向落盘
 
-评审正文只打到 stdout、诊断与告警走 stderr，两者都不落盘。主线调用时**两流分别重定向**，主线上下文里只留 `exit=` 一行，随后 Read `.log` 拿无损原文裁决：
+评审正文只打到 stdout、诊断与告警走 stderr，两者都不落盘。主线调用时**两流分别重定向**，随后 Read `.log` 拿无损原文裁决。
+
+前台，切分支 + 建日志目录：
+
+```bash
+gh pr checkout <PR>
+mkdir -p "$(git rev-parse --git-dir)/pr-review"
+```
+
+**后台**（Bash 工具参数 `run_in_background: true`），跑评审：
 
 ```bash
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
 [ -x "$REVIEW" ] || { echo "pr-review 脚本路径解析失败" >&2; exit 1; }
-LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
-"$REVIEW" <PR> > "$LOG/<PR>-r1.log" 2> "$LOG/<PR>-r1.err"; echo "exit=$?"
+LOG="$(git rev-parse --git-dir)/pr-review"
+"$REVIEW" <PR> > "$LOG/<PR>-r1.log" 2> "$LOG/<PR>-r1.err"
 ```
+
+**评审调用应走后台**：前台 Bash 调用的 `timeout` 上限 600000ms 是硬顶，评审时长随 PR 体量与 `--effort` 增长、无上限，撞顶即被 SIGTERM 杀（`Exit code 143`）或被静默移入后台。`timeout` 只约束前台调用——后台任务不受它裁剪，跑多久由进程自己决定。跑完后完成通知自动送达主线，其中带 `<status>` 与 exit code，故不必在命令尾部追加 `echo "exit=$?"`。等通知即可，**不应**用 `sleep` + `tail` 轮询日志。中断后的补救分路与首轮续接命令见 `SKILL.md`「执行分工」§1。
+
+两步分开跑，是因为 shell 变量不跨 Bash 调用保留——第 2 步须自带 `REVIEW` / `LOG` 赋值。
 
 **不得写成 `2>&1`**：脚本有意分开两个流，而首轮的 grok 调用不做 stderr 隔离，合并会让进度与告警插进评审正文中间。脚本非零退出时读 `.err` 拿原文，不自行重试、不改用其他评审方式。
 
@@ -65,12 +78,12 @@ LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
   - **增量语义要看清**：默认增量是 `git diff <BASE_SHA>`（BASE_SHA=首轮 HEAD），即**累积自首轮起的全部本地 delta**，不是严格的"仅相对上一轮"。好处是改完 commit 也不会漏；代价是多轮 followup 时早先几轮的改动会重复出现在增量里（grok 侧有会话记忆，多为冗余强化而非新信息）。想要严格的"仅本轮"增量、或自定义基线，复核轮传 `--since <上一轮的 tag/sha>`。相对首轮那份远程全量 PR diff，本地增量始终小得多，省 token 目标成立。
   - 首轮工作区若非干净，BASE_SHA 之后的未提交改动会被计入复核增量（脚本首轮会 stderr 警告）；需要干净语义就先 commit/stash，或复核轮用 `--since`。
 
-典型两轮命令：
+典型两轮命令（两轮都按上节走**后台**，`run_in_background: true`；日志目录先在前台 `mkdir -p "$(git rev-parse --git-dir)/pr-review"` 建好）：
 
 ```bash
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"   # 与上节「调用形态」同一定义，本块可独立照抄
 [ -x "$REVIEW" ] || { echo "pr-review 脚本路径解析失败" >&2; exit 1; }
-LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
+LOG="$(git rev-parse --git-dir)/pr-review"
 
 # 第 1 轮：全量评审
 "$REVIEW" 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
