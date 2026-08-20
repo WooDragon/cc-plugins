@@ -22,18 +22,29 @@ description: |
 
 **一轮只派一次**：主线裁决 → 派修复子任务改一遍并跑一次复核 → 主线读新一轮日志再裁决。循环由主线驱动，子任务不自行收敛。
 
-### 1. 取评审：主线自跑，两流分文件
+### 1. 取评审：主线自跑，后台执行，两流分文件
+
+第 1 步 · 前台，切到 PR 分支并建日志目录：
+
+```bash
+gh pr checkout <PR>                                    # 首轮前必须切到 PR 分支
+mkdir -p "$(git rev-parse --git-dir)/pr-review"
+```
+
+第 2 步 · **后台**（Bash 工具参数 `run_in_background: true`），跑评审：
 
 ```bash
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
 [ -x "$REVIEW" ] || { echo "pr-review 脚本路径解析失败" >&2; exit 1; }
-LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
-
-gh pr checkout <PR>                                                    # 首轮前必须切到 PR 分支
-"$REVIEW" <PR> > "$LOG/<PR>-r1.log" 2> "$LOG/<PR>-r1.err"; echo "exit=$?"
+LOG="$(git rev-parse --git-dir)/pr-review"
+"$REVIEW" <PR> > "$LOG/<PR>-r1.log" 2> "$LOG/<PR>-r1.err"
 ```
 
-预期结果：主线上下文里只出现 `exit=0` 一行，评审正文进 `.log`，诊断与告警进 `.err`。「dump 不进主线」由重定向达成。相比派一个子任务去跑，这条路径少一个实例的 system prompt 与 skill 加载开销。**漏掉重定向就是错的**——正文会直接灌进主线上下文，旧失败模式原地复活。
+预期结果：第 2 步的 tool_result 只有一行受理回执（`Command running in background with ID: …`），评审正文进 `.log`，诊断与告警进 `.err`。评审跑完后完成通知自动送达主线，其中带 `<status>` 与 exit code。「dump 不进主线」由重定向达成。相比派一个子任务去跑，这条路径少一个实例的 system prompt 与 skill 加载开销。**漏掉重定向就是错的**——正文会直接灌进主线上下文，旧失败模式原地复活。
+
+**评审调用应走后台，`run_in_background` 是 Bash 工具参数、不是命令的一部分**——它写在工具调用的 `run_in_background` 字段里，照抄上面的命令文本抄不到它。理由是通道容量：前台 Bash 调用的 `timeout` 上限 600000ms 是硬顶，而评审时长随 PR 体量与 `--effort` 增长、无上限，撞顶即被 SIGTERM 杀（`Exit code 143`）或被静默移入后台；后台通道无此上限。正文与诊断既已全部落盘，前台阻塞也换不回任何多余信息。
+
+两步分开跑，是因为 shell 变量不跨 Bash 调用保留——第 2 步须自带 `REVIEW` / `LOG` 赋值，不能指望第 1 步的赋值还在。
 
 `$(git rev-parse --git-dir)` 在 worktree 里返回该 worktree 自己的 gitdir——评审日志随工作区走，不入版本库。
 
@@ -41,7 +52,12 @@ gh pr checkout <PR>                                                    # 首轮�
 
 **路径用 `${CLAUDE_PLUGIN_ROOT}`，不要 `find … | head -1`**：本文件经 skill 加载时该变量已展开成绝对路径；被当**文件**读取时它是字面量（主线 shell 环境里并没有这个变量），故配方带 `[ -x "$REVIEW" ]` 先验——路径解析不出来就当场停，不往下跑。**每处 `REVIEW=` 赋值后面都紧跟这行先验**，本仓文档无例外：配方要能独立照抄，就不能靠「上一节已经写过」。`find` 有两个实测失败模式——它解析到的是 marketplace 源码副本而非已安装的 cache（cache 路径含版本段，`*/pr-review/skills/…` 匹配不到），而远程安装无本地 clone 时零命中。
 
-**跑不完时等它跑完，不要重开一轮**：评审耗时随 PR 体量与 `--effort` 增长，前台调用应给足超时。命令若被中断，两条路径的补救不同——首轮的 `state_write` 在引擎成功返回之后才执行，此时 session 未建立，应丢弃残日志整轮重跑；复核轮 session 已在，应丢弃残日志**只重跑这一轮 `--followup`**，不要回头重开首轮（那会覆写 SID）。两种情况下半截日志都不得拿来裁决。
+**等完成通知，不要轮询**：后台评审跑完时通知会自动送达，主线**不应**用 `sleep` + `tail` 反复探日志——那每探一次烧一个 turn，且拿到的是半截正文。派完后台调用就结束本轮、交还主循环。想看中途进度时读一次后台任务的 output 文件即可，不要为此起轮询循环。
+
+**被中断时不要重开一轮**：后台通道无超时，剩余的中断来源只有用户主动中断与 session 结束。此时残日志**不得**拿来裁决，两条路径的补救不同：
+
+- **首轮**——SID 在 `.err` 的 `session=` 行里（脚本在调引擎**之前**就打了它），应丢弃残日志，用 `--session <SID> --followup "<继续评审的指令>"` 续接，不重发全量 diff。续接失败时脚本会明确报 session 已失效并要求重开首轮，故这条路径**宜**先试——试错成本低于无条件重发全量 diff。
+- **复核轮**——session 已在 state 文件里，应丢弃残日志**只重跑这一轮 `--followup`**，不要回头重开首轮（那会覆写 SID）。
 
 ### 2. 裁决：主线 Read 评审日志（每轮都回到这一步）
 
@@ -73,6 +89,7 @@ gh pr checkout <PR>                                                    # 首轮�
 - **cwd 钉死为首轮的仓库 toplevel，禁用 worktree 隔离**——脚本按 `git rev-parse --show-toplevel` 钉 session 身份，换路径直接 Fail Fast
 - 改完 `git commit` 新 commit（勿 `git amend` 首轮 tip），然后跑**一次**复核：
   `<REVIEW 绝对路径> <PR> --followup "<复核指令 + 驳回清单>" > <日志目录>/<PR>-r<N>.log 2> <日志目录>/<PR>-r<N>.err`
+- **该复核调用与首轮同样走后台**（`run_in_background: true`），等完成通知，不轮询——超时上限对子任务一样是硬顶，理由见 §1
 - **回传 exit code 与两个日志路径，到此为止**——不判定收敛、不循环、不自行裁决
 
 脚本路径与日志目录在工单里**应展开成字面绝对路径**：子任务不继承主线的 shell 变量，`${CLAUDE_PLUGIN_ROOT}` 在子任务 prompt 里也不展开。
@@ -107,15 +124,22 @@ PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改
 
 **对抗式多轮复评**：首轮 `pr-review.sh <PR>` 全量评审建 session；复核轮 `--followup "<复核指令>"` 续接同一 session、只发复核指令 + 本轮增量 diff（不重发首轮全量）。每轮的正文与诊断各自落盘为 `<PR>-r<N>.log` / `<PR>-r<N>.err`。**轮次由主线驱动**，分工与收敛判据见上文「执行分工」；本段只讲脚本侧的 session 机制。
 
+前台，切分支 + 建日志目录（本地 HEAD≠PR head 时首轮默认 Fail Fast，除非 `--allow-divergent-base`）：
+
+```bash
+gh pr checkout 123
+mkdir -p "$(git rev-parse --git-dir)/pr-review"
+```
+
+后台（`run_in_background: true`），第 1 轮全量评审：
+
 ```bash
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
 [ -x "$REVIEW" ] || { echo "pr-review 脚本路径解析失败" >&2; exit 1; }
-LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
+LOG="$(git rev-parse --git-dir)/pr-review"
+"$REVIEW" 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
 
-gh pr checkout 123                                                # 必须：先切到 PR 分支再跑首轮（本地 HEAD≠PR head 时首轮默认 Fail Fast，除非 --allow-divergent-base）
-"$REVIEW" 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"; echo "exit=$?"   # 第 1 轮：主线跑，全量评审
-
-# 之后每轮的 --followup 由修复子任务按 §3 执行（形如下行），主线只 Read 它回传的路径：
+# 之后每轮的 --followup 由修复子任务按 §3 执行（同样走后台，形如下行），主线只 Read 它回传的路径：
 #   "$REVIEW" 123 --followup "<复核指令 + 驳回清单>" > "$LOG/123-r2.log" 2> "$LOG/123-r2.err"
 # 修复请 git commit 新 commit，勿 git amend 首轮 tip
 # （amend 会让首轮 BASE_SHA 不再是 HEAD 祖先 → 复核轮 Fail Fast，须重开首轮或 --since）
