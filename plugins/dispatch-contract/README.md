@@ -79,15 +79,19 @@ misfire often enough to be ignored. The skill closes that gap instead.
 
 ## The `%%DONE%%` Contract
 
-Declare the contract per task, not per role. When a dispatch prompt requires a finalized deliverable, append a line asking for the marker — at minimum:
+Declare the contract per task, not per role. When a dispatch prompt requires a finalized
+deliverable, append the canonical marker line, copied verbatim from the `定稿标记` section of
+`skills/subagent-dispatch/SKILL.md`. That line carries both halves of the ask: give the full
+report, *then* end with the marker.
 
-> 末尾单独一行输出 `%%DONE%%`。
+This README deliberately shows no shortened version. A format-only paraphrase such as
+`末尾单独一行输出 %%DONE%%。` drops the report half and reads literally as "output nothing but
+the marker" — the exact failure the gate now rejects.
 
-The gate enforces only that marker line. What else a finalized report must contain is a
-convention rather than something a hook can check, so the canonical wording — which also
-asks for a verification matrix and an unfinished-items section — lives in one place:
-the `定稿标记` section of `skills/subagent-dispatch/SKILL.md`. Copy it from there rather
-than from this README, which shows only the gate-enforced minimum.
+The gate checks two structural facts: the marker is the last non-blank line, and at least one
+other non-blank line exists. What that other content must *say* — the canonical wording also
+asks for a verification matrix and an unfinished-items section — stays convention, not a hook
+check.
 
 The subagent's final non-empty line must then be exactly `%%DONE%%` — not contain it, but equal it. If the check fails, the gate blocks the SubagentStop event and sends a correction directive back into the subagent, asking it to complete the report and end with the marker.
 
@@ -112,7 +116,7 @@ The gate is fail-open by design. It passes silently when:
 - `jq` is not available on the system.
 - The transcript file is unreadable or malformed.
 
-The only active enforcement path is: dispatch prompt contains `%%DONE%%` AND subagent final non-empty line does not equal `%%DONE%%`.
+There are two active enforcement paths. Both require the dispatch prompt to contain `%%DONE%%`; they then differ in what the subagent's final message looks like — its last non-empty line does not equal `%%DONE%%`, or it does equal `%%DONE%%` but no other non-empty line is present. Anything else passes.
 
 ## Escape Hatch
 

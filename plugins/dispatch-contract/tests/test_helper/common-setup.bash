@@ -413,6 +413,18 @@ assert_block() {
   }
 }
 
+# assert_block_marker_only — assert_block, plus the directive that names the
+# marker-only path. Both reject paths exit 2, so exit code alone cannot tell
+# them apart: a regression that loses the marker-only judgment would fall
+# through to "末尾未检测到" and still satisfy assert_block.
+assert_block_marker_only() {
+  assert_block || return 1
+  [[ "$HOOK_STDERR" == *"报告是空的"* ]] || {
+    echo "Expected the marker-only directive ('报告是空的') in stderr, got: $HOOK_STDERR"
+    return 1
+  }
+}
+
 # ============================================================
 # Additions below support dispatch-capability-guard.bats
 # (PreToolUse hook: subagent_type/model capability mismatch guard,

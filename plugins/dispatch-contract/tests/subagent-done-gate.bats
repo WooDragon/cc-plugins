@@ -284,7 +284,7 @@ teardown() {
   local payload
   payload=$(mk_payload false "$TP_REQUIRED" "$MARK")
   run_gate "$payload"
-  assert_block
+  assert_block_marker_only
 }
 
 @test "marker-only: required + blank lines then the marker → BLOCK" {
@@ -293,7 +293,7 @@ teardown() {
   local payload
   payload=$(mk_payload false "$TP_REQUIRED" "$msg")
   run_gate "$payload"
-  assert_block
+  assert_block_marker_only
 }
 
 @test "marker-only: required + indented marker alone → BLOCK" {
@@ -302,7 +302,7 @@ teardown() {
   local payload
   payload=$(mk_payload false "$TP_REQUIRED" "$msg")
   run_gate "$payload"
-  assert_block
+  assert_block_marker_only
 }
 
 @test "marker-only: required + one report line then the marker → PASS (阈值下界)" {

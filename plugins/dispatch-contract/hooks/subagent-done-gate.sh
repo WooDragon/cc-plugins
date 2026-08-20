@@ -15,9 +15,14 @@
 # read the subagent's own line 2, or the subagent could plant the MARK in its
 # own first-turn reply and open its own gate.
 # If the judged line(s) contain the MARK, the dispatcher asked for a
-# finalized inline report; the subagent's last non-empty final-message line
-# must then equal the MARK exactly (not just contain it — a trailing marker
-# after unfinished prose would otherwise still pass).
+# finalized inline report, and two structural conditions must both hold.
+# (1) The subagent's last non-empty final-message line equals the MARK
+# exactly — not merely contains it, or a trailing marker after unfinished
+# prose would still pass. (2) At least one other non-empty line is present:
+# the MARK is a terminator, not the deliverable, so a message whose only
+# non-blank line is the MARK carries a zero-byte report, and it is rejected
+# on its own path with its own directive. (1) is necessary, never
+# sufficient — do not "simplify" the second check away.
 #
 # MARK 刻意不含尖括号：harness 会中和"指令形状"文本里的 < >，尖括号 token 有被改写导致永久误拦的风险。
 #
