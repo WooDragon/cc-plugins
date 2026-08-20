@@ -57,7 +57,9 @@ SubagentStop (matcher: *)
   │
   └─ subagent-done-gate.sh (10s timeout)
          Checks whether the dispatch prompt contained %%DONE%%.
-         If yes: verifies the subagent's final non-empty line equals %%DONE%% exactly.
+         If yes: verifies the subagent's final non-empty line equals %%DONE%% exactly,
+         and that the message carries at least one other non-blank line — a message
+         consisting of nothing but the marker is an empty delivery, not a report.
          Mismatch → deny once, inject correction directive asking for a complete
          report ending with %%DONE%%.  Blocks at most once per subagent:
          the resumed stop carries stop_hook_active=true and passes unconditionally.
@@ -88,6 +90,8 @@ the `定稿标记` section of `skills/subagent-dispatch/SKILL.md`. Copy it from 
 than from this README, which shows only the gate-enforced minimum.
 
 The subagent's final non-empty line must then be exactly `%%DONE%%` — not contain it, but equal it. If the check fails, the gate blocks the SubagentStop event and sends a correction directive back into the subagent, asking it to complete the report and end with the marker.
+
+**A marker-only message is blocked too.** The marker is a terminator, not the deliverable: a final message whose only non-blank line is `%%DONE%%` carries zero report and is rejected with its own directive. The test is structural — is there any other non-blank line — so it inspects no wording and maintains no keyword list.
 
 **It blocks at most once.** The resumed stop arrives with `stop_hook_active=true`, and the gate passes it unconditionally without re-checking. A subagent that still omits the marker on its second attempt is let through rather than looped — an unbounded retry loop on a subagent that cannot satisfy the check would be worse than an unmarked report.
 

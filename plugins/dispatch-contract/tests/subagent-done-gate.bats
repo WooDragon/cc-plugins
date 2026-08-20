@@ -275,3 +275,55 @@ teardown() {
   run_gate "$payload" "ALLOW_UNMARKED_FINAL=1"
   assert_pass
 }
+
+# ============================================================
+# Marker-only final message: 标记在场 ≠ 报告在场 (6)
+# ============================================================
+
+@test "marker-only: required + message is nothing but the marker → BLOCK" {
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$MARK")
+  run_gate "$payload"
+  assert_block
+}
+
+@test "marker-only: required + blank lines then the marker → BLOCK" {
+  local msg
+  msg=$(printf '\n\n%s' "$MARK")
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_block
+}
+
+@test "marker-only: required + indented marker alone → BLOCK" {
+  local msg
+  msg=$(printf '   %s   ' "$MARK")
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_block
+}
+
+@test "marker-only: required + one report line then the marker → PASS (阈值下界)" {
+  local msg
+  msg=$(printf '无命中。\n%s' "$MARK")
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_pass
+}
+
+@test "marker-only: not required + message is nothing but the marker → PASS" {
+  local payload
+  payload=$(mk_payload false "$TP_NOT_REQUIRED" "$MARK")
+  run_gate "$payload"
+  assert_pass
+}
+
+@test "marker-only: kill switch bypasses the marker-only block → PASS" {
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$MARK")
+  run_gate "$payload" "ALLOW_UNMARKED_FINAL=1"
+  assert_pass
+}
