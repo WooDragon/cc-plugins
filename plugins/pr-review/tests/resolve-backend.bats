@@ -33,6 +33,12 @@ setup() {
   [ "$output" = "copilot" ]
 }
 
+@test "resolve-backend: PR_REVIEW_BACKEND=codex 直通" {
+  run env PR_REVIEW_BACKEND=codex bash "$RESOLVE_SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$output" = "codex" ]
+}
+
 @test "resolve-backend: 非法 PR_REVIEW_BACKEND 报错" {
   run env PR_REVIEW_BACKEND=bogus bash "$RESOLVE_SCRIPT"
   [ "$status" -ne 0 ]
@@ -72,8 +78,13 @@ EOF
 #!/usr/bin/env bash
 echo "CLAUDE_REVIEW_CALLED $*"
 EOF
+  cat > "$WORK/scripts_dir/codex-review.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "CODEX_REVIEW_CALLED $*"
+EOF
   chmod +x "$WORK/scripts_dir/pr-review.sh" "$WORK/scripts_dir/resolve-backend.sh" \
-    "$WORK/scripts_dir/grok-review.sh" "$WORK/scripts_dir/claude-review.sh"
+    "$WORK/scripts_dir/grok-review.sh" "$WORK/scripts_dir/claude-review.sh" \
+    "$WORK/scripts_dir/codex-review.sh"
 }
 
 @test "pr-review.sh: PR_REVIEW_BACKEND=grok 时路由到 grok-review.sh 并透传参数" {
@@ -88,6 +99,13 @@ EOF
   run env PR_REVIEW_BACKEND=claude bash "$WORK/scripts_dir/pr-review.sh" 42 --followup "复核"
   [ "$status" -eq 0 ]
   [[ "$output" == "CLAUDE_REVIEW_CALLED 42 --followup 复核" ]]
+}
+
+@test "pr-review.sh: PR_REVIEW_BACKEND=codex 时路由到 codex-review.sh 并透传参数" {
+  setup_backend_stubs
+  run env PR_REVIEW_BACKEND=codex bash "$WORK/scripts_dir/pr-review.sh" 42 --effort high
+  [ "$status" -eq 0 ]
+  [[ "$output" == "CODEX_REVIEW_CALLED 42 --effort high" ]]
 }
 
 @test "pr-review.sh: PR_REVIEW_BACKEND=copilot 时报错并提示改用 copilot-review.sh" {
