@@ -1,15 +1,16 @@
 ---
 name: subagent-dispatch
 description: |
-  子 agent 派发契约——四条铁律正反例、卸载场景判断、定稿标记机制、Workflow schema 用法。当需要：
+  子 agent 派发契约——四条铁律正反例、卸载场景判断、Explore 任务级别三档、定稿标记机制、Workflow schema 用法。当需要：
   - 派发 subagent / spawn agent / delegate to agent，想确认 prompt 格式与交付物形态是否合规
   - dispatch subagent 时不确定「输出即产物」「范围围栏」「渐进产出」「定稿纪律」哪条该套用
   - 判断某任务该不该卸载（offload）、用哪个模型档位
+  - 派发 Explore 时不确定任务级别该钉 `quick` / `medium` / `very thorough` 哪一档
   - 处理 background subagent 产物回传通道、活性判定、TaskStop 时机
   - 需要子 agent 返回强结构化产物（JSON schema 校验）时了解 Workflow agent() 用法
   - 派发 prompt 触发拒绝，排查是否遇到上游 persona 焊死问题
   时调用此 Skill。
-  Triggers: 派发 subagent, subagent 调度, dispatch subagent, spawn agent, delegate to agent, Task 派发, 并行派发, 交付物形态, 定稿标记, 输出即产物, 范围围栏, 渐进产出, 定稿纪律, offload, 卸载场景, 卸载判断, background subagent, 活性判定, TaskStop, 回传通道, workflow schema, 结构化产物, persona 拒绝, 派发契约, dispatch contract, %%DONE%%.
+  Triggers: 派发 subagent, subagent 调度, dispatch subagent, spawn agent, delegate to agent, Task 派发, 并行派发, 交付物形态, 定稿标记, 输出即产物, 范围围栏, 渐进产出, 定稿纪律, offload, 卸载场景, 卸载判断, Explore 任务级别, Explore quick, Explore medium, Explore very thorough, background subagent, 活性判定, TaskStop, 回传通道, workflow schema, 结构化产物, persona 拒绝, 派发契约, dispatch contract, %%DONE%%.
 ---
 
 # 子 agent 派发契约
@@ -24,6 +25,21 @@ description: |
 | ②范围围栏 | 只改指定文件/只做指定事，范围外发现只报告不动手 | 见 references/dispatch-contract.md |
 | ③渐进产出 | 大调研/长任务分段读、尽早吐中间进展，避免触发 stall watchdog | 见 references/dispatch-contract.md |
 | ④定稿纪律 | 据以派活或做不可逆动作的结论必须来自完整定稿产物，不采信精简/中间回传 | 见 references/dispatch-contract.md |
+
+## Explore 任务级别（派发端）
+
+每次派发 `subagent_type=Explore`，应在 prompt 正文出现三档英文词之一。平台认的是这三个词，与 Explore 的 search breadth 对齐；`description` 里写不算数。prompt 正文缺档位词，视为未完成派发前置动作。
+
+| 写进 prompt | 用途 |
+|---|---|
+| `quick` | 单点查找：一个符号、一个文件、一个配置项 |
+| `medium` | 中等范围：相关调用点、周边代码 |
+| `very thorough` | 多目录、多命名约定、全面扫 |
+
+推荐格式：prompt 开头单独一行 `Explore 任务级别: <档位>`。这是排版约定，不是第二套合法值——合法值只有表中三个英文词。
+
+正例：prompt 首行 `Explore 任务级别: quick`，随后写查找目标。
+反例：只在 `description` 里写「全面搜一下」，prompt 正文不钉档位。
 
 ## 定稿标记：`%%DONE%%`
 
@@ -76,6 +92,7 @@ description: |
 
 - 需要每条铁律的正反例与常见踩坑时，读取：`references/dispatch-contract.md`
 - 判断某任务该不该卸载、用哪个模型档时，读取：`references/offload-scenarios.md`
+- 派发 Explore 时任务级别钉哪一档，见本节「Explore 任务级别」
 - spawn background subagent 后如何收产物 / 判活性 / 何时能 TaskStop，读取：`references/mailbox-liveness.md`
 - 需要子 agent 返回强结构化产物（JSON/schema 校验）时，读取：`references/workflow-schema.md`
 - 派发端 persona 规避的发作区/安全区展开与实测背书，读取：同一份 `references/dispatch-contract.md` 的「## 派发端补充」章节
