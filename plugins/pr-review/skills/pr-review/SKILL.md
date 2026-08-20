@@ -57,16 +57,16 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 **被中断时不要重开一轮**：后台通道无超时，剩余的中断来源只有用户主动中断与 session 结束。此时残日志**不得**拿来裁决，两条路径的补救不同：
 
 - **首轮**——SID 在 `.err` 的 `session=` 行里（脚本在调引擎**之前**就打了它），应丢弃残日志按下方命令续接，不重发全量 diff。续接失败时脚本会明确报 session 已失效并要求重开首轮，故这条路径**宜**先试——试错成本低于无条件重发全量 diff。
-- **复核轮**——session 已在 state 文件里，应丢弃残日志**只重跑这一轮 `--followup`**（形态同下方命令，去掉 `--session`），不要回头重开首轮（那会覆写 SID）。
+- **复核轮**——session 已在 state 文件里，应丢弃残日志**只重跑这一轮 `--followup`**，用下方同一条命令**去掉 `--session <SID>`** 即可（SID 由脚本自己从 state 读回），不要回头重开首轮（那会覆写 SID）。
 
-首轮续接命令，同样走**后台**（`run_in_background: true`）：
+续接命令，同样走**后台**（`run_in_background: true`）。`<N>` 填被中断的那一轮轮次，输出**覆写**该轮被丢弃的残日志——一轮一个文件，不另起变体后缀，主线仍按 `<PR>-r<N>.log` 找本轮结果：
 
 ```bash
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
 [ -x "$REVIEW" ] || { echo "pr-review 脚本路径解析失败" >&2; exit 1; }
 LOG="$(git rev-parse --git-dir)/pr-review"
 "$REVIEW" <PR> --session <SID> --followup "<继续评审的指令>" \
-  > "$LOG/<PR>-r1b.log" 2> "$LOG/<PR>-r1b.err"
+  > "$LOG/<PR>-r<N>.log" 2> "$LOG/<PR>-r<N>.err"
 ```
 
 `--session` 只在配 `--followup` 时合法，且 `<PR>` 不可省——脚本对二者都会 Fail Fast。
