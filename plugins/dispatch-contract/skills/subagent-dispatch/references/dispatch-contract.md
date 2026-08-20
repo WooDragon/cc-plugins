@@ -12,7 +12,7 @@
 **反例 prompt 片段**：
 > 完成后简要说明你的分析。
 
-**机器强制**：`%%DONE%%` 结束标记把本铁律从纯散文钉死为可机器判定。派发 prompt 出现该标记 ⇒ SubagentStop 门禁 `hooks/subagent-done-gate.sh` 介入；子 agent 最终消息末个非空行须精确等于该标记才放行，不匹配则阻断一次，把纠正指令回灌给子 agent 要求原地补写完整报告。`stop_hook_active` 保证同一子 agent 最多被拦一次，不会死循环。标准行见 SKILL.md「定稿标记」节；逃生舱 `export ALLOW_UNMARKED_FINAL=1`。
+**机器强制**：`%%DONE%%` 结束标记把本铁律从纯散文钉死为可机器判定。派发 prompt 出现该标记 ⇒ SubagentStop 门禁 `hooks/subagent-done-gate.sh` 介入；子 agent 最终消息末个非空行须精确等于该标记——必要条件，不是充分条件：末行是标记、但除它之外再无非空行时同样阻断，因为标记是结束信号不是交付物。两条路径各自阻断一次，把纠正指令回灌给子 agent 要求原地补写完整报告。`stop_hook_active` 保证同一子 agent 最多被拦一次，不会死循环。标准行见 SKILL.md「定稿标记」节；逃生舱 `export ALLOW_UNMARKED_FINAL=1`。
 
 ## 铁律②：范围围栏
 
@@ -56,7 +56,7 @@
 
 日常 `Agent`/`Task` 工具**没有 schema 参数**，字段级结构化产物（如强制 JSON 各字段类型、validation 失败自动重试）仍只能升级到 `Workflow` 的 `agent({schema})` 机制才可校验——见 workflow-schema.md。
 
-但"定稿与否"这一件事已不再纯靠措辞：SubagentStop 门禁 + `%%DONE%%` 标记把它变成可机器判定的二元事实——子 agent 最终消息末个非空行是否精确等于标记，不依赖语义理解。门禁只保证"报告在场"，不判断"内容是否成立"；证据是否成立仍是主上下文的裁决活，字段级 schema 校验仍是 Workflow 的专属能力。
+但"定稿与否"这一件事已不再纯靠措辞：SubagentStop 门禁 + `%%DONE%%` 标记把它变成可机器判定的二元事实——末个非空行是否精确等于标记，以及除标记外是否还有非空行。两条都不依赖语义理解，也都必须判："标记在场"不等于"报告在场"，只判前者等于承认一行标记就是交付物。门禁只保证"报告在场"，不判断"内容是否成立"；证据是否成立仍是主上下文的裁决活，字段级 schema 校验仍是 Workflow 的专属能力。
 
 ## 派发端补充：干活别照镜子（persona 规避）
 

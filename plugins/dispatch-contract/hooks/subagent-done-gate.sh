@@ -15,9 +15,14 @@
 # read the subagent's own line 2, or the subagent could plant the MARK in its
 # own first-turn reply and open its own gate.
 # If the judged line(s) contain the MARK, the dispatcher asked for a
-# finalized inline report; the subagent's last non-empty final-message line
-# must then equal the MARK exactly (not just contain it — a trailing marker
-# after unfinished prose would otherwise still pass).
+# finalized inline report, and two structural conditions must both hold.
+# (1) The subagent's last non-empty final-message line equals the MARK
+# exactly — not merely contains it, or a trailing marker after unfinished
+# prose would still pass. (2) At least one other non-empty line is present:
+# the MARK is a terminator, not the deliverable, so a message whose only
+# non-blank line is the MARK carries a zero-byte report, and it is rejected
+# on its own path with its own directive. (1) is necessary, never
+# sufficient — do not "simplify" the second check away.
 #
 # MARK 刻意不含尖括号：harness 会中和"指令形状"文本里的 < >，尖括号 token 有被改写导致永久误拦的风险。
 #
@@ -71,8 +76,18 @@ grep -qF "$MARK" <<< "$PROMPT_SRC" || exit 0
 # 最终消息「末个非空行」须与 MARK 相等（不是包含），仅容忍前后空白与 CR。
 # 容忍空白是因为尾随空格/CRLF 是高频且零歧义的；不容忍 markdown 修饰
 # （**MARK**、`MARK`、- MARK 等仍拦），每放宽一分就多开一分带内信令的口子。
-LAST_LINE=$(printf '%s' "$LAST" | grep -v '^[[:space:]]*$' | tail -1)
-[[ "$LAST_LINE" =~ ^[[:space:]]*"$MARK"[[:space:]]*$ ]] && exit 0
+NONBLANK=$(printf '%s' "$LAST" | grep -v '^[[:space:]]*$')
+LAST_LINE=$(printf '%s' "$NONBLANK" | tail -1)
+if [[ "$LAST_LINE" =~ ^[[:space:]]*"$MARK"[[:space:]]*$ ]]; then
+  # 标记在场不等于报告在场。整条最终消息只剩标记这一行时交付物为零——门禁自称
+  # 判「报告在场」，这一格正落在那句话里，此前却因为只看末行而放行。
+  # 判据是「除标记外还有没有非空行」，不看内容、不查词表：要了标记就是要了交付物，
+  # marker-only 恒为违约，不存在需要放行的正当形态。
+  [ "$(printf '%s\n' "$NONBLANK" | wc -l)" -gt 1 ] && exit 0
+  printf '[subagent-done-gate] 最终消息只有 %s 这一行，报告是空的。标记只是结束信号，不是交付物——完整报告必须写在标记之前的同一条消息里。若任务同时要求落盘交付物，按派发约定写 .wip 并 promote，但不要把报告只写进文件。补齐报告后，仍在末尾单独一行输出 %s。\n' "$MARK" "$MARK" >&2
+  printf '[subagent-done-gate] 逃生舱：export ALLOW_UNMARKED_FINAL=1\n' >&2
+  exit 2
+fi
 
 printf '[subagent-done-gate] 最终消息末尾未检测到独立成行的 %s，说明报告没写完。完整报告要写在最终消息里；若任务同时要求落盘交付物，按派发约定写 .wip 并 promote，但不要把报告只写进文件、也不要只写完成说明。并在末尾单独一行输出 %s——该行只能有这个标记本身，不要加粗、不要代码块或反引号、不要列表符号或标题符号、后面不要跟标点或其他文字。某一节做不到就保留该节并写明原因，不要留空。\n' "$MARK" "$MARK" >&2
 printf '[subagent-done-gate] 逃生舱：export ALLOW_UNMARKED_FINAL=1\n' >&2
