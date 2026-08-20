@@ -42,7 +42,7 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 
 预期结果：第 2 步的 tool_result 只有一行受理回执（`Command running in background with ID: …`），评审正文进 `.log`，诊断与告警进 `.err`。评审跑完后完成通知自动送达主线，其中带 `<status>` 与 exit code。「dump 不进主线」由重定向达成。相比派一个子任务去跑，这条路径少一个实例的 system prompt 与 skill 加载开销。**漏掉重定向就是错的**——正文会直接灌进主线上下文，旧失败模式原地复活。
 
-**评审调用应走后台，`run_in_background` 是 Bash 工具参数、不是命令的一部分**——它写在工具调用的 `run_in_background` 字段里，照抄上面的命令文本抄不到它。理由是通道容量：前台 Bash 调用的 `timeout` 上限 600000ms 是硬顶，而评审时长随 PR 体量与 `--effort` 增长、无上限，撞顶即被 SIGTERM 杀（`Exit code 143`）或被静默移入后台；后台通道无此上限。正文与诊断既已全部落盘，前台阻塞也换不回任何多余信息。
+**评审调用应走后台，`run_in_background` 是 Bash 工具参数、不是命令的一部分**——它写在工具调用的 `run_in_background` 字段里，照抄上面的命令文本抄不到它。理由是通道容量：前台 Bash 调用的 `timeout` 上限 600000ms 是硬顶，而评审时长随 PR 体量与 `--effort` 增长、无上限，撞顶即被 SIGTERM 杀（`Exit code 143`）或被静默移入后台。`timeout` 只约束前台调用——后台任务不受它裁剪，跑多久由进程自己决定，直到退出时发出完成通知。正文与诊断既已全部落盘，前台阻塞也换不回任何多余信息。
 
 两步分开跑，是因为 shell 变量不跨 Bash 调用保留——第 2 步须自带 `REVIEW` / `LOG` 赋值，不能指望第 1 步的赋值还在。
 
@@ -56,8 +56,20 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 
 **被中断时不要重开一轮**：后台通道无超时，剩余的中断来源只有用户主动中断与 session 结束。此时残日志**不得**拿来裁决，两条路径的补救不同：
 
-- **首轮**——SID 在 `.err` 的 `session=` 行里（脚本在调引擎**之前**就打了它），应丢弃残日志，用 `--session <SID> --followup "<继续评审的指令>"` 续接，不重发全量 diff。续接失败时脚本会明确报 session 已失效并要求重开首轮，故这条路径**宜**先试——试错成本低于无条件重发全量 diff。
-- **复核轮**——session 已在 state 文件里，应丢弃残日志**只重跑这一轮 `--followup`**，不要回头重开首轮（那会覆写 SID）。
+- **首轮**——SID 在 `.err` 的 `session=` 行里（脚本在调引擎**之前**就打了它），应丢弃残日志按下方命令续接，不重发全量 diff。续接失败时脚本会明确报 session 已失效并要求重开首轮，故这条路径**宜**先试——试错成本低于无条件重发全量 diff。
+- **复核轮**——session 已在 state 文件里，应丢弃残日志**只重跑这一轮 `--followup`**（形态同下方命令，去掉 `--session`），不要回头重开首轮（那会覆写 SID）。
+
+首轮续接命令，同样走**后台**（`run_in_background: true`）：
+
+```bash
+REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
+[ -x "$REVIEW" ] || { echo "pr-review 脚本路径解析失败" >&2; exit 1; }
+LOG="$(git rev-parse --git-dir)/pr-review"
+"$REVIEW" <PR> --session <SID> --followup "<继续评审的指令>" \
+  > "$LOG/<PR>-r1b.log" 2> "$LOG/<PR>-r1b.err"
+```
+
+`--session` 只在配 `--followup` 时合法，且 `<PR>` 不可省——脚本对二者都会 Fail Fast。
 
 ### 2. 裁决：主线 Read 评审日志（每轮都回到这一步）
 
@@ -89,7 +101,7 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 - **cwd 钉死为首轮的仓库 toplevel，禁用 worktree 隔离**——脚本按 `git rev-parse --show-toplevel` 钉 session 身份，换路径直接 Fail Fast
 - 改完 `git commit` 新 commit（勿 `git amend` 首轮 tip），然后跑**一次**复核：
   `<REVIEW 绝对路径> <PR> --followup "<复核指令 + 驳回清单>" > <日志目录>/<PR>-r<N>.log 2> <日志目录>/<PR>-r<N>.err`
-- **该复核调用与首轮同样走后台**（`run_in_background: true`），等完成通知，不轮询——超时上限对子任务一样是硬顶，理由见 §1
+- **该复核调用与首轮同样走后台**（`run_in_background: true`），等完成通知，不轮询——前台 `timeout` 的 600000ms 上限在子任务里同样是硬顶，故子任务也**不应**用前台跑评审，理由见 §1
 - **回传 exit code 与两个日志路径，到此为止**——不判定收敛、不循环、不自行裁决
 
 脚本路径与日志目录在工单里**应展开成字面绝对路径**：子任务不继承主线的 shell 变量，`${CLAUDE_PLUGIN_ROOT}` 在子任务 prompt 里也不展开。

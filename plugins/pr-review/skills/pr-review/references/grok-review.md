@@ -39,7 +39,7 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 "$REVIEW" <PR> > "$LOG/<PR>-r1.log" 2> "$LOG/<PR>-r1.err"
 ```
 
-**评审调用应走后台**：前台 Bash 调用的 `timeout` 上限 600000ms 是硬顶，评审时长随 PR 体量与 `--effort` 增长、无上限，撞顶即被 SIGTERM 杀（`Exit code 143`）或被静默移入后台；后台通道无此上限。跑完后完成通知自动送达主线，其中带 `<status>` 与 exit code，故不必在命令尾部追加 `echo "exit=$?"`。等通知即可，**不应**用 `sleep` + `tail` 轮询日志。中断后的补救分路见 `SKILL.md`「执行分工」§1。
+**评审调用应走后台**：前台 Bash 调用的 `timeout` 上限 600000ms 是硬顶，评审时长随 PR 体量与 `--effort` 增长、无上限，撞顶即被 SIGTERM 杀（`Exit code 143`）或被静默移入后台。`timeout` 只约束前台调用——后台任务不受它裁剪，跑多久由进程自己决定。跑完后完成通知自动送达主线，其中带 `<status>` 与 exit code，故不必在命令尾部追加 `echo "exit=$?"`。等通知即可，**不应**用 `sleep` + `tail` 轮询日志。中断后的补救分路与首轮续接命令见 `SKILL.md`「执行分工」§1。
 
 两步分开跑，是因为 shell 变量不跨 Bash 调用保留——第 2 步须自带 `REVIEW` / `LOG` 赋值。
 
