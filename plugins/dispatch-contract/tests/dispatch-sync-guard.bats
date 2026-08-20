@@ -196,6 +196,8 @@ teardown() {
   ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<< "$INJECT_STDOUT")
   [[ "$ctx" == *"只改指定文件"* ]]
   [[ "$ctx" == *'SendMessage(to:"main")'* ]]
+  [[ "$ctx" == *"铁律④定稿标记"* ]]
+  [[ "$ctx" == *'%%DONE%%'* ]]
 }
 
 # ============================================================
@@ -214,6 +216,7 @@ teardown() {
   [[ "$ctx" == *"输出即产物"* ]]
   [[ "$ctx" == *"渐进产出"* ]]
   [[ "$ctx" == *'SendMessage(to:"main")'* ]]
+  [[ "$ctx" == *"铁律④定稿标记"* ]]
 }
 
 @test "inject #13b: agent_type=Plan -> same read-only tier as Explore (omits scope-fence wording)" {
@@ -228,6 +231,7 @@ teardown() {
   [[ "$ctx" == *"输出即产物"* ]]
   [[ "$ctx" == *"渐进产出"* ]]
   [[ "$ctx" == *'SendMessage(to:"main")'* ]]
+  [[ "$ctx" == *"铁律④定稿标记"* ]]
 }
 
 # ============================================================

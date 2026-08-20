@@ -83,6 +83,15 @@ mk_payload() {
   '
 }
 
+# mk_bytes N — a single-line, N-byte ASCII string ('x' repeated). Used to
+# build fixtures that land exactly on/around the FLOOR byte threshold —
+# English 'x' is guaranteed 1 byte/char, unlike the Chinese filler text used
+# elsewhere in this suite, so the caller controls the exact byte count.
+mk_bytes() {
+  local n="$1"
+  printf 'x%.0s' $(seq 1 "$n")
+}
+
 # mk_payload_null_last STOP_HOOK_ACTIVE(true/false) TRANSCRIPT_PATH
 # last_assistant_message field is null, not an empty string.
 mk_payload_null_last() {
@@ -421,6 +430,30 @@ assert_block_marker_only() {
   assert_block || return 1
   [[ "$HOOK_STDERR" == *"报告是空的"* ]] || {
     echo "Expected the marker-only directive ('报告是空的') in stderr, got: $HOOK_STDERR"
+    return 1
+  }
+}
+
+# assert_pass_with_warning — exit 0, no BLOCK marker in stderr (assert_pass),
+# and stdout carries a systemMessage JSON payload (the ≥FLOOR warn-not-block
+# path). Distinct from bare assert_pass so a regression that silently drops
+# the warning (falls through to plain fail-open) still fails this assertion
+# even though exit code alone would look identical.
+assert_pass_with_warning() {
+  assert_pass || return 1
+  jq -e '.systemMessage | length > 0' <<< "$HOOK_STDOUT" >/dev/null 2>&1 || {
+    echo "Expected stdout to carry a non-empty systemMessage, got: $HOOK_STDOUT"
+    return 1
+  }
+}
+
+# assert_block_echoes ORIGINAL_BODY — assert_block, plus the exact original
+# body text must appear verbatim in stderr (the <FLOOR echo-back path).
+assert_block_echoes() {
+  local body="$1"
+  assert_block || return 1
+  [[ "$HOOK_STDERR" == *"$body"* ]] || {
+    echo "Expected the original body echoed back in stderr, got: $HOOK_STDERR"
     return 1
   }
 }

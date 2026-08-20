@@ -68,14 +68,26 @@ AGENT_TYPE_LC=$(printf '%s' "$AGENT_TYPE" | tr '[:upper:]' '[:lower:]')
 RULE1='[dispatch-contract] 铁律①输出即产物：最终消息本身就是产物，禁止写完成说明或元总结。若你被赋了 name（teammate），最终消息不会自动回到派发方，须再用 SendMessage(to:"main") 送出同一份产物。'
 RULE2='[dispatch-contract] 铁律②范围围栏：只改指定文件/只做指定事，范围外只报告不擅动。'
 RULE3='[dispatch-contract] 铁律③渐进产出：长任务分段读、尽早吐中间进展。'
+# 条件式：只在派发 prompt 确实要求了 %%DONE%% 时才有意义，但这个 hook 读不到
+# 派发 prompt 内容（SubagentStart payload 没有该字段），所以措辞本身就是条件式
+# 的——"若派发 prompt 要求了……"——不判断，把判断留给读到这句话的 agent 自己。
+# 这条注入到全部 agent_type（含 explore|plan 只读支），因为只读 agent 同样会被
+# subagent-done-gate 的判据（读派发 prompt 是否含 MARK）纳入判断，不该只有非
+# 只读支才知道这条契约存在。
+#
+# 字面量：本行文本刻意含 %%DONE%% 的字面拼写，不是变量插值——若未来改用变量
+# 拼接要三思，见 subagent-done-gate.sh 里「PROMPT_SRC 过滤 attachment 记录」
+# 那段注释：这行字面量落进 transcript 后，若被门禁的两行读取窗口误读到，会让
+# 每个 subagent 都被判成「派发方要求了标记」，是那段过滤逻辑存在的直接原因。
+RULE4='[dispatch-contract] 铁律④定稿标记：若派发 prompt 要求了 %%DONE%%，在最终消息末尾单独一行输出该标记，不加粗、不代码块、不列表符。'
 POINTER='[dispatch-contract] 详规见 Skill(subagent-dispatch)。'
 
 case "$AGENT_TYPE_LC" in
   explore|plan)
-    CONTEXT=$(printf '%s\n%s\n%s' "$RULE1" "$RULE3" "$POINTER")
+    CONTEXT=$(printf '%s\n%s\n%s\n%s' "$RULE1" "$RULE3" "$RULE4" "$POINTER")
     ;;
   *)
-    CONTEXT=$(printf '%s\n%s\n%s\n%s' "$RULE1" "$RULE2" "$RULE3" "$POINTER")
+    CONTEXT=$(printf '%s\n%s\n%s\n%s\n%s' "$RULE1" "$RULE2" "$RULE3" "$RULE4" "$POINTER")
     ;;
 esac
 
