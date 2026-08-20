@@ -209,6 +209,22 @@ EOF
   grep -qx -- '--ignore-rules' "$CODEX_ARGS_LOG"
 }
 
+@test "AGENTS.md 自动加载防护: 首轮调用同时带 project_doc_max_bytes=0 与 --strict-config" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  grep -qx -- 'project_doc_max_bytes=0' "$CODEX_ARGS_LOG"
+  grep -qx -- '--strict-config' "$CODEX_ARGS_LOG"
+}
+
+@test "AGENTS.md 自动加载防护: 复核轮 resume 调用同样带 project_doc_max_bytes=0 与 --strict-config" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  rm -f "$CODEX_ARGS_LOG"
+  run bash "$SCRIPT" 42 --followup "请复核这处"
+  [ "$status" -eq 0 ]
+  grep -qx -- 'project_doc_max_bytes=0' "$CODEX_ARGS_LOG"
+  grep -qx -- '--strict-config' "$CODEX_ARGS_LOG"
+}
+
 @test "state 文件: 用 .codex.session 后缀，与同 PR 的 grok .session、claude .claude.session 三方互不覆盖" {
   bash "$GROK_SCRIPT" 42 >/dev/null 2>&1
   [ -f "$GROK_STATE_FILE_42" ]

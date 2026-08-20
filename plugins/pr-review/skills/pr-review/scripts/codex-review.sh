@@ -59,11 +59,21 @@
 #     读"的错配面。复核轮同理，从 lib 的 build_incremental_prompt 产出的 CWD_FLAG（其元素是
 #     grok 专属的 --cwd 数组）里只取路径部分（CWD_FLAG[1]）另组 -C，不改 lib、不复用其
 #     --cwd token。
-#   - **codex 会自动加载仓库内 AGENTS.md**（codex CLI 已知行为，非本次实测项）——评审外部
-#     贡献者 PR 时，这是与 grok/claude 都不同的额外未受信指令面：grok/claude 都不会自动读取
-#     被评审仓库里的任何"给 AI 看"的特殊文件。本脚本已用 -s read-only 限制 codex 的执行能力，
-#     但读取/被 AGENTS.md 文案影响判断的风险仍然存在，已在 references/codex-review.md「已知
-#     边界」节明写，调用方需知情。
+#   - **-c project_doc_max_bytes=0 + --strict-config**：codex CLI 会把被评审仓库根目录的
+#     AGENTS.md 自动加载进指令层（不是普通文件内容，是「项目指令」抬升地位）——PR 作者能在
+#     自己仓库里塞一份 AGENTS.md 借此劫持评审结论，且 -s read-only 只挡写入/执行，挡不住这条
+#     纯读取的提示词注入面。本机 codex-cli 0.147.0 实测坐实（同一 prompt，AGENTS.md 里写
+#     "internal codename is ZEBRA47"）：默认（无旗标）codex 回答 ZEBRA47（自动加载生效）；
+#     加 -c project_doc_max_bytes=0 后回答 UNKNOWN（自动加载被关掉）。故两条路径都必须传
+#     project_doc_max_bytes=0。同时加 --strict-config：已实测该旗标会让未知配置键报错退出
+#     （`-c totally_bogus_key_xyz=1` → exit 1），而 project_doc_max_bytes 被其接受（证明键存在）；
+#     加上它是为了防未来 codex 版本改名/删掉这个键时，本脚本的 -c 静默变成 no-op、安全旗标
+#     形同虚设却不报错——宁可 fail loud（脚本报错退出，逼人发现并修复），不要 fail silent（自动
+#     加载悄悄复活，评审在不知情中重新暴露给注入）。代价见下条已知边界。
+#   - **残余边界（--strict-config 消除不了）**：评审任务本身就要求 codex 读被评审仓库的 diff
+#     与文件内容，这些由 PR 作者控制，仍会进入模型上下文——区别是它们现在是普通文件内容，不再
+#     享有 AGENTS.md 那种「项目指令」的抬升地位。这是评审这件事本身的固有面，不是本旗标遗漏。
+#     完整已消除/取舍/残余三层记录见 references/codex-review.md「已知边界」节。
 #   - 复核轮无法续接 session 时 Fail Fast 报错退出，不降级为新建 session（followup 常预设
 #     codex 记得前几轮 finding，发给无记忆新会话必然幻觉）——与 grok/claude 两后端一致。
 set -euo pipefail
@@ -233,6 +243,7 @@ if (( FOLLOWUP_MODE )); then
   # （SESSION_INVALID_RE 只出现在 stderr，见文件头注释实测记录）。
   set +e
   codex exec -m "$MODEL" -c model_reasoning_effort="$EFFORT" \
+    -c project_doc_max_bytes=0 --strict-config \
     -s read-only "${CODEX_CWD[@]}" --ignore-rules --color never \
     --json -o "$OUT_FILE" \
     resume "$SID" - < "$PROMPT_FILE" \
@@ -313,6 +324,7 @@ else
   # 先调 codex，成功（rc=0）后再落盘 state：首轮失败不留误导性 SID/BASE_SHA。
   set +e
   codex exec -m "$MODEL" -c model_reasoning_effort="$EFFORT" \
+    -c project_doc_max_bytes=0 --strict-config \
     -s read-only "${CODEX_CWD[@]}" --ignore-rules --color never \
     --json -o "$OUT_FILE" \
     - < "$PROMPT_FILE" \
