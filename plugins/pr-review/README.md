@@ -34,6 +34,7 @@ Normally you don't invoke anything by hand — say "评审 PR 123" / "grok revie
 
 ```bash
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"   # auto-routes grok/claude
+[ -x "$REVIEW" ] || { echo "pr-review script path did not resolve" >&2; exit 1; }
 
 gh pr checkout 123        # cwd must be the PR's own repo worktree
 "$REVIEW" 123             # round 1: full review, opens a session
