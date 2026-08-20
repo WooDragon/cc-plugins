@@ -1,15 +1,16 @@
 ---
 name: pr-review
 description: |
-  对已开的 GitHub PR 做 AI 代码评审，三个后端：grok（本地 CLI 同步产出评审到终端，即时深度评审、默认 high 档可调低档控成本，适合本地自审）、claude（本地 `claude -p` 同步评审，wrapper 会话经 grok provider 路由时的默认自动切换目标，也可手动强制）、copilot（gh 触发 GitHub Copilot bot 异步评审、结果回帖 PR，成本高通常不启用、仅复杂项目收尾）。统一入口 `pr-review.sh` 在 grok/claude 间自动路由。当需要：
+  对已开的 GitHub PR 做 AI 代码评审，四个后端：grok（本地 CLI 同步产出评审到终端，即时深度评审、默认 high 档可调低档控成本，适合本地自审）、claude（本地 `claude -p` 同步评审，wrapper 会话经 grok provider 路由时的默认自动切换目标，也可手动强制）、codex（本地 codex CLI 同步评审，需要第三方独立视角时显式指定）、copilot（gh 触发 GitHub Copilot bot 异步评审、结果回帖 PR，成本高通常不启用、仅复杂项目收尾）。统一入口 `pr-review.sh` 在 grok/claude 间自动路由。当需要：
   - 评审某个 PR（给出 PR 编号）、快速自审改动质量
   - 本地评审 PR（默认路径，grok/claude 自动路由）
   - 用 claude 评审 PR / 强制走 claude 后端
+  - 用 codex 评审 PR / 强制走 codex 后端（第三方独立视角）
   - 触发 / 重新触发 GitHub Copilot 评审 PR（可选路径）
   - 查询 Copilot 评审请求状态
   时调用此 Skill。
   注意边界：本 skill 针对「已开 PR 编号」的评审；本地未提交 working diff 的即时 review 走 /code-review，不由本 skill 承接。
-  Triggers: pr review, review this pr, 评审 PR, 评审这个 PR, 审查 PR, grok review, grok 评审, 用 grok 评审 PR, claude review, claude 评审, 用 claude 评审 PR, copilot review, copilot 评审, 触发 copilot, request copilot reviewer, re-request review, 重新评审 PR.
+  Triggers: pr review, review this pr, 评审 PR, 评审这个 PR, 审查 PR, grok review, grok 评审, 用 grok 评审 PR, claude review, claude 评审, 用 claude 评审 PR, codex review, codex 评审, 用 codex 评审 PR, copilot review, copilot 评审, 触发 copilot, request copilot reviewer, re-request review, 重新评审 PR.
 ---
 
 # PR Review
@@ -118,6 +119,7 @@ PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改
 |---|---|---|---|
 | grok | 本地 CLI 同步产出评审 → 终端 | 本地即时深度评审，默认 high 可调档；`pr-review.sh` 自动路由的默认目标 | `references/grok-review.md` |
 | claude | 本地 `claude -p` 同步产出评审 → 终端 | wrapper 会话经 grok provider 路由时，`pr-review.sh` 自动切换到的目标；也可手动强制 | `references/claude-review.md` |
+| codex | 本地 codex CLI 同步产出评审 → 终端 | 需要第三方独立视角时显式指定；不参与自动路由 | `references/codex-review.md` |
 | copilot（可选） | gh 触发 GitHub Copilot bot 异步评审 → 回帖 PR | 复杂项目收尾、成本高通常不启用 | `references/copilot-review.md` |
 
 ## 默认路径：`pr-review.sh`
