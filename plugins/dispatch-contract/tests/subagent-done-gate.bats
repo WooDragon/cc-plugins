@@ -327,3 +327,162 @@ teardown() {
   run_gate "$payload" "ALLOW_UNMARKED_FINAL=1"
   assert_pass
 }
+
+# ============================================================
+# FLOOR-based inversion (issue #183): missing marker only blocks when the
+# body is small enough that there is nothing valuable to lose (14)
+# ============================================================
+
+@test "floor: missing marker + body >= FLOOR (500B) → PASS + systemMessage warning" {
+  local msg
+  msg=$(mk_bytes 500)
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_pass_with_warning
+}
+
+@test "floor: missing marker + body < FLOOR (500B) → BLOCK + stderr echoes the original body" {
+  local msg
+  msg=$(mk_bytes 200)
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_block_echoes "$msg"
+}
+
+@test "floor: boundary 499B (just under FLOOR) → BLOCK" {
+  local msg
+  msg=$(mk_bytes 499)
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_block
+}
+
+@test "floor: boundary 500B (exactly FLOOR) → PASS" {
+  local msg
+  msg=$(mk_bytes 500)
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_pass_with_warning
+}
+
+@test "floor: boundary 501B (just over FLOOR) → PASS" {
+  local msg
+  msg=$(mk_bytes 501)
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_pass_with_warning
+}
+
+@test "floor: DONE_GATE_BODY_FLOOR env override lowers the threshold" {
+  # 50B body would BLOCK under the default 500B floor; with the floor
+  # lowered to 10 it must PASS instead — proves the knob actually takes
+  # effect, not just documented.
+  local msg
+  msg=$(mk_bytes 50)
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload" "DONE_GATE_BODY_FLOOR=10"
+  assert_pass_with_warning
+}
+
+@test "floor: DONE_GATE_BODY_FLOOR env override raises the threshold" {
+  # 500B body would PASS under the default floor; raising the floor to 600
+  # must push it back to BLOCK.
+  local msg
+  msg=$(mk_bytes 500)
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload" "DONE_GATE_BODY_FLOOR=600"
+  assert_block
+}
+
+@test "floor: non-numeric DONE_GATE_BODY_FLOOR falls back to the 500B default, no crash" {
+  local msg
+  msg=$(mk_bytes 500)
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload" "DONE_GATE_BODY_FLOOR=not-a-number"
+  assert_pass_with_warning
+}
+
+@test "floor: marker present + body ~30B → PASS (regression guard: branches must stay separate)" {
+  # Anti-regression for merging the marker-present and marker-absent
+  # branches into one FLOOR check — a short but fully-compliant report
+  # (marker in place) must never be judged by body size.
+  local msg
+  msg=$(printf '无命中。\n%s' "$MARK")
+  local payload
+  payload=$(mk_payload false "$TP_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_pass
+}
+
+@test "floor: not required + short body → PASS (marker never required, FLOOR branch never reached)" {
+  local msg
+  msg=$(mk_bytes 50)
+  local payload
+  payload=$(mk_payload false "$TP_NOT_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_pass
+}
+
+# ============================================================
+# attachment-line filtering: SubagentStart-injected 铁律④ text carries the
+# MARK literal; it must never open the gate on its own (16)
+# ============================================================
+
+@test "attachment: non-fork transcript, line-1 window occupied by an attachment record carrying MARK → filtered, gate stays closed" {
+  # Non-fork PROMPT_SRC is line 1 alone today. This simulates the drift
+  # scenario the filter defends against: if CC's layout ever shifts so the
+  # SubagentStart-injected attachment record lands inside that single-line
+  # read window, the attachment-type filter must still strip it before the
+  # MARK substring check runs — proving the filter is a structural property
+  # of PROMPT_SRC, not an artifact of today's line count.
+  local tp
+  tp=$(mktemp "$TEST_TEMP_DIR/transcript.XXXXXX")
+  jq -cn --arg t "[dispatch-contract] 铁律④定稿标记：若派发 prompt 要求了 ${MARK}，在最终消息末尾单独一行输出该标记。" \
+    '{type:"attachment",content:$t}' > "$tp"
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":"filler line, never read"}}' >> "$tp"
+
+  local msg
+  msg=$(mk_bytes 50)
+  local payload
+  payload=$(mk_payload false "$tp" "$msg")
+  run_gate "$payload"
+  assert_pass
+}
+
+@test "attachment: fork transcript, MARK only in an attachment line (L4) → gate stays closed" {
+  local tp
+  tp=$(mktemp "$TEST_TEMP_DIR/transcript.XXXXXX")
+  printf '%s\n' '{"type":"fork-context-ref","agentId":"test-fork-0001","parentSessionId":"p0","parentLastUuid":"u0","contextLength":17}' > "$tp"
+  jq -cn --arg t "请完成任务并汇报结果" '{
+    type:"assistant",
+    message:{role:"assistant",content:[{type:"tool_use",name:"Agent",
+      input:{description:"d",prompt:$t,subagent_type:"fork"}}]}
+  }' >> "$tp"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"filler"}}' >> "$tp"
+  jq -cn --arg t "[dispatch-contract] 铁律④定稿标记：若派发 prompt 要求了 ${MARK}，在最终消息末尾单独一行输出该标记。" \
+    '{type:"attachment",content:$t}' >> "$tp"
+
+  local msg
+  msg=$(mk_bytes 50)
+  local payload
+  payload=$(mk_payload false "$tp" "$msg")
+  run_gate "$payload"
+  assert_pass
+}
+
+@test "safety-valve: stop_hook_active=true still short-circuits before the FLOOR branch → PASS" {
+  local msg
+  msg=$(mk_bytes 50)
+  local payload
+  payload=$(mk_payload true "$TP_REQUIRED" "$msg")
+  run_gate "$payload"
+  assert_pass
+}

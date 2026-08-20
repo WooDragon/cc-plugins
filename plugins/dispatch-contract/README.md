@@ -88,14 +88,44 @@ This README deliberately shows no shortened version. A format-only paraphrase su
 `末尾单独一行输出 %%DONE%%。` drops the report half and reads literally as "output nothing but
 the marker" — the exact failure the gate now rejects.
 
-The gate checks two structural facts: the marker is the last non-blank line, and at least one
-other non-blank line exists. What that other content must *say* — the canonical wording also
-asks for a verification matrix and an unfinished-items section — stays convention, not a hook
-check.
+The gate has two branches, split on whether the marker arrived at all.
 
-The subagent's final non-empty line must then be exactly `%%DONE%%` — not contain it, but equal it. If the check fails, the gate blocks the SubagentStop event and sends a correction directive back into the subagent, asking it to complete the report and end with the marker.
+**Marker present** — the last non-blank line equals `%%DONE%%` exactly (not merely contains
+it). The subagent has asserted it is finished, and the gate takes that assertion at face value
+with one exception: if the marker is the *only* non-blank line, the assertion is literally
+empty — zero report — and it is rejected with its own directive. The test is structural (is
+there any other non-blank line), so it inspects no wording and maintains no keyword list. A
+short-but-real report such as `APPROVED. 无发现。` followed by the marker passes; brevity is
+not the offense.
 
-**A marker-only message is blocked too.** The marker is a terminator, not the deliverable: a final message whose only non-blank line is `%%DONE%%` carries zero report and is rejected with its own directive. The test is structural — is there any other non-blank line — so it inspects no wording and maintains no keyword list.
+**Marker absent** — the gate blocks only when the body is under `DONE_GATE_BODY_FLOOR` bytes
+(default 500). Above the floor it passes and emits a `systemMessage` warning instead.
+
+That asymmetry is deliberate, and it is the fix for
+[#183](https://github.com/WooDragon/cc-plugins/issues/183). `SubagentStop` has no ability to
+rewrite a final message; exit 2 only *prevents the subagent from stopping*, which forces it to
+write another message — and the harness hands the dispatcher the **last** assistant message.
+So every block is a wager: if the subagent answers with anything shorter than what it already
+wrote, the finished report is silently overwritten.
+
+Measured across 4,761 local subagent transcripts (489 before/after pairs at a block):
+
+| Size of the blocked message | Collapsed (<0.3x) | Healthy rewrite (>1.0x) |
+|---|---|---|
+| < 800 B | 11 (5%) | 161 (74%) |
+| >= 3000 B | 59 (40%) | 37 (25%) |
+
+Blocking a large message is where the damage is. And the thing this contract exists to catch —
+`Sent.`, `Done. Report sent to team-lead`, `已完成，详见文件` — is always small. Stratified
+sampling of the same corpus: 0-200 B is entirely status notes; 200-500 B is still dominated by
+meta-summaries; real deliverables start appearing at 500-900 B; everything above 900 B is a
+genuine report. Hence the 500-byte floor.
+
+Both directions of floor error are benign. Too low degrades toward no enforcement — it never
+destroys a product. Too high blocks only small reports, where the measured outcome is 74%
+healthy rewrite and 5% collapse, and where the block message **echoes the blocked body back
+verbatim** so the retry is a copy rather than a feat of memory. That echo is affordable
+precisely because it only ever fires below the floor.
 
 **It blocks at most once.** The resumed stop arrives with `stop_hook_active=true`, and the gate passes it unconditionally without re-checking. A subagent that still omits the marker on its second attempt is let through rather than looped — an unbounded retry loop on a subagent that cannot satisfy the check would be worse than an unmarked report.
 
@@ -116,7 +146,11 @@ The gate is fail-open by design. It passes silently when:
 - `jq` is not available on the system.
 - The transcript file is unreadable or malformed.
 
-There are two active enforcement paths. Both require the dispatch prompt to contain `%%DONE%%`; they then differ in what the subagent's final message looks like — its last non-empty line does not equal `%%DONE%%`, or it does equal `%%DONE%%` but no other non-empty line is present. Anything else passes.
+There are two active enforcement paths, both requiring the dispatch prompt to contain
+`%%DONE%%`: the final message's last non-empty line equals `%%DONE%%` but no other non-empty
+line exists (empty assertion), or it does not equal `%%DONE%%` and the body is below
+`DONE_GATE_BODY_FLOOR`. Anything else passes — including a marker-less message whose body
+clears the floor, which passes with a warning rather than a block.
 
 ## Escape Hatch
 
@@ -131,6 +165,8 @@ Set this before starting the Claude Code session to disable the gate globally. U
 - The gate only fires at `SubagentStop` — it has no visibility into intermediate tool calls or messages the subagent sends before stopping.
 - If the dispatch prompt contains `%%DONE%%` anywhere (even in a negated or illustrative context), the gate activates. Misfire direction is one extra block, which self-heals because the retry passes unconditionally.
 - The gate blocks at most once per subagent. If the corrected output still misses the marker, it is let through — the gate does not loop.
+- A long final message that is missing the marker is **not** blocked — it passes with a `systemMessage` warning. The marker's absence is reported, not enforced, because enforcing it costs the product 40% of the time. Terminator discipline above the floor is convention, backed by the SubagentStart rules injection rather than by a block.
+- The gate reads only the dispatcher-written line(s) of the transcript to decide whether the marker was required, and filters out `attachment` records first — the SubagentStart injector's own text mentions `%%DONE%%`, and without that filter a change in record ordering would make every subagent look like it had been asked for a marker.
 
 ## The Background-Dispatch Sync Guard
 
@@ -486,3 +522,4 @@ the model sees. The correction message reaches model context either way.
 | `CLAUDE_CODE_FORK_SUBAGENT` | _(unset)_ | `0` disables the fork-subagent feature — restores `run_in_background` to the Agent input schema, the correct fix for step 9b's fork-world block |
 | `ALLOW_DISPATCH_CAPABILITY_MISMATCH` | _(unset)_ | `1` disables the dispatch-capability guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
 | `CLAUDE_AUTO_BACKGROUND_TASKS` | _(unset)_ | Truthy value defeats `run_in_background:false`'s synchronous-delivery guarantee past 120s runtime — the sync guard blocks (step 8b) rather than silently misjudge a passing dispatch as safe; clear this variable to fix |
+| `DONE_GATE_BODY_FLOOR` | `500` | Byte floor for the marker-absent branch — a final message with no marker and a body below this is blocked; at or above it passes with a `systemMessage` warning. Derivation in `The %%DONE%% Contract` above |

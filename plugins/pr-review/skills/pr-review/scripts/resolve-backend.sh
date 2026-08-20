@@ -13,9 +13,9 @@
 set -euo pipefail
 
 case "${PR_REVIEW_BACKEND:-}" in
-  grok|claude|copilot) echo "$PR_REVIEW_BACKEND"; exit 0 ;;
+  grok|claude|copilot|codex) echo "$PR_REVIEW_BACKEND"; exit 0 ;;
   "") ;;
-  *) echo "错误: 非法 PR_REVIEW_BACKEND=${PR_REVIEW_BACKEND}（合法: grok/claude/copilot）" >&2; exit 1 ;;
+  *) echo "错误: 非法 PR_REVIEW_BACKEND=${PR_REVIEW_BACKEND}（合法: grok/claude/copilot/codex）" >&2; exit 1 ;;
 esac
 
 case "${ANTHROPIC_DEFAULT_OPUS_MODEL:-}" in

@@ -14,5 +14,6 @@ BACKEND=$("$DIR/resolve-backend.sh")
 case "$BACKEND" in
   grok)   exec "$DIR/grok-review.sh" "$@" ;;
   claude) exec "$DIR/claude-review.sh" "$@" ;;
-  *)      echo "错误: pr-review.sh 只路由 grok/claude 两个同构后端（CLI 参数形态一致）；copilot 是异步流程、参数形态不同，请直接调用 copilot-review.sh" >&2; exit 1 ;;
+  codex)  exec "$DIR/codex-review.sh" "$@" ;;
+  *)      echo "错误: pr-review.sh 只路由 grok/claude/codex 三个同构后端（CLI 参数形态一致）；copilot 是异步流程、参数形态不同，请直接调用 copilot-review.sh" >&2; exit 1 ;;
 esac
