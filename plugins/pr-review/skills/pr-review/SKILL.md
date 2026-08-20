@@ -26,6 +26,7 @@ description: |
 
 ```bash
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
+[ -x "$REVIEW" ] || { echo "pr-review 脚本路径解析失败" >&2; exit 1; }
 LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
 
 gh pr checkout <PR>                                                    # 首轮前必须切到 PR 分支
@@ -38,7 +39,7 @@ gh pr checkout <PR>                                                    # 首轮�
 
 **两流必须分文件，不得 `2>&1` 合并**：脚本有意把评审正文放 stdout、诊断放 stderr，而首轮的引擎调用不做 stderr 隔离，`2>&1` 会让进度与告警插进评审正文中间。脚本非零退出时读 `.err` 拿原文，不自行重试、不改用其他评审方式。
 
-**路径用 `${CLAUDE_PLUGIN_ROOT}`，不要 `find … | head -1`**：本文件由主线读入，该变量在此展开。`find` 有两个实测失败模式——它解析到的是 marketplace 源码副本而非已安装的 cache（cache 路径含版本段，`*/pr-review/skills/…` 匹配不到），而远程安装无本地 clone 时零命中，`REVIEW=""` 会让 `"$REVIEW" <PR>` 变成执行 `<PR>` 本身。
+**路径用 `${CLAUDE_PLUGIN_ROOT}`，不要 `find … | head -1`**：本文件经 skill 加载时该变量已展开成绝对路径；被当**文件**读取时它是字面量（主线 shell 环境里并没有这个变量），故配方带 `[ -x "$REVIEW" ]` 先验——路径解析不出来就当场停，不往下跑。`find` 有两个实测失败模式——它解析到的是 marketplace 源码副本而非已安装的 cache（cache 路径含版本段，`*/pr-review/skills/…` 匹配不到），而远程安装无本地 clone 时零命中。
 
 **跑不完时等它跑完，不要重开一轮**：评审耗时随 PR 体量与 `--effort` 增长，前台调用应给足超时。命令若被中断，两条路径的补救不同——首轮的 `state_write` 在引擎成功返回之后才执行，此时 session 未建立，应丢弃残日志整轮重跑；复核轮 session 已在，应丢弃残日志**只重跑这一轮 `--followup`**，不要回头重开首轮（那会覆写 SID）。两种情况下半截日志都不得拿来裁决。
 
@@ -80,7 +81,7 @@ gh pr checkout <PR>                                                    # 首轮�
 
 ### 例外
 
-PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改，不必落盘也不必派发。
+PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改，**不必派修复子任务**。落盘不在豁免之列：两流重定向对一屏 diff 的代价也接近零，而免掉它就是把正文灌回主线，旧失败模式原地复活。
 
 ## 后端选择
 

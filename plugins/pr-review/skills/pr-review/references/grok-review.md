@@ -25,6 +25,7 @@ scripts/grok-review.sh <PR> --followup "<复核指令>" [--since <ref>] [--sessi
 
 ```bash
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
+[ -x "$REVIEW" ] || { echo "pr-review 脚本路径解析失败" >&2; exit 1; }
 LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
 "$REVIEW" <PR> > "$LOG/<PR>-r1.log" 2> "$LOG/<PR>-r1.err"; echo "exit=$?"
 ```
@@ -67,15 +68,17 @@ LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
 典型两轮命令：
 
 ```bash
-LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"   # 与上节「调用形态」同一定义，本块可独立照抄
+REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"   # 与上节「调用形态」同一定义，本块可独立照抄
+[ -x "$REVIEW" ] || { echo "pr-review 脚本路径解析失败" >&2; exit 1; }
+LOG="$(git rev-parse --git-dir)/pr-review"; mkdir -p "$LOG"
 
 # 第 1 轮：全量评审
-scripts/grok-review.sh 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
+"$REVIEW" 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
 
 # ...主线 Read 123-r1.log 逐条裁决，派修复子任务改代码 + git commit...
 
 # 第 2 轮：复核，只发复核指令 + 本轮增量 diff
-scripts/grok-review.sh 123 --followup "已按你的意见修复 file.go:42 的空指针解引用，请复核。以下维持驳回、无新证据不要重开：<驳回清单>" \
+"$REVIEW" 123 --followup "已按你的意见修复 file.go:42 的空指针解引用，请复核。以下维持驳回、无新证据不要重开：<驳回清单>" \
   > "$LOG/123-r2.log" 2> "$LOG/123-r2.err"
 ```
 

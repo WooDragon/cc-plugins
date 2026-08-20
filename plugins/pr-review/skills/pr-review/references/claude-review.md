@@ -19,6 +19,8 @@ scripts/claude-review.sh <PR> --followup "<复核指令>" [--since <ref>] [--ses
 
 不带 `--repo` 时自动用当前仓库。首轮与复核轮是两条独立路径，机制与 grok 后端一致（见 [grok-review.md](grok-review.md)「多轮 session 复用」）。
 
+上面两行是**参数形态说明**，不是可直接照抄的调用式——agent 调用一律按 [grok-review.md](grok-review.md)「调用形态」两流分文件重定向。
+
 ## 与 grok 后端的两处不同
 
 CLI 参数形态（`<PR> [--repo] [--model] [--effort] [--followup] [--since] [--session] [--allow-divergent-base]`）与 grok-review.sh 完全一致，只有 MODEL/EFFORT 默认值与合法集合不同：
