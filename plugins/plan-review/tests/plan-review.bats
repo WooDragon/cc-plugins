@@ -197,6 +197,7 @@ teardown() {
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"非法"* ]]
+  [[ "$reason" == *"框架许可的 plan 目录"* ]]
   # Message must name the offending path so the user knows what was rejected.
   [[ "$reason" == *"passwd"* ]]
 }
@@ -2078,297 +2079,10 @@ LGTM from Gemini."
   assert_log_contains "rest-fallback-triggered"
 }
 
-# =============================================================================
-# Dispatch Manifest — Layer 1 (plan-review.sh)
-# =============================================================================
 
-# 101. plan 含 Task( 关键词 + 无 manifest → deny 不调引擎 + counter 递增
-@test "manifest: plan with Task( keyword + no manifest → pre-flight deny + counter increment" {
-  # No mock engine — pre-flight fires before engine call
-  INPUT=$(build_input plan="Step 1: Use Task( to isolate work. No manifest here.")
-  run_hook
 
-  assert_deny_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"MISSING DISPATCH MANIFEST"* ]]
-  # Deny message must embed a self-contained format example (not just "see CLAUDE.md").
-  # Assert tokens that ONLY appear in the embedded example, so the old code can't pass.
-  [[ "$reason" == *"parallel_with"* ]]
-  [[ "$reason" == *"填写规则"* ]]
-  # Counter must be incremented (TOTAL_ROUNDS only, ATTEMPT stays 0)
-  local attempt; attempt=$(get_counter_value)
-  [ "$attempt" -eq 0 ]
-  [ "$(get_total_rounds)" -eq 1 ]
-}
-
-# 102. plan 含 Task( + 完整 manifest → 进入正常引擎审阅路径
-@test "manifest: plan with Task( + Dispatch Manifest → proceeds to engine review" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-Plan looks good with manifest."
-  local plan_with_manifest="## Plan
-Step 1: Use Task( to run analysis.
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | worker    | sonnet| -          | -             |"
-  INPUT=$(build_input "plan=$plan_with_manifest")
-  run_hook
-
-  # Engine was called (ack-deny with APPROVED)
-  assert_ack_approve_json
-}
-
-# 103. plan 不含 Task 关键词 → 不要求 manifest
-@test "manifest: plan without Task/Agent keywords → no manifest required" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-Simple plan, no dispatch needed."
-  INPUT=$(build_input plan="Simple plan: edit file X, run tests, commit.")
-  run_hook
-
-  # Engine was called normally (no pre-flight block)
-  assert_ack_approve_json
-}
-
-# 104. 大小写变体 "Worker Agent" / "TASK(" → 也触发 needs_manifest
-@test "manifest: case variants 'Worker Agent' and 'TASK(' trigger manifest requirement" {
-  INPUT=$(build_input plan="Use Worker Agent for step 2. Also TASK( for isolation.")
-  run_hook
-
-  assert_deny_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"MISSING DISPATCH MANIFEST"* ]]
-}
-
-# 105. APPROVE 路径 + plan 含 manifest → dispatch JSON 写入且 schema 合法
-@test "manifest: APPROVE path + manifest → dispatch JSON written with valid schema" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-All good."
-  local plan_with_manifest="## Implementation
-Use Task( for isolation.
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | -         | -     | -          | -             |
-| 2    | worker    | sonnet| 1          | -             |"
-  INPUT=$(build_input "plan=$plan_with_manifest")
-  run_hook
-
-  assert_ack_approve_json
-  # Dispatch JSON must exist
-  local dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
-  [ -f "$dispatch_file" ]
-  # Must be valid JSON with required fields
-  jq -e '.requires_dispatch_check == true' "$dispatch_file" >/dev/null
-  jq -e '.plan_hash | length > 0' "$dispatch_file" >/dev/null
-  jq -e '.steps | length == 2' "$dispatch_file" >/dev/null
-  # Step 2 has agent_type and model
-  jq -e '.steps[1].agent_type == "worker"' "$dispatch_file" >/dev/null
-  jq -e '.steps[1].model == "sonnet"' "$dispatch_file" >/dev/null
-}
-
-# 106. APPROVE 路径 + plan 无 manifest → 不写 dispatch JSON
-@test "manifest: APPROVE path + no manifest → no dispatch JSON written" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-Simple plan approved."
-  INPUT=$(build_input plan="Simple plan: edit file, run tests.")
-  run_hook_to_completion
-
-  assert_approve_json
-  # Dispatch file must NOT exist
-  [ ! -f "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
-}
-
-# 107. manifest 行含 stray 引号 → 落地 JSON 仍合法（jq -e 通过）
-@test "manifest: stray quotes in manifest rows → dispatch JSON still valid" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-LGTM."
-  local plan_with_quoted_manifest='## Task( analysis
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | "worker"  | "sonnet" | -       | -             |'
-  INPUT=$(build_input "plan=$plan_with_quoted_manifest")
-  run_hook
-
-  assert_ack_approve_json
-  local dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
-  [ -f "$dispatch_file" ]
-  # Must be parseable by jq (no stray quotes in JSON values)
-  jq -e '.' "$dispatch_file" >/dev/null
-  jq -e '.steps[0].agent_type == "worker"' "$dispatch_file" >/dev/null
-  jq -e '.steps[0].model == "sonnet"' "$dispatch_file" >/dev/null
-}
-
-# 108. pre-flight 反复 deny → ATTEMPT 始终 0，不触发非 Critical 安全阀
-@test "manifest: repeated pre-flight denies → ATTEMPT stays 0, only TOTAL increments" {
-  export REVIEW_MAX_ROUNDS=2
-  # No mock engine — pre-flight fires before engine call
-  INPUT=$(build_input plan="Use Task( for analysis.")
-
-  # Round 1: ATTEMPT stays 0, TOTAL→1
-  run_hook
-  assert_deny_json
-  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"MISSING DISPATCH MANIFEST"* ]]
-  [ "$(get_counter_value)" -eq 0 ]
-  [ "$(get_total_rounds)" -eq 1 ]
-
-  # Round 2: ATTEMPT stays 0, TOTAL→2
-  run_hook
-  assert_deny_json
-  [ "$(get_counter_value)" -eq 0 ]
-  [ "$(get_total_rounds)" -eq 2 ]
-
-  # Round 3: ATTEMPT=0 < MAX=2 → valve does NOT fire, pre-flight deny again
-  run_hook
-  assert_deny_json
-  [ "$(get_counter_value)" -eq 0 ]
-  [ "$(get_total_rounds)" -eq 3 ]
-}
-
-# 109. APPROVE 写入 dispatch 前清理 stale 文件
-@test "manifest: APPROVE path cleans up stale dispatch files" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-Good."
-  local plan_with_manifest="## Task( work
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | worker    | haiku | -          | -             |"
-
-  # Pre-plant a stale dispatch file (mtime >30min ago via touch -t)
-  local stale_file="${REVIEW_COUNTER_DIR}/.dispatch-other-session.json"
-  printf '{"stale":true}' > "$stale_file"
-  # Backdate by 35 minutes (2100 seconds)
-  touch -t "$(date -v -35M +%Y%m%d%H%M 2>/dev/null || date -d '35 minutes ago' +%Y%m%d%H%M 2>/dev/null || date +%Y%m%d%H%M)" "$stale_file" 2>/dev/null || \
-    python3 -c "import os,time; os.utime('$stale_file', (time.time()-2100, time.time()-2100))" 2>/dev/null || true
-
-  INPUT=$(build_input "plan=$plan_with_manifest")
-  run_hook
-
-  assert_ack_approve_json
-  # Stale file must be cleaned up
-  [ ! -f "$stale_file" ]
-}
-
-# 110. plan 含 dispatch 关键词 + manifest 全 "-" → degenerate deny + counter increment
-@test "manifest: all-dash manifest → pre-flight degenerate deny + counter increment" {
-  local plan_all_dash="## Plan
-Step 1: Use Task( for analysis.
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | -         | -     | -          | -             |
-| 2    | -         | -     | 1          | -             |"
-  INPUT=$(build_input "plan=$plan_all_dash")
-  run_hook
-
-  assert_deny_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"DEGENERATE DISPATCH MANIFEST"* ]]
-  # Deny message must embed the self-contained format example.
-  [[ "$reason" == *"parallel_with"* ]]
-  [[ "$reason" == *"填写规则"* ]]
-  local attempt; attempt=$(get_counter_value)
-  [ "$attempt" -eq 0 ]
-  [ "$(get_total_rounds)" -eq 1 ]
-}
-
-# 111. mixed manifest (dash + real agent) → passes pre-flight (non-regression)
-@test "manifest: mixed manifest with real agent_type → passes pre-flight to engine" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-All good."
-  local plan_mixed="## Plan
-Step 1: Prepare context. Step 2: Use Task( for heavy lifting.
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | -         | -     | -          | -             |
-| 2    | worker    | sonnet| 1          | -             |"
-  INPUT=$(build_input "plan=$plan_mixed")
-  run_hook
-
-  assert_ack_approve_json
-}
-
-# 112. all-dash repeated → ATTEMPT stays 0, only TOTAL increments
-@test "manifest: repeated degenerate denies → ATTEMPT stays 0, only TOTAL increments" {
-  export REVIEW_MAX_ROUNDS=2
-  local plan_all_dash="## Plan
-Use Task( for work.
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | -         | -     | -          | -             |"
-  INPUT=$(build_input "plan=$plan_all_dash")
-
-  # Round 1: degenerate deny, ATTEMPT stays 0, TOTAL→1
-  run_hook
-  assert_deny_json
-  [ "$(get_counter_value)" -eq 0 ]
-  [ "$(get_total_rounds)" -eq 1 ]
-
-  # Round 2: degenerate deny, ATTEMPT stays 0, TOTAL→2
-  run_hook
-  assert_deny_json
-  [ "$(get_counter_value)" -eq 0 ]
-  [ "$(get_total_rounds)" -eq 2 ]
-
-  # Round 3: ATTEMPT=0 < MAX=2 → valve does NOT fire, degenerate deny again
-  run_hook
-  assert_deny_json
-  [ "$(get_counter_value)" -eq 0 ]
-  [ "$(get_total_rounds)" -eq 3 ]
-}
-
-# 113. empty manifest (header + separator only, 0 data rows) → degenerate deny
-@test "manifest: empty manifest section (no data rows) → degenerate deny" {
-  local plan_empty_manifest="## Plan
-Step 1: Use Task( for isolation.
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-
-## Next Section"
-  INPUT=$(build_input "plan=$plan_empty_manifest")
-  run_hook
-
-  assert_deny_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"DEGENERATE DISPATCH MANIFEST"* ]]
-}
-
-# 114. agent_type="worker" + model="-" → NOT blocked (only agent_type checked)
-@test "manifest: real agent_type with dash model → passes pre-flight" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-OK."
-  local plan_agent_no_model="## Plan
-Use Task( for analysis.
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | worker    | -     | -          | -             |"
-  INPUT=$(build_input "plan=$plan_agent_no_model")
-  run_hook
-
-  assert_ack_approve_json
-}
-
-# 100. Capacity-fast-break → degrade file already written; REST entry does not overwrite
-#      (double-write is harmless: timestamps differ by <1s, both numeric, TTL still valid)
-@test "degrade: capacity-fast-break + REST success → degrade file refreshed (double-write harmless)" {
+# 100. Capacity-fast-break plus REST success refreshes the degraded state.
+@test "degrade: capacity-fast-break + REST success → degrade file refreshed" {
   create_capacity_exhausted_engine "agy"
   export REVIEW_API_URL="http://localhost:9999"
   export REVIEW_API_KEY="test-key"
@@ -2377,13 +2091,11 @@ Use Task( for analysis.
 
   run_hook
   assert_ack_approve_json
-
-  # Degrade file exists with a valid timestamp (may be written once or twice — both ok)
   assert_degraded_file_written
-  local ts; ts=$(cat "${REVIEW_COUNTER_DIR}/.gemini-degraded")
-  local now; now=$(date +%s)
-  local age=$(( now - ts ))
-  # Timestamp must be recent (within 10s): proves at least one write succeeded
+  local timestamp now age
+  timestamp=$(cat "${REVIEW_COUNTER_DIR}/.gemini-degraded")
+  now=$(date +%s)
+  age=$(( now - timestamp ))
   (( age < 10 )) || { echo "degrade timestamp too old: age=${age}s"; return 1; }
   assert_log_contains "gemini-degrade-write"
 
@@ -2391,18 +2103,337 @@ Use Task( for analysis.
   assert_approve_json
 }
 
-# ---------------------------------------------------------------------------
-# Prompt content integrity
-# ---------------------------------------------------------------------------
-@test "system-instructions: Testability criterion has structured sub-items" {
-  grep -q "Test strategy presence" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
-  grep -q "E2E selector cascade" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
-  grep -q "evidence-gated" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
-  grep -q "Deletion completeness" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
-  grep -q "3000 characters" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+# =============================================================================
+# Dispatch Manifest v2 — Layer 1 (plan-review.sh)
+# =============================================================================
+
+manifest_v2_plan() {
+  local rows="$1"
+  printf '%s\n' "## Plan
+Use Task( for isolated work.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+${rows}"
 }
 
-@test "system-instructions: Version Identifiers Are Ground Truth has training-cutoff / version-identifier ground-truth directive" {
+@test "manifest v2: Main, preset, and runtime rows pass pre-flight" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  local plan
+  plan=$(manifest_v2_plan '| 1 | main  | -        | -       | -     | - | - |
+| 2 | agent | dev-econ | preset  | -     | 1 | - |
+| 3 | agent | Explore  | runtime | haiku | 1 | 2 |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_ack_approve_json
+}
+
+@test "manifest v2: Main-only rows deny when dispatch keywords are present" {
+  local plan
+  plan=$(manifest_v2_plan '| 1 | main | - | - | - | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"DISPATCH HOARDING"* ]]
+  [[ "$reason" == *"必须同时移除 Manifest 与全部调度关键词"* ]]
+  [[ "$reason" == *"显式声明至少一个 Agent step"* ]]
+}
+
+@test "manifest v2: preset-only row is structurally valid" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  local plan
+  plan=$(manifest_v2_plan '| 1 | agent | dev-econ | preset | - | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_ack_approve_json
+}
+
+@test "manifest v2: runtime-only row is structurally valid" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  local plan
+  plan=$(manifest_v2_plan '| 1 | agent | Explore | runtime | haiku | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_ack_approve_json
+}
+
+@test "manifest v2: Main row rejects subagent fields" {
+  local plan
+  plan=$(manifest_v2_plan '| 1 | main | dev-econ | - | - | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"INVALID DISPATCH MANIFEST"* ]]
+}
+
+@test "manifest v2: preset row requires type and forbids model" {
+  local plan
+  plan=$(manifest_v2_plan '| 1 | agent | - | preset | - | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+  assert_deny_json
+
+  plan=$(manifest_v2_plan '| 1 | agent | dev-econ | preset | haiku | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+  assert_deny_json
+}
+
+@test "manifest v2: runtime row requires type and model" {
+  local plan
+  plan=$(manifest_v2_plan '| 1 | agent | Explore | runtime | - | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"INVALID DISPATCH MANIFEST"* ]]
+}
+
+@test "manifest v2: agent row rejects an unknown model_source" {
+  local plan
+  plan=$(manifest_v2_plan '| 1 | agent | Explore | inherited | - | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"INVALID DISPATCH MANIFEST"* ]]
+}
+
+@test "manifest v2: wrong or missing columns reject before review" {
+  local plan='## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on |
+|------|----------|---------------|--------------|-------|------------|
+| 1 | main | - | - | - | - |'
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"INVALID DISPATCH MANIFEST"* ]]
+}
+
+@test "manifest v2: APPROVE writes schema v2 signatures and dependency columns" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  local plan
+  plan=$(manifest_v2_plan '| 1 | main  | -        | -       | -     | - | - |
+| 2 | agent | dev-econ | preset  | -     | 1 | - |
+| 3 | agent | Explore  | runtime | haiku | 1 | 2 |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_ack_approve_json
+  local dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
+  [ -f "$dispatch_file" ]
+  jq -e '.schema_version == 2' "$dispatch_file" >/dev/null
+  jq -e '.allowed_signatures == [{"subagent_type":"dev-econ","model_source":"preset"},{"subagent_type":"Explore","model_source":"runtime","model":"haiku"}]' "$dispatch_file" >/dev/null
+  jq -e '.steps[2].depends_on == "1" and .steps[2].parallel_with == "2"' "$dispatch_file" >/dev/null
+}
+
+
+
+@test "manifest v2: quote and backslash cells serialize to valid JSON" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  local plan
+  plan=$(manifest_v2_plan '| 1 | agent | dev"econ\preset | preset | - | - | - |
+| 2 | agent | Explore | runtime | haiku"tier\2 | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_ack_approve_json
+  local dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
+  jq -e . "$dispatch_file" >/dev/null
+  jq -e '.steps[0].subagent_type == "dev\"econ\\preset"' "$dispatch_file" >/dev/null
+  jq -e '.steps[1].model == "haiku\"tier\\2"' "$dispatch_file" >/dev/null
+}
+
+
+
+@test "manifest v2: literal TAB in subagent_type rejects before state creation" {
+  local tab=$'\t'
+  local plan
+  plan=$(manifest_v2_plan "| 1 | agent | Explore${tab}smuggled | runtime | haiku | - | - |")
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"tab or carriage-return"* ]]
+  [ ! -e "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+@test "manifest v2: literal TAB in model rejects before state creation" {
+  local tab=$'\t'
+  local plan
+  plan=$(manifest_v2_plan "| 1 | agent | Explore | runtime | hai${tab}ku | - | - |")
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"tab or carriage-return"* ]]
+  [ ! -e "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+
+@test "manifest v2: literal carriage-return in dependency rejects before state creation" {
+  local carriage_return=$'\r'
+  local plan
+  plan=$(manifest_v2_plan "| 1 | agent | Explore | runtime | haiku | dependency${carriage_return}tail | - |")
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"tab or carriage-return"* ]]
+  [ ! -e "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+@test "manifest v2: failed serializer leaves no temporary or destination state" {
+  setup_script_copy
+  local copied_manifest="${COPY_SCRIPT_DIR}/lib/manifest.sh"
+  python3 - "$copied_manifest" <<'PYTHON'
+from pathlib import Path
+path = Path(__import__('sys').argv[1])
+text = path.read_text()
+needle = '  validate_manifest_v2 "$plan" || return 1\n'
+assert text.count(needle) == 1
+path.write_text(text.replace(needle, '  return 1\n', 1))
+PYTHON
+
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  local plan
+  plan=$(manifest_v2_plan '| 1 | agent | Explore | runtime | haiku | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook_copy
+
+  assert_ack_approve_json
+  [ ! -e "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+  ! find "$REVIEW_COUNTER_DIR" -maxdepth 1 -name '.dispatch-test-session.*' -print -quit | grep -q .
+}
+
+@test "mutation: shared blank-line boundary has one executable hit" {
+  local plan
+  plan=$(manifest_v2_plan '| 1 | main | - | - | - | - | - |
+
+| 2 | agent | Explore | runtime | haiku | - | - |')
+
+  run bash -c '. "$1"; manifest_has_agent_signature "$2"' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -ne 0 ]
+
+  setup_script_copy
+  local copied_manifest="${COPY_SCRIPT_DIR}/lib/manifest.sh"
+  python3 - "$copied_manifest" <<'PYTHON'
+from pathlib import Path
+path = Path(__import__('sys').argv[1])
+text = path.read_text()
+needle = '''if [ "$table_started" -eq 1 ] && [[ "$line" =~ ^[[:space:]]*$ ]]; then
+      break
+    fi'''
+assert text.count(needle) == 1, text.count(needle)
+path.write_text(text.replace(needle, '''if [ "$table_started" -eq 1 ] && [[ "$line" =~ ^[[:space:]]*$ ]]; then
+      : # MUTATION
+    fi''', 1))
+PYTHON
+  run grep -F ': # MUTATION' "$copied_manifest"
+  [ "$status" -eq 0 ]
+
+  # Red proof: without the shared boundary the later agent row satisfies the
+  # exact signature expectation that the production implementation rejects.
+  run bash -c '. "$1"; manifest_has_agent_signature "$2"' bash "$copied_manifest" "$plan"
+  [ "$status" -eq 0 ]
+}
+
+@test "manifest v2: no manifest remains optional without dispatch keywords" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  INPUT=$(build_input plan="Edit one file and run its test.")
+  run_hook_to_completion
+
+  assert_approve_json
+  [ ! -f "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+@test "dispatch cleanup: Tier0 approval removes stale global dispatch state" {
+  local stale_dispatch="${REVIEW_COUNTER_DIR}/.dispatch-abandoned-session.json"
+  printf '%s' '{}' > "$stale_dispatch"
+  touch -t 200001010000 "$stale_dispatch"
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  INPUT=$(build_input plan="Edit one file and run its test.")
+  run_hook
+
+  assert_ack_approve_json
+  [ ! -e "$stale_dispatch" ]
+}
+
+@test "manifest v2: missing manifest still rejects dispatch keywords" {
+  INPUT=$(build_input plan="Use Task( for isolation.")
+  run_hook
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"MISSING DISPATCH MANIFEST"* ]]
+}
+
+
+
+# Pre-flight corrections consume only TOTAL_ROUNDS, never the non-Critical
+# ATTEMPT budget. These are control-flow regressions independent of v1 schema.
+@test "manifest v2: repeated pre-flight denies keep ATTEMPT at zero" {
+  export REVIEW_MAX_ROUNDS=2
+  INPUT=$(build_input plan="Use Task( for analysis.")
+
+  run_hook; assert_deny_json; [ "$(get_counter_value)" -eq 0 ]; [ "$(get_total_rounds)" -eq 1 ]
+  run_hook; assert_deny_json; [ "$(get_counter_value)" -eq 0 ]; [ "$(get_total_rounds)" -eq 2 ]
+  run_hook; assert_deny_json; [ "$(get_counter_value)" -eq 0 ]; [ "$(get_total_rounds)" -eq 3 ]
+}
+
+@test "manifest v2: correcting pre-flight error starts engine from prior ATTEMPT" {
+  INPUT=$(build_input plan="Use Task( for analysis.")
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 1 ]
+
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+Needs work."
+  local plan
+  plan=$(manifest_v2_plan '| 1 | agent | Explore | runtime | haiku | - | - |')
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 1 ]
+  [ "$(get_total_rounds)" -eq 2 ]
+}
+
+@test "manifest v2: repeated pre-flight denies reach the TOTAL hard stop" {
+  export REVIEW_MAX_TOTAL_ROUNDS=3
+  INPUT=$(build_input plan="Use Task( for analysis.")
+
+  run_hook; assert_deny_json; [ "$(get_total_rounds)" -eq 1 ]
+  run_hook; assert_deny_json; [ "$(get_total_rounds)" -eq 2 ]
+  run_hook; assert_deny_json; [ "$(get_total_rounds)" -eq 3 ]
+  run_hook
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"HARD STOP"* ]]
+}
+
+# Static contracts in the generic prompt must remain present even though the
+# Manifest v2 criteria live in the plan-specific prompt.
+@test "system-instructions: Version Identifiers Are Ground Truth remains explicit" {
   grep -q "GROUND TRUTH" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
   grep -q "verify against your memory" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
   grep -q "training knowledge has a cutoff" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
@@ -2410,242 +2441,235 @@ Use Task( for analysis.
   grep -q "never Critical" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
 }
 
-# ---------------------------------------------------------------------------
-# Finding Quality Gate (issue #30) — prompt-layer denoising directives.
-# These are static prompt-content assertions: the gate operates inside the
-# review engine (LLM self-check), so it cannot be exercised at runtime here.
-# We assert the four gap-closing directives are present in SYSTEM_INSTRUCTIONS.
-# ---------------------------------------------------------------------------
-@test "system-instructions: Finding Quality Gate section present" {
+@test "system-instructions: Finding Quality Gate contract remains complete" {
   grep -q "Finding Quality Gate" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
-}
-
-@test "quality-gate: gap1 confidence threshold + drop-low-confidence directive" {
   grep -q "Confidence" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
   grep -q "DROP" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
-}
-
-@test "quality-gate: gap1 gradient exit — low-confidence Critical kept as UNVERIFIED, not dropped" {
   grep -q "UNVERIFIED" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
   grep -q "not REJECT" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
-}
-
-@test "quality-gate: gap2 false-positive registry present" {
   grep -q "False-positive registry" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
   grep -qi "never raise" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
-}
-
-@test "quality-gate: gap3 verdict-severity pre-flight self-check (prompt-layer, not body-scan)" {
   grep -q "Verdict↔severity" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
-  # Routing must remain verdict-only: the hook must NOT grep the body for severity tags
+  grep -q "Severity calibration" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -q "never Major" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -q 'UNVERIFIED.*suspicion.*but no confirmed Critical\|including any .UNVERIFIED' "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
+  grep -q '\[Major\] \[UNVERIFIED\]' "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
   ! grep -qE "grep[^|]*'\[Critical\]'" "${HOOK_SCRIPT:?Missing hook script}"
 }
 
-@test "quality-gate: gap4 severity calibration anti-drift" {
-  grep -q "Severity calibration" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
-  grep -q "never Major" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
-}
-
-@test "quality-gate: UNVERIFIED routes to CONCERNS in verdict rules + output format" {
-  # CONCERNS bucket explicitly includes UNVERIFIED suspicions
-  grep -q "UNVERIFIED.*suspicion.*but no confirmed Critical\|including any .UNVERIFIED" "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
-  # output format documents the [Major] [UNVERIFIED] emission shape
-  grep -q '\[Major\] \[UNVERIFIED\]' "${SYSTEM_PROMPT_COMMON_FILE:?Missing system prompt asset}"
-}
-
 # =============================================================================
-# Dispatch Economy — Criterion 7 regression (v1.0.44 → v1.0.45)
-# Asserts: (1) bash syntax still valid after heredoc refactor,
-#          (2) new Criterion 7 token set is present in SYSTEM_INSTRUCTIONS,
-#          (3) manifest detection path still passes through to engine (non-regression).
+# Dispatch Economy — Criterion 7 regression
 # =============================================================================
 
-# 115. bash syntax check — quoted heredoc must have matching delimiters.
-# Covers the main hook script AND every lib/*.sh it sources (post-split):
-# a syntax error confined to a lib file would otherwise slip past this gate.
-@test "dispatch-economy: bash -n reports no syntax errors after heredoc refactor" {
+@test "dispatch-economy: bash -n reports no syntax errors" {
   while IFS= read -r -d '' f; do
     run bash -n "$f"
     [ "$status" -eq 0 ] || { echo "syntax error in $f: $output"; return 1; }
   done < <(find "${BATS_TEST_DIRNAME}/../scripts" -name '*.sh' -print0)
 }
 
-# 116. Criterion 7 token presence — new prompt content has not been reverted
-@test "dispatch-economy: Criterion 7 tokens present in SYSTEM_INSTRUCTIONS" {
-  grep -q "Dispatch Economy"      "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
-  grep -q "Full hoarding"         "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
-  grep -q "Partial hoarding"      "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
-  grep -q "Retrieval work"        "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
-  grep -q "split-brain"           "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
-  grep -q "Decision work"         "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
-  grep -q "Implementation work"   "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+@test "dispatch-economy: Criterion 7 states ownership and source rules" {
+  grep -q "Decision and review judgment" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "registered agent" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "dev-econ" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -q "worker-econ" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -qF "full hoarding [Critical]" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -qF "partial hoarding [Major]" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  ! grep -q "Implementation work.*sonnet" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
 }
 
-# 117. manifest detection survives prompt refactor — Task( + manifest reaches engine
-# Non-regression: same scenario as test 102, re-asserted post-heredoc-refactor.
-@test "dispatch-economy: Task( + Dispatch Manifest still proceeds to engine review after refactor" {
+
+
+# Manifest parser boundaries: blanks before the table are tolerated; a blank
+# after it and a following section are both hard boundaries.
+@test "manifest v2 parser: one blank line before table is tolerated" {
   create_mock_engine "agy" "<verdict>APPROVE</verdict>
-Dispatch Economy verified."
-  local plan_with_manifest="## Plan
-Step 1: Use Task( for isolation.
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | worker    | sonnet| -          | -             |"
-  INPUT=$(build_input "plan=$plan_with_manifest")
-  run_hook
-
-  assert_ack_approve_json
-}
-
-# --- Bug #44: blank-line tolerance in manifest parsing ---
-
-# 118. blank line between heading and table → manifest still parsed
-@test "manifest: blank line between heading and table → passes pre-flight" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-All good."
-  local plan_blank="## Plan
-Step 1: Use Task( for isolation.
-
-## Dispatch Manifest
-
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | worker    | sonnet| -          | -             |"
-  INPUT=$(build_input "plan=$plan_blank")
-  run_hook
-
-  assert_ack_approve_json
-}
-
-# 119. blank line before all-dash table → degenerate deny (not false pass)
-@test "manifest: blank line before all-dash table → degenerate deny" {
-  local plan_blank_dash="## Plan
-Step 1: Use Task( for work.
-
-## Dispatch Manifest
-
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | -         | -     | -          | -             |"
-  INPUT=$(build_input "plan=$plan_blank_dash")
-  run_hook
-
-  assert_deny_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"DEGENERATE DISPATCH MANIFEST"* ]]
-}
-
-# 120. multiple blank lines between heading and table → still parsed
-@test "manifest: multiple blank lines between heading and table → passes pre-flight" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-OK."
-  local plan_multi="## Plan
-Use Task( for work.
-
-## Dispatch Manifest
-
-
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | worker    | haiku | -          | -             |"
-  INPUT=$(build_input "plan=$plan_multi")
-  run_hook
-
-  assert_ack_approve_json
-}
-
-# 121. blank line AFTER table terminates parsing (existing behavior preserved)
-@test "manifest: blank line after table terminates block" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-Good."
-  local plan_trail="## Plan
+Approved."
+  local plan="## Plan
 Use Task( for isolation.
 
 ## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | worker    | sonnet| -          | -             |
 
-Some trailing content."
-  INPUT=$(build_input "plan=$plan_trail")
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+| 1 | agent | Explore | runtime | haiku | - | - |"
+  INPUT=$(build_input "plan=$plan")
   run_hook
-
   assert_ack_approve_json
 }
 
-# 122. manifest heading with no table + next section has table → no bleeding
-@test "manifest: heading with no table + next section has table → chapter boundary stops parsing" {
-  local plan_no_table="## Plan
-Use Task( for analysis.
+@test "manifest v2 parser: multiple blank lines before an Agent table are tolerated" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  local plan="## Plan
+Use Task( for isolated work.
+
+## Dispatch Manifest
+
+
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+| 1 | agent | Explore | runtime | haiku | - | - |"
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+  assert_ack_approve_json
+}
+
+@test "manifest v2 parser: blank line after table terminates parsing" {
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+| 1 | agent | Explore | runtime | haiku | - | - |
+
+| this trailing table is not manifest content |"
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+  assert_ack_approve_json
+}
+
+@test "manifest v2 parser: blank line blocks a later seven-column agent signature" {
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+| 1 | main | - | - | - | - | - |
+
+| 2 | agent | Explore | runtime | haiku | - | - |"
+  run bash -c '. "$1"; manifest_has_agent_signature "$2"' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -ne 0 ]
+  run bash -c '. "$1"; parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[]' ]]
+  [[ "$(jq -c '.steps' <<<"$output")" == '[{"id":"1","location":"main","subagent_type":null,"model_source":null,"model":null,"depends_on":null,"parallel_with":null}]' ]]
+
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+  assert_deny_json
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$HOOK_STDOUT")" == *"DISPATCH HOARDING"* ]]
+  [ ! -e "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+@test "manifest v2 parser: blank line blocks a later TAB-based agent signature" {
+  local tab=$'\t'
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+| 1 | main | - | - | - | - | - |
+
+| 2 | agent | Explore${tab}smuggled | runtime | haiku | - | - |"
+  run bash -c '. "$1"; manifest_has_agent_signature "$2"' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -ne 0 ]
+  run bash -c '. "$1"; parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[]' ]]
+
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+  assert_deny_json
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$HOOK_STDOUT")" == *"DISPATCH HOARDING"* ]]
+  [ ! -e "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+@test "manifest v2 parser: terminal CRLF suffix is normalized before table semantics" {
+  local cr=$'\r'
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |${cr}
+|------|----------|---------------|--------------|-------|------------|---------------|${cr}
+| 1 | agent | Explore | runtime | haiku | - | - |${cr}"
+  run bash -c '. "$1"; parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[{"subagent_type":"Explore","model_source":"runtime","model":"haiku"}]' ]]
+}
+
+@test "manifest v2 parser: Markdown alignment separator variants validate" {
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+| :--- | :---: | ---: | :--- | :---: | ---: | :--- |
+| 1 | agent | Explore | runtime | haiku | - | - |"
+  run bash -c '. "$1"; validate_manifest_v2 "$2" && manifest_has_agent_signature "$2" && parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+
+  [ "$status" -eq 0 ]
+  [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[{"subagent_type":"Explore","model_source":"runtime","model":"haiku"}]' ]]
+}
+
+@test "manifest v2 parser: malformed later separator cell rejects" {
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|garbage|---------------|--------------|-------|------------|---------------|
+| 1 | agent | Explore | runtime | haiku | - | - |"
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$HOOK_STDOUT")" == *"table separator must have seven Markdown separator cells"* ]]
+}
+
+@test "manifest v2 parser: over-64KB valid plan validates, detects signature, and serializes" {
+  local padding padding_lines padding_bytes
+  padding=$(awk 'BEGIN { for (i = 1; i <= 3000; i++) printf "padding-%04d-abcdefghijklmnopqrstuvwxyz-0123456789-ordinary-ascii-line\n", i }')
+  padding_lines=$(printf '%s\n' "$padding" | wc -l | tr -d ' ')
+  padding_bytes=$(printf '%s' "$padding" | wc -c | tr -d ' ')
+  [ "$padding_lines" -ge 2000 ] || { echo "large plan padding has only $padding_lines lines"; return 1; }
+  [ "$padding_bytes" -gt 65536 ] || { echo "large plan padding has only $padding_bytes bytes"; return 1; }
+
+  local plan manifest_script
+  manifest_script="${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh"
+  plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+| 1 | agent | Explore | runtime | haiku | - | - |
+
+## Detail
+${padding}"
+
+  run bash -c '. "$1"; validate_manifest_v2 "$2"' bash "$manifest_script" "$plan"
+  [ "$status" -eq 0 ]
+
+  run bash -c '. "$1"; manifest_has_agent_signature "$2"' bash "$manifest_script" "$plan"
+  [ "$status" -eq 0 ]
+
+  run bash -c '. "$1"; parse_manifest_to_json "$2" test-hash' bash "$manifest_script" "$plan"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[{"subagent_type":"Explore","model_source":"runtime","model":"haiku"}]' ]]
+}
+
+@test "manifest v2 parser: next section table does not satisfy missing manifest table" {
+  local plan="## Plan
+Use Task( for isolation.
 
 ## Dispatch Manifest
 
 ## Other Section
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | worker    | sonnet| -          | -             |"
-  INPUT=$(build_input "plan=$plan_no_table")
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+| 1 | agent | Explore | runtime | haiku | - | - |"
+  INPUT=$(build_input "plan=$plan")
   run_hook
 
-  # Must deny as MISSING (manifest heading present but no table before next ##)
-  # Actually has_manifest matches heading, manifest_has_real_agent finds nothing → DEGENERATE
   assert_deny_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"DEGENERATE DISPATCH MANIFEST"* ]]
-}
-
-# --- Bug #71: pre-flight deny NOT consuming ATTEMPT budget ---
-
-# 123. pre-flight deny then fix → engine review starts ATTEMPT from 0
-@test "manifest: pre-flight deny then fix → engine review starts ATTEMPT from 0" {
-  export REVIEW_MAX_ROUNDS=2
-  INPUT=$(build_input plan="Use Task( for analysis.")
-
-  # Pre-flight deny: ATTEMPT stays 0, TOTAL→1
-  run_hook
-  assert_deny_json
-  [ "$(get_counter_value)" -eq 0 ]
-  [ "$(get_total_rounds)" -eq 1 ]
-
-  # User fixes manifest, engine gives CONCERNS
-  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
-Issues found."
-  local fixed_plan="## Plan
-Use Task( for analysis.
-
-## Dispatch Manifest
-| step | agent_type | model | depends_on | parallel_with |
-|------|-----------|-------|------------|---------------|
-| 1    | worker    | sonnet| -          | -             |"
-  INPUT=$(build_input "plan=$fixed_plan")
-  run_hook
-
-  # Engine CONCERNS: ATTEMPT→1, TOTAL→2
-  assert_deny_json
-  [ "$(get_counter_value)" -eq 1 ]
-  [ "$(get_total_rounds)" -eq 2 ]
-}
-
-# 124. pre-flight denies hit global safety valve at TOTAL_ROUNDS limit
-@test "manifest: pre-flight denies hit global safety valve at TOTAL_ROUNDS limit" {
-  export REVIEW_MAX_TOTAL_ROUNDS=3
-  INPUT=$(build_input plan="Use Task( for analysis.")
-
-  # 3 pre-flight denies → TOTAL reaches 3
-  run_hook; assert_deny_json; [ "$(get_total_rounds)" -eq 1 ]
-  run_hook; assert_deny_json; [ "$(get_total_rounds)" -eq 2 ]
-  run_hook; assert_deny_json; [ "$(get_total_rounds)" -eq 3 ]
-
-  # Next call: TOTAL=3 >= MAX_TOTAL=3 → global safety valve (HARD STOP deny)
-  run_hook
-  assert_deny_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"HARD STOP"* ]]
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"INVALID DISPATCH MANIFEST"* ]]
 }
 
 # =============================================================================

@@ -7,12 +7,28 @@ MARK='%%DONE%%'
 
 # --- Setup / Teardown ---
 
+# Bats owns its per-test directory and its lifecycle traps. Keep this helper
+# out of EXIT/INT/TERM entirely: stealing those traps can hide a test failure
+# or prevent Bats from running teardown. Outside Bats, use an independent
+# directory and remove only that directory from the explicit teardown call.
+cleanup_test_temp_dir() {
+  if [[ "${TEST_TEMP_DIR_BATS_OWNED:-0}" != "1" ]]; then
+    rm -rf "${TEST_TEMP_DIR:-}"
+  fi
+}
+
 common_setup() {
-  TEST_TEMP_DIR=$(mktemp -d)
+  if [[ -n "${BATS_TEST_TMPDIR:-}" ]]; then
+    TEST_TEMP_DIR=$(mktemp -d "${BATS_TEST_TMPDIR%/}/dispatch-contract.XXXXXX") || return 1
+    TEST_TEMP_DIR_BATS_OWNED=1
+  else
+    TEST_TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dispatch-contract.XXXXXX") || return 1
+    TEST_TEMP_DIR_BATS_OWNED=0
+  fi
 }
 
 common_teardown() {
-  rm -rf "$TEST_TEMP_DIR"
+  cleanup_test_temp_dir
 }
 
 # --- Transcript Fixture Builders ---
@@ -121,7 +137,7 @@ run_gate() {
   HOOK_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_UNMARKED_FINAL=1
   # (subagent-done-gate 的逃生舱),门禁会全局失效,导致每个 BLOCK 用例假通过。
@@ -206,7 +222,7 @@ run_sync_guard() {
   SYNC_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_BACKGROUND_DISPATCH=1、
   # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS 或 CLAUDE_AUTO_BACKGROUND_TASKS,门禁
@@ -231,7 +247,7 @@ run_rules_inject() {
   INJECT_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_NO_RULES_INJECT=1
   # (dispatch-rules-inject 的逃生舱),门禁会静默 exit 0 不注入,导致用例假通过。
@@ -326,7 +342,7 @@ mk_channel_payload() {
 # run_channel_guard PAYLOAD [env_overrides...]
 # Sets: CHANNEL_STDOUT, CHANNEL_STDERR, CHANNEL_EXIT
 #
-# Isolates all five escape-hatch/fail-open env vars any of this plugin's
+# Isolates all six escape-hatch/fail-open env vars any of this plugin's
 # PreToolUse(Agent|Task) guards read, not just this gate's own
 # ALLOW_UNMANAGED_TEAMMATE — a BLOCK test here must not silently PASS because
 # the calling shell happens to have ALLOW_BACKGROUND_DISPATCH,
@@ -341,12 +357,12 @@ run_channel_guard() {
   CHANNEL_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   if [[ "${2:-}" != "" ]]; then
-    CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH "${@:2}" bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
+    CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT "${@:2}" bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
   else
-    CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
+    CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
   fi
   CHANNEL_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
@@ -471,7 +487,7 @@ CAP_GUARD_SCRIPT="${BATS_TEST_DIRNAME}/../hooks/dispatch-capability-guard.sh"
 # --- Payload Builder (dispatch-capability-guard) ---
 
 # mk_cap_payload SUBAGENT_TYPE_MODE PROMPT [MODEL_MODE]
-# SUBAGENT_TYPE_MODE: omit | any other string (used verbatim as subagent_type value)
+# SUBAGENT_TYPE_MODE: omit | null | any other string (used verbatim as subagent_type value)
 # PROMPT: prompt text. Pass "" for an explicit empty string (field present but
 #         blank); use PROMPT_MODE=omit (4th positional, see below) to omit the
 #         field entirely instead.
@@ -481,9 +497,11 @@ CAP_GUARD_SCRIPT="${BATS_TEST_DIRNAME}/../hooks/dispatch-capability-guard.sh"
 mk_cap_payload() {
   local type_mode="$1" prompt="$2" model_mode="${3:-omit}" prompt_field_mode="${4:-present}"
   local ti='{}'
-  if [[ "$type_mode" != "omit" ]]; then
-    ti=$(jq -cn --argjson base "$ti" --arg v "$type_mode" '$base + {subagent_type:$v}')
-  fi
+  case "$type_mode" in
+    omit) ;;
+    null) ti=$(jq -cn --argjson base "$ti" '$base + {subagent_type:null}') ;;
+    *) ti=$(jq -cn --argjson base "$ti" --arg v "$type_mode" '$base + {subagent_type:$v}') ;;
+  esac
   if [[ "$prompt_field_mode" != "omit" ]]; then
     ti=$(jq -cn --argjson base "$ti" --arg v "$prompt" '$base + {prompt:$v}')
   fi
@@ -510,16 +528,38 @@ run_cap_guard() {
   CAP_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   # 夹具必须隔离调用者环境：若跑测试的 shell 里设了
   # ALLOW_DISPATCH_CAPABILITY_MISMATCH=1 (本 hook 的逃生舱),门禁会全局失效,
   # 导致每个 BLOCK 用例假通过。-u 排在显式 override 之前,用例仍能主动传该
   # 变量做正向测试（见 GATE-BYPASS 用例）。
   if [[ "${2:-}" != "" ]]; then
-    CAP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH "${@:2}" bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
+    CAP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT "${@:2}" bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
   else
-    CAP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
+    CAP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
+  fi
+  CAP_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# run_cap_guard_script SCRIPT PAYLOAD [env_overrides...]
+# Like run_cap_guard, but executes a copied guard for dependency/mutation
+# probes without changing the production script.
+run_cap_guard_script() {
+  local script="$1" payload="$2"
+  shift 2
+  CAP_STDOUT=""
+  CAP_STDERR=""
+  CAP_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
+
+  if [[ "${1:-}" != "" ]]; then
+    CAP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT "$@" bash "$script" 2>"$stderr_file") || CAP_EXIT=$?
+  else
+    CAP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT bash "$script" 2>"$stderr_file") || CAP_EXIT=$?
   fi
   CAP_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
@@ -536,12 +576,12 @@ run_cap_guard_stdin() {
   CAP_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   if [[ "${2:-}" != "" ]]; then
-    CAP_STDOUT=$(printf '%s' "$raw" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH "${@:2}" bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
+    CAP_STDOUT=$(printf '%s' "$raw" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT "${@:2}" bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
   else
-    CAP_STDOUT=$(printf '%s' "$raw" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
+    CAP_STDOUT=$(printf '%s' "$raw" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
   fi
   CAP_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
@@ -581,7 +621,7 @@ run_cap_guard_no_jq() {
   CAP_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   CAP_STDOUT=$(printf '%s' "$payload" | env -i PATH="$no_jq_dir" bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
   CAP_STDERR=$(cat "$stderr_file")
@@ -642,7 +682,7 @@ PLUGIN_ROOT_DIR="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
 # enforces it) is only invoked once per payload.
 #
 # This is the mechanism that keeps the composition test honest as the plugin
-# grows: a third PreToolUse guard added to hooks.json tomorrow is picked up
+# grows: an additional PreToolUse guard added to hooks.json tomorrow is picked up
 # here automatically, with no edit to this file or to gate-composition.bats
 # required. A hardcoded GATE_SCRIPTS=(a.sh b.sh) list would not have that
 # property — it is exactly the shape of drift that let the channel-guard
@@ -684,7 +724,7 @@ discover_agent_gates() {
 }
 
 # discover_task_gates — matcher "Task". Sets GATE_SCRIPTS. hooks.json
-# mirrors the same three PreToolUse guards under both the "Agent" and
+# mirrors the same four PreToolUse guards under both the "Agent" and
 # "Task" matchers (Lead/PM dispatch via the Task tool as well as Agent), so
 # any composition assertion built only from discover_agent_gates would stay
 # green even if someone stripped a guard from the "Task" side only — the
@@ -706,7 +746,7 @@ discover_task_gates() {
 #
 # RIB_MODE:      omit | false | true
 # NAME_MODE:     omit | <literal string>   (tool_input.name)
-# SUBTYPE_MODE:  omit | <literal string>   (tool_input.subagent_type)
+# SUBTYPE_MODE:  omit | __NULL__ | <literal string>   (tool_input.subagent_type)
 # CWD_MODE:      omit | <literal path>     (top-level .cwd)
 # PROMPT_MODE:   omit | <literal string>   (tool_input.prompt, default omit)
 # DESC_MODE:     omit | <literal string>   (tool_input.description, default omit)
@@ -727,9 +767,11 @@ mk_composed_payload() {
   if [[ "$name" != "omit" ]]; then
     ti=$(jq -cn --argjson b "$ti" --arg n "$name" '$b + {name:$n}')
   fi
-  if [[ "$subtype" != "omit" ]]; then
-    ti=$(jq -cn --argjson b "$ti" --arg s "$subtype" '$b + {subagent_type:$s}')
-  fi
+  case "$subtype" in
+    omit) ;;
+    __NULL__) ti=$(jq -cn --argjson b "$ti" '$b + {subagent_type:null}') ;;
+    *) ti=$(jq -cn --argjson b "$ti" --arg s "$subtype" '$b + {subagent_type:$s}') ;;
+  esac
   if [[ "$prompt" != "omit" ]]; then
     ti=$(jq -cn --argjson b "$ti" --arg p "$prompt" '$b + {prompt:$p}')
   fi
@@ -752,10 +794,11 @@ mk_composed_payload() {
 #
 # Same escape-hatch/fail-open isolation discipline as the sibling
 # run_*_guard helpers above: a BLOCK case here must not silently PASS
-# because the invoking shell happens to carry one of these five vars for an
+# because the invoking shell happens to carry one of these six vars for an
 # unrelated reason. This runner is shared across every gate discovered by
 # discover_agent_gates/discover_task_gates (dispatch-sync-guard.sh,
-# dispatch-capability-guard.sh, pre-dispatch-channel-guard.sh) — it must
+# dispatch-agent-ownership-guard.sh, dispatch-capability-guard.sh,
+# pre-dispatch-channel-guard.sh) — it must
 # clear the union of all their escape hatches, not just the ones the gate
 # under test in a given call happens to read, since a caller composing a
 # payload for one gate may still route it through this same helper for
@@ -765,12 +808,103 @@ run_one_gate() {
   shift 2
   ONE_GATE_EXIT=0
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
   if [[ "${1:-}" != "" ]]; then
-    printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH "$@" bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
+    printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT "$@" bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
   else
-    printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
+    printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
   fi
   ONE_GATE_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
+}
+
+# ============================================================
+# Additions below support dispatch-agent-ownership-guard.bats.
+# ============================================================
+
+OWNERSHIP_GUARD_SCRIPT="${BATS_TEST_DIRNAME}/../hooks/dispatch-agent-ownership-guard.sh"
+
+# mk_ownership_payload TOOL_NAME TYPE_MODE MODEL_MODE [MODEL_VALUE]
+# TYPE_MODE: omit | null | any literal type. MODEL_MODE: omit | null | string.
+mk_ownership_payload() {
+  local tool="$1" type_mode="$2" model_mode="$3" model_value="${4:-}"
+  local ti='{}'
+
+  case "$type_mode" in
+    omit) ;;
+    null) ti=$(jq -cn --argjson base "$ti" '$base + {subagent_type:null}') ;;
+    *) ti=$(jq -cn --argjson base "$ti" --arg value "$type_mode" '$base + {subagent_type:$value}') ;;
+  esac
+  case "$model_mode" in
+    null) ti=$(jq -cn --argjson base "$ti" '$base + {model:null}') ;;
+    string) ti=$(jq -cn --argjson base "$ti" --arg value "$model_value" '$base + {model:$value}') ;;
+    omit) ;;
+    *) return 2 ;;
+  esac
+  jq -cn --arg tool "$tool" --argjson ti "$ti" '{tool_name:$tool, tool_input:$ti}'
+}
+
+# run_ownership_guard PAYLOAD [env_overrides...]
+# Sets: OWNERSHIP_STDOUT, OWNERSHIP_STDERR, OWNERSHIP_EXIT. The runner clears
+# the ownership hatch before applying a test's explicit override.
+run_ownership_guard() {
+  run_ownership_script "$OWNERSHIP_GUARD_SCRIPT" "$@"
+}
+
+# run_ownership_script SCRIPT PAYLOAD [env_overrides...]
+# Like run_ownership_guard, but accepts a temp-copy script for mutation tests.
+run_ownership_script() {
+  local script="$1" payload="$2"
+  shift 2
+  OWNERSHIP_STDOUT=""
+  OWNERSHIP_STDERR=""
+  OWNERSHIP_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
+  if [[ "${1:-}" != "" ]]; then
+    OWNERSHIP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_AGENT_MODEL_INHERIT "$@" bash "$script" 2>"$stderr_file") || OWNERSHIP_EXIT=$?
+  else
+    OWNERSHIP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_AGENT_MODEL_INHERIT bash "$script" 2>"$stderr_file") || OWNERSHIP_EXIT=$?
+  fi
+  OWNERSHIP_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+run_ownership_guard_no_jq() {
+  local payload="$1" no_jq_dir
+  no_jq_dir=$(mk_no_jq_path)
+  OWNERSHIP_STDOUT=""
+  OWNERSHIP_STDERR=""
+  OWNERSHIP_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
+  OWNERSHIP_STDOUT=$(printf '%s' "$payload" | env -i PATH="$no_jq_dir" bash "$OWNERSHIP_GUARD_SCRIPT" 2>"$stderr_file") || OWNERSHIP_EXIT=$?
+  OWNERSHIP_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+assert_ownership_pass() {
+  [ "$OWNERSHIP_EXIT" -eq 0 ] || {
+    echo "Expected exit 0, got $OWNERSHIP_EXIT"
+    echo "stderr: $OWNERSHIP_STDERR"
+    return 1
+  }
+  [[ "$OWNERSHIP_STDERR" != *"[dispatch-agent-ownership-guard]"* ]] || {
+    echo "Expected no ownership BLOCK marker, got: $OWNERSHIP_STDERR"
+    return 1
+  }
+}
+
+assert_ownership_block() {
+  [ "$OWNERSHIP_EXIT" -eq 2 ] || {
+    echo "Expected exit 2, got $OWNERSHIP_EXIT"
+    echo "stderr: $OWNERSHIP_STDERR"
+    return 1
+  }
+  [[ "$OWNERSHIP_STDERR" == *"[dispatch-agent-ownership-guard]"* ]] || {
+    echo "Expected ownership BLOCK marker, got: $OWNERSHIP_STDERR"
+    return 1
+  }
 }

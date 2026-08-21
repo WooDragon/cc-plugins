@@ -155,6 +155,44 @@ teardown() {
   assert_cap_pass
 }
 
+@test "cap #15d: missing or null subagent_type defaults to general-purpose, so explicit haiku write dispatch blocks C for Agent and Task" {
+  local tool type_mode payload
+  for tool in Agent Task; do
+    for type_mode in omit null; do
+      payload=$(mk_cap_payload "$type_mode" "修复 main.py" "haiku")
+      payload=$(jq -c --arg tool "$tool" '. + {tool_name:$tool}' <<<"$payload")
+      if [[ "$type_mode" == "omit" ]]; then
+        [[ "$(jq -e '.tool_input | has("subagent_type") | not' <<<"$payload")" == "true" ]]
+      else
+        [[ "$(jq -r '.tool_input.subagent_type' <<<"$payload")" == "null" ]]
+      fi
+      run_cap_guard "$payload"
+      assert_cap_block "C"
+    done
+  done
+}
+
+@test "cap #15a: dev-econ + write prompt + model=haiku -> PASS (registered agents are outside judgment C)" {
+  local payload
+  payload=$(mk_cap_payload "dev-econ" "修复 main.py" "haiku")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
+@test "cap #15b: dev-econ + write prompt + model=sonnet -> PASS (registered agents are outside judgment C)" {
+  local payload
+  payload=$(mk_cap_payload "dev-econ" "修复 main.py" "sonnet")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
+@test "cap #15c: dev-econ + write prompt + model absent -> PASS (registered agents are outside judgment C)" {
+  local payload
+  payload=$(mk_cap_payload "dev-econ" "修复 main.py" "omit")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
 # ============================================================
 # WRITE anchoring: syntactic shape, not bare keyword
 # ============================================================
@@ -319,7 +357,7 @@ teardown() {
 # Malformed input fail-open
 # ============================================================
 
-@test "cap #30a: empty stdin -> exit 0 with [GATE-DEGRADE] (Major finding #3: empty stdin is a degrade path, not a silent no-signal pass — not assert_cap_pass, same reasoning as #30b)" {
+@test "cap #30a: empty stdin -> exit 0 with [GATE-DEGRADE] (empty stdin is a degrade path, not a silent no-signal pass)" {
   run_cap_guard_stdin ""
   [ "$CAP_EXIT" -eq 0 ] || {
     echo "Expected exit 0, got $CAP_EXIT"
@@ -410,7 +448,7 @@ teardown() {
 }
 
 # ============================================================
-# Regression: 4 defects fixed post-AI-review
+# Regression: four fixed dispatch-capability defects
 # (WRITE_HIT_A dead-end close, EXEC exec-intent anchor, GATE-DEGRADE for
 # empty stdin / missing jq, WRITE_OBJ bug|issue|error). See preamble in
 # hooks/dispatch-capability-guard.sh ("A's exemption" block comment) for
@@ -572,6 +610,103 @@ teardown() {
   }
   [[ "$CAP_STDERR" == *"jq unavailable"* ]] || {
     echo "Expected 'jq unavailable' in stderr, got: $CAP_STDERR"
+    return 1
+  }
+}
+
+@test "cap #46: copied hook without agent-kind.sh fails open through shared loader" {
+  local copied_guard payload
+  copied_guard="$TEST_TEMP_DIR/dependency-missing/dispatch-capability-guard.sh"
+  mkdir -p "${copied_guard%/*}/lib"
+  cp "$CAP_GUARD_SCRIPT" "$copied_guard"
+  cp "${CAP_GUARD_SCRIPT%/*}/lib/gate.sh" "${copied_guard%/*}/lib/gate.sh"
+
+  payload=$(mk_cap_payload "explore" "修复 main.py" "omit")
+  run_cap_guard_script "$copied_guard" "$payload"
+  [ "$CAP_EXIT" -eq 0 ] || {
+    echo "Expected dependency-missing copied hook to fail open, got $CAP_EXIT: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"[GATE-DEGRADE] dispatch-capability-guard: agent-kind.sh unavailable"* ]] || {
+    echo "Expected agent-kind dependency degrade, got: $CAP_STDERR"
+    return 1
+  }
+}
+
+@test "cap #47: copied hook with incomplete agent-kind.sh fails open through shared loader" {
+  local copied_guard payload
+  copied_guard="$TEST_TEMP_DIR/dependency-incomplete/dispatch-capability-guard.sh"
+  mkdir -p "${copied_guard%/*}/lib"
+  cp "$CAP_GUARD_SCRIPT" "$copied_guard"
+  cp "${CAP_GUARD_SCRIPT%/*}/lib/gate.sh" "${copied_guard%/*}/lib/gate.sh"
+  printf '%s\n' 'normalize_agent_type() { :; }' > "${copied_guard%/*}/lib/agent-kind.sh"
+
+  payload=$(mk_cap_payload "explore" "修复 main.py" "omit")
+  run_cap_guard_script "$copied_guard" "$payload"
+  [ "$CAP_EXIT" -eq 0 ] || {
+    echo "Expected incomplete dependency copied hook to fail open, got $CAP_EXIT: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"[GATE-DEGRADE] dispatch-capability-guard: agent-kind.sh lacks required helpers"* ]] || {
+    echo "Expected missing-helper dependency degrade, got: $CAP_STDERR"
+    return 1
+  }
+}
+
+@test "cap #48: dependency failure drains more than 64KB of ordinary ASCII stdin before fail-open" {
+  local copied_guard input_file fifo marker stderr_file input_lines input_bytes producer_status guard_status
+  copied_guard="$TEST_TEMP_DIR/dependency-drain/dispatch-capability-guard.sh"
+  mkdir -p "${copied_guard%/*}/lib"
+  cp "$CAP_GUARD_SCRIPT" "$copied_guard"
+  cp "${CAP_GUARD_SCRIPT%/*}/lib/gate.sh" "${copied_guard%/*}/lib/gate.sh"
+
+  input_file="$TEST_TEMP_DIR/large-input.json"
+  local padding
+  padding=$(awk 'BEGIN { for (i = 1; i <= 3000; i++) printf "padding-%04d-abcdefghijklmnopqrstuvwxyz-0123456789-ordinary-ascii-line\n", i }')
+  input_lines=$(printf '%s\n' "$padding" | wc -l | tr -d ' ')
+  input_bytes=$(printf '%s' "$padding" | wc -c | tr -d ' ')
+  [ "$input_lines" -ge 2000 ] || { echo "large stdin fixture has only $input_lines lines"; return 1; }
+  [ "$input_bytes" -gt 65536 ] || { echo "large stdin fixture has only $input_bytes bytes"; return 1; }
+  jq -cn --arg prompt "$padding" '{tool_name:"Agent",tool_input:{subagent_type:"explore",prompt:$prompt}}' > "$input_file"
+
+  fifo="$TEST_TEMP_DIR/input.fifo"
+  marker="$TEST_TEMP_DIR/producer-finished"
+  stderr_file="$TEST_TEMP_DIR/stderr"
+  mkfifo "$fifo"
+  ( cat "$input_file" > "$fifo" && : > "$marker" ) &
+  local producer_pid=$!
+  env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT bash "$copied_guard" < "$fifo" >/dev/null 2>"$stderr_file"
+  guard_status=$?
+  wait "$producer_pid"
+  producer_status=$?
+  CAP_STDERR=$(cat "$stderr_file")
+  CAP_EXIT=$guard_status
+
+  [ "$guard_status" -eq 0 ] || { echo "Expected dependency failure to fail open, got $guard_status: $CAP_STDERR"; return 1; }
+  [ "$producer_status" -eq 0 ] || { echo "Producer hit a closed stdin before drain, got $producer_status"; return 1; }
+  [ -f "$marker" ] || { echo "Producer did not finish after writing the full fixture"; return 1; }
+  [[ "$CAP_STDERR" == *"[GATE-DEGRADE] dispatch-capability-guard: agent-kind.sh unavailable"* ]]
+}
+
+@test "cap #49: A and B rejection exits provide complete executable dispatch fields" {
+  local payload
+  payload=$(mk_cap_payload "general-purpose" "只读调研，查看代码逻辑" "sonnet")
+  run_cap_guard "$payload"
+  assert_cap_block "A"
+  [[ "$CAP_STDERR" == *'Agent(subagent_type="Explore", model="sonnet", ...)'* ]] || {
+    echo "Expected complete Explore re-dispatch fields, got: $CAP_STDERR"
+    return 1
+  }
+
+  payload=$(mk_cap_payload "explore" "修复 main.py" "omit")
+  run_cap_guard "$payload"
+  assert_cap_block "B"
+  [[ "$CAP_STDERR" == *'Agent(subagent_type="general-purpose", model="sonnet", ...)'* ]] || {
+    echo "Expected complete general-purpose re-dispatch fields, got: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *'Agent(subagent_type="dev", ...)'* && "$CAP_STDERR" == *"省略 model"* ]] || {
+    echo "Expected registered-agent model ownership guidance, got: $CAP_STDERR"
     return 1
   }
 }

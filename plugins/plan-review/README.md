@@ -50,11 +50,11 @@ scripts/
                                truth on version identifiers, Review Discipline, Finding Quality
                                Gate, Severity Definitions, Verdict Rules, Output Format). Does not
                                assume the artifact under review is a plan.
-    review-plan.md            Plan-specific layer (framing, Scope Boundary, the 9 Review
+    review-plan.md            Plan-specific layer (framing, Scope Boundary, the 8 Review
                                Criteria, output length cap). Concatenated ahead of
                                review-common.md when plan-review.sh assembles the hook's system
                                prompt — this is the only consumer that concatenates the two.
-  dispatch-check.sh           Layer 2 hook — Agent/Task dispatch-parameter enforcement
+  dispatch-check.sh           Layer 2 hook — Manifest v2 Agent/Task signature-set enforcement
   precompact-review.sh        PreCompact hook — plan recovery across compaction
 ```
 
@@ -123,7 +123,27 @@ is written, separate from `plan-review.log`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DISPATCH_CHECK_DISABLED` | `0` | Set `1` to disable the Layer 2 dispatch-parameter check (kill switch) |
+| `DISPATCH_CHECK_DISABLED` | `0` | Set `1` to disable the Layer 2 Manifest v2 signature check (kill switch) |
+
+### Dispatch Manifest v2
+
+A plan with dispatch keywords must include a Dispatch Manifest with at least one
+`agent` row. A plan without dispatch keywords, including Tier0 work, remains
+Manifest-free. `plan-review.sh` stores only the approved v2 signature set. The
+fixed columns are `step | location | subagent_type | model_source | model |
+depends_on | parallel_with`.
+
+- `main` rows use `-` for `subagent_type`, `model_source`, and `model`.
+- `agent` + `preset` rows require `subagent_type` and require the tool call to
+  omit `model`.
+- `agent` + `runtime` rows require both `subagent_type` and `model`; the hook
+  matches both values exactly.
+
+The hook permits repeated matching calls. It does not implement a step cursor,
+call count, execution order, or global model ownership policy. State with no
+schema marker is treated as temporary Manifest v1 compatibility state: the hook
+emits a migration prompt and skips enforcement. Corrupt, stale, or invalid state
+fails open.
 
 ## Consultation Flow
 
@@ -141,13 +161,13 @@ on that second call permits execution.
 
 ## Review Criteria
 
-Nine criteria — authoritative text is split across two files (see [Architecture](#architecture)):
+Eight criteria — authoritative text is split across two files (see [Architecture](#architecture)):
 
 - `scripts/assets/review-common.md` — the generic layer: version-identifier ground truth, Review
   Discipline, Finding Quality Gate, Severity Definitions, Verdict Rules, Output Format. Shared by
   every caller of the engine infrastructure, including `second-opinion.sh`; it never assumes the
   reviewed artifact is a plan.
-- `scripts/assets/review-plan.md` — the plan-specific layer: framing, Scope Boundary, the 9
+- `scripts/assets/review-plan.md` — the plan-specific layer: framing, Scope Boundary, the 8
   criteria below, and the output length cap. Only `plan-review.sh` uses this file, concatenating
   it ahead of `review-common.md` when assembling the hook's system prompt.
 
@@ -159,9 +179,8 @@ Nine criteria — authoritative text is split across two files (see [Architectur
 | 4 | **Safety** | Security risks, data loss, backwards-compatibility breaks? |
 | 5 | **Testability** | Test strategy presence; test pyramid completeness; e2e selector cascade (evidence-gated); deletion completeness for exported symbols |
 | 6 | **Architecture fit** | Consistent with project patterns? |
-| 7 | **Execution topology** | Each step annotated with execution location and scheduling order? |
+| 7 | **Dispatch Economy** | Main decision work, preset registered agents, runtime built-ins, and mechanical work delegation rules |
 | 8 | **Reuse over reinvention** | Using existing dependencies before building custom? |
-| 9 | **Dispatch Manifest** | Agent/Task steps declare `agent_type`, `model`, `depends_on`, `parallel_with`? |
 
 Criterion #5 (Testability) is evidence-gated: e2e selector audits only trigger if the plan or project context reveals e2e coverage (Playwright, Cypress, `*.spec.ts`, `e2e/` directory).
 

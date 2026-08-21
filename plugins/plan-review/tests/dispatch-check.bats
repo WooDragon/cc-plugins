@@ -1,15 +1,13 @@
 #!/usr/bin/env bats
-# BDD test suite for dispatch-check.sh (Layer 2 dispatch enforcement hook).
+# BDD tests for Manifest v2 signature-set enforcement in dispatch-check.sh.
 #
-# Verifies: fail-open on all anomaly paths, correct deny on missing params,
-# stale file cleanup, kill switch, task/agent naming compatibility.
-#
-# Dependencies: bats-core, jq
+# Given an approved v2 dispatch state, Agent and Task calls must match a
+# declared preset/runtime signature. Malformed, stale, and v1 state stays
+# fail-open so an unavailable guard cannot block userspace.
 
 setup() {
   load 'test_helper/common-setup'
   common_setup
-  # Minimal defaults for dispatch-check (unset plan-review-specific overrides)
   unset DISPATCH_CHECK_DISABLED
 }
 
@@ -17,15 +15,203 @@ teardown() {
   common_teardown
 }
 
-# Valid dispatch JSON for use across tests
-VALID_DISPATCH='{"plan_hash":"abc123","created_at":1700000000,"requires_dispatch_check":true,"steps":[{"id":"1","agent_type":null,"model":null},{"id":"2","agent_type":"worker","model":"sonnet"}]}'
+VALID_V2_DISPATCH='{
+  "schema_version": 2,
+  "plan_hash": "abc123",
+  "created_at": 1700000000,
+  "requires_dispatch_check": true,
+  "steps": [
+    {"id":"1","location":"main","subagent_type":null,"model_source":null,"model":null,"depends_on":null,"parallel_with":null},
+    {"id":"2","location":"agent","subagent_type":"dev-econ","model_source":"preset","model":null,"depends_on":"1","parallel_with":null},
+    {"id":"3","location":"agent","subagent_type":"Explore","model_source":"runtime","model":"haiku","depends_on":"1","parallel_with":null}
+  ],
+  "allowed_signatures": [
+    {"subagent_type":"dev-econ","model_source":"preset"},
+    {"subagent_type":"Explore","model_source":"runtime","model":"haiku"}
+  ]
+}'
 
 # =============================================================================
-# Fail-Open: No Dispatch File
+# Manifest v2: declared signature acceptance
 # =============================================================================
 
-# 1. 无 dispatch 文件 + Agent 调用 → allow (exit 0, no JSON output)
-@test "dispatch: no dispatch file + Agent call → allow (fail-open)" {
+@test "dispatch v2: preset signature accepts matching type with model omitted" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input subagent_type=dev-econ)
+  run_dispatch_check
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+@test "dispatch v2: runtime signature accepts exact type and model" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input subagent_type=Explore model=haiku)
+  run_dispatch_check
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+@test "dispatch v2: repeated matching signature remains allowed" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input subagent_type=Explore model=haiku)
+
+  run_dispatch_check
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+
+  run_dispatch_check
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+# =============================================================================
+# Manifest v2: undeclared or malformed calls deny
+# =============================================================================
+
+@test "dispatch v2: preset call with explicit model denies" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input subagent_type=dev-econ model=haiku)
+  run_dispatch_check
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"omit model"* ]]
+}
+
+@test "dispatch v2: preset call with wrong type denies" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input subagent_type=worker-econ)
+  run_dispatch_check
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"signature"* ]]
+}
+
+@test "dispatch v2: runtime call with wrong model denies" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input subagent_type=Explore model=sonnet)
+  run_dispatch_check
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"signature"* ]]
+}
+
+@test "dispatch v2: runtime call with wrong type denies" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input subagent_type=dev model=haiku)
+  run_dispatch_check
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"signature"* ]]
+}
+
+@test "dispatch v2: runtime call missing model denies" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input subagent_type=Explore)
+  run_dispatch_check
+
+  assert_deny_json
+  [[ "$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')" == *"signature"* ]]
+}
+
+# =============================================================================
+# Agent / Task compatibility
+# =============================================================================
+
+@test "dispatch v2: Task accepts the same preset signature as Agent" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input tool_name=Task subagent_type=dev-econ)
+  run_dispatch_check
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+@test "dispatch v2: Task rejects the same wrong runtime model as Agent" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input tool_name=Task subagent_type=Explore model=sonnet)
+  run_dispatch_check
+
+  assert_deny_json
+}
+
+# =============================================================================
+# Fail-open paths and legacy migration
+# =============================================================================
+
+@test "dispatch: no dispatch file allows silently" {
+  INPUT=$(build_agent_input subagent_type=Explore model=haiku)
+  run_dispatch_check
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+@test "dispatch: jq missing allows silently" {
+  INPUT=$(build_agent_input subagent_type=Explore model=sonnet)
+  local restricted_bin="${TEST_TEMP_DIR}/restricted-bin"
+  mkdir -p "$restricted_bin"
+  local command_name command_path
+  for command_name in bash cat mktemp rm; do
+    command_path=$(command -v "$command_name")
+    ln -s "$command_path" "${restricted_bin}/${command_name}"
+  done
+  local original_path="$PATH"
+  export PATH="$restricted_bin"
+  run_dispatch_check
+  export PATH="$original_path"
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+@test "dispatch: missing session_id allows silently" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input session_id= subagent_type=Explore model=sonnet)
+  run_dispatch_check
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+@test "dispatch: requires_dispatch_check false allows silently" {
+  local disabled_state
+  disabled_state=$(printf '%s' "$VALID_V2_DISPATCH" | jq '.requires_dispatch_check = false')
+  create_dispatch_file "test-session" "$disabled_state"
+  INPUT=$(build_agent_input subagent_type=Explore model=sonnet)
+  run_dispatch_check
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+}
+
+@test "dispatch v1: state without schema_version emits only a migration systemMessage" {
+  create_dispatch_file "test-session" '{"plan_hash":"old","requires_dispatch_check":true,"steps":[]}'
+  INPUT=$(build_agent_input subagent_type=wrong model=wrong)
+  run_dispatch_check
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  echo "$HOOK_STDOUT" | jq -e 'keys == ["systemMessage"] and (.systemMessage | contains("Manifest v1")) and (.systemMessage | contains("schema_version: 2"))' >/dev/null
+  ! echo "$HOOK_STDOUT" | jq -e 'has("hookSpecificOutput") or has("permissionDecision")' >/dev/null
+}
+
+@test "dispatch v2: empty allowed_signatures denies without a deceptive declared list" {
+  local main_only_state
+  main_only_state=$(printf '%s' "$VALID_V2_DISPATCH" | jq '.steps = [.steps[0]] | .allowed_signatures = []')
+  create_dispatch_file "test-session" "$main_only_state"
+  INPUT=$(build_agent_input subagent_type=Explore model=haiku)
+  run_dispatch_check
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"contains no agent signatures"* ]]
+  [[ "$reason" != *"Declared signatures:"* ]]
+}
+
+@test "dispatch: corrupt state allows silently" {
+  create_dispatch_file "test-session" 'not-valid-json{{{{'
   INPUT=$(build_agent_input)
   run_dispatch_check
 
@@ -33,71 +219,49 @@ VALID_DISPATCH='{"plan_hash":"abc123","created_at":1700000000,"requires_dispatch
   [ -z "$HOOK_STDOUT" ]
 }
 
-# 2. dispatch 文件存在 + 完整 Agent 参数 → allow (silent exit 0)
-@test "dispatch: dispatch file + complete Agent params → allow" {
-  create_dispatch_file "test-session" "$VALID_DISPATCH"
-  INPUT=$(build_agent_input model=sonnet subagent_type=worker)
+@test "dispatch: structurally invalid v2 state allows silently" {
+  create_dispatch_file "test-session" '{"schema_version":2,"requires_dispatch_check":true,"steps":[],"allowed_signatures":[{"subagent_type":"Explore","model_source":"runtime"}]}'
+  INPUT=$(build_agent_input subagent_type=Explore)
   run_dispatch_check
 
   [ "$HOOK_EXIT" -eq 0 ]
   [ -z "$HOOK_STDOUT" ]
 }
 
-# =============================================================================
-# Deny: Missing Params
-# =============================================================================
 
-# 3. dispatch 文件存在 + 缺 model → deny + 提示含 manifest 预览
-@test "dispatch: dispatch file + missing model → deny with manifest preview" {
-  create_dispatch_file "test-session" "$VALID_DISPATCH"
-  INPUT=$(build_agent_input subagent_type=worker)
-  run_dispatch_check
-
-  assert_deny_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"model"* ]]
-  [[ "$reason" == *"Manifest"* ]]
-}
-
-# 4. dispatch 文件存在 + 缺 subagent_type → deny
-@test "dispatch: dispatch file + missing subagent_type → deny" {
-  create_dispatch_file "test-session" "$VALID_DISPATCH"
-  INPUT=$(build_agent_input model=sonnet)
-  run_dispatch_check
-
-  assert_deny_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"subagent_type"* ]]
-}
-
-# 5. dispatch 文件存在 + 两者都缺 → deny，提示两者
-@test "dispatch: dispatch file + missing both → deny with both listed" {
-  create_dispatch_file "test-session" "$VALID_DISPATCH"
+@test "dispatch: state with signatures not derived from steps allows silently" {
+  local mismatched_state
+  mismatched_state=$(printf '%s' "$VALID_V2_DISPATCH" | jq '.allowed_signatures = [{"subagent_type":"worker","model_source":"runtime","model":"sonnet"}]')
+  create_dispatch_file "test-session" "$mismatched_state"
   INPUT=$(build_agent_input)
   run_dispatch_check
 
-  assert_deny_json
-  local reason
-  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
-  [[ "$reason" == *"subagent_type"* ]]
-  [[ "$reason" == *"model"* ]]
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
 }
 
-# =============================================================================
-# Fail-Open: Stale File
-# =============================================================================
+@test "dispatch: its own stale cleanup removes published and temporary state only" {
+  local stale_dispatch="${REVIEW_COUNTER_DIR}/.dispatch-abandoned.json"
+  local stale_temp="${REVIEW_COUNTER_DIR}/.dispatch-abandoned.json.temporary"
+  local retained_review="${REVIEW_COUNTER_DIR}/.review-count-abandoned"
+  printf '%s' '{}' > "$stale_dispatch"
+  printf '%s' '{}' > "$stale_temp"
+  printf '%s' '1:1' > "$retained_review"
+  touch -t 200001010000 "$stale_dispatch" "$stale_temp" "$retained_review"
+  INPUT=$(build_agent_input)
+  run_dispatch_check
 
-# 6. dispatch 文件 mtime > 30min → allow + 文件自动删除
-@test "dispatch: stale dispatch file (>30min) → allow + file deleted" {
-  create_dispatch_file "test-session" "$VALID_DISPATCH"
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+  [ ! -e "$stale_dispatch" ]
+  [ ! -e "$stale_temp" ]
+  [ -e "$retained_review" ]
+}
+
+@test "dispatch: stale current-session state allows silently and removes file" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
   local dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
-  # Backdate by 35 minutes
-  touch -t "$(date -v -35M +%Y%m%d%H%M 2>/dev/null || date -d '35 minutes ago' +%Y%m%d%H%M 2>/dev/null || date +%Y%m%d%H%M)" \
-    "$dispatch_file" 2>/dev/null || \
-    python3 -c "import os,time; os.utime('$dispatch_file', (time.time()-2100, time.time()-2100))" 2>/dev/null || true
-
+  touch -t 200001010000 "$dispatch_file"
   INPUT=$(build_agent_input)
   run_dispatch_check
 
@@ -106,75 +270,18 @@ VALID_DISPATCH='{"plan_hash":"abc123","created_at":1700000000,"requires_dispatch
   [ ! -f "$dispatch_file" ]
 }
 
-# =============================================================================
-# Fail-Open: Corrupt / Missing Fields
-# =============================================================================
-
-# 7. dispatch JSON 损坏 → allow + 无副作用
-@test "dispatch: corrupt dispatch JSON → allow (fail-open)" {
-  create_dispatch_file "test-session" "not-valid-json{{{{"
-  INPUT=$(build_agent_input)
-  run_dispatch_check
-
-  [ "$HOOK_EXIT" -eq 0 ]
-  [ -z "$HOOK_STDOUT" ]
-}
-
-# 8. requires_dispatch_check=false → allow
-@test "dispatch: requires_dispatch_check=false → allow" {
-  create_dispatch_file "test-session" \
-    '{"plan_hash":"abc","created_at":1700000000,"requires_dispatch_check":false,"steps":[]}'
-  INPUT=$(build_agent_input)
-  run_dispatch_check
-
-  [ "$HOOK_EXIT" -eq 0 ]
-  [ -z "$HOOK_STDOUT" ]
-}
-
-# =============================================================================
-# Fail-Open: Kill Switches
-# =============================================================================
-
-# 9. DISPATCH_CHECK_DISABLED=1 → allow 即使 dispatch 文件存在 + 参数缺失
-@test "dispatch: DISPATCH_CHECK_DISABLED=1 → allow regardless of dispatch file" {
+@test "dispatch: disabled kill switch allows silently" {
   export DISPATCH_CHECK_DISABLED=1
-  create_dispatch_file "test-session" "$VALID_DISPATCH"
-  INPUT=$(build_agent_input)  # missing both model and subagent_type
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input subagent_type=Explore model=sonnet)
   run_dispatch_check
 
   [ "$HOOK_EXIT" -eq 0 ]
   [ -z "$HOOK_STDOUT" ]
 }
 
-# 10. jq 缺失 → allow (PATH 临时去除 jq 模拟)
-@test "dispatch: jq missing → allow (fail-open)" {
-  create_dispatch_file "test-session" "$VALID_DISPATCH"
-  INPUT=$(build_agent_input)
-
-  local restricted_bin="${TEST_TEMP_DIR}/restricted_bin_dc"
-  mkdir -p "$restricted_bin"
-  for cmd in bash cat grep head tr printf mkdir rm find stat date python3 mktemp; do
-    local cmd_path
-    cmd_path=$(command -v "$cmd" 2>/dev/null) || continue
-    ln -sf "$cmd_path" "${restricted_bin}/${cmd}"
-  done
-
-  local orig_path="$PATH"
-  export PATH="$restricted_bin"
-  run_dispatch_check
-  export PATH="$orig_path"
-
-  [ "$HOOK_EXIT" -eq 0 ]
-  [ -z "$HOOK_STDOUT" ]
-}
-
-# =============================================================================
-# Fail-Open: Wrong Tool / Missing Session
-# =============================================================================
-
-# 11. tool_name != Agent/Task → allow (e.g. Read)
-@test "dispatch: tool_name=Read → allow (not an Agent call)" {
-  create_dispatch_file "test-session" "$VALID_DISPATCH"
+@test "dispatch: non-Agent/Task tool allows silently" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
   INPUT=$(build_agent_input tool_name=Read)
   run_dispatch_check
 
@@ -182,50 +289,42 @@ VALID_DISPATCH='{"plan_hash":"abc123","created_at":1700000000,"requires_dispatch
   [ -z "$HOOK_STDOUT" ]
 }
 
-# 12. session_id 缺失 → allow
-@test "dispatch: missing session_id → allow (fail-open)" {
-  create_dispatch_file "test-session" "$VALID_DISPATCH"
-  INPUT=$(jq -n '{"tool_name":"Agent","tool_input":{}}')  # no session_id
-  run_dispatch_check
 
+# =============================================================================
+# Mutation guard
+# =============================================================================
+
+@test "mutation: runtime model comparator has one executable hit" {
+  create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
+  INPUT=$(build_agent_input subagent_type=Explore model=sonnet)
+
+  # Baseline: an undeclared runtime model is denied by the production script.
+  run_dispatch_check
+  assert_deny_json
+
+  local copy_dir="${TEST_TEMP_DIR}/dispatch-copy"
+  local copy="${copy_dir}/dispatch-check.sh"
+  mkdir -p "${copy_dir}/lib"
+  cp "$DISPATCH_SCRIPT" "$copy"
+  cp "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "${copy_dir}/lib/manifest.sh"
+  local mutation_count
+  mutation_count=$(grep -cF -- '--arg model "$CALL_MODEL"' "$copy")
+  [ "$mutation_count" -eq 1 ] || {
+    echo "expected one runtime-model comparator, found $mutation_count"
+    return 1
+  }
+
+  # Change only the copied comparator. If this mutation stops the deny, the
+  # baseline assertion above is attached to the actual production branch.
+  perl -0pi -e 's/--arg model "\$CALL_MODEL"/--arg model "haiku"/' "$copy"
+  mutated_count=$(grep -cF -- '--arg model "haiku"' "$copy")
+  [ "$mutated_count" -eq 1 ] || {
+    echo "expected one mutated runtime-model comparator, found $mutated_count"
+    return 1
+  }
+
+  DISPATCH_SCRIPT="$copy"
+  run_dispatch_check
   [ "$HOOK_EXIT" -eq 0 ]
   [ -z "$HOOK_STDOUT" ]
-}
-
-# =============================================================================
-# Task Tool Name Compatibility
-# =============================================================================
-
-# 13. tool_name="Task" → 与 Agent 同等处理（双命名兼容）
-@test "dispatch: tool_name=Task → same enforcement as Agent" {
-  create_dispatch_file "test-session" "$VALID_DISPATCH"
-  INPUT=$(build_agent_input tool_name=Task)  # missing model + subagent_type
-  run_dispatch_check
-
-  assert_deny_json
-}
-
-# =============================================================================
-# Opportunistic Global Cleanup
-# =============================================================================
-
-# 14. Opportunistic 全局清理：预置其它 session 的 stale dispatch 文件，本次调用后被删除
-@test "dispatch: opportunistic global cleanup removes other sessions' stale files" {
-  # Plant stale files for other sessions
-  local stale1="${REVIEW_COUNTER_DIR}/.dispatch-old-session-1.json"
-  local stale2="${REVIEW_COUNTER_DIR}/.dispatch-old-session-2.json"
-  printf '%s' "$VALID_DISPATCH" > "$stale1"
-  printf '%s' "$VALID_DISPATCH" > "$stale2"
-  touch -t "$(date -v -35M +%Y%m%d%H%M 2>/dev/null || date -d '35 minutes ago' +%Y%m%d%H%M 2>/dev/null || date +%Y%m%d%H%M)" \
-    "$stale1" "$stale2" 2>/dev/null || \
-    python3 -c "import os,time; [os.utime(f, (time.time()-2100,)*2) for f in ['$stale1','$stale2']]" 2>/dev/null || true
-
-  # Fresh file for current session (no dispatch file for test-session → allow path)
-  INPUT=$(build_agent_input)
-  run_dispatch_check
-
-  [ "$HOOK_EXIT" -eq 0 ]
-  # Stale files for other sessions must be cleaned up
-  [ ! -f "$stale1" ]
-  [ ! -f "$stale2" ]
 }

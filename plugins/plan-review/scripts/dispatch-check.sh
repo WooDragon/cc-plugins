@@ -1,9 +1,11 @@
 #!/bin/bash
-# PreToolUse:Agent/Task hook — Layer 2 dispatch enforcement.
+# PreToolUse:Agent/Task hook — Manifest v2 signature-set enforcement.
 #
-# Reads dispatch JSON written by plan-review.sh APPROVE path; if present,
-# requires Agent tool call to provide both subagent_type and model.
-# Fail-open on ALL anomalies: jq missing, JSON corrupt, session absent, stale file, etc.
+# A valid v2 state written by plan-review.sh declares permitted dispatch
+# signatures. Preset signatures require the model field to be omitted; runtime
+# signatures require exact type/model values. This hook intentionally tracks no
+# step cursor, invocation count, execution order, or global model ownership.
+# Fail open on missing, corrupt, stale, or structurally invalid state.
 #
 # Environment variables:
 #   DISPATCH_CHECK_DISABLED=1  — kill switch, bypass entirely
@@ -12,30 +14,27 @@ set -euo pipefail
 
 INPUT=$(cat)
 
-# Kill switch (highest priority)
 [ "${DISPATCH_CHECK_DISABLED:-0}" != "1" ] || exit 0
-
-# jq required for JSON parsing
 command -v jq >/dev/null 2>&1 || exit 0
+MANIFEST_LIB="$(dirname "$0")/lib/manifest.sh"
+[ -s "$MANIFEST_LIB" ] || exit 0
+if ! . "$MANIFEST_LIB"; then
+  exit 0
+fi
 
-# Extract tool_name and session_id — fail-open on parse errors
 TOOL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null || true)
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || true)
-
-# Only intercept Agent and Task tool calls (belt-and-suspenders with hook matcher)
 [ "$TOOL_NAME" = "Agent" ] || [ "$TOOL_NAME" = "Task" ] || exit 0
 [ -n "$SESSION_ID" ] || exit 0
 
 DISPATCH_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
 DISPATCH_FILE="$DISPATCH_DIR/.dispatch-${SESSION_ID}.json"
-
-# Opportunistic global cleanup: remove stale dispatch files from all sessions
-find "$DISPATCH_DIR" -maxdepth 1 -name '.dispatch-*.json' -mmin +30 -delete 2>/dev/null || true
-
-# No dispatch file → no active plan constraint → allow
+# Layer 2 owns its own stale-state cleanup too: it can run without a fresh
+# plan-review invocation. Match both published files and the writer's
+# `.dispatch-<session>.json.XXXXXX` temporary files.
+find "$DISPATCH_DIR" -maxdepth 1 -name '.dispatch-*.json*' -mmin +30 -delete 2>/dev/null || true
 [ -f "$DISPATCH_FILE" ] || exit 0
 
-# Stale check (>30min) — dispatch from a previous session leaked through
 file_mtime=$(stat -f %m "$DISPATCH_FILE" 2>/dev/null || stat -c %Y "$DISPATCH_FILE" 2>/dev/null || echo 0)
 now=$(date +%s)
 if (( now - file_mtime > 1800 )); then
@@ -43,46 +42,75 @@ if (( now - file_mtime > 1800 )); then
   exit 0
 fi
 
-# JSON sanity check — corrupt dispatch file → fail-open
-jq -e '.requires_dispatch_check == true' "$DISPATCH_FILE" >/dev/null 2>&1 || exit 0
-
-# Check that Agent call has both non-empty model AND subagent_type
-has_model="no"
-has_type="no"
-if printf '%s' "$INPUT" | jq -e \
-    '.tool_input.model and (.tool_input.model | type == "string") and (.tool_input.model | length > 0)' \
-    >/dev/null 2>&1; then
-  has_model="yes"
-fi
-if printf '%s' "$INPUT" | jq -e \
-    '.tool_input.subagent_type and (.tool_input.subagent_type | type == "string") and (.tool_input.subagent_type | length > 0)' \
-    >/dev/null 2>&1; then
-  has_type="yes"
-fi
-
-# Both present → silent allow
-if [ "$has_model" = "yes" ] && [ "$has_type" = "yes" ]; then
+# A state from pre-v2 plan-review has no schema marker. Preserve compatibility
+# for its short TTL but visibly ask the caller to regenerate the approval.
+if jq -e '.requires_dispatch_check == true and (has("schema_version") | not)' "$DISPATCH_FILE" >/dev/null 2>&1; then
+  migration_message="dispatch-check: Manifest v1 state detected. Matching is skipped for this temporary state; re-run plan review to create schema_version: 2 before relying on dispatch enforcement."
+  migration_json=$(printf '%s' "$migration_message" | jq -Rs .)
+  printf '{"systemMessage":%s}\n' "$migration_json"
   exit 0
 fi
 
-# Compose deny with manifest preview
-MANIFEST_PREVIEW=$(jq -r \
-  '.steps | map("  - step " + .id + ": agent_type=" + (.agent_type // "-") + ", model=" + (.model // "-")) | join("\n")' \
-  "$DISPATCH_FILE" 2>/dev/null || echo "  (manifest parse failed)")
+# Only a complete, currently supported state can constrain tool calls. The
+# shared predicate also proves allowed_signatures are derived from steps; it
+# has no catalog scan, frontmatter snapshot, or plugin-list lookup.
+dispatch_state_is_valid_v2 "$DISPATCH_FILE" || exit 0
 
-missing=""
-[ "$has_type" = "yes" ] || missing="${missing}subagent_type "
-[ "$has_model" = "yes" ] || missing="${missing}model"
+CALL_TYPE=$(printf '%s' "$INPUT" | jq -r '.tool_input.subagent_type // ""' 2>/dev/null || true)
+MODEL_PRESENT="no"
+if printf '%s' "$INPUT" | jq -e '.tool_input | has("model")' >/dev/null 2>&1; then
+  MODEL_PRESENT="yes"
+fi
+CALL_MODEL=$(printf '%s' "$INPUT" | jq -r '.tool_input.model // ""' 2>/dev/null || true)
 
-MSG="dispatch-check: Agent 调用必须显式传 subagent_type 和 model（plan 已声明 Dispatch Manifest，承诺被强制执行）。
+# Preset means exact type plus an absent model key, not merely an empty model.
+if [ "$MODEL_PRESENT" = "no" ] && jq -e --arg type "$CALL_TYPE" \
+    'any(.allowed_signatures[]; .model_source == "preset" and .subagent_type == $type)' \
+    "$DISPATCH_FILE" >/dev/null 2>&1; then
+  exit 0
+fi
 
-当前调用缺失：${missing}
+# Runtime means exact type and a nonempty exact model string.
+if [ "$MODEL_PRESENT" = "yes" ] && [ -n "$CALL_MODEL" ] && jq -e \
+    --arg type "$CALL_TYPE" --arg model "$CALL_MODEL" \
+    'any(.allowed_signatures[]; .model_source == "runtime" and .subagent_type == $type and .model == $model)' \
+    "$DISPATCH_FILE" >/dev/null 2>&1; then
+  exit 0
+fi
 
-请查阅 Manifest 取值：
-${MANIFEST_PREVIEW}
+# Explain the common preset error without weakening exact signature matching.
+preset_model_hint=""
+if [ "$MODEL_PRESENT" = "yes" ] && jq -e --arg type "$CALL_TYPE" \
+    'any(.allowed_signatures[]; .model_source == "preset" and .subagent_type == $type)' \
+    "$DISPATCH_FILE" >/dev/null 2>&1; then
+  preset_model_hint=" The declared preset signature requires you to omit model entirely."
+fi
 
-如需关闭强制检查，设置 DISPATCH_CHECK_DISABLED=1。"
+MANIFEST_PREVIEW=$(jq -r '
+  .allowed_signatures |
+  if length == 0 then ""
+  else map(if .model_source == "preset"
+           then "  - preset: subagent_type=" + .subagent_type + ", model omitted"
+           else "  - runtime: subagent_type=" + .subagent_type + ", model=" + .model
+           end) |
+       join("\n")
+  end
+' "$DISPATCH_FILE" 2>/dev/null || echo "  (manifest parse failed)")
 
+if [ -n "$MANIFEST_PREVIEW" ]; then
+  DECLARED_SIGNATURES="
+
+Declared signatures:
+${MANIFEST_PREVIEW}"
+else
+  DECLARED_SIGNATURES="
+
+This approved Manifest contains no agent signatures."
+fi
+
+MSG="dispatch-check: Agent/Task call does not match an approved Manifest v2 signature.${preset_model_hint}${DECLARED_SIGNATURES}
+
+Preset calls must omit model; runtime calls must provide the exact model. To disable this guard, set DISPATCH_CHECK_DISABLED=1."
 DENY_JSON=$(printf '%s' "$MSG" | jq -Rs .)
 cat <<EOF
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${DENY_JSON}}}

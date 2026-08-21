@@ -32,7 +32,7 @@
 #      condition, A fired and told the caller to re-dispatch to Explore — but
 #      Explore's Edit/Write is physically disabled, so the re-dispatch cannot
 #      do what the prompt asks. That is a dead end the gate manufactured,
-#      not a legitimate rejection (see issue's Critical finding #1). Adding
+#      not a legitimate rejection. Adding
 #      !WRITE closes it: a prompt carrying write intent is no longer routed
 #      toward an agent that cannot write, regardless of what RO/NEG also say
 #      in the same prompt.
@@ -107,9 +107,11 @@
 # writing it would misleadingly imply the check does something.
 set -u
 
+. "${BASH_SOURCE[0]%/*}/lib/gate.sh"
+
 INPUT=$(cat)
 
-# Knowing bypass is checked first: an open hatch is the reason this dispatch
+# The bypass check occurs first: an open hatch is the reason this dispatch
 # passes, not evidence the gate is broken, and it must be reported as such
 # regardless of whether any judgment below would otherwise have fired.
 if [[ "${ALLOW_DISPATCH_CAPABILITY_MISMATCH:-}" == "1" ]]; then
@@ -142,11 +144,14 @@ MODEL=$(jq -r '.tool_input.model // empty' <<< "$INPUT" 2>/dev/null) || {
 
 [ -z "$PROMPT" ] && exit 0
 
+AGENT_KIND_LIB="${BASH_SOURCE[0]%/*}/lib/agent-kind.sh"
+gate_require_library dispatch-capability-guard "$AGENT_KIND_LIB" \
+  normalize_agent_type is_runtime_model_agent || exit 0
+
 # subagent_type default differs from prompt/model-style fields: absent means
 # "general-purpose", not "treat as missing" (mirrors
 # pre-dispatch-readonly-guard.sh's same rule, kept for judgment A's parity).
-[ -z "$SUBAGENT_TYPE" ] && SUBAGENT_TYPE="general-purpose"
-TYPE=$(tr '[:upper:]' '[:lower:]' <<< "$SUBAGENT_TYPE")
+TYPE=$(normalize_agent_type "$SUBAGENT_TYPE")
 
 # Fold ASCII to lowercase so English signals match regardless of case; CJK is
 # unaffected by tr. All English patterns below are written lowercase to match
@@ -160,8 +165,8 @@ MODEL_LC=$(tr '[:upper:]' '[:lower:]' <<< "$MODEL")
 # widened the set of prompts allowed to pass — harmless in that direction).
 # This hook reuses it as a REJECTION signal (judgment B blocks on EXEC_HIT),
 # which flips the safety direction: a bare keyword list now widens the set
-# of prompts BLOCKED, and false positives there have a real cost (실측 in
-# Major finding #2 — "查一下跑测试的脚本在哪" is pure research and got
+# of prompts BLOCKED, and false positives there have a real cost (a measured
+# A prior false positive showed that "查一下跑测试的脚本在哪" is pure research and got
 # blocked). Per gate-design.md §2 (anchor syntactic shape, not bare
 # keywords), EXEC_HIT now requires a bare-keyword match to sit in an
 # imperative/delegation clause, not a research-frame or negated clause.
@@ -187,7 +192,7 @@ RE_EXEC_FRAME_EN='document how to|find where|explain why|show me where|do not|do
 # what keeps the two apart — same reasoning pre-dispatch-readonly-guard.sh's
 # RE_WRITE_SCOPE comment already documents for a different judgment.
 WRITE_VERB='修改|修复|重构|实现|新增|添加|删除|重命名|改写|补充|编写|落地|开发|加一个|加个'
-# bug|issue|error added per Minor finding #4: "fix the bug in auth" carries
+# Include bug|issue|error because: "fix the bug in auth" carries
 # no code/file/test noun at all, only a defect noun, and was missing from
 # the object list. English tokens kept as-is (not translated) because 中文
 # 句子里 bug 常年以英文原词出现（"修复 auth 模块的 bug"），同一 token 双语都要收。
@@ -390,7 +395,7 @@ case "$TYPE" in
   general-purpose|claude)
     if [ "$EXEC_HIT" -eq 0 ] && [ "$WRITE_HIT_A" -eq 0 ] && { [ "$RO_HIT" -eq 1 ] || [ "$NEG_HIT" -eq 1 ]; }; then
       printf '[dispatch-capability-guard] 命中判据 A: 只读任务声明但派了全权 agent(subagent_type=%s),应改派内置 Explore(Edit/Write/NotebookEdit 物理禁用,越权改不了文件)。\n' "$TYPE" >&2
-      printf '[dispatch-capability-guard] 出路: 改派 subagent_type=Explore。需 code-search/web-search 时在 prompt 内 Skill(...) 加载。任务其实要执行脚本/跑测试(Explore 的 Bash 限只读白名单,会拒执行)时,在 prompt 里写明执行意图(如"前台同步执行"/"跑脚本")即豁免——这类任务留 general-purpose 是对的。\n' >&2
+      printf '[dispatch-capability-guard] 修复方式：只读任务改派 Agent(subagent_type="Explore", model="sonnet", ...)。若任务需要执行脚本或跑测试，保留 Agent(subagent_type="general-purpose", model="sonnet", ...) 并在 prompt 中明确执行意图；Explore 的 Bash 仅允许只读操作。\n' >&2
       REJECT=1
     fi
     ;;
@@ -401,16 +406,21 @@ case "$TYPE" in
   explore|plan)
     if [ "$NEEDS_CAP" -eq 1 ]; then
       printf '[dispatch-capability-guard] 命中判据 B: 本任务需要超出只读的能力(subagent_type=%s),但 Explore/Plan 的 Edit/Write/NotebookEdit 被平台物理禁用、Bash 限只读白名单,派过去会空转一轮后 dead-end。\n' "$TYPE" >&2
-      printf '[dispatch-capability-guard] 出路: 改派 subagent_type=general-purpose 或 dev(team-ops 场景)。\n' >&2
+      printf '[dispatch-capability-guard] 修复方式：改派 Agent(subagent_type="general-purpose", model="sonnet", ...)。team-ops 场景改派 Agent(subagent_type="dev", ...) 且省略 model，让注册 agent 的 frontmatter 决定模型。\n' >&2
       REJECT=1
     fi
     ;;
 esac
 
-# --- Judgment C (new): NEEDS_CAP && model contains "haiku" -----------------
-if [ "$NEEDS_CAP" -eq 1 ] && [[ "$MODEL_LC" == *haiku* ]]; then
-  printf '[dispatch-capability-guard] 命中判据 C: 本任务需要超出只读的能力,但 model=%s 落在 haiku 档;解读执行/测试输出并决定下一步属"产出取舍结论"的落地活,daily 模型分层判据把这类工作排除在 haiku 之外。\n' "$MODEL" >&2
-  printf '[dispatch-capability-guard] 出路: 把 model 升到 sonnet(或按任务要求的档位)重派。\n' >&2
+# --- Judgment C (new): NEEDS_CAP && runtime-owned type && explicit haiku ---
+# Registered agents own their model in frontmatter. Their model field must be
+# omitted (enforced by dispatch-agent-ownership-guard.sh), so C only judges
+# runtime-owned built-ins that explicitly select a haiku model on this call.
+if [ "$NEEDS_CAP" -eq 1 ] \
+   && is_runtime_model_agent "$TYPE" \
+   && [[ "$MODEL_LC" == *haiku* ]]; then
+  printf '[dispatch-capability-guard] 命中判据 C: 本任务需要超出只读的能力,但 runtime-owned agent 的显式 model=%s 落在 haiku 档;解读执行/测试输出并决定下一步属"产出取舍结论"的落地活,daily 模型分层判据把这类工作排除在 haiku 之外。\n' "$MODEL" >&2
+  printf '[dispatch-capability-guard] 修复方式：将 model 升至 sonnet，或选择任务要求的更高档位后重派。\n' >&2
   REJECT=1
 fi
 

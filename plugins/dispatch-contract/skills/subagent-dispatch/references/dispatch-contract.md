@@ -50,13 +50,22 @@
 **反例**：
 > 看到初步结论说全部确认，立即派 agent 开始修复。
 
-**同族纪律**：④管"信息完不完整就别拍板"，另有两条己方端纪律管 background 派发后的"通道"与"活性"——产物走 `SendMessage(to:"main")` 回传（该工具在 subagent 默认 deferred，须先 ToolSearch 加载）、活性判定不靠文件轮询、TaskStop 存疑多等一 turn。见 `references/mailbox-liveness.md`。
+**同族纪律**：④管"信息完不完整就别拍板"，另有两条己方端纪律管 background 派发后的"通道"与"活性"——产物走 `SendMessage(to:"main")` 回传（该工具在 subagent 默认 deferred，须先 ToolSearch 加载）、活性判定不靠文件轮询、TaskStop 存疑多等一 turn。见 `mailbox-liveness.md`。
 
 ## 铁律①的技术边界
 
 日常 `Agent`/`Task` 工具**没有 schema 参数**，字段级结构化产物（如强制 JSON 各字段类型、validation 失败自动重试）仍只能升级到 `Workflow` 的 `agent({schema})` 机制才可校验——见 workflow-schema.md。
 
 但"定稿与否"这一件事已不再纯靠措辞：SubagentStop 门禁 + `%%DONE%%` 标记把它变成可机器判定的二元事实——末个非空行是否精确等于标记，以及除标记外是否还有非空行。两条都不依赖语义理解，也都必须判："标记在场"不等于"报告在场"，只判前者等于承认一行标记就是交付物。门禁只保证"报告在场"，不判断"内容是否成立"；证据是否成立仍是主上下文的裁决活，字段级 schema 校验仍是 Workflow 的专属能力。
+
+## Model ownership
+
+`Agent` 和 `Task` 调用应让正确的一方拥有 `model`。runtime-owned 内置类型必须在调用中提供非空、非空白的 model。具名注册 agent 必须省略 model；`null` 表示不覆盖，任何其他值（包括 `inherit`、空字符串和空白）都会被视为覆盖并被拒绝。
+
+> **前置阅读**：runtime-owned 内置类型的唯一维护清单，修改类型归属或判断派发字段前必须先读取：
+> [`hooks/lib/agent-kind.sh`](../../../hooks/lib/agent-kind.sh)
+
+当注册 agent 的能力不足时，应选择满足能力的角色。不要用调用侧 model 覆盖其注册定义。需要紧急放行时，可在 `settings.json` 的 `env` 段设 `ALLOW_AGENT_MODEL_INHERIT=1`；该开关仅用于临时排障，恢复后应移除。
 
 ## 派发端补充：干活别照镜子（persona 规避）
 

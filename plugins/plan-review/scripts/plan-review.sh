@@ -249,6 +249,9 @@ fi
 # --- Attempt counter (tmpfs-backed, system handles cleanup) ---
 COUNTER_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
 mkdir -p "$COUNTER_DIR"
+# Dispatch state shares the review-state directory for its whole lifecycle:
+# stale cleanup below and APPROVE serialization must not derive it separately.
+DISPATCH_DIR="$COUNTER_DIR"
 COUNTER_FILE="$COUNTER_DIR/.review-count-${SESSION_ID}"
 APPROVE_MARKER="$COUNTER_DIR/.review-approved-${SESSION_ID}"
 # Gemini degraded state file (global, no session suffix — persists across hooks)
@@ -268,6 +271,10 @@ CONV_FILE="$COUNTER_DIR/.conversation-${SESSION_ID}"
 # clearing it (see that branch below) — that is the highest-value moment for
 # cross-round memory, not a cycle end.
 HISTORY_FILE="$COUNTER_DIR/.review-history-${SESSION_ID}"
+# Dispatch state is session-scoped, but stale files are global debris. Clean
+# them for every valid plan-review invocation, including Tier0 plans that have
+# no Manifest and therefore never enter the approval serializer branch.
+find "$DISPATCH_DIR" -maxdepth 1 -name '.dispatch-*.json*' -mmin +30 -delete 2>/dev/null || true
 
 # --- Read counter (new format ATTEMPT:TOTAL, backward-compat with old single-number) ---
 IFS=: read -r ATTEMPT TOTAL_ROUNDS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0")"
@@ -385,10 +392,27 @@ EOF
   exit 0
 fi
 
-# --- Pre-flight manifest check (AFTER non-critical valve, not before) ---
+# --- Pre-flight manifest checks (AFTER non-critical valve, not before) ---
 # Format correction, NOT negotiation round: increments TOTAL_ROUNDS only.
 # ATTEMPT stays frozen — pre-flight denies do not count toward MAX_ROUNDS.
 # Global safety valve (TOTAL_ROUNDS >= 20) still protects against infinite loops.
+if has_manifest "$PLAN" && ! validate_manifest_v2 "$PLAN"; then
+  TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
+  echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
+  log_decision "decision=deny reason=invalid-manifest detail=${MANIFEST_ERROR:-unknown}"
+  INVALID_MANIFEST_MSG="## Red Team Pre-flight — INVALID DISPATCH MANIFEST
+
+Manifest v2 结构错误：${MANIFEST_ERROR:-unknown}。
+请按以下固定列顺序和行规则修正后重新调用 ExitPlanMode。
+
+${MANIFEST_EXAMPLE}"
+  INVALID_MANIFEST_JSON=$(printf '%s' "$INVALID_MANIFEST_MSG" | jq -Rs .)
+  cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${INVALID_MANIFEST_JSON}}}
+EOF
+  exit 0
+fi
+
 if needs_manifest "$PLAN" && ! has_manifest "$PLAN"; then
   TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
   echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
@@ -406,22 +430,19 @@ EOF
   exit 0
 fi
 
-# --- Pre-flight degenerate manifest check (all agent_type == "-") ---
-# Fires when manifest is present but declares zero real agent steps.
-if needs_manifest "$PLAN" && has_manifest "$PLAN" && ! manifest_has_real_agent "$PLAN"; then
+if needs_manifest "$PLAN" && ! manifest_has_agent_signature "$PLAN"; then
   TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
   echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
-  log_decision "decision=deny reason=degenerate-manifest"
-  DEGEN_MSG="## Red Team Pre-flight — DEGENERATE DISPATCH MANIFEST
+  log_decision "decision=deny reason=dispatch-hoarding"
+  HOARDING_MSG="## Red Team Pre-flight — DISPATCH HOARDING
 
-Plan 含 Agent/Task 调度关键词，但 Manifest 所有行 agent_type 均为 \`-\`（全主上下文）。
-- 若任务确实简单（单一关注点、无接口变更）：**首选**移除 plan 中的 dispatch 关键词，改写为直接执行描述。
-- 若任务复杂：在 manifest 中至少声明一个真实 agent 步骤（agent_type 与 model 两列均填实值）。
+Plan 声明了 Agent/Task 调度意图，但 Manifest v2 没有任何 \`agent\` 行。不得把全部工作囤积在 Main。
+Tier0 工作若保留在 Main，必须同时移除 Manifest 与全部调度关键词；否则显式声明至少一个 Agent step 后重新调用 ExitPlanMode。
 
 ${MANIFEST_EXAMPLE}"
-  DEGEN_DENY_JSON=$(printf '%s' "$DEGEN_MSG" | jq -Rs .)
+  HOARDING_JSON=$(printf '%s' "$HOARDING_MSG" | jq -Rs .)
   cat <<EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${DEGEN_DENY_JSON}}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${HOARDING_JSON}}}
 EOF
   exit 0
 fi
@@ -706,14 +727,18 @@ if [ "$VERDICT" = "APPROVE" ]; then
 
   # Parse manifest → dispatch JSON for Layer 2 enforcement (fail-silent: Layer 2 self-disables)
   if has_manifest "$PLAN"; then
-    DISPATCH_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
     mkdir -p "$DISPATCH_DIR" 2>/dev/null || true
-    find "$DISPATCH_DIR" -maxdepth 1 -name '.dispatch-*.json' -mmin +30 -delete 2>/dev/null || true
     DISPATCH_FILE="$DISPATCH_DIR/.dispatch-${SESSION_ID}.json"
-    parse_manifest_to_json "$PLAN" "$(plan_hash "$PLAN")" > "$DISPATCH_FILE" 2>/dev/null || rm -f "$DISPATCH_FILE"
-    if [ -f "$DISPATCH_FILE" ]; then
+    DISPATCH_TEMP=$(mktemp "$DISPATCH_DIR/.dispatch-${SESSION_ID}.json.XXXXXX" 2>/dev/null || true)
+    if [ -n "$DISPATCH_TEMP" ] \
+       && parse_manifest_to_json "$PLAN" "$(plan_hash "$PLAN")" > "$DISPATCH_TEMP" 2>/dev/null \
+       && dispatch_state_is_valid_v2 "$DISPATCH_TEMP"; then
+      mv -f "$DISPATCH_TEMP" "$DISPATCH_FILE"
       dispatch_bytes=$(wc -c < "$DISPATCH_FILE" | tr -d ' ')
       log_decision "manifest-written file=$DISPATCH_FILE bytes=$dispatch_bytes"
+    else
+      rm -f "${DISPATCH_TEMP:-}" "$DISPATCH_FILE"
+      log_decision "manifest-write-skipped reason=invalid-json"
     fi
   fi
 

@@ -16,9 +16,9 @@
 #
 # Gate discovery (see discover_agent_gates/discover_task_gates in
 # test_helper/common-setup.bash) reads hooks.json's PreToolUse section at
-# test time instead of hardcoding script names — a fourth PreToolUse guard
-# added to this plugin later is automatically included in every test below
-# without touching this file. hooks.json registers the same three guards
+# test time instead of hardcoding script names — any additional PreToolUse
+# guard added to this plugin later is automatically included in every test below
+# without touching this file. hooks.json registers the same four guards
 # under BOTH the "Agent" and "Task" matchers (Lead/PM can dispatch via
 # either tool), so this file checks both matchers independently (composition
 # #7/#8/#9 below) — the Agent-only checks alone would stay green even if a
@@ -57,6 +57,7 @@ setup() {
   unset CLAUDE_CODE_DISABLE_BACKGROUND_TASKS
   unset CLAUDE_AUTO_BACKGROUND_TASKS
   unset ALLOW_DISPATCH_CAPABILITY_MISMATCH
+  unset ALLOW_AGENT_MODEL_INHERIT
   discover_agent_gates
   # A neutral prompt/description pair carrying no EXEC/WRITE/RO/NEG signal
   # dispatch-capability-guard.sh's regex set recognizes (verified directly
@@ -87,9 +88,9 @@ teardown() {
   # hooks.json — a different jq traversal (recursive descent via `..` instead
   # of discover_agent_gates' explicit `.hooks.PreToolUse[]` field walk) so
   # this check cannot pass by construction just because both expressions
-  # share the same bug. This is what makes the assertion resilient to a
-  # fourth guard being added later: the expected number is computed from the
-  # same file discover_agent_gates reads, not hardcoded here.
+  # share the same bug. This is what makes the assertion resilient to an
+  # additional guard being added later: the expected number is computed from
+  # the same file discover_agent_gates reads, not hardcoded here.
   local independent_count
   independent_count=$(jq '
     [.. | objects | select(has("matcher") and .matcher == "Agent") | .hooks[]?] | length
@@ -105,14 +106,16 @@ teardown() {
     [ -f "$s" ] || { echo "Discovered gate path does not exist on disk: $s"; return 1; }
   done
 
-  # Check 3: all three known guards must be present in the discovered set.
-  local found_sync=0 found_capability=0 found_channel=0
+  # Check 3: all four known guards must be present in the discovered set.
+  local found_sync=0 found_ownership=0 found_capability=0 found_channel=0
   for s in "${GATE_SCRIPTS[@]}"; do
     [[ "$s" == *"/hooks/dispatch-sync-guard.sh" ]] && found_sync=1
+    [[ "$s" == *"/hooks/dispatch-agent-ownership-guard.sh" ]] && found_ownership=1
     [[ "$s" == *"/hooks/dispatch-capability-guard.sh" ]] && found_capability=1
     [[ "$s" == *"/hooks/pre-dispatch-channel-guard.sh" ]] && found_channel=1
   done
   [ "$found_sync" -eq 1 ] || { echo "dispatch-sync-guard.sh not in discovered set: ${GATE_SCRIPTS[*]}"; return 1; }
+  [ "$found_ownership" -eq 1 ] || { echo "dispatch-agent-ownership-guard.sh not in discovered set: ${GATE_SCRIPTS[*]}"; return 1; }
   [ "$found_capability" -eq 1 ] || { echo "dispatch-capability-guard.sh not in discovered set: ${GATE_SCRIPTS[*]}"; return 1; }
   [ "$found_channel" -eq 1 ] || { echo "pre-dispatch-channel-guard.sh not in discovered set: ${GATE_SCRIPTS[*]}"; return 1; }
 }
@@ -124,7 +127,7 @@ teardown() {
 
 @test "composition #1: outroute ① (no name, run_in_background:false) clears every discovered gate" {
   local payload
-  payload=$(mk_composed_payload "Agent" "false" "omit" "omit" "omit" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC")
+  payload=$(mk_composed_payload "Agent" "false" "omit" "omit" "omit" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC" "sonnet")
   # fixture self-check: a real Agent dispatch always carries a prompt — a
   # payload with no prompt field makes dispatch-capability-guard.sh's
   # participation in this test a no-op (see setup's NEUTRAL_PROMPT comment).
@@ -154,14 +157,14 @@ teardown() {
   mkdir -p "$cwd/.claude/agents"
   printf 'dev role\n' > "$cwd/.claude/agents/dev.md"
   local payload
-  # model is included because a real Lead starting a teammate always sends
-  # one; PROMPT/DESC per setup's NEUTRAL_PROMPT comment.
-  payload=$(mk_composed_payload "Agent" "omit" "lead" "dev" "$cwd" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC" "sonnet")
+  # Registered teammates own their model in frontmatter, so callers must omit
+  # model. PROMPT/DESC are supplied per setup's NEUTRAL_PROMPT comment.
+  payload=$(mk_composed_payload "Agent" "omit" "lead" "dev" "$cwd" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC")
   # fixture self-check
   [[ "$(jq -r '.tool_input.name' <<< "$payload")" == "lead" ]]
   [[ "$(jq -r '.tool_input.subagent_type' <<< "$payload")" == "dev" ]]
   [[ "$(jq -r '.tool_input.prompt' <<< "$payload")" == "$NEUTRAL_PROMPT" ]]
-  [[ "$(jq -r '.tool_input.model' <<< "$payload")" == "sonnet" ]]
+  [[ "$(jq -e '.tool_input | has("model") | not' <<< "$payload")" == "true" ]]
   run jq -e '.tool_input | has("run_in_background")' <<< "$payload"
   [ "$status" -eq 1 ]
   local s rc
@@ -283,7 +286,7 @@ teardown() {
 @test "composition #8: outroute ① via Task matcher clears every discovered Task-side gate" {
   discover_task_gates
   local payload
-  payload=$(mk_composed_payload "Task" "false" "omit" "omit" "omit" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC")
+  payload=$(mk_composed_payload "Task" "false" "omit" "omit" "omit" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC" "sonnet")
   local s rc
   for s in "${GATE_SCRIPTS[@]}"; do
     run_one_gate "$s" "$payload"
@@ -302,7 +305,7 @@ teardown() {
   mkdir -p "$cwd/.claude/agents"
   printf 'dev role\n' > "$cwd/.claude/agents/dev.md"
   local payload
-  payload=$(mk_composed_payload "Task" "omit" "lead" "dev" "$cwd" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC" "sonnet")
+  payload=$(mk_composed_payload "Task" "omit" "lead" "dev" "$cwd" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC")
   local s rc
   for s in "${GATE_SCRIPTS[@]}"; do
     run_one_gate "$s" "$payload"
@@ -396,4 +399,90 @@ teardown() {
     echo "Expected '命中判据 B' in stderr, got: $ONE_GATE_STDERR"
     return 1
   }
+}
+
+@test "composition #12: ownership guard blocks an Agent and Task runtime default without model" {
+  local ownership_script="${PLUGIN_ROOT_DIR}/hooks/dispatch-agent-ownership-guard.sh"
+  local tool payload
+  for tool in Agent Task; do
+    payload=$(mk_composed_payload "$tool" "false" "omit" "omit" "omit" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC")
+    run_one_gate "$ownership_script" "$payload"
+    [ "$ONE_GATE_EXIT" -eq 2 ] || {
+      echo "Expected ownership guard to block $tool without model, got exit $ONE_GATE_EXIT"
+      echo "stderr: $ONE_GATE_STDERR"
+      return 1
+    }
+    [[ "$ONE_GATE_STDERR" == *"runtime-owned"* ]] || {
+      echo "Expected runtime-owned ownership message, got: $ONE_GATE_STDERR"
+      return 1
+    }
+  done
+}
+
+@test "composition #13: dev-econ write dispatch without model clears all Agent and Task gates" {
+  local tool payload s
+  for tool in Agent Task; do
+    discover_agent_gates
+    [[ "$tool" == "Task" ]] && discover_task_gates
+    payload=$(mk_composed_payload "$tool" "false" "omit" "dev-econ" "omit" "修复 main.py 里的 bug" "$NEUTRAL_DESC")
+    [[ "$(jq -e '.tool_input | has("model") | not' <<<"$payload")" == "true" ]]
+    for s in "${GATE_SCRIPTS[@]}"; do
+      run_one_gate "$s" "$payload"
+      [ "$ONE_GATE_EXIT" -eq 0 ] || {
+        echo "Expected dev-econ write dispatch to pass $(basename "$s") for $tool, got exit $ONE_GATE_EXIT"
+        echo "stderr: $ONE_GATE_STDERR"
+        return 1
+      }
+    done
+  done
+}
+
+@test "composition #14: missing or null type normalizes to general-purpose before C for both Agent and Task" {
+  local tool type_mode payload s
+  for tool in Agent Task; do
+    discover_agent_gates
+    [[ "$tool" == "Task" ]] && discover_task_gates
+    for type_mode in omit __NULL__; do
+      payload=$(mk_composed_payload "$tool" "false" "omit" "$type_mode" "omit" "修复 main.py 里的 bug" "$NEUTRAL_DESC" "haiku")
+      for s in "${GATE_SCRIPTS[@]}"; do
+        run_one_gate "$s" "$payload"
+        if [[ "$s" == *"/dispatch-capability-guard.sh" ]]; then
+          [ "$ONE_GATE_EXIT" -eq 2 ] || {
+            echo "Expected capability C to block $tool/$type_mode, got exit $ONE_GATE_EXIT"
+            echo "stderr: $ONE_GATE_STDERR"
+            return 1
+          }
+          [[ "$ONE_GATE_STDERR" == *"命中判据 C"* ]] || {
+            echo "Expected judgment C for $tool/$type_mode, got: $ONE_GATE_STDERR"
+            return 1
+          }
+        else
+          [ "$ONE_GATE_EXIT" -eq 0 ] || {
+            echo "Expected sibling gate $(basename "$s") to pass $tool/$type_mode, got exit $ONE_GATE_EXIT"
+            echo "stderr: $ONE_GATE_STDERR"
+            return 1
+          }
+        fi
+      done
+    done
+  done
+}
+
+@test "composition #15: missing or null type plus sonnet write dispatch clears all Agent and Task gates" {
+  local tool type_mode payload s
+  for tool in Agent Task; do
+    discover_agent_gates
+    [[ "$tool" == "Task" ]] && discover_task_gates
+    for type_mode in omit __NULL__; do
+      payload=$(mk_composed_payload "$tool" "false" "omit" "$type_mode" "omit" "修复 main.py 里的 bug" "$NEUTRAL_DESC" "sonnet")
+      for s in "${GATE_SCRIPTS[@]}"; do
+        run_one_gate "$s" "$payload"
+        [ "$ONE_GATE_EXIT" -eq 0 ] || {
+          echo "Expected sonnet dispatch $tool/$type_mode to pass $(basename "$s"), got exit $ONE_GATE_EXIT"
+          echo "stderr: $ONE_GATE_STDERR"
+          return 1
+        }
+      done
+    done
+  done
 }
