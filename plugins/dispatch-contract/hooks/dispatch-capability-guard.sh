@@ -107,11 +107,19 @@
 # writing it would misleadingly imply the check does something.
 set -u
 
-. "${BASH_SOURCE[0]%/*}/lib/agent-kind.sh"
+AGENT_KIND_LIB="${BASH_SOURCE[0]%/*}/lib/agent-kind.sh"
+if ! . "$AGENT_KIND_LIB"; then
+  printf '[GATE-DEGRADE] dispatch-capability-guard: agent-kind.sh unavailable\n' >&2
+  exit 0
+fi
+if ! declare -F normalize_agent_type >/dev/null 2>&1 || ! declare -F is_runtime_model_agent >/dev/null 2>&1; then
+  printf '[GATE-DEGRADE] dispatch-capability-guard: agent-kind.sh lacks required helpers\n' >&2
+  exit 0
+fi
 
 INPUT=$(cat)
 
-# Knowing bypass is checked first: an open hatch is the reason this dispatch
+# The bypass check occurs first: an open hatch is the reason this dispatch
 # passes, not evidence the gate is broken, and it must be reported as such
 # regardless of whether any judgment below would otherwise have fired.
 if [[ "${ALLOW_DISPATCH_CAPABILITY_MISMATCH:-}" == "1" ]]; then
@@ -391,7 +399,7 @@ case "$TYPE" in
   general-purpose|claude)
     if [ "$EXEC_HIT" -eq 0 ] && [ "$WRITE_HIT_A" -eq 0 ] && { [ "$RO_HIT" -eq 1 ] || [ "$NEG_HIT" -eq 1 ]; }; then
       printf '[dispatch-capability-guard] 命中判据 A: 只读任务声明但派了全权 agent(subagent_type=%s),应改派内置 Explore(Edit/Write/NotebookEdit 物理禁用,越权改不了文件)。\n' "$TYPE" >&2
-      printf '[dispatch-capability-guard] 修复方式：只读任务改派 subagent_type=Explore。若任务需要执行脚本或跑测试，保留 general-purpose 并在 prompt 中明确执行意图；Explore 的 Bash 仅允许只读操作。\n' >&2
+      printf '[dispatch-capability-guard] 修复方式：只读任务改派 Agent(subagent_type="Explore", model="sonnet", ...)。若任务需要执行脚本或跑测试，保留 Agent(subagent_type="general-purpose", model="sonnet", ...) 并在 prompt 中明确执行意图；Explore 的 Bash 仅允许只读操作。\n' >&2
       REJECT=1
     fi
     ;;
@@ -402,7 +410,7 @@ case "$TYPE" in
   explore|plan)
     if [ "$NEEDS_CAP" -eq 1 ]; then
       printf '[dispatch-capability-guard] 命中判据 B: 本任务需要超出只读的能力(subagent_type=%s),但 Explore/Plan 的 Edit/Write/NotebookEdit 被平台物理禁用、Bash 限只读白名单,派过去会空转一轮后 dead-end。\n' "$TYPE" >&2
-      printf '[dispatch-capability-guard] 修复方式：改派 subagent_type=general-purpose；team-ops 场景改派 dev。\n' >&2
+      printf '[dispatch-capability-guard] 修复方式：改派 Agent(subagent_type="general-purpose", model="sonnet", ...)。team-ops 场景改派 Agent(subagent_type="dev", ...) 且省略 model，让注册 agent 的 frontmatter 决定模型。\n' >&2
       REJECT=1
     fi
     ;;

@@ -197,6 +197,7 @@ teardown() {
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"非法"* ]]
+  [[ "$reason" == *"框架许可的 plan 目录"* ]]
   # Message must name the offending path so the user knows what was rejected.
   [[ "$reason" == *"passwd"* ]]
 }
@@ -2140,7 +2141,7 @@ Approved."
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"DISPATCH HOARDING"* ]]
-  [[ "$reason" == *"移除不再需要的调度关键词"* ]]
+  [[ "$reason" == *"必须同时移除 Manifest 与全部调度关键词"* ]]
   [[ "$reason" == *"显式声明至少一个 Agent step"* ]]
 }
 
@@ -2334,17 +2335,19 @@ Approved."
 
   setup_script_copy
   local copied_manifest="${COPY_SCRIPT_DIR}/lib/manifest.sh"
-  run grep -F 'table_started && line ~ /^[[:space:]]*$/ { exit }' "$copied_manifest"
-  [ "$status" -eq 0 ]
   python3 - "$copied_manifest" <<'PYTHON'
 from pathlib import Path
 path = Path(__import__('sys').argv[1])
 text = path.read_text()
-needle = 'table_started && line ~ /^[[:space:]]*$/ { exit }'
-assert text.count(needle) == 1
-path.write_text(text.replace(needle, '0 # MUTATION', 1))
+needle = '''if [ "$table_started" -eq 1 ] && [[ "$line" =~ ^[[:space:]]*$ ]]; then
+      break
+    fi'''
+assert text.count(needle) == 1, text.count(needle)
+path.write_text(text.replace(needle, '''if [ "$table_started" -eq 1 ] && [[ "$line" =~ ^[[:space:]]*$ ]]; then
+      : # MUTATION
+    fi''', 1))
 PYTHON
-  run grep -F '0 # MUTATION' "$copied_manifest"
+  run grep -F ': # MUTATION' "$copied_manifest"
   [ "$status" -eq 0 ]
 
   # Red proof: without the shared boundary the later agent row satisfies the
@@ -2587,6 +2590,54 @@ Use Task( for isolation.
 |------|----------|---------------|--------------|-------|------------|---------------|${cr}
 | 1 | agent | Explore | runtime | haiku | - | - |${cr}"
   run bash -c '. "$1"; parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[{"subagent_type":"Explore","model_source":"runtime","model":"haiku"}]' ]]
+}
+
+@test "manifest v2 parser: Markdown alignment separator variants validate" {
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+| :--- | :---: | ---: | :--- | :---: | ---: | :--- |
+| 1 | agent | Explore | runtime | haiku | - | - |"
+  run bash -c '. "$1"; validate_manifest_v2 "$2" && manifest_has_agent_signature "$2" && parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+
+  [ "$status" -eq 0 ]
+  [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[{"subagent_type":"Explore","model_source":"runtime","model":"haiku"}]' ]]
+}
+
+@test "manifest v2 parser: malformed later separator cell rejects" {
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|garbage|---------------|--------------|-------|------------|---------------|
+| 1 | agent | Explore | runtime | haiku | - | - |"
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$HOOK_STDOUT")" == *"table separator must have seven Markdown separator cells"* ]]
+}
+
+@test "manifest v2 parser: over-64KB valid plan validates, detects signature, and serializes" {
+  local padding
+  padding=$(head -c 70000 < /dev/zero | tr '\\0' x)
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+| 1 | agent | Explore | runtime | haiku | - | - |
+
+## Detail
+${padding}"
+  run bash -c '. "$1"; validate_manifest_v2 "$2" && manifest_has_agent_signature "$2" && parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+
   [ "$status" -eq 0 ]
   [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[{"subagent_type":"Explore","model_source":"runtime","model":"haiku"}]' ]]
 }

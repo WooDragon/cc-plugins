@@ -7,38 +7,28 @@ MARK='%%DONE%%'
 
 # --- Setup / Teardown ---
 
+# Bats owns its per-test directory and its lifecycle traps. Keep this helper
+# out of EXIT/INT/TERM entirely: stealing those traps can hide a test failure
+# or prevent Bats from running teardown. Outside Bats, use an independent
+# directory and remove only that directory from the explicit teardown call.
 cleanup_test_temp_dir() {
-  rm -rf "${TEST_TEMP_DIR:-}"
-}
-
-restore_common_setup_traps() {
-  trap - EXIT INT TERM
-  [ -n "${COMMON_SETUP_PREVIOUS_EXIT_TRAP:-}" ] && eval "$COMMON_SETUP_PREVIOUS_EXIT_TRAP"
-  [ -n "${COMMON_SETUP_PREVIOUS_INT_TRAP:-}" ] && eval "$COMMON_SETUP_PREVIOUS_INT_TRAP"
-  [ -n "${COMMON_SETUP_PREVIOUS_TERM_TRAP:-}" ] && eval "$COMMON_SETUP_PREVIOUS_TERM_TRAP"
-  return 0
-}
-
-cleanup_and_terminate() {
-  local signal="$1"
-  cleanup_test_temp_dir
-  trap - EXIT INT TERM
-  kill -s "$signal" "$$"
+  if [[ "${TEST_TEMP_DIR_BATS_OWNED:-0}" != "1" ]]; then
+    rm -rf "${TEST_TEMP_DIR:-}"
+  fi
 }
 
 common_setup() {
-  COMMON_SETUP_PREVIOUS_EXIT_TRAP=$(trap -p EXIT)
-  COMMON_SETUP_PREVIOUS_INT_TRAP=$(trap -p INT)
-  COMMON_SETUP_PREVIOUS_TERM_TRAP=$(trap -p TERM)
-  TEST_TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dispatch-contract.XXXXXX") || return 1
-  trap cleanup_test_temp_dir EXIT
-  trap 'cleanup_and_terminate INT' INT
-  trap 'cleanup_and_terminate TERM' TERM
+  if [[ -n "${BATS_TEST_TMPDIR:-}" ]]; then
+    TEST_TEMP_DIR=$(mktemp -d "${BATS_TEST_TMPDIR%/}/dispatch-contract.XXXXXX") || return 1
+    TEST_TEMP_DIR_BATS_OWNED=1
+  else
+    TEST_TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dispatch-contract.XXXXXX") || return 1
+    TEST_TEMP_DIR_BATS_OWNED=0
+  fi
 }
 
 common_teardown() {
   cleanup_test_temp_dir
-  restore_common_setup_traps
 }
 
 # --- Transcript Fixture Builders ---
@@ -557,6 +547,32 @@ run_cap_guard() {
 # Like run_cap_guard but takes a raw stdin string instead of building/echoing
 # a JSON payload — for malformed-input fixtures (empty, non-JSON, etc.) where
 # there is no well-formed payload to build.
+# run_cap_guard_script SCRIPT PAYLOAD [env_overrides...]
+# Like run_cap_guard, but executes a copied guard for dependency/mutation
+# probes without changing the production script.
+run_cap_guard_script() {
+  local script="$1" payload="$2"
+  shift 2
+  CAP_STDOUT=""
+  CAP_STDERR=""
+  CAP_EXIT=0
+
+  local stderr_file
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
+
+  if [[ "${1:-}" != "" ]]; then
+    CAP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT "$@" bash "$script" 2>"$stderr_file") || CAP_EXIT=$?
+  else
+    CAP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT bash "$script" 2>"$stderr_file") || CAP_EXIT=$?
+  fi
+  CAP_STDERR=$(cat "$stderr_file")
+  rm -f "$stderr_file"
+}
+
+# run_cap_guard_stdin RAW_STDIN [env_overrides...]
+# Like run_cap_guard but takes a raw stdin string instead of building/echoing
+# a JSON payload — for malformed-input fixtures (empty, non-JSON, etc.) where
+# there is no well-formed payload to build.
 run_cap_guard_stdin() {
   local raw="$1"
   CAP_STDOUT=""
@@ -670,7 +686,7 @@ PLUGIN_ROOT_DIR="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
 # enforces it) is only invoked once per payload.
 #
 # This is the mechanism that keeps the composition test honest as the plugin
-# grows: a third PreToolUse guard added to hooks.json tomorrow is picked up
+# grows: an additional PreToolUse guard added to hooks.json tomorrow is picked up
 # here automatically, with no edit to this file or to gate-composition.bats
 # required. A hardcoded GATE_SCRIPTS=(a.sh b.sh) list would not have that
 # property — it is exactly the shape of drift that let the channel-guard
@@ -785,7 +801,8 @@ mk_composed_payload() {
 # because the invoking shell happens to carry one of these six vars for an
 # unrelated reason. This runner is shared across every gate discovered by
 # discover_agent_gates/discover_task_gates (dispatch-sync-guard.sh,
-# dispatch-capability-guard.sh, pre-dispatch-channel-guard.sh) — it must
+# dispatch-agent-ownership-guard.sh, dispatch-capability-guard.sh,
+# pre-dispatch-channel-guard.sh) — it must
 # clear the union of all their escape hatches, not just the ones the gate
 # under test in a given call happens to read, since a caller composing a
 # payload for one gate may still route it through this same helper for

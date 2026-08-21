@@ -16,8 +16,8 @@
 #
 # Gate discovery (see discover_agent_gates/discover_task_gates in
 # test_helper/common-setup.bash) reads hooks.json's PreToolUse section at
-# test time instead of hardcoding script names — a fourth PreToolUse guard
-# added to this plugin later is automatically included in every test below
+# test time instead of hardcoding script names — any additional PreToolUse
+# guard added to this plugin later is automatically included in every test below
 # without touching this file. hooks.json registers the same four guards
 # under BOTH the "Agent" and "Task" matchers (Lead/PM can dispatch via
 # either tool), so this file checks both matchers independently (composition
@@ -88,9 +88,9 @@ teardown() {
   # hooks.json — a different jq traversal (recursive descent via `..` instead
   # of discover_agent_gates' explicit `.hooks.PreToolUse[]` field walk) so
   # this check cannot pass by construction just because both expressions
-  # share the same bug. This is what makes the assertion resilient to a
-  # fourth guard being added later: the expected number is computed from the
-  # same file discover_agent_gates reads, not hardcoded here.
+  # share the same bug. This is what makes the assertion resilient to an
+  # additional guard being added later: the expected number is computed from
+  # the same file discover_agent_gates reads, not hardcoded here.
   local independent_count
   independent_count=$(jq '
     [.. | objects | select(has("matcher") and .matcher == "Agent") | .hooks[]?] | length

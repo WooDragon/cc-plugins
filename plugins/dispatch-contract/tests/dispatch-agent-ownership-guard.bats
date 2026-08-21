@@ -145,81 +145,69 @@ teardown() {
   }
 }
 
-@test "ownership #14: TERM cleanup removes test-owned temporary directory and terminates" {
-  local temp_dir_record continued_record
-  temp_dir_record="$TEST_TEMP_DIR/interrupted-temp-dir"
-  continued_record="$TEST_TEMP_DIR/continued-after-term"
-  run bash -c '
-    source "$1"
-    common_setup
-    printf "%s" "$TEST_TEMP_DIR" > "$2"
-    kill -TERM "$$"
-    printf "continued" > "$3"
-  ' _ "${BATS_TEST_DIRNAME}/test_helper/common-setup.bash" "$temp_dir_record" "$continued_record"
-  [ "$status" -eq 143 ] || {
-    echo "Expected TERM to terminate with 143, got status $status: $output"
+@test "ownership #14: Bats reports an intentional failure and still executes teardown" {
+  local probe marker helper
+  probe="$TEST_TEMP_DIR/intentional-failure-probe.bats"
+  marker="$TEST_TEMP_DIR/teardown-ran"
+  helper="${BATS_TEST_DIRNAME}/test_helper/common-setup.bash"
+  cat > "$probe" <<'EOF'
+#!/usr/bin/env bats
+setup() {
+  source "$HELPER"
+  common_setup
+}
+teardown() {
+  printf 'teardown-ran' > "$MARKER"
+  common_teardown
+}
+@test "intentional failure" {
+  false
+}
+EOF
+
+  run env HELPER="$helper" MARKER="$marker" bats "$probe"
+  [ "$status" -ne 0 ] || {
+    echo "Intentional failing probe was reported as passing: $output"
     return 1
   }
-  [ -s "$temp_dir_record" ] || {
-    echo "Interrupted helper did not record its temporary directory"
+  [[ "$output" == *"not ok"* && "$output" == *"intentional failure"* ]] || {
+    echo "Bats did not report the intentional failure: $output"
     return 1
   }
-  [ ! -e "$(<"$temp_dir_record")" ] || {
-    echo "TERM trap left test temporary directory: $(<"$temp_dir_record")"
-    return 1
-  }
-  [ ! -e "$continued_record" ] || {
-    echo "TERM trap swallowed interruption and continued execution"
+  [ "$(<"$marker")" = "teardown-ran" ] || {
+    echo "Bats did not execute teardown after the intentional failure"
     return 1
   }
 }
 
-@test "ownership #15: common teardown restores caller EXIT, INT, and TERM traps" {
-  local caller_exit_record
-  caller_exit_record="$TEST_TEMP_DIR/caller-exit-ran"
-  run bash -c '
-    trap '"'"'printf caller-exit > "$1"'"'"' EXIT
-    trap '"'"':'"'"' INT
-    trap '"'"':'"'"' TERM
-    source "$2"
-    common_setup
-    common_teardown
-    trap -p EXIT
-    trap -p INT
-    trap -p TERM
-  ' _ "$caller_exit_record" "${BATS_TEST_DIRNAME}/test_helper/common-setup.bash"
-  [ "$status" -eq 0 ] || {
-    echo "Expected teardown to preserve caller traps, got status $status: $output"
-    return 1
-  }
-  [[ "$output" == *"EXIT"* && "$output" == *"INT"* && "$output" == *"TERM"* ]] || {
-    echo "Expected restored EXIT, INT, and TERM traps, got: $output"
-    return 1
-  }
-  [ "$(<"$caller_exit_record")" = "caller-exit" ] || {
-    echo "Caller EXIT trap did not run after common_teardown"
-    return 1
-  }
-}
-
-@test "ownership #16: a temp-copy mutation of the runtime rejection is present and makes its block expectation fail" {
-  local mutant payload
+@test "ownership #15: runtime rejection mutation makes the focused block assertion red, then restores it" {
+  local mutant payload anchor anchor_count
   mkdir -p "$TEST_TEMP_DIR/mutant/hooks"
   mutant="$TEST_TEMP_DIR/mutant/hooks/dispatch-agent-ownership-guard.sh"
   cp "$OWNERSHIP_GUARD_SCRIPT" "$mutant"
   cp -R "${OWNERSHIP_GUARD_SCRIPT%/*}/lib" "$TEST_TEMP_DIR/mutant/hooks/lib"
 
-  # Assert the production anchor before making the temp-copy mutation.
-  run grep -F 'exit 2' "$mutant"
-  [ "$status" -eq 0 ]
-  perl -0pi -e 's/  exit 2\nfi\n\n# Null/  exit 0 # MUTATION\nfi\n\n# Null/' "$mutant"
+  anchor='  printf '\''[dispatch-agent-ownership-guard] 内置 runtime-owned agent(subagent_type=%s) 必须显式带非空、非空白 model。\n'\'' "$TYPE" >&2'
+  anchor_count=$(grep -Fxc "$anchor" "$mutant")
+  [ "$anchor_count" -eq 1 ] || {
+    echo "Expected exactly one complete runtime-rejection anchor, found $anchor_count"
+    return 1
+  }
+  perl -0pi -e 's/(内置 runtime-owned agent\(subagent_type=%s\).*?\n.*?\n  exit) 2/$1 0 # MUTATION/s' "$mutant"
   run grep -F 'exit 0 # MUTATION' "$mutant"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || {
+    echo "Runtime rejection mutation did not land"
+    return 1
+  }
 
   payload=$(mk_ownership_payload Agent general-purpose omit)
   run_ownership_script "$mutant" "$payload"
-  [ "$OWNERSHIP_EXIT" -eq 0 ] || {
-    echo "Mutated runtime rejection unexpectedly still blocked: $OWNERSHIP_STDERR"
+  if assert_ownership_block; then
+    echo "Mutated runtime rejection still satisfied the focused block assertion"
     return 1
-  }
+  fi
+
+  cp "$OWNERSHIP_GUARD_SCRIPT" "$mutant"
+  run_ownership_script "$mutant" "$payload"
+  assert_ownership_block
 }

@@ -10,21 +10,53 @@ has_manifest() { printf '%s' "$1" | grep -qi '^## Dispatch Manifest'; }
 # is normalized as line ending syntax; after the table starts, a blank line is
 # a hard boundary so later prose/tables cannot affect validation or dispatch.
 manifest_table_rows() {
-  printf '%s\n' "$1" | awk '
-    tolower($0) ~ /^## dispatch manifest/ { in_manifest=1; next }
-    !in_manifest { next }
-    /^## / { exit }
-    {
-      line=$0
-      sub(/\r$/, "", line)
-    }
-    table_started && line ~ /^[[:space:]]*$/ { exit }
-    line ~ /^[[:space:]]*\|/ { table_started=1; print line }
-  '
+  local plan="$1" line="" in_manifest=0 table_started=0
+  local had_nocasematch=0
+  local carriage_return=$'\r'
+
+  # Do not pipe the complete plan into an early-exiting reader. On a large plan,
+  # awk's former `exit` closed the pipe while printf was still writing; pipefail
+  # then turned the expected section boundary into SIGPIPE. Iterate the argument
+  # directly instead: no pipe writer and no heredoc delimiter that plan content
+  # could accidentally terminate. This is supported by macOS bash 3.2.
+  shopt -q nocasematch && had_nocasematch=1 || shopt -s nocasematch
+  while [ -n "$plan" ]; do
+    case "$plan" in
+      *$'\n'*)
+        line=${plan%%$'\n'*}
+        plan=${plan#*$'\n'}
+        ;;
+      *)
+        line=$plan
+        plan=""
+        ;;
+    esac
+    line=${line%"$carriage_return"}
+    if [ "$in_manifest" -eq 0 ]; then
+      case "$line" in
+        '## Dispatch Manifest'*) in_manifest=1 ;;
+      esac
+      continue
+    fi
+
+    case "$line" in
+      '## '*) break ;;
+    esac
+    if [ "$table_started" -eq 1 ] && [[ "$line" =~ ^[[:space:]]*$ ]]; then
+      break
+    fi
+    if [[ "$line" =~ ^[[:space:]]*\| ]]; then
+      table_started=1
+      printf '%s\n' "$line"
+    fi
+  done
+  [ "$had_nocasematch" -eq 1 ] || shopt -u nocasematch
 }
 
 manifest_has_agent_signature() {
-  manifest_table_rows "$1" | awk '
+  local rows
+  rows=$(manifest_table_rows "$1")
+  awk '
     {
       line=$0
       sub(/^[[:space:]]*\|[[:space:]]*/, "", line)
@@ -32,7 +64,9 @@ manifest_has_agent_signature() {
       if (tolower(fields[2]) ~ /^[[:space:]]*agent[[:space:]]*$/) found=1
     }
     END { exit !found }
-  '
+  ' <<MANIFEST_ROWS_EOF
+$rows
+MANIFEST_ROWS_EOF
 }
 
 # Manifest v2 is intentionally explicit about dispatch ownership:
@@ -64,23 +98,30 @@ validate_manifest_v2() {
   local plan="$1"
   MANIFEST_ERROR=$(manifest_table_rows "$plan" | awk '
     function trim(value) { sub(/^[[:space:]]+/, "", value); sub(/[[:space:]]+$/, "", value); return value }
-    function fail(message) { print message; failed=1; exit 1 }
+    # Keep consuming rows after the first error. The caller runs under pipefail;
+    # exiting here would SIGPIPE manifest_table_rows on a large valid plan.
+    function fail(message) { if (!failed) { print message; failed=1 } }
     BEGIN { expected[1]="step"; expected[2]="location"; expected[3]="subagent_type"; expected[4]="model_source"; expected[5]="model"; expected[6]="depends_on"; expected[7]="parallel_with" }
     {
+      if (failed) next
       # The serializer uses tab-delimited records internally. Reject control
       # separators before extraction so a cell cannot alter that framing.
-      if (header_seen && (index($0, "\t") || index($0, "\r"))) fail("data cells must not contain tab or carriage-return")
+      if (header_seen && (index($0, "\t") || index($0, "\r"))) { fail("data cells must not contain tab or carriage-return"); next }
       line=$0; sub(/^[[:space:]]*\|[[:space:]]*/, "", line); sub(/[[:space:]]*\|[[:space:]]*$/, "", line)
       count=split(line, fields, /[[:space:]]*\|[[:space:]]*/)
       for (i=1; i<=count; i++) fields[i]=trim(fields[i])
       if (!header_seen) {
-        if (count != 7) fail("header must have seven v2 columns")
-        for (i=1; i<=7; i++) if (fields[i] != expected[i]) fail("header must be: step | location | subagent_type | model_source | model | depends_on | parallel_with")
+        if (count != 7) { fail("header must have seven v2 columns"); next }
+        for (i=1; i<=7; i++) if (fields[i] != expected[i]) { fail("header must be: step | location | subagent_type | model_source | model | depends_on | parallel_with"); next }
         header_seen=1
         next
       }
-      if (fields[1] ~ /^-+$/) { separator_seen=1; next }
-      if (count != 7) fail("every row must have seven columns")
+      if (count != 7) { fail("every row must have seven columns"); next }
+      if (fields[1] ~ /^:?-+:?$/) {
+        for (i=2; i<=7; i++) if (fields[i] !~ /^:?-+:?$/) { fail("table separator must have seven Markdown separator cells"); next }
+        separator_seen=1
+        next
+      }
       step=fields[1]; location=fields[2]; agent_type=fields[3]; model_source=fields[4]; model=fields[5]
       if (step == "" || step == "-") fail("step is required")
       if (location == "main") {
@@ -98,13 +139,12 @@ validate_manifest_v2() {
         fail("location must be main or agent")
       }
       row_count++
-      data_seen=1
-      next
     }
     END {
       if (!failed && !header_seen) { print "missing v2 table header"; exit 1 }
       if (!failed && !separator_seen) { print "missing table separator"; exit 1 }
       if (!failed && row_count == 0) { print "manifest has no data rows"; exit 1 }
+      if (failed) exit 1
     }
   ')
 }

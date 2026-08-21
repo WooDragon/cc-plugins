@@ -249,6 +249,9 @@ fi
 # --- Attempt counter (tmpfs-backed, system handles cleanup) ---
 COUNTER_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
 mkdir -p "$COUNTER_DIR"
+# Dispatch state shares the review-state directory for its whole lifecycle:
+# stale cleanup below and APPROVE serialization must not derive it separately.
+DISPATCH_DIR="$COUNTER_DIR"
 COUNTER_FILE="$COUNTER_DIR/.review-count-${SESSION_ID}"
 APPROVE_MARKER="$COUNTER_DIR/.review-approved-${SESSION_ID}"
 # Gemini degraded state file (global, no session suffix — persists across hooks)
@@ -271,7 +274,7 @@ HISTORY_FILE="$COUNTER_DIR/.review-history-${SESSION_ID}"
 # Dispatch state is session-scoped, but stale files are global debris. Clean
 # them for every valid plan-review invocation, including Tier0 plans that have
 # no Manifest and therefore never enter the approval serializer branch.
-find "$COUNTER_DIR" -maxdepth 1 -name '.dispatch-*.json' -mmin +30 -delete 2>/dev/null || true
+find "$DISPATCH_DIR" -maxdepth 1 -name '.dispatch-*.json*' -mmin +30 -delete 2>/dev/null || true
 
 # --- Read counter (new format ATTEMPT:TOTAL, backward-compat with old single-number) ---
 IFS=: read -r ATTEMPT TOTAL_ROUNDS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0")"
@@ -434,7 +437,7 @@ if needs_manifest "$PLAN" && ! manifest_has_agent_signature "$PLAN"; then
   HOARDING_MSG="## Red Team Pre-flight — DISPATCH HOARDING
 
 Plan 声明了 Agent/Task 调度意图，但 Manifest v2 没有任何 \`agent\` 行。不得把全部工作囤积在 Main。
-请移除不再需要的调度关键词，或显式声明至少一个 Agent step 后重新调用 ExitPlanMode。
+Tier0 工作若保留在 Main，必须同时移除 Manifest 与全部调度关键词；否则显式声明至少一个 Agent step 后重新调用 ExitPlanMode。
 
 ${MANIFEST_EXAMPLE}"
   HOARDING_JSON=$(printf '%s' "$HOARDING_MSG" | jq -Rs .)
@@ -724,10 +727,9 @@ if [ "$VERDICT" = "APPROVE" ]; then
 
   # Parse manifest → dispatch JSON for Layer 2 enforcement (fail-silent: Layer 2 self-disables)
   if has_manifest "$PLAN"; then
-    DISPATCH_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
     mkdir -p "$DISPATCH_DIR" 2>/dev/null || true
     DISPATCH_FILE="$DISPATCH_DIR/.dispatch-${SESSION_ID}.json"
-    DISPATCH_TEMP=$(mktemp "$DISPATCH_DIR/.dispatch-${SESSION_ID}.XXXXXX" 2>/dev/null || true)
+    DISPATCH_TEMP=$(mktemp "$DISPATCH_DIR/.dispatch-${SESSION_ID}.json.XXXXXX" 2>/dev/null || true)
     if [ -n "$DISPATCH_TEMP" ] \
        && parse_manifest_to_json "$PLAN" "$(plan_hash "$PLAN")" > "$DISPATCH_TEMP" 2>/dev/null \
        && dispatch_state_is_valid_v2 "$DISPATCH_TEMP"; then

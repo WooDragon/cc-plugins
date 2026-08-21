@@ -613,3 +613,44 @@ teardown() {
     return 1
   }
 }
+
+@test "cap #46: copied hook without agent-kind.sh fails open with [GATE-DEGRADE]" {
+  local copied_guard payload
+  copied_guard="$TEST_TEMP_DIR/dependency-missing/dispatch-capability-guard.sh"
+  mkdir -p "${copied_guard%/*}"
+  cp "$CAP_GUARD_SCRIPT" "$copied_guard"
+
+  payload=$(mk_cap_payload "explore" "修复 main.py" "omit")
+  run_cap_guard_script "$copied_guard" "$payload"
+  [ "$CAP_EXIT" -eq 0 ] || {
+    echo "Expected dependency-missing copied hook to fail open, got $CAP_EXIT: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"[GATE-DEGRADE]"* && "$CAP_STDERR" == *"agent-kind.sh unavailable"* ]] || {
+    echo "Expected agent-kind dependency degrade, got: $CAP_STDERR"
+    return 1
+  }
+}
+
+@test "cap #47: A and B rejection exits provide complete executable dispatch fields" {
+  local payload
+  payload=$(mk_cap_payload "general-purpose" "只读调研，查看代码逻辑" "sonnet")
+  run_cap_guard "$payload"
+  assert_cap_block "A"
+  [[ "$CAP_STDERR" == *'Agent(subagent_type="Explore", model="sonnet", ...)'* ]] || {
+    echo "Expected complete Explore re-dispatch fields, got: $CAP_STDERR"
+    return 1
+  }
+
+  payload=$(mk_cap_payload "explore" "修复 main.py" "omit")
+  run_cap_guard "$payload"
+  assert_cap_block "B"
+  [[ "$CAP_STDERR" == *'Agent(subagent_type="general-purpose", model="sonnet", ...)'* ]] || {
+    echo "Expected complete general-purpose re-dispatch fields, got: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *'Agent(subagent_type="dev", ...)'* && "$CAP_STDERR" == *"省略 model"* ]] || {
+    echo "Expected registered-agent model ownership guidance, got: $CAP_STDERR"
+    return 1
+  }
+}

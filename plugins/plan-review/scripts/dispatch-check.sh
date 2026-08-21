@@ -29,7 +29,10 @@ SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || tru
 
 DISPATCH_DIR="${REVIEW_COUNTER_DIR:-/tmp/claude-reviews}"
 DISPATCH_FILE="$DISPATCH_DIR/.dispatch-${SESSION_ID}.json"
-find "$DISPATCH_DIR" -maxdepth 1 -name '.dispatch-*.json' -mmin +30 -delete 2>/dev/null || true
+# Layer 2 owns its own stale-state cleanup too: it can run without a fresh
+# plan-review invocation. Match both published files and the writer's
+# `.dispatch-<session>.json.XXXXXX` temporary files.
+find "$DISPATCH_DIR" -maxdepth 1 -name '.dispatch-*.json*' -mmin +30 -delete 2>/dev/null || true
 [ -f "$DISPATCH_FILE" ] || exit 0
 
 file_mtime=$(stat -f %m "$DISPATCH_FILE" 2>/dev/null || stat -c %Y "$DISPATCH_FILE" 2>/dev/null || echo 0)
@@ -44,9 +47,7 @@ fi
 if jq -e '.requires_dispatch_check == true and (has("schema_version") | not)' "$DISPATCH_FILE" >/dev/null 2>&1; then
   migration_message="dispatch-check: Manifest v1 state detected. Matching is skipped for this temporary state; re-run plan review to create schema_version: 2 before relying on dispatch enforcement."
   migration_json=$(printf '%s' "$migration_message" | jq -Rs .)
-  cat <<EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${migration_json}},"systemMessage":${migration_json}}
-EOF
+  printf '{"systemMessage":%s}\n' "$migration_json"
   exit 0
 fi
 
@@ -87,17 +88,27 @@ fi
 
 MANIFEST_PREVIEW=$(jq -r '
   .allowed_signatures |
-  map(if .model_source == "preset"
-      then "  - preset: subagent_type=" + .subagent_type + ", model omitted"
-      else "  - runtime: subagent_type=" + .subagent_type + ", model=" + .model
-      end) |
-  join("\n")
+  if length == 0 then ""
+  else map(if .model_source == "preset"
+           then "  - preset: subagent_type=" + .subagent_type + ", model omitted"
+           else "  - runtime: subagent_type=" + .subagent_type + ", model=" + .model
+           end) |
+       join("\n")
+  end
 ' "$DISPATCH_FILE" 2>/dev/null || echo "  (manifest parse failed)")
 
-MSG="dispatch-check: Agent/Task call does not match an approved Manifest v2 signature.${preset_model_hint}
+if [ -n "$MANIFEST_PREVIEW" ]; then
+  DECLARED_SIGNATURES="
 
 Declared signatures:
-${MANIFEST_PREVIEW}
+${MANIFEST_PREVIEW}"
+else
+  DECLARED_SIGNATURES="
+
+This approved Manifest contains no agent signatures."
+fi
+
+MSG="dispatch-check: Agent/Task call does not match an approved Manifest v2 signature.${preset_model_hint}${DECLARED_SIGNATURES}
 
 Preset calls must omit model; runtime calls must provide the exact model. To disable this guard, set DISPATCH_CHECK_DISABLED=1."
 DENY_JSON=$(printf '%s' "$MSG" | jq -Rs .)

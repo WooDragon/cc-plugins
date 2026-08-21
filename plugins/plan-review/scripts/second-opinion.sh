@@ -143,10 +143,11 @@ unset _f
 #     strips ALL trailing newlines from the last file, so a trailing
 #     sentinel byte is appended before capture and stripped back off after —
 #     this preserves the exact byte sequence of the concatenated files
-#     (no separator is inserted between files; "concatenate in order" is
-#     read literally as back-to-back bytes). Each file is piped through
-#     `tr -d '\r'` — same normalization plan-review.sh:493 applies to its own
-#     two prompt assets — so a CRLF-authored rubric file doesn't change the
+#     (no separator is inserted between files; unlike plan-review.sh's fixed
+#     asset seam, this caller-controlled order is literal back-to-back bytes).
+#     Each file is piped through `tr -d '\r'`, matching plan-review.sh's
+#     CRLF normalization for its own prompt assets, so a CRLF-authored rubric
+#     file doesn't change the
 #     bytes actually sent to the engine (and therefore doesn't change the
 #     --session hash, which is derived from these assembled bytes) relative
 #     to an LF-only file with identical content. ---

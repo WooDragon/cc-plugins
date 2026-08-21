@@ -186,14 +186,28 @@ VALID_V2_DISPATCH='{
   [ -z "$HOOK_STDOUT" ]
 }
 
-@test "dispatch v1: state without schema_version emits migration prompt and skips matching" {
+@test "dispatch v1: state without schema_version emits only a migration systemMessage" {
   create_dispatch_file "test-session" '{"plan_hash":"old","requires_dispatch_check":true,"steps":[]}'
   INPUT=$(build_agent_input subagent_type=wrong model=wrong)
   run_dispatch_check
 
-  assert_approve_json
-  [[ "$(echo "$HOOK_STDOUT" | jq -r '.systemMessage')" == *"Manifest v1"* ]]
-  [[ "$(echo "$HOOK_STDOUT" | jq -r '.systemMessage')" == *"schema_version: 2"* ]]
+  [ "$HOOK_EXIT" -eq 0 ]
+  echo "$HOOK_STDOUT" | jq -e 'keys == ["systemMessage"] and (.systemMessage | contains("Manifest v1")) and (.systemMessage | contains("schema_version: 2"))' >/dev/null
+  ! echo "$HOOK_STDOUT" | jq -e 'has("hookSpecificOutput") or has("permissionDecision")' >/dev/null
+}
+
+@test "dispatch v2: empty allowed_signatures denies without a deceptive declared list" {
+  local main_only_state
+  main_only_state=$(printf '%s' "$VALID_V2_DISPATCH" | jq '.steps = [.steps[0]] | .allowed_signatures = []')
+  create_dispatch_file "test-session" "$main_only_state"
+  INPUT=$(build_agent_input subagent_type=Explore model=haiku)
+  run_dispatch_check
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"contains no agent signatures"* ]]
+  [[ "$reason" != *"Declared signatures:"* ]]
 }
 
 @test "dispatch: corrupt state allows silently" {
@@ -226,7 +240,25 @@ VALID_V2_DISPATCH='{
   [ -z "$HOOK_STDOUT" ]
 }
 
-@test "dispatch: stale state allows silently and removes file" {
+@test "dispatch: its own stale cleanup removes published and temporary state only" {
+  local stale_dispatch="${REVIEW_COUNTER_DIR}/.dispatch-abandoned.json"
+  local stale_temp="${REVIEW_COUNTER_DIR}/.dispatch-abandoned.json.temporary"
+  local retained_review="${REVIEW_COUNTER_DIR}/.review-count-abandoned"
+  printf '%s' '{}' > "$stale_dispatch"
+  printf '%s' '{}' > "$stale_temp"
+  printf '%s' '1:1' > "$retained_review"
+  touch -t 200001010000 "$stale_dispatch" "$stale_temp" "$retained_review"
+  INPUT=$(build_agent_input)
+  run_dispatch_check
+
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDOUT" ]
+  [ ! -e "$stale_dispatch" ]
+  [ ! -e "$stale_temp" ]
+  [ -e "$retained_review" ]
+}
+
+@test "dispatch: stale current-session state allows silently and removes file" {
   create_dispatch_file "test-session" "$VALID_V2_DISPATCH"
   local dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
   touch -t 200001010000 "$dispatch_file"

@@ -101,16 +101,16 @@ resolve_plan_from_transcript() {
 #     plus the caller's PLAN_FILE_PATH, and sets the REASON global directly
 #     (no $(...) subshell — matches resolve_plan_from_transcript's own
 #     global-assignment style so callers just read $REASON afterward).
-# Three-state error message routed by the resolver's RESOLVE_REASON. Every
-# branch names the plan file path under evaluation (RESOLVE_PATH) so the user
-# can act — "write your plan to this exact file" instead of a bare directive.
+# Resolver-reason error message. Every path-aware branch names the plan file
+# under evaluation (RESOLVE_PATH) so the user can act — "write your plan to
+# this exact file" instead of a bare directive.
 plan_source_error_reason() {
   REASON=""
   case "${RESOLVE_REASON:-}" in
     resolved-but-missing)
       REASON="[ERROR] plan 内容未传入。框架在 transcript 中指定了 plan 文件 \"${RESOLVE_PATH}\"，但该文件尚未写入。请用 Write 将 plan 写入该文件后重新调用 ExitPlanMode。" ;;
     outside-whitelist|symlink-rejected|path-traversal)
-      REASON="[ERROR] plan 文件路径 \"${RESOLVE_PATH}\" 非法（${RESOLVE_REASON}），出于安全已拒绝读取。plan 文件必须位于 ~/.claude/plans 下且不能是软链接。" ;;
+      REASON="[ERROR] plan 文件路径 \"${RESOLVE_PATH}\" 非法（${RESOLVE_REASON}），出于安全已拒绝读取。请将 plan 写入框架许可的 plan 目录；路径不得包含 ..，且不能是软链接。" ;;
     *)
       if [ -n "${PLAN_FILE_PATH:-}" ] && [ "${PLAN_FILE_PATH:-}" != "null" ]; then
         REASON="[ERROR] plan 内容未传入。tool_input.plan 为空，planFilePath=\"${PLAN_FILE_PATH}\" 指向的文件不存在。请将 plan 写入该文件后重新调用 ExitPlanMode。"
