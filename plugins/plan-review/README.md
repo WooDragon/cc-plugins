@@ -127,9 +127,11 @@ is written, separate from `plan-review.log`.
 
 ### Dispatch Manifest v2
 
-When an approved plan has a Dispatch Manifest, `plan-review.sh` stores only its
-v2 signature set. The fixed columns are `step | location | subagent_type |
-model_source | model | depends_on | parallel_with`.
+A plan with dispatch keywords must include a Dispatch Manifest with at least one
+`agent` row. A plan without dispatch keywords, including Tier0 work, remains
+Manifest-free. `plan-review.sh` stores only the approved v2 signature set. The
+fixed columns are `step | location | subagent_type | model_source | model |
+depends_on | parallel_with`.
 
 - `main` rows use `-` for `subagent_type`, `model_source`, and `model`.
 - `agent` + `preset` rows require `subagent_type` and require the tool call to

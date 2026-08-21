@@ -5,6 +5,35 @@
 
 needs_manifest() { printf '%s' "$1" | grep -qiE '(Task\(|subagent_type|agent_type|Plan agent|Explore agent|worker agent|dev agent)'; }
 has_manifest() { printf '%s' "$1" | grep -qi '^## Dispatch Manifest'; }
+# manifest_table_rows <plan>
+# Emits only table rows in the Dispatch Manifest section. A single terminal CR
+# is normalized as line ending syntax; after the table starts, a blank line is
+# a hard boundary so later prose/tables cannot affect validation or dispatch.
+manifest_table_rows() {
+  printf '%s\n' "$1" | awk '
+    tolower($0) ~ /^## dispatch manifest/ { in_manifest=1; next }
+    !in_manifest { next }
+    /^## / { exit }
+    {
+      line=$0
+      sub(/\r$/, "", line)
+    }
+    table_started && line ~ /^[[:space:]]*$/ { exit }
+    line ~ /^[[:space:]]*\|/ { table_started=1; print line }
+  '
+}
+
+manifest_has_agent_signature() {
+  manifest_table_rows "$1" | awk '
+    {
+      line=$0
+      sub(/^[[:space:]]*\|[[:space:]]*/, "", line)
+      split(line, fields, /[[:space:]]*\|[[:space:]]*/)
+      if (tolower(fields[2]) ~ /^[[:space:]]*agent[[:space:]]*$/) found=1
+    }
+    END { exit !found }
+  '
+}
 
 # Manifest v2 is intentionally explicit about dispatch ownership:
 # - main rows describe work retained in the main context;
@@ -33,13 +62,11 @@ MANIFEST_EOF
 # stores a human-readable structural reason in MANIFEST_ERROR for pre-flight.
 validate_manifest_v2() {
   local plan="$1"
-  MANIFEST_ERROR=$(printf '%s\n' "$plan" | awk '
+  MANIFEST_ERROR=$(manifest_table_rows "$plan" | awk '
     function trim(value) { sub(/^[[:space:]]+/, "", value); sub(/[[:space:]]+$/, "", value); return value }
     function fail(message) { print message; failed=1; exit 1 }
     BEGIN { expected[1]="step"; expected[2]="location"; expected[3]="subagent_type"; expected[4]="model_source"; expected[5]="model"; expected[6]="depends_on"; expected[7]="parallel_with" }
-    tolower($0) ~ /^## dispatch manifest/ { in_manifest=1; next }
-    in_manifest && /^## / { in_manifest=0 }
-    in_manifest && /^[[:space:]]*\|/ {
+    {
       # The serializer uses tab-delimited records internally. Reject control
       # separators before extraction so a cell cannot alter that framing.
       if (header_seen && (index($0, "\t") || index($0, "\r"))) fail("data cells must not contain tab or carriage-return")
@@ -74,7 +101,6 @@ validate_manifest_v2() {
       data_seen=1
       next
     }
-    in_manifest && data_seen && /^[[:space:]]*$/ { in_manifest=0 }
     END {
       if (!failed && !header_seen) { print "missing v2 table header"; exit 1 }
       if (!failed && !separator_seen) { print "missing table separator"; exit 1 }
@@ -90,11 +116,9 @@ validate_manifest_v2() {
 parse_manifest_to_json() {
   local plan="$1" hash="$2"
   validate_manifest_v2 "$plan" || return 1
-  printf '%s\n' "$plan" | awk '
+  manifest_table_rows "$plan" | awk '
     function trim(value) { sub(/^[[:space:]]+/, "", value); sub(/[[:space:]]+$/, "", value); return value }
-    tolower($0) ~ /^## dispatch manifest/ { in_manifest=1; next }
-    in_manifest && /^## / { in_manifest=0 }
-    in_manifest && /^[[:space:]]*\|/ {
+    {
       line=$0; sub(/^[[:space:]]*\|[[:space:]]*/, "", line); sub(/[[:space:]]*\|[[:space:]]*$/, "", line)
       count=split(line, fields, /[[:space:]]*\|[[:space:]]*/)
       for (i=1; i<=count; i++) fields[i]=trim(fields[i])

@@ -2130,15 +2130,18 @@ Approved."
   assert_ack_approve_json
 }
 
-@test "manifest v2: Main-only row is structurally valid" {
-  create_mock_engine "agy" "<verdict>APPROVE</verdict>
-Approved."
+@test "manifest v2: Main-only rows deny when dispatch keywords are present" {
   local plan
   plan=$(manifest_v2_plan '| 1 | main | - | - | - | - | - |')
   INPUT=$(build_input "plan=$plan")
   run_hook
 
-  assert_ack_approve_json
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"DISPATCH HOARDING"* ]]
+  [[ "$reason" == *"移除不再需要的调度关键词"* ]]
+  [[ "$reason" == *"显式声明至少一个 Agent step"* ]]
 }
 
 @test "manifest v2: preset-only row is structurally valid" {
@@ -2320,33 +2323,33 @@ Approved."
   ! find "$REVIEW_COUNTER_DIR" -maxdepth 1 -name '.dispatch-test-session.*' -print -quit | grep -q .
 }
 
-@test "mutation: control-separator guard has one executable hit" {
-  local tab=$'\t'
+@test "mutation: shared blank-line boundary has one executable hit" {
   local plan
-  plan=$(manifest_v2_plan "| 1 | agent | Explore${tab}smuggled | runtime | haiku | - | - |")
+  plan=$(manifest_v2_plan '| 1 | main | - | - | - | - | - |
 
-  # The production validator rejects the tab before serializer framing begins.
-  run bash -c '. "$1"; validate_manifest_v2 "$2"' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+| 2 | agent | Explore | runtime | haiku | - | - |')
+
+  run bash -c '. "$1"; manifest_has_agent_signature "$2"' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
   [ "$status" -ne 0 ]
 
   setup_script_copy
   local copied_manifest="${COPY_SCRIPT_DIR}/lib/manifest.sh"
-  local mutation_count
-  mutation_count=$(grep -cF 'index($0, "\t") || index($0, "\r")' "$copied_manifest")
-  [ "$mutation_count" -eq 1 ] || {
-    echo "expected one control-separator guard, found $mutation_count"
-    return 1
-  }
+  run grep -F 'table_started && line ~ /^[[:space:]]*$/ { exit }' "$copied_manifest"
+  [ "$status" -eq 0 ]
   python3 - "$copied_manifest" <<'PYTHON'
 from pathlib import Path
 path = Path(__import__('sys').argv[1])
 text = path.read_text()
-needle = 'header_seen && (index($0, "\\t") || index($0, "\\r"))'
+needle = 'table_started && line ~ /^[[:space:]]*$/ { exit }'
 assert text.count(needle) == 1
-path.write_text(text.replace(needle, '0', 1))
+path.write_text(text.replace(needle, '0 # MUTATION', 1))
 PYTHON
+  run grep -F '0 # MUTATION' "$copied_manifest"
+  [ "$status" -eq 0 ]
 
-  run bash -c '. "$1"; validate_manifest_v2 "$2"' bash "$copied_manifest" "$plan"
+  # Red proof: without the shared boundary the later agent row satisfies the
+  # exact signature expectation that the production implementation rejects.
+  run bash -c '. "$1"; manifest_has_agent_signature "$2"' bash "$copied_manifest" "$plan"
   [ "$status" -eq 0 ]
 }
 
@@ -2358,6 +2361,19 @@ Approved."
 
   assert_approve_json
   [ ! -f "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+@test "dispatch cleanup: Tier0 approval removes stale global dispatch state" {
+  local stale_dispatch="${REVIEW_COUNTER_DIR}/.dispatch-abandoned-session.json"
+  printf '%s' '{}' > "$stale_dispatch"
+  touch -t 200001010000 "$stale_dispatch"
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Approved."
+  INPUT=$(build_input plan="Edit one file and run its test.")
+  run_hook
+
+  assert_ack_approve_json
+  [ ! -e "$stale_dispatch" ]
 }
 
 @test "manifest v2: missing manifest still rejects dispatch keywords" {
@@ -2454,6 +2470,8 @@ Needs work."
   grep -q "registered agent" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
   grep -q "dev-econ" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
   grep -q "worker-econ" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -qF "full hoarding [Critical]" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
+  grep -qF "partial hoarding [Major]" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
   ! grep -q "Implementation work.*sonnet" "${SYSTEM_PROMPT_PLAN_FILE:?Missing system prompt asset}"
 }
 
@@ -2477,18 +2495,18 @@ Use Task( for isolation.
   assert_ack_approve_json
 }
 
-@test "manifest v2 parser: multiple blank lines before a Main-only table are tolerated" {
+@test "manifest v2 parser: multiple blank lines before an Agent table are tolerated" {
   create_mock_engine "agy" "<verdict>APPROVE</verdict>
 Approved."
   local plan="## Plan
-Use Task( for isolation.
+Use Task( for isolated work.
 
 ## Dispatch Manifest
 
 
 | step | location | subagent_type | model_source | model | depends_on | parallel_with |
 |------|----------|---------------|--------------|-------|------------|---------------|
-| 1 | main | - | - | - | - | - |"
+| 1 | agent | Explore | runtime | haiku | - | - |"
   INPUT=$(build_input "plan=$plan")
   run_hook
   assert_ack_approve_json
@@ -2509,6 +2527,68 @@ Use Task( for isolation.
   INPUT=$(build_input "plan=$plan")
   run_hook
   assert_ack_approve_json
+}
+
+@test "manifest v2 parser: blank line blocks a later seven-column agent signature" {
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+| 1 | main | - | - | - | - | - |
+
+| 2 | agent | Explore | runtime | haiku | - | - |"
+  run bash -c '. "$1"; manifest_has_agent_signature "$2"' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -ne 0 ]
+  run bash -c '. "$1"; parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[]' ]]
+  [[ "$(jq -c '.steps' <<<"$output")" == '[{"id":"1","location":"main","subagent_type":null,"model_source":null,"model":null,"depends_on":null,"parallel_with":null}]' ]]
+
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+  assert_deny_json
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$HOOK_STDOUT")" == *"DISPATCH HOARDING"* ]]
+  [ ! -e "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+@test "manifest v2 parser: blank line blocks a later TAB-based agent signature" {
+  local tab=$'\t'
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |
+|------|----------|---------------|--------------|-------|------------|---------------|
+| 1 | main | - | - | - | - | - |
+
+| 2 | agent | Explore${tab}smuggled | runtime | haiku | - | - |"
+  run bash -c '. "$1"; manifest_has_agent_signature "$2"' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -ne 0 ]
+  run bash -c '. "$1"; parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[]' ]]
+
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+  assert_deny_json
+  [[ "$(jq -r '.hookSpecificOutput.permissionDecisionReason' <<<"$HOOK_STDOUT")" == *"DISPATCH HOARDING"* ]]
+  [ ! -e "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+@test "manifest v2 parser: terminal CRLF suffix is normalized before table semantics" {
+  local cr=$'\r'
+  local plan="## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on | parallel_with |${cr}
+|------|----------|---------------|--------------|-------|------------|---------------|${cr}
+| 1 | agent | Explore | runtime | haiku | - | - |${cr}"
+  run bash -c '. "$1"; parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
+  [ "$status" -eq 0 ]
+  [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[{"subagent_type":"Explore","model_source":"runtime","model":"haiku"}]' ]]
 }
 
 @test "manifest v2 parser: next section table does not satisfy missing manifest table" {

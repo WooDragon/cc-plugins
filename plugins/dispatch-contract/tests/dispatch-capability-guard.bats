@@ -357,7 +357,7 @@ teardown() {
 # Malformed input fail-open
 # ============================================================
 
-@test "cap #30a: empty stdin -> exit 0 with [GATE-DEGRADE] (Major finding #3: empty stdin is a degrade path, not a silent no-signal pass — not assert_cap_pass, same reasoning as #30b)" {
+@test "cap #30a: empty stdin -> exit 0 with [GATE-DEGRADE] (empty stdin is a degrade path, not a silent no-signal pass)" {
   run_cap_guard_stdin ""
   [ "$CAP_EXIT" -eq 0 ] || {
     echo "Expected exit 0, got $CAP_EXIT"
@@ -448,7 +448,7 @@ teardown() {
 }
 
 # ============================================================
-# Regression: 4 defects fixed post-AI-review
+# Regression: four fixed dispatch-capability defects
 # (WRITE_HIT_A dead-end close, EXEC exec-intent anchor, GATE-DEGRADE for
 # empty stdin / missing jq, WRITE_OBJ bug|issue|error). See preamble in
 # hooks/dispatch-capability-guard.sh ("A's exemption" block comment) for

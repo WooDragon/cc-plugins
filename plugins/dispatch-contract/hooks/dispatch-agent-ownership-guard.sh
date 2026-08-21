@@ -25,8 +25,7 @@ if ! jq -e '.tool_input | type == "object"' <<<"$GATE_INPUT" >/dev/null 2>&1; th
   exit 0
 fi
 
-TYPE="$subagent_type"
-[ -z "$TYPE" ] && TYPE="general-purpose"
+TYPE=$(normalize_agent_type "$subagent_type")
 
 if is_runtime_model_agent "$TYPE"; then
   if jq -e '.tool_input.model | type == "string" and test("[^[:space:]]")' <<<"$GATE_INPUT" >/dev/null 2>&1; then

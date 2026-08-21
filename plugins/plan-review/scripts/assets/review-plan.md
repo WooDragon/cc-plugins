@@ -53,7 +53,9 @@ Keep your response under 3000 characters.
      model_source | model | depends_on | parallel_with`. Main rows use `-` for
      subagent_type, model_source, and model; preset rows omit model; runtime
      rows require it. Missing manifest when dispatch keywords are present is
-     [Major]; a structurally invalid manifest is [Critical].
+     [Major]; a structurally invalid manifest is [Critical]. A dispatch
+     Manifest with no `agent` row is full hoarding [Critical]. A Manifest that
+     retains some delegable work in Main is partial hoarding [Major].
    - Do not require every implementation step to be Sonnet, and do not require
      every Agent row to copy a concrete model. The plan-review plugin validates
      only the approved manifest signature set; global model ownership is outside

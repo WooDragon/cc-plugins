@@ -257,7 +257,7 @@ teardown() {
   # Drive with timeout to guarantee non-hang even if the hook regresses.
   HOOK_STDOUT="" HOOK_STDERR="" HOOK_EXIT=0
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
   HOOK_STDOUT=$(printf '%s' "$payload" | timeout 10 bash "$GATE_SCRIPT" 2>"$stderr_file") || HOOK_EXIT=$?
   HOOK_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"

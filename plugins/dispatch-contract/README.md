@@ -2,6 +2,10 @@
 
 Subagent dispatch contract enforcement for Claude Code — a `%%DONE%%` finalization gate plus a methodology skill for reliable subagent delegation.
 
+## Version 1.6.0: Breaking Model Contract
+
+Version 1.6.0 makes caller-side `model` ownership explicit. Runtime-owned built-ins must carry a non-empty `model` in an `Agent` or `Task` call. Registered agents must omit `model`; `model: null` is equivalent to omission and preserves the agent frontmatter preset. Any other registered-agent model value is rejected because it overrides that preset. This is a breaking contract for callers that previously supplied a model for a registered agent.
+
 The plugin has seven parts: four **PreToolUse hooks** — one blocks dispatch calls omitting `run_in_background:false`, one enforces model ownership, one blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, and one blocks a `name`-carrying dispatch (upgrading a one-shot subagent to a teammate) whose `subagent_type` is not a recognized team-ops role — a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
 
 ## Installation
@@ -542,6 +546,6 @@ the model sees. The correction message reaches model context either way.
 | `ALLOW_UNMANAGED_TEAMMATE` | _(unset)_ | `1` disables the dispatch channel guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
 | `CLAUDE_CODE_FORK_SUBAGENT` | _(unset)_ | `0` disables the fork-subagent feature — restores `run_in_background` to the Agent input schema, the correct fix for step 9b's fork-world block |
 | `ALLOW_DISPATCH_CAPABILITY_MISMATCH` | _(unset)_ | `1` disables the dispatch-capability guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
-| `ALLOW_AGENT_MODEL_INHERIT` | _(unset)_ | `1` temporarily bypasses the agent ownership guard — remove it after diagnosing the call, because it disables model ownership validation |
+| `ALLOW_AGENT_MODEL_INHERIT` | _(unset)_ | Emergency-only `1` bypass for diagnosing an ownership false positive. Remove it immediately after diagnosis: it disables model ownership validation and is not a supported dispatch mode. |
 | `CLAUDE_AUTO_BACKGROUND_TASKS` | _(unset)_ | Truthy value defeats `run_in_background:false`'s synchronous-delivery guarantee past 120s runtime — the sync guard blocks (step 8b) rather than silently misjudge a passing dispatch as safe; clear this variable to fix |
 | `DONE_GATE_BODY_FLOOR` | `500` | Byte floor for the marker-absent branch — a final message with no marker and a body below this is blocked; at or above it passes with a `systemMessage` warning. Derivation in `The %%DONE%% Contract` above |

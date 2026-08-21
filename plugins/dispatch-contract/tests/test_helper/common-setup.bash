@@ -7,12 +7,38 @@ MARK='%%DONE%%'
 
 # --- Setup / Teardown ---
 
+cleanup_test_temp_dir() {
+  rm -rf "${TEST_TEMP_DIR:-}"
+}
+
+restore_common_setup_traps() {
+  trap - EXIT INT TERM
+  [ -n "${COMMON_SETUP_PREVIOUS_EXIT_TRAP:-}" ] && eval "$COMMON_SETUP_PREVIOUS_EXIT_TRAP"
+  [ -n "${COMMON_SETUP_PREVIOUS_INT_TRAP:-}" ] && eval "$COMMON_SETUP_PREVIOUS_INT_TRAP"
+  [ -n "${COMMON_SETUP_PREVIOUS_TERM_TRAP:-}" ] && eval "$COMMON_SETUP_PREVIOUS_TERM_TRAP"
+  return 0
+}
+
+cleanup_and_terminate() {
+  local signal="$1"
+  cleanup_test_temp_dir
+  trap - EXIT INT TERM
+  kill -s "$signal" "$$"
+}
+
 common_setup() {
-  TEST_TEMP_DIR=$(mktemp -d)
+  COMMON_SETUP_PREVIOUS_EXIT_TRAP=$(trap -p EXIT)
+  COMMON_SETUP_PREVIOUS_INT_TRAP=$(trap -p INT)
+  COMMON_SETUP_PREVIOUS_TERM_TRAP=$(trap -p TERM)
+  TEST_TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dispatch-contract.XXXXXX") || return 1
+  trap cleanup_test_temp_dir EXIT
+  trap 'cleanup_and_terminate INT' INT
+  trap 'cleanup_and_terminate TERM' TERM
 }
 
 common_teardown() {
-  rm -rf "$TEST_TEMP_DIR"
+  cleanup_test_temp_dir
+  restore_common_setup_traps
 }
 
 # --- Transcript Fixture Builders ---
@@ -121,7 +147,7 @@ run_gate() {
   HOOK_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_UNMARKED_FINAL=1
   # (subagent-done-gate 的逃生舱),门禁会全局失效,导致每个 BLOCK 用例假通过。
@@ -206,7 +232,7 @@ run_sync_guard() {
   SYNC_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_BACKGROUND_DISPATCH=1、
   # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS 或 CLAUDE_AUTO_BACKGROUND_TASKS,门禁
@@ -231,7 +257,7 @@ run_rules_inject() {
   INJECT_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   # 夹具必须隔离调用者环境：若跑测试的 shell 里设了 ALLOW_NO_RULES_INJECT=1
   # (dispatch-rules-inject 的逃生舱),门禁会静默 exit 0 不注入,导致用例假通过。
@@ -341,7 +367,7 @@ run_channel_guard() {
   CHANNEL_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   if [[ "${2:-}" != "" ]]; then
     CHANNEL_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT "${@:2}" bash "$CHANNEL_GUARD_SCRIPT" 2>"$stderr_file") || CHANNEL_EXIT=$?
@@ -512,7 +538,7 @@ run_cap_guard() {
   CAP_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   # 夹具必须隔离调用者环境：若跑测试的 shell 里设了
   # ALLOW_DISPATCH_CAPABILITY_MISMATCH=1 (本 hook 的逃生舱),门禁会全局失效,
@@ -538,7 +564,7 @@ run_cap_guard_stdin() {
   CAP_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   if [[ "${2:-}" != "" ]]; then
     CAP_STDOUT=$(printf '%s' "$raw" | env -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT "${@:2}" bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
@@ -583,7 +609,7 @@ run_cap_guard_no_jq() {
   CAP_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
 
   CAP_STDOUT=$(printf '%s' "$payload" | env -i PATH="$no_jq_dir" bash "$CAP_GUARD_SCRIPT" 2>"$stderr_file") || CAP_EXIT=$?
   CAP_STDERR=$(cat "$stderr_file")
@@ -769,7 +795,7 @@ run_one_gate() {
   shift 2
   ONE_GATE_EXIT=0
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
   if [[ "${1:-}" != "" ]]; then
     printf '%s' "$payload" | env -u ALLOW_UNMANAGED_TEAMMATE -u ALLOW_BACKGROUND_DISPATCH -u CLAUDE_CODE_DISABLE_BACKGROUND_TASKS -u CLAUDE_AUTO_BACKGROUND_TASKS -u ALLOW_DISPATCH_CAPABILITY_MISMATCH -u ALLOW_AGENT_MODEL_INHERIT "$@" bash "$script" >/dev/null 2>"$stderr_file" || ONE_GATE_EXIT=$?
   else
@@ -786,14 +812,16 @@ run_one_gate() {
 OWNERSHIP_GUARD_SCRIPT="${BATS_TEST_DIRNAME}/../hooks/dispatch-agent-ownership-guard.sh"
 
 # mk_ownership_payload TOOL_NAME TYPE_MODE MODEL_MODE [MODEL_VALUE]
-# TYPE_MODE: omit | any literal type. MODEL_MODE: omit | null | string.
+# TYPE_MODE: omit | null | any literal type. MODEL_MODE: omit | null | string.
 mk_ownership_payload() {
   local tool="$1" type_mode="$2" model_mode="$3" model_value="${4:-}"
   local ti='{}'
 
-  if [[ "$type_mode" != "omit" ]]; then
-    ti=$(jq -cn --argjson base "$ti" --arg value "$type_mode" '$base + {subagent_type:$value}')
-  fi
+  case "$type_mode" in
+    omit) ;;
+    null) ti=$(jq -cn --argjson base "$ti" '$base + {subagent_type:null}') ;;
+    *) ti=$(jq -cn --argjson base "$ti" --arg value "$type_mode" '$base + {subagent_type:$value}') ;;
+  esac
   case "$model_mode" in
     null) ti=$(jq -cn --argjson base "$ti" '$base + {model:null}') ;;
     string) ti=$(jq -cn --argjson base "$ti" --arg value "$model_value" '$base + {model:$value}') ;;
@@ -820,7 +848,7 @@ run_ownership_script() {
   OWNERSHIP_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
   if [[ "${1:-}" != "" ]]; then
     OWNERSHIP_STDOUT=$(printf '%s' "$payload" | env -u ALLOW_AGENT_MODEL_INHERIT "$@" bash "$script" 2>"$stderr_file") || OWNERSHIP_EXIT=$?
   else
@@ -838,7 +866,7 @@ run_ownership_guard_no_jq() {
   OWNERSHIP_EXIT=0
 
   local stderr_file
-  stderr_file=$(mktemp)
+  stderr_file=$(mktemp "$TEST_TEMP_DIR/stderr.XXXXXX") || return 1
   OWNERSHIP_STDOUT=$(printf '%s' "$payload" | env -i PATH="$no_jq_dir" bash "$OWNERSHIP_GUARD_SCRIPT" 2>"$stderr_file") || OWNERSHIP_EXIT=$?
   OWNERSHIP_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
