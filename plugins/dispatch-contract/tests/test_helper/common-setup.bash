@@ -543,10 +543,6 @@ run_cap_guard() {
   rm -f "$stderr_file"
 }
 
-# run_cap_guard_stdin RAW_STDIN [env_overrides...]
-# Like run_cap_guard but takes a raw stdin string instead of building/echoing
-# a JSON payload — for malformed-input fixtures (empty, non-JSON, etc.) where
-# there is no well-formed payload to build.
 # run_cap_guard_script SCRIPT PAYLOAD [env_overrides...]
 # Like run_cap_guard, but executes a copied guard for dependency/mutation
 # probes without changing the production script.

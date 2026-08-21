@@ -13,9 +13,12 @@
 set -u
 
 . "${BASH_SOURCE[0]%/*}/lib/gate.sh"
-. "${BASH_SOURCE[0]%/*}/lib/agent-kind.sh"
 
 gate_preamble dispatch-agent-ownership-guard ALLOW_AGENT_MODEL_INHERIT subagent_type || exit 0
+
+AGENT_KIND_LIB="${BASH_SOURCE[0]%/*}/lib/agent-kind.sh"
+gate_require_library dispatch-agent-ownership-guard "$AGENT_KIND_LIB" \
+  normalize_agent_type is_runtime_model_agent || exit 0
 
 # gate_preamble validates JSON and extracts fields, but model-field ownership
 # depends on distinguishing absent, null, blank, and nonblank values. Its

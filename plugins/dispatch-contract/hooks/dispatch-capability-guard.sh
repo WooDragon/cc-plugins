@@ -107,15 +107,7 @@
 # writing it would misleadingly imply the check does something.
 set -u
 
-AGENT_KIND_LIB="${BASH_SOURCE[0]%/*}/lib/agent-kind.sh"
-if ! . "$AGENT_KIND_LIB"; then
-  printf '[GATE-DEGRADE] dispatch-capability-guard: agent-kind.sh unavailable\n' >&2
-  exit 0
-fi
-if ! declare -F normalize_agent_type >/dev/null 2>&1 || ! declare -F is_runtime_model_agent >/dev/null 2>&1; then
-  printf '[GATE-DEGRADE] dispatch-capability-guard: agent-kind.sh lacks required helpers\n' >&2
-  exit 0
-fi
+. "${BASH_SOURCE[0]%/*}/lib/gate.sh"
 
 INPUT=$(cat)
 
@@ -152,6 +144,10 @@ MODEL=$(jq -r '.tool_input.model // empty' <<< "$INPUT" 2>/dev/null) || {
 
 [ -z "$PROMPT" ] && exit 0
 
+AGENT_KIND_LIB="${BASH_SOURCE[0]%/*}/lib/agent-kind.sh"
+gate_require_library dispatch-capability-guard "$AGENT_KIND_LIB" \
+  normalize_agent_type is_runtime_model_agent || exit 0
+
 # subagent_type default differs from prompt/model-style fields: absent means
 # "general-purpose", not "treat as missing" (mirrors
 # pre-dispatch-readonly-guard.sh's same rule, kept for judgment A's parity).
@@ -169,7 +165,7 @@ MODEL_LC=$(tr '[:upper:]' '[:lower:]' <<< "$MODEL")
 # widened the set of prompts allowed to pass — harmless in that direction).
 # This hook reuses it as a REJECTION signal (judgment B blocks on EXEC_HIT),
 # which flips the safety direction: a bare keyword list now widens the set
-# of prompts BLOCKED, and false positives there have a real cost (실측 in
+# of prompts BLOCKED, and false positives there have a real cost (a measured
 # A prior false positive showed that "查一下跑测试的脚本在哪" is pure research and got
 # blocked). Per gate-design.md §2 (anchor syntactic shape, not bare
 # keywords), EXEC_HIT now requires a bare-keyword match to sit in an

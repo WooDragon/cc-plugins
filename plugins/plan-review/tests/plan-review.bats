@@ -2624,9 +2624,16 @@ Use Task( for isolation.
 }
 
 @test "manifest v2 parser: over-64KB valid plan validates, detects signature, and serializes" {
-  local padding
-  padding=$(head -c 70000 < /dev/zero | tr '\\0' x)
-  local plan="## Plan
+  local padding padding_lines padding_bytes
+  padding=$(awk 'BEGIN { for (i = 1; i <= 3000; i++) printf "padding-%04d-abcdefghijklmnopqrstuvwxyz-0123456789-ordinary-ascii-line\n", i }')
+  padding_lines=$(printf '%s\n' "$padding" | wc -l | tr -d ' ')
+  padding_bytes=$(printf '%s' "$padding" | wc -c | tr -d ' ')
+  [ "$padding_lines" -ge 2000 ] || { echo "large plan padding has only $padding_lines lines"; return 1; }
+  [ "$padding_bytes" -gt 65536 ] || { echo "large plan padding has only $padding_bytes bytes"; return 1; }
+
+  local plan manifest_script
+  manifest_script="${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh"
+  plan="## Plan
 Use Task( for isolation.
 
 ## Dispatch Manifest
@@ -2636,8 +2643,14 @@ Use Task( for isolation.
 
 ## Detail
 ${padding}"
-  run bash -c '. "$1"; validate_manifest_v2 "$2" && manifest_has_agent_signature "$2" && parse_manifest_to_json "$2" test-hash' bash "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh" "$plan"
 
+  run bash -c '. "$1"; validate_manifest_v2 "$2"' bash "$manifest_script" "$plan"
+  [ "$status" -eq 0 ]
+
+  run bash -c '. "$1"; manifest_has_agent_signature "$2"' bash "$manifest_script" "$plan"
+  [ "$status" -eq 0 ]
+
+  run bash -c '. "$1"; parse_manifest_to_json "$2" test-hash' bash "$manifest_script" "$plan"
   [ "$status" -eq 0 ]
   [[ "$(jq -c '.allowed_signatures' <<<"$output")" == '[{"subagent_type":"Explore","model_source":"runtime","model":"haiku"}]' ]]
 }

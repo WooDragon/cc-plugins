@@ -38,6 +38,33 @@
 # contract (rc 0/1/2/3 above) must be kept in sync by hand — there is no
 # automated check tying them together.
 
+# gate_require_library <gate-name> <library-path> <required-function>...
+#   rc 0 = library sourced and every required helper is defined
+#   rc 1 = library unavailable or a required helper is missing; a
+#          [GATE-DEGRADE] marker is written to stderr
+#
+# Loading a dependency is part of forming judgment data, so this helper keeps
+# the failure contract in one place for every consumer. It deliberately uses
+# only Bash builtins and never exits the caller.
+gate_require_library() {
+  local gate="$1" library="$2"; shift 2
+  local library_name="${library##*/}"
+
+  if ! . "$library"; then
+    printf '[GATE-DEGRADE] %s: %s unavailable\n' "$gate" "$library_name" >&2
+    return 1
+  fi
+
+  local required
+  for required in "$@"; do
+    if ! declare -F "$required" >/dev/null 2>&1; then
+      printf '[GATE-DEGRADE] %s: %s lacks required helpers\n' "$gate" "$library_name" >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
 gate_preamble() {
   local gate="$1" hatch="$2"; shift 2
   GATE_INPUT=$(cat)

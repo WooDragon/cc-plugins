@@ -211,3 +211,30 @@ EOF
   run_ownership_script "$mutant" "$payload"
   assert_ownership_block
 }
+
+@test "ownership #16: missing agent-kind library fails open through shared loader" {
+  local copied_guard payload
+  copied_guard="$TEST_TEMP_DIR/dependency-missing/dispatch-agent-ownership-guard.sh"
+  mkdir -p "${copied_guard%/*}/lib"
+  cp "$OWNERSHIP_GUARD_SCRIPT" "$copied_guard"
+  cp "${OWNERSHIP_GUARD_SCRIPT%/*}/lib/gate.sh" "${copied_guard%/*}/lib/gate.sh"
+
+  payload=$(mk_ownership_payload Agent general-purpose omit)
+  run_ownership_script "$copied_guard" "$payload"
+  [ "$OWNERSHIP_EXIT" -eq 0 ]
+  [[ "$OWNERSHIP_STDERR" == *"[GATE-DEGRADE] dispatch-agent-ownership-guard: agent-kind.sh unavailable"* ]]
+}
+
+@test "ownership #17: agent-kind library missing a required helper fails open" {
+  local copied_guard payload
+  copied_guard="$TEST_TEMP_DIR/dependency-incomplete/dispatch-agent-ownership-guard.sh"
+  mkdir -p "${copied_guard%/*}/lib"
+  cp "$OWNERSHIP_GUARD_SCRIPT" "$copied_guard"
+  cp "${OWNERSHIP_GUARD_SCRIPT%/*}/lib/gate.sh" "${copied_guard%/*}/lib/gate.sh"
+  printf '%s\n' 'normalize_agent_type() { :; }' > "${copied_guard%/*}/lib/agent-kind.sh"
+
+  payload=$(mk_ownership_payload Agent general-purpose omit)
+  run_ownership_script "$copied_guard" "$payload"
+  [ "$OWNERSHIP_EXIT" -eq 0 ]
+  [[ "$OWNERSHIP_STDERR" == *"[GATE-DEGRADE] dispatch-agent-ownership-guard: agent-kind.sh lacks required helpers"* ]]
+}

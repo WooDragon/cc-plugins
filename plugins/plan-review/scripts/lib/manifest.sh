@@ -14,23 +14,12 @@ manifest_table_rows() {
   local had_nocasematch=0
   local carriage_return=$'\r'
 
-  # Do not pipe the complete plan into an early-exiting reader. On a large plan,
-  # awk's former `exit` closed the pipe while printf was still writing; pipefail
-  # then turned the expected section boundary into SIGPIPE. Iterate the argument
-  # directly instead: no pipe writer and no heredoc delimiter that plan content
-  # could accidentally terminate. This is supported by macOS bash 3.2.
+  # Read the plan line by line from a here-string. Unlike the old string
+  # slicing loop, this keeps large-plan traversal linear and avoids piping the
+  # complete plan into an early-exiting reader that could SIGPIPE its writer.
+  # This is supported by macOS bash 3.2.
   shopt -q nocasematch && had_nocasematch=1 || shopt -s nocasematch
-  while [ -n "$plan" ]; do
-    case "$plan" in
-      *$'\n'*)
-        line=${plan%%$'\n'*}
-        plan=${plan#*$'\n'}
-        ;;
-      *)
-        line=$plan
-        plan=""
-        ;;
-    esac
+  while IFS= read -r line || [ -n "$line" ]; do
     line=${line%"$carriage_return"}
     if [ "$in_manifest" -eq 0 ]; then
       case "$line" in
@@ -49,13 +38,15 @@ manifest_table_rows() {
       table_started=1
       printf '%s\n' "$line"
     fi
-  done
+  done <<<"$plan"
   [ "$had_nocasematch" -eq 1 ] || shopt -u nocasematch
 }
 
 manifest_has_agent_signature() {
   local rows
   rows=$(manifest_table_rows "$1")
+  # The section parser has already bounded the captured rows; a here-string
+  # passes them to awk without a delimiter that plan content can terminate.
   awk '
     {
       line=$0
@@ -64,9 +55,7 @@ manifest_has_agent_signature() {
       if (tolower(fields[2]) ~ /^[[:space:]]*agent[[:space:]]*$/) found=1
     }
     END { exit !found }
-  ' <<MANIFEST_ROWS_EOF
-$rows
-MANIFEST_ROWS_EOF
+  ' <<<"$rows"
 }
 
 # Manifest v2 is intentionally explicit about dispatch ownership:
