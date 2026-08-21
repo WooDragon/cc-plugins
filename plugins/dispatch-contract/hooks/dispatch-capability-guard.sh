@@ -107,6 +107,8 @@
 # writing it would misleadingly imply the check does something.
 set -u
 
+. "${BASH_SOURCE[0]%/*}/lib/agent-kind.sh"
+
 INPUT=$(cat)
 
 # Knowing bypass is checked first: an open hatch is the reason this dispatch
@@ -407,9 +409,14 @@ case "$TYPE" in
     ;;
 esac
 
-# --- Judgment C (new): NEEDS_CAP && model contains "haiku" -----------------
-if [ "$NEEDS_CAP" -eq 1 ] && [[ "$MODEL_LC" == *haiku* ]]; then
-  printf '[dispatch-capability-guard] 命中判据 C: 本任务需要超出只读的能力,但 model=%s 落在 haiku 档;解读执行/测试输出并决定下一步属"产出取舍结论"的落地活,daily 模型分层判据把这类工作排除在 haiku 之外。\n' "$MODEL" >&2
+# --- Judgment C (new): NEEDS_CAP && runtime-owned type && explicit haiku ---
+# Registered agents own their model in frontmatter. Their model field must be
+# omitted (enforced by dispatch-agent-ownership-guard.sh), so C only judges
+# runtime-owned built-ins that explicitly select a haiku model on this call.
+if [ "$NEEDS_CAP" -eq 1 ] \
+   && is_runtime_model_agent "$TYPE" \
+   && [[ "$MODEL_LC" == *haiku* ]]; then
+  printf '[dispatch-capability-guard] 命中判据 C: 本任务需要超出只读的能力,但 runtime-owned agent 的显式 model=%s 落在 haiku 档;解读执行/测试输出并决定下一步属"产出取舍结论"的落地活,daily 模型分层判据把这类工作排除在 haiku 之外。\n' "$MODEL" >&2
   printf '[dispatch-capability-guard] 出路: 把 model 升到 sonnet(或按任务要求的档位)重派。\n' >&2
   REJECT=1
 fi

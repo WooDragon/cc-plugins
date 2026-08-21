@@ -96,7 +96,7 @@ description: |
 
 ## References 导航
 
-- 需要每条铁律的正反例与常见踩坑时，读取：`references/dispatch-contract.md`
+- 需要每条铁律的正反例、常见踩坑或 model ownership 规则时，读取：`references/dispatch-contract.md`
 - 判断某任务该不该卸载、用哪个模型档时，读取：`references/offload-scenarios.md`
 - 派发 Explore 时任务级别钉哪一档，见本节「Explore 任务级别」
 - spawn background subagent 后如何收产物 / 判活性 / 何时能 TaskStop，读取：`references/mailbox-liveness.md`
@@ -107,4 +107,4 @@ description: |
 
 team-ops 语境下派发由 team-ops 协议（handoff/control-signal）接管，不适用本 skill；web-search 的搜索隔离用 web-search skill 自己的规范。
 
-**即席派发经济性**：分两件事，别混同。model/agent 取值与任务能力是否匹配（该派 Explore 还是全权 agent、该用 sonnet 还是 haiku）已落地进本插件的 `hooks/dispatch-capability-guard.sh`（PreToolUse，判据 A/B/C），逃生舱 `ALLOW_DISPATCH_CAPABILITY_MISMATCH=1`。「`model` 字段在不在场」是另一件事——仍是插件外可选配置，可另配 PreToolUse hook 拦截省略 `model` 的派发调用逼显式指定档位；注册 agent（frontmatter 已钉 model）可豁免；紧急放行写在 `~/.claude/settings.json` 的 `env` 段设 `"ALLOW_AGENT_MODEL_INHERIT": "1"`（Bash 内 `export` 传不进 hook 进程）。
+**即席派发经济性**：先按任务能力选择角色和模型，再按所有权填写调用字段。`hooks/dispatch-capability-guard.sh` 判断角色/模型能否执行请求（判据 A/B/C）。`hooks/dispatch-agent-ownership-guard.sh` 判断调用者是否有权覆盖 `model`：runtime-owned 内置类型必须显式提供非空 model；具名注册 agent 必须省略 model。派发前应先读取 `references/dispatch-contract.md` 的「Model ownership」；该节再指向唯一维护类型清单的 helper。紧急放行可在 `~/.claude/settings.json` 的 `env` 段设 `"ALLOW_AGENT_MODEL_INHERIT": "1"`；Bash 内 `export` 不会传给 hook 进程。

@@ -155,6 +155,44 @@ teardown() {
   assert_cap_pass
 }
 
+@test "cap #15d: missing or null subagent_type defaults to general-purpose, so explicit haiku write dispatch blocks C for Agent and Task" {
+  local tool type_mode payload
+  for tool in Agent Task; do
+    for type_mode in omit null; do
+      payload=$(mk_cap_payload "$type_mode" "修复 main.py" "haiku")
+      payload=$(jq -c --arg tool "$tool" '. + {tool_name:$tool}' <<<"$payload")
+      if [[ "$type_mode" == "omit" ]]; then
+        [[ "$(jq -e '.tool_input | has("subagent_type") | not' <<<"$payload")" == "true" ]]
+      else
+        [[ "$(jq -r '.tool_input.subagent_type' <<<"$payload")" == "null" ]]
+      fi
+      run_cap_guard "$payload"
+      assert_cap_block "C"
+    done
+  done
+}
+
+@test "cap #15a: dev-econ + write prompt + model=haiku -> PASS (registered agents are outside judgment C)" {
+  local payload
+  payload=$(mk_cap_payload "dev-econ" "修复 main.py" "haiku")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
+@test "cap #15b: dev-econ + write prompt + model=sonnet -> PASS (registered agents are outside judgment C)" {
+  local payload
+  payload=$(mk_cap_payload "dev-econ" "修复 main.py" "sonnet")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
+@test "cap #15c: dev-econ + write prompt + model absent -> PASS (registered agents are outside judgment C)" {
+  local payload
+  payload=$(mk_cap_payload "dev-econ" "修复 main.py" "omit")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
 # ============================================================
 # WRITE anchoring: syntactic shape, not bare keyword
 # ============================================================

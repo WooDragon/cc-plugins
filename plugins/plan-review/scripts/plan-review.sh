@@ -385,10 +385,27 @@ EOF
   exit 0
 fi
 
-# --- Pre-flight manifest check (AFTER non-critical valve, not before) ---
+# --- Pre-flight manifest checks (AFTER non-critical valve, not before) ---
 # Format correction, NOT negotiation round: increments TOTAL_ROUNDS only.
 # ATTEMPT stays frozen — pre-flight denies do not count toward MAX_ROUNDS.
 # Global safety valve (TOTAL_ROUNDS >= 20) still protects against infinite loops.
+if has_manifest "$PLAN" && ! validate_manifest_v2 "$PLAN"; then
+  TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
+  echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
+  log_decision "decision=deny reason=invalid-manifest detail=${MANIFEST_ERROR:-unknown}"
+  INVALID_MANIFEST_MSG="## Red Team Pre-flight — INVALID DISPATCH MANIFEST
+
+Manifest v2 结构错误：${MANIFEST_ERROR:-unknown}。
+请按以下固定列顺序和行规则修正后重新调用 ExitPlanMode。
+
+${MANIFEST_EXAMPLE}"
+  INVALID_MANIFEST_JSON=$(printf '%s' "$INVALID_MANIFEST_MSG" | jq -Rs .)
+  cat <<EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${INVALID_MANIFEST_JSON}}}
+EOF
+  exit 0
+fi
+
 if needs_manifest "$PLAN" && ! has_manifest "$PLAN"; then
   TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
   echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
@@ -402,26 +419,6 @@ ${MANIFEST_EXAMPLE}"
   MANIFEST_DENY_JSON=$(printf '%s' "$MANIFEST_MSG" | jq -Rs .)
   cat <<EOF
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${MANIFEST_DENY_JSON}}}
-EOF
-  exit 0
-fi
-
-# --- Pre-flight degenerate manifest check (all agent_type == "-") ---
-# Fires when manifest is present but declares zero real agent steps.
-if needs_manifest "$PLAN" && has_manifest "$PLAN" && ! manifest_has_real_agent "$PLAN"; then
-  TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
-  echo "${ATTEMPT:-0}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
-  log_decision "decision=deny reason=degenerate-manifest"
-  DEGEN_MSG="## Red Team Pre-flight — DEGENERATE DISPATCH MANIFEST
-
-Plan 含 Agent/Task 调度关键词，但 Manifest 所有行 agent_type 均为 \`-\`（全主上下文）。
-- 若任务确实简单（单一关注点、无接口变更）：**首选**移除 plan 中的 dispatch 关键词，改写为直接执行描述。
-- 若任务复杂：在 manifest 中至少声明一个真实 agent 步骤（agent_type 与 model 两列均填实值）。
-
-${MANIFEST_EXAMPLE}"
-  DEGEN_DENY_JSON=$(printf '%s' "$DEGEN_MSG" | jq -Rs .)
-  cat <<EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${DEGEN_DENY_JSON}}}
 EOF
   exit 0
 fi
@@ -710,10 +707,16 @@ if [ "$VERDICT" = "APPROVE" ]; then
     mkdir -p "$DISPATCH_DIR" 2>/dev/null || true
     find "$DISPATCH_DIR" -maxdepth 1 -name '.dispatch-*.json' -mmin +30 -delete 2>/dev/null || true
     DISPATCH_FILE="$DISPATCH_DIR/.dispatch-${SESSION_ID}.json"
-    parse_manifest_to_json "$PLAN" "$(plan_hash "$PLAN")" > "$DISPATCH_FILE" 2>/dev/null || rm -f "$DISPATCH_FILE"
-    if [ -f "$DISPATCH_FILE" ]; then
+    DISPATCH_TEMP=$(mktemp "$DISPATCH_DIR/.dispatch-${SESSION_ID}.XXXXXX" 2>/dev/null || true)
+    if [ -n "$DISPATCH_TEMP" ] \
+       && parse_manifest_to_json "$PLAN" "$(plan_hash "$PLAN")" > "$DISPATCH_TEMP" 2>/dev/null \
+       && dispatch_state_is_valid_v2 "$DISPATCH_TEMP"; then
+      mv -f "$DISPATCH_TEMP" "$DISPATCH_FILE"
       dispatch_bytes=$(wc -c < "$DISPATCH_FILE" | tr -d ' ')
       log_decision "manifest-written file=$DISPATCH_FILE bytes=$dispatch_bytes"
+    else
+      rm -f "${DISPATCH_TEMP:-}" "$DISPATCH_FILE"
+      log_decision "manifest-write-skipped reason=invalid-json"
     fi
   fi
 
