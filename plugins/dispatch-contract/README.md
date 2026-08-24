@@ -243,8 +243,10 @@ channel is real and the guard is protecting against an actual notification-loss 
 `dispatch-agent-ownership-guard.sh` runs independently on `PreToolUse` for
 `Agent` and `Task`. It fails open with `[GATE-DEGRADE]` when it cannot parse
 its judgment data. It exits 2 only for a semantic ownership violation. The
-runtime-owned classifier lives only in `hooks/lib/agent-kind.sh`; do not copy
-its type list into another hook or document. Read
+three ownership predicates (runtime-owned / model-optional / everything else
+counts as registered) have a single source of truth in
+`hooks/lib/agent-kind.sh`; do not copy its type list into another hook or
+document. Read
 `skills/subagent-dispatch/references/dispatch-contract.md` before changing the
 policy, the caller-side model field, or its escape hatch.
 
@@ -315,7 +317,11 @@ stderr message before a single trailing `exit 2`:
   selection. Interpreting
   run/test/build output well enough to decide what to do next is a
   judgment-forming action the daily model-tiering rubric excludes from the
-  haiku tier. Fix: redispatch at `sonnet` or the task's required tier.
+  haiku tier. Fix: if the next step is pinned mechanical delivery, redispatch
+  to `dev-econ`/`worker-econ` and omit `model` so the registered agent's
+  frontmatter carries haiku+effort:max; if the next step still carries an
+  unpinned tradeoff, redispatch to `dev`/`worker` and omit `model`; or raise
+  the runtime-owned built-in's `model` to `sonnet`.
 
 **Why A's condition had to widen**: the original `pre-dispatch-readonly-guard.sh`
 had no WRITE signal at all, so `!EXEC` meant "this task needs nothing beyond

@@ -1,8 +1,11 @@
 #!/usr/bin/env bats
 # BDD coverage for runtime model ownership on PreToolUse(Agent|Task).
-# Runtime-owned built-ins require a nonblank model. Registered named agents
-# own their model in frontmatter, so callers may omit the field or pass null
-# but may not provide any other value.
+# Runtime-owned built-ins require a nonblank model. Model-optional built-ins
+# (the only member is `plan`) may omit the field or pass null to follow the
+# parent session's tier, or provide a valid model name; empty/whitespace-only
+# values are still rejected. Registered named agents own their model in
+# frontmatter, so callers may omit the field or pass null but may not provide
+# any other value.
 
 setup() {
   load 'test_helper/common-setup'
