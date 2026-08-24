@@ -107,4 +107,4 @@ description: |
 
 team-ops 语境下派发由 team-ops 协议（handoff/control-signal）接管，不适用本 skill；web-search 的搜索隔离用 web-search skill 自己的规范。
 
-**即席派发经济性**：先按任务能力选择角色和模型，再按所有权填写调用字段。`hooks/dispatch-capability-guard.sh` 判断角色/模型能否执行请求（判据 A/B/C）。`hooks/dispatch-agent-ownership-guard.sh` 判断调用者是否有权覆盖 `model`：runtime-owned 内置类型必须显式提供非空 model；具名注册 agent 必须省略 model。派发前应先读取 `references/dispatch-contract.md` 的「Model ownership」；该节再指向唯一维护类型清单的 helper。紧急放行可在 `~/.claude/settings.json` 的 `env` 段设 `"ALLOW_AGENT_MODEL_INHERIT": "1"`；Bash 内 `export` 不会传给 hook 进程。
+**即席派发经济性**：先按任务能力选择角色和模型，再按所有权填写调用字段。`hooks/dispatch-capability-guard.sh` 判断角色/模型能否执行请求（判据 A/B/C）。`hooks/dispatch-agent-ownership-guard.sh` 判断调用者是否有权覆盖 `model`：runtime-owned 内置类型必须显式提供非空、非空白 model；model-optional 内置类型可省略或填 `null` 以跟随主 session 档位，也可显式提供有效模型名，但空串和纯空白仍拒绝；具名注册 agent 必须省略 model 或填 `null`。派发前应先读取 `references/dispatch-contract.md` 的「Model ownership」；该节再指向唯一维护类型清单的 helper。紧急放行可在 `~/.claude/settings.json` 的 `env` 段设 `"ALLOW_AGENT_MODEL_INHERIT": "1"`；Bash 内 `export` 不会传给 hook 进程。

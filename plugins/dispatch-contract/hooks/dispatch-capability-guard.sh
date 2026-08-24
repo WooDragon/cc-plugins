@@ -60,13 +60,15 @@
 #      goes through unexamined, which is exactly today's baseline, not a
 #      regression this patch introduces or a trap this patch built.
 #
-#   C (new): NEEDS_CAP && model contains "haiku"
+#   C (new): NEEDS_CAP && is_runtime_model_agent(TYPE) && model contains "haiku"
 #        -> this task needs write/exec capability, which in practice means
 #           interpreting run/test/build output well enough to decide what to
 #           do next — a judgment-forming action the haiku tier is excluded
 #           from by the daily model-tiering rubric (取数活 vs 落地活). Model
 #           substring match, not exact match: real values look like
-#           "claude-haiku-4-5-20251001", never the bare word.
+#           "claude-haiku-4-5-20251001", never the bare word. Registered
+#           agents and model-optional built-ins are both outside C's
+#           judgment range — only runtime-owned built-ins are examined here.
 #
 # B and C are independent: a dispatch can hit both at once (Explore + haiku
 # asked to fix code), and both rejection messages are printed before the
@@ -420,7 +422,7 @@ if [ "$NEEDS_CAP" -eq 1 ] \
    && is_runtime_model_agent "$TYPE" \
    && [[ "$MODEL_LC" == *haiku* ]]; then
   printf '[dispatch-capability-guard] 命中判据 C: 本任务需要超出只读的能力,但 runtime-owned agent 的显式 model=%s 落在 haiku 档;解读执行/测试输出并决定下一步属"产出取舍结论"的落地活,daily 模型分层判据把这类工作排除在 haiku 之外。\n' "$MODEL" >&2
-  printf '[dispatch-capability-guard] 修复方式：将 model 升至 sonnet，或选择任务要求的更高档位后重派。\n' >&2
+  printf '[dispatch-capability-guard] 修复方式：已钉死的机械落地→改派 dev-econ/worker-econ 且省略 model，让注册 agent 的 frontmatter 带 haiku+effort:max；下一步仍含未钉死的取舍→改派 dev/worker 且省略 model，或把 runtime-owned 内置的 model 升至 sonnet。\n' >&2
   REJECT=1
 fi
 

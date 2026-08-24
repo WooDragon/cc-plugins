@@ -106,6 +106,13 @@ teardown() {
   assert_cap_block "B"
 }
 
+@test "cap #9a: Plan + read-only prompt + model omitted -> PASS" {
+  local payload
+  payload=$(mk_cap_payload "plan" "只读调研，查看代码逻辑" "omit")
+  run_cap_guard "$payload"
+  assert_cap_pass
+}
+
 @test "cap #10: general-purpose + write prompt (修复 main.py) -> PASS (full-privilege agent can do this)" {
   local payload
   payload=$(mk_cap_payload "general-purpose" "修复 main.py" "omit")
@@ -123,6 +130,31 @@ teardown() {
   [[ "$(jq -r '.tool_input.model' <<< "$payload")" == "haiku" ]]
   run_cap_guard "$payload"
   assert_cap_block "C"
+}
+
+@test "cap #11a: general-purpose + write prompt + model=haiku pins econ routing wording for judgment C" {
+  local payload
+  payload=$(mk_cap_payload "general-purpose" "修复 main.py" "haiku")
+  run_cap_guard "$payload"
+  if [ "$CAP_EXIT" -ne 2 ] || [ -z "$CAP_STDERR" ]; then
+    echo "Expected judgment-C rejection, got rc=$CAP_EXIT stderr=$CAP_STDERR"
+    return 1
+  fi
+  assert_cap_block "C"
+  # Pin the executable econ paths, not the obsolete "always upgrade to sonnet"
+  # wording; a message-only regression would not change the block behavior.
+  [[ "$CAP_STDERR" == *"dev-econ"* ]] || {
+    echo "Expected dev-econ guidance, got: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"worker-econ"* ]] || {
+    echo "Expected worker-econ guidance, got: $CAP_STDERR"
+    return 1
+  }
+  [[ "$CAP_STDERR" == *"省略 model"* ]] || {
+    echo "Expected omitted-model guidance, got: $CAP_STDERR"
+    return 1
+  }
 }
 
 @test "cap #12: general-purpose + write prompt + model=claude-haiku-4-5-20251001 (full ID) -> BLOCK judgment C" {

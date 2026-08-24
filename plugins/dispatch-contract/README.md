@@ -243,14 +243,19 @@ channel is real and the guard is protecting against an actual notification-loss 
 `dispatch-agent-ownership-guard.sh` runs independently on `PreToolUse` for
 `Agent` and `Task`. It fails open with `[GATE-DEGRADE]` when it cannot parse
 its judgment data. It exits 2 only for a semantic ownership violation. The
-runtime-owned classifier lives only in `hooks/lib/agent-kind.sh`; do not copy
-its type list into another hook or document. Read
+three ownership predicates (runtime-owned / model-optional / everything else
+counts as registered) have a single source of truth in
+`hooks/lib/agent-kind.sh`; do not copy its type list into another hook or
+document. Read
 `skills/subagent-dispatch/references/dispatch-contract.md` before changing the
 policy, the caller-side model field, or its escape hatch.
 
-The guard has two repairs: add a runtime model for a runtime-owned built-in, or
-remove model from a registered agent call. If the registered agent cannot do
-the work, select another role instead of overriding its model.
+The guard has three repairs. Add a non-empty runtime model for a runtime-owned
+built-in. For a model-optional built-in, omit `model` or use `null` to follow the
+parent session, or provide a valid model name. For a registered-agent call,
+remove `model`. Empty and whitespace-only values remain invalid for
+model-optional built-ins. If the registered agent cannot do the work, select
+another role instead of overriding its model.
 
 ## The Dispatch Capability Guard
 
@@ -312,7 +317,11 @@ stderr message before a single trailing `exit 2`:
   selection. Interpreting
   run/test/build output well enough to decide what to do next is a
   judgment-forming action the daily model-tiering rubric excludes from the
-  haiku tier. Fix: redispatch at `sonnet` or the task's required tier.
+  haiku tier. Fix: if the next step is pinned mechanical delivery, redispatch
+  to `dev-econ`/`worker-econ` and omit `model` so the registered agent's
+  frontmatter carries haiku+effort:max; if the next step still carries an
+  unpinned tradeoff, redispatch to `dev`/`worker` and omit `model`; or raise
+  the runtime-owned built-in's `model` to `sonnet`.
 
 **Why A's condition had to widen**: the original `pre-dispatch-readonly-guard.sh`
 had no WRITE signal at all, so `!EXEC` meant "this task needs nothing beyond
@@ -487,7 +496,7 @@ malformed-stdin shapes), plus the rules-injector's JSON-shape checks (normal
 `agent_type` gets all three rules, `Explore` omits the scope-fence rule, empty stdin
 and `ALLOW_NO_RULES_INJECT=1` both leave stdout fully empty).
 
-`dispatch-agent-ownership-guard.bats` covers all runtime-owned types, model field presence states, case normalization, registered-agent `inherit`/empty/whitespace overrides, both `Agent` and `Task`, escape-hatch and fail-open paths, plus a temp-copy mutation that proves the runtime rejection is load-bearing.
+`dispatch-agent-ownership-guard.bats` covers all runtime-owned types, model-optional Plan omission, `null`, valid-model, empty, and whitespace shapes, model field presence states, case normalization, registered-agent `inherit`/empty/whitespace overrides, both `Agent` and `Task`, escape-hatch and fail-open paths, plus Plan-classification mutation and runtime-rejection wording-anchor cases that prove the policy is load-bearing.
 
 `dispatch-capability-guard.bats` covers: signal extraction
 (EXEC/WRITE/RO/NEG, including the double-negation and exclusive-write-scope scrub
@@ -546,6 +555,6 @@ the model sees. The correction message reaches model context either way.
 | `ALLOW_UNMANAGED_TEAMMATE` | _(unset)_ | `1` disables the dispatch channel guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
 | `CLAUDE_CODE_FORK_SUBAGENT` | _(unset)_ | `0` disables the fork-subagent feature — restores `run_in_background` to the Agent input schema, the correct fix for step 9b's fork-world block |
 | `ALLOW_DISPATCH_CAPABILITY_MISMATCH` | _(unset)_ | `1` disables the dispatch-capability guard entirely — set in `settings.json`'s `env` section, since `export` in a Bash tool call does not reach the hook process |
-| `ALLOW_AGENT_MODEL_INHERIT` | _(unset)_ | Emergency-only `1` bypass for diagnosing an ownership false positive. Remove it immediately after diagnosis: it disables model ownership validation and is not a supported dispatch mode. |
+| `ALLOW_AGENT_MODEL_INHERIT` | _(unset)_ | Emergency-only `1` bypass for diagnosing a model-ownership false positive across all agent classes. Remove it immediately after diagnosis: it disables model ownership validation and is not a supported dispatch mode. |
 | `CLAUDE_AUTO_BACKGROUND_TASKS` | _(unset)_ | Truthy value defeats `run_in_background:false`'s synchronous-delivery guarantee past 120s runtime — the sync guard blocks (step 8b) rather than silently misjudge a passing dispatch as safe; clear this variable to fix |
 | `DONE_GATE_BODY_FLOOR` | `500` | Byte floor for the marker-absent branch — a final message with no marker and a body below this is blocked; at or above it passes with a `systemMessage` warning. Derivation in `The %%DONE%% Contract` above |

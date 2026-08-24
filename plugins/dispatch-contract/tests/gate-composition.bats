@@ -486,3 +486,43 @@ teardown() {
     done
   done
 }
+
+@test "composition #16: Plan + omitted model + read-only prompt clears every discovered Agent and Task gate" {
+  local tool payload s
+  # Omitted model exercises the model-optional ownership path; this is the
+  # normal Plan dispatch route and must pass every dynamically discovered gate.
+  for tool in Agent Task; do
+    discover_agent_gates
+    [[ "$tool" == "Task" ]] && discover_task_gates
+    payload=$(mk_composed_payload "$tool" "false" "omit" "plan" "omit" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC")
+    [[ "$(jq -e '.tool_input | has("model") | not' <<<"$payload")" == "true" ]]
+    for s in "${GATE_SCRIPTS[@]}"; do
+      run_one_gate "$s" "$payload"
+      [ "$ONE_GATE_EXIT" -eq 0 ] || {
+        echo "Expected Plan omission dispatch to pass $(basename "$s") for $tool, got exit $ONE_GATE_EXIT"
+        echo "stderr: $ONE_GATE_STDERR"
+        return 1
+      }
+    done
+  done
+}
+
+@test "composition #17: Plan + explicit sonnet + read-only prompt clears every discovered Agent and Task gate" {
+  local tool payload s
+  # Explicit model makes capability guard evaluate a different MODEL_LC/C path
+  # than omission; cross-gate compatibility must be mechanically verified.
+  for tool in Agent Task; do
+    discover_agent_gates
+    [[ "$tool" == "Task" ]] && discover_task_gates
+    payload=$(mk_composed_payload "$tool" "false" "omit" "plan" "omit" "$NEUTRAL_PROMPT" "$NEUTRAL_DESC" "sonnet")
+    [[ "$(jq -r '.tool_input.model' <<<"$payload")" == "sonnet" ]]
+    for s in "${GATE_SCRIPTS[@]}"; do
+      run_one_gate "$s" "$payload"
+      [ "$ONE_GATE_EXIT" -eq 0 ] || {
+        echo "Expected Plan sonnet dispatch to pass $(basename "$s") for $tool, got exit $ONE_GATE_EXIT"
+        echo "stderr: $ONE_GATE_STDERR"
+        return 1
+      }
+    done
+  done
+}
