@@ -92,12 +92,13 @@ On a follow-up round, persisted session `MODEL`/`EFFORT` values win over env var
 ## Tests
 
 ```bash
-bats plugins/pr-review/tests/grok-review.bats plugins/pr-review/tests/claude-review.bats plugins/pr-review/tests/codex-review.bats plugins/pr-review/tests/resolve-backend.bats
+bats plugins/pr-review/tests/grok-review.bats plugins/pr-review/tests/claude-review.bats plugins/pr-review/tests/codex-review.bats plugins/pr-review/tests/resolve-backend.bats plugins/pr-review/tests/skill-contract.bats
 ```
 
-117 cases total:
+122 cases total:
 
 - `grok-review.bats` (66) — argument parsing, session state files, path construction, fail-fast semantics, directory permissions, GC, effort validation and migration, and the secret-file heuristics. External commands (`grok`, `gh`, `uuidgen`) are stubbed; `git` is real, against a per-test temp repo.
 - `claude-review.bats` (24) — same shape of coverage for the claude backend: isolation flags (`--setting-sources ""`, `--tools ""`, `--safe-mode`, `--strict-mcp-config`, the `unset_provider_routing_env` unset list covering `ANTHROPIC_*`/`CLAUDECODE`/`CLAUDE_CODE_MESSAGING_*`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_CHILD_SESSION`/`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) asserted on both first-round and `--resume` follow-up paths, session resume/fail-fast, `.claude.session` state file isolation from grok's `.session`, and shared-lib workspace pinning reuse. `claude` is stubbed.
-- `codex-review.bats` (15) — codex backend shape: CLI arg parsing, session state files, thread resume/fail-fast, workspace pinning, effort validation, and secret-file heuristics. `codex exec` is stubbed; `git` is real against a per-test temp repo.
-- `resolve-backend.bats` (10) — `PR_REVIEW_BACKEND` pass-through and validation, `ANTHROPIC_DEFAULT_OPUS_MODEL` auto-detection, and `pr-review.sh`'s routing to the resolved backend script (including the `copilot` rejection path).
+- `codex-review.bats` (17) — codex backend shape: CLI arg parsing, session state files, thread resume/fail-fast, workspace pinning, effort validation, and secret-file heuristics. `codex exec` is stubbed; `git` is real against a per-test temp repo.
+- `resolve-backend.bats` (12) — `PR_REVIEW_BACKEND` pass-through and validation, `ANTHROPIC_DEFAULT_OPUS_MODEL` auto-detection, and `pr-review.sh`'s routing to the resolved backend script (including the `copilot` rejection path).
+- `skill-contract.bats` (3) — real-skill Markdown contract checks for repair-subagent ownership, main-session SHA verification and follow-up lifecycle, and the grok two-round example.

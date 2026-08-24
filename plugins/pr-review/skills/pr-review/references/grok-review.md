@@ -78,7 +78,7 @@ LOG="$(git rev-parse --git-dir)/pr-review"
   - **增量语义要看清**：默认增量是 `git diff <BASE_SHA>`（BASE_SHA=首轮 HEAD），即**累积自首轮起的全部本地 delta**，不是严格的"仅相对上一轮"。好处是改完 commit 也不会漏；代价是多轮 followup 时早先几轮的改动会重复出现在增量里（grok 侧有会话记忆，多为冗余强化而非新信息）。想要严格的"仅本轮"增量、或自定义基线，复核轮传 `--since <上一轮的 tag/sha>`。相对首轮那份远程全量 PR diff，本地增量始终小得多，省 token 目标成立。
   - 首轮工作区若非干净，BASE_SHA 之后的未提交改动会被计入复核增量（脚本首轮会 stderr 警告）；需要干净语义就先 commit/stash，或复核轮用 `--since`。
 
-典型两轮命令（两轮都按上节走**后台**，`run_in_background: true`；日志目录先在前台 `mkdir -p "$(git rev-parse --git-dir)/pr-review"` 建好）：
+典型两轮命令由主线执行。两轮都按上节走**后台**，`run_in_background: true`；日志目录先在前台 `mkdir -p "$(git rev-parse --git-dir)/pr-review"` 建好。修复子任务只修改、测试、git commit、push 并回传 immutable SHA；主线核对 SHA 后，第 2 轮由主线以后台方式启动，且两流分文件：
 
 ```bash
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"   # 与上节「调用形态」同一定义，本块可独立照抄
