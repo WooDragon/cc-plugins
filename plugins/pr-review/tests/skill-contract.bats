@@ -122,6 +122,16 @@ for needle in sys.argv[2:]:
 PY
 }
 
+assert_no_child_followup_ownership() {
+  python3 - "$1" <<'PY'
+import sys
+
+for line_number, line in enumerate(sys.argv[1].splitlines(), start=1):
+    if "修复子任务" in line and "--followup" in line:
+        raise SystemExit(f"child owns followup at line {line_number}: {line}")
+PY
+}
+
 assert_no_child_runtime_review_resource() {
   python3 - "$1" <<'PY'
 import re
@@ -183,14 +193,22 @@ PY
   main="$output"
 
   assert_order "$main" \
-    "**SHA 回执核对**" \
+    "**SHA 核对**" \
+    "**SHA 核对失败**" \
     "**主线 background followup**" \
     "**完成通知及 exit/log/head 验收**" \
     "**Read 完整日志裁决**"
 
-  run label_rhs "$main" "SHA 回执核对"
+  run label_rhs "$main" "SHA 核对"
   [ "$status" -eq 0 ]
-  [ "$output" = "sha:commit-object,sha:local-head,sha:remote-feature-oid,sha:pr-head-oid" ]
+  [ "$output" = "sha:all-equal(commit-object,local-head,remote-feature-oid,pr-head-oid)" ]
+
+  run label_rhs "$main" "SHA 核对失败"
+  [ "$status" -eq 0 ]
+  [ "$output" = "review:stop,git:no-reset,git:no-rebase" ]
+
+  assert_contains "$main" "四者均等于immutable SHA"
+  assert_absent "$main" "不要改变行为"
 
   run label_rhs "$main" "完成通知及 exit/log/head 验收"
   [ "$status" -eq 0 ]
@@ -216,4 +234,19 @@ PY
   assert_contains "$output" "主线核对 SHA 后"
   assert_contains "$output" "123-r2.log"
   assert_contains "$output" "123-r2.err"
+
+  run section "$SKILL" '默认路径：`pr-review.sh`'
+  [ "$status" -eq 0 ]
+  [ -n "$output" ]
+  default_path="$output"
+
+  run assert_no_child_followup_ownership "$default_path"
+  [ "$status" -eq 0 ]
+  assert_contains "$default_path" "主线核对 SHA 后，以后台方式启动 r2"
+  assert_contains "$default_path" '"$REVIEW" 123 --followup'
+  assert_contains "$default_path" '"$LOG/123-r2.log"'
+  assert_contains "$default_path" '"$LOG/123-r2.err"'
+  assert_contains "$default_path" '> "$LOG/123-r2.log" 2> "$LOG/123-r2.err"'
+  assert_contains "$default_path" "子任务新建 commit，且不得 amend 首轮 tip"
+  assert_absent "$default_path" "修复请 git commit"
 }

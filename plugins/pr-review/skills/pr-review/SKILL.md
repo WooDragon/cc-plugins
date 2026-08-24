@@ -113,8 +113,10 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 
 #### 主线接管复核
 
-- **SHA 回执核对**：`sha:commit-object,sha:local-head,sha:remote-feature-oid,sha:pr-head-oid`
-主线收到修复子任务immutable SHA后，确认commit object存在、本地HEAD、远端feature OID、PR head OID四者均等于该SHA；不要改变行为。
+- **SHA 核对**：`sha:all-equal(commit-object,local-head,remote-feature-oid,pr-head-oid)`
+主线收到修复子任务immutable SHA后，确认commit object存在、本地HEAD、远端feature OID、PR head OID四者均等于immutable SHA。
+- **SHA 核对失败**：`review:stop,git:no-reset,git:no-rebase`
+任一对象不存在或不相等即停止，不启动复核，不reset/rebase改写历史，报告主线处理。
 - **主线 background followup**：主线以后台方式启动下一轮 `--followup`。
 - **完成通知及 exit/log/head 验收**：主线收到完成通知后，确认 exit=0、日志完整且 HEAD 未漂移。
 - **Read 完整日志裁决**：主线 Read 完整日志裁决。
@@ -163,10 +165,10 @@ REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
 LOG="$(git rev-parse --git-dir)/pr-review"
 "$REVIEW" 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
 
-# 修复子任务只修改、测试、git commit、push 并回传 immutable SHA。
+# 修复子任务只修改、测试、新建 commit、push 并回传 immutable SHA。
 # 主线核对 SHA 后，以后台方式启动 r2；两流继续分文件：
 #   "$REVIEW" 123 --followup "<复核指令 + 驳回清单>" > "$LOG/123-r2.log" 2> "$LOG/123-r2.err"
-# 修复请 git commit 新 commit，勿 git amend 首轮 tip
+# 子任务新建 commit，且不得 amend 首轮 tip
 # （amend 会让首轮 BASE_SHA 不再是 HEAD 祖先 → 复核轮 Fail Fast，须重开首轮或 --since）
 ```
 
