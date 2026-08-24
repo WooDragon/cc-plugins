@@ -42,8 +42,10 @@ Keep your response under 3000 characters.
    main context without inventing global model ownership rules.
    - **Decision and review judgment** (architecture, root-cause debugging,
      requirements breakdown, plan authoring, review acceptance) stay in Main.
-   - A **registered agent** uses `model_source = preset`: declare its
-     `subagent_type`, but do not copy a concrete model into the plan.
+   - A `model_source = preset` row delegates model ownership to the dispatched
+     party. A **registered agent** uses the model from its frontmatter; a
+     model-optional built-in type follows the main session model. Declare its
+     `subagent_type` and put `-` in the `model` column.
    - A built-in agent that needs a selected runtime tier uses
      `model_source = runtime`: declare both `subagent_type` and `model`.
    - Mechanical, already-specified implementation may use `dev-econ` or

@@ -60,7 +60,9 @@ manifest_has_agent_signature() {
 
 # Manifest v2 is intentionally explicit about dispatch ownership:
 # - main rows describe work retained in the main context;
-# - agent/preset rows name a registered agent and must omit model;
+# - agent/preset rows delegate model ownership to the dispatched party: a registered
+#   agent uses its frontmatter model, while a model-optional built-in type follows
+#   the main session model; both rows must omit model;
 # - agent/runtime rows name both the agent and exact runtime model.
 MANIFEST_EXAMPLE=$(cat <<'MANIFEST_EOF'
 格式示例（占位值 <...> 替换为你 plan 的真实步骤，勿原样复制本表）：

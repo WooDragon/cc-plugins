@@ -13,14 +13,54 @@ teardown() {
   common_teardown
 }
 
-@test "ownership #1: all six runtime-owned agent types accept a nonblank model for Agent and Task" {
+@test "ownership #1: all five runtime-owned agent types accept a nonblank model for Agent and Task" {
   local tool type payload
   for tool in Agent Task; do
-    for type in general-purpose claude Explore Plan claude-code-guide statusline-setup; do
+    for type in general-purpose claude Explore claude-code-guide statusline-setup; do
       payload=$(mk_ownership_payload "$tool" "$type" string sonnet)
       [[ "$(jq -r '.tool_input.model' <<<"$payload")" == "sonnet" ]]
       run_ownership_guard "$payload"
       assert_ownership_pass
+    done
+  done
+}
+
+@test "ownership #1a: model-optional Plan accepts omission, null, and valid model strings for Agent and Task" {
+  local tool payload
+  for tool in Agent Task; do
+    payload=$(mk_ownership_payload "$tool" Plan omit)
+    run_ownership_guard "$payload"
+    assert_ownership_pass
+
+    payload=$(mk_ownership_payload "$tool" Plan null)
+    run_ownership_guard "$payload"
+    assert_ownership_pass
+
+    payload=$(mk_ownership_payload "$tool" Plan string sonnet)
+    run_ownership_guard "$payload"
+    assert_ownership_pass
+
+    payload=$(mk_ownership_payload "$tool" Plan string opus)
+    run_ownership_guard "$payload"
+    assert_ownership_pass
+  done
+}
+
+@test "ownership #1b: model-optional Plan rejects explicit empty and whitespace model strings for Agent and Task" {
+  local tool value payload
+  for tool in Agent Task; do
+    for value in '' '  '; do
+      payload=$(mk_ownership_payload "$tool" Plan string "$value")
+      run_ownership_guard "$payload"
+      assert_ownership_block
+      [[ "$OWNERSHIP_STDERR" == *"model-optional agent"* ]] || {
+        echo "Expected model-optional rejection message, got: $OWNERSHIP_STDERR"
+        return 1
+      }
+      [[ "$OWNERSHIP_STDERR" != *"必须显式带非空"* ]] || {
+        echo "Plan empty-model rejection used runtime-owned wording: $OWNERSHIP_STDERR"
+        return 1
+      }
     done
   done
 }
@@ -31,7 +71,7 @@ teardown() {
   [[ "$(jq -e '.tool_input | has("subagent_type") | not' <<<"$payload")" == "true" ]]
   run_ownership_guard "$payload"
   assert_ownership_block
-  [[ "$OWNERSHIP_STDERR" == *"补 runtime model"* ]]
+  [[ "$OWNERSHIP_STDERR" == *"必须显式带非空"* ]]
 }
 
 @test "ownership #3: runtime-owned types reject omitted, null, empty, and whitespace model fields" {
@@ -187,14 +227,14 @@ EOF
   cp "$OWNERSHIP_GUARD_SCRIPT" "$mutant"
   cp -R "${OWNERSHIP_GUARD_SCRIPT%/*}/lib" "$TEST_TEMP_DIR/mutant/hooks/lib"
 
-  anchor='  printf '\''[dispatch-agent-ownership-guard] 内置 runtime-owned agent(subagent_type=%s) 必须显式带非空、非空白 model。\n'\'' "$TYPE" >&2'
+  anchor='  printf '\''[dispatch-agent-ownership-guard] 内置 runtime-owned agent(subagent_type=%s) 必须显式带非空、非空白 model：档位不等于任务类型,裸派只能选 model,effort 只能由角色 frontmatter 承载(dev-econ/worker-econ 已钉 haiku+effort:max),裸派 haiku 拿不到该档上限。\n'\'' "$TYPE" >&2'
   anchor_count=$(grep -Fxc "$anchor" "$mutant")
   [ "$anchor_count" -eq 1 ] || {
     echo "Expected exactly one complete runtime-rejection anchor, found $anchor_count"
     return 1
   }
-  perl -0pi -e 's/(内置 runtime-owned agent\(subagent_type=%s\).*?\n.*?\n  exit) 2/$1 0 # MUTATION/s' "$mutant"
-  run grep -F 'exit 0 # MUTATION' "$mutant"
+  perl -0pi -e 's/(内置 runtime-owned agent\(subagent_type=%s\).*?\n.*?\n)  ownership_reject/$1  : # MUTATION/s' "$mutant"
+  run grep -F ': # MUTATION' "$mutant"
   [ "$status" -eq 0 ] || {
     echo "Runtime rejection mutation did not land"
     return 1
@@ -210,6 +250,69 @@ EOF
   cp "$OWNERSHIP_GUARD_SCRIPT" "$mutant"
   run_ownership_script "$mutant" "$payload"
   assert_ownership_block
+}
+
+@test "ownership #15a: putting Plan back in runtime-owned classification turns omission into BLOCK, then restores PASS" {
+  local mutant mutant_kind payload
+  mkdir -p "$TEST_TEMP_DIR/plan-mutant/hooks"
+  mutant="$TEST_TEMP_DIR/plan-mutant/hooks/dispatch-agent-ownership-guard.sh"
+  mutant_kind="$TEST_TEMP_DIR/plan-mutant/hooks/lib/agent-kind.sh"
+  cp "$OWNERSHIP_GUARD_SCRIPT" "$mutant"
+  cp -R "${OWNERSHIP_GUARD_SCRIPT%/*}/lib" "$TEST_TEMP_DIR/plan-mutant/hooks/lib"
+
+  perl -0pi -e 's/general-purpose\|claude\|explore\|claude-code-guide\|statusline-setup\)/general-purpose|claude|explore|plan|claude-code-guide|statusline-setup)/' "$mutant_kind"
+  run grep -F '|plan|' "$mutant_kind"
+  [ "$status" -eq 0 ] || {
+    echo "Plan runtime-owned mutation did not land"
+    return 1
+  }
+
+  payload=$(mk_ownership_payload Agent Plan omit)
+  run_ownership_script "$mutant" "$payload"
+  assert_ownership_block
+
+  cp "${OWNERSHIP_GUARD_SCRIPT%/*}/lib/agent-kind.sh" "$mutant_kind"
+  run grep -F '|plan|' "$mutant_kind"
+  [ "$status" -ne 0 ] || {
+    echo "Plan runtime-owned mutation was not restored"
+    return 1
+  }
+  run_ownership_script "$mutant" "$payload"
+  assert_ownership_pass
+}
+
+@test "ownership #15b: runtime-owned rejection wording pins tiering, cross-gate, and econ guidance" {
+  local payload l1 l2
+  payload=$(mk_ownership_payload Agent general-purpose omit)
+  run_ownership_guard "$payload"
+  if [ "$OWNERSHIP_EXIT" -ne 2 ] || [ -z "$OWNERSHIP_STDERR" ]; then
+    echo "Expected runtime-owned rejection, got rc=$OWNERSHIP_EXIT stderr=$OWNERSHIP_STDERR"
+    return 1
+  fi
+  # Behavior-only assertions would stay green if the message regressed to the old
+  # generic wording, so pin the tier criterion, cross-gate handoff, and econ path.
+  [[ "$OWNERSHIP_STDERR" == *"effort:max"* ]] || {
+    echo "Expected effort:max guidance, got: $OWNERSHIP_STDERR"
+    return 1
+  }
+  [[ "$OWNERSHIP_STDERR" == *"dispatch-capability-guard"* ]] || {
+    echo "Expected dispatch-capability-guard handoff, got: $OWNERSHIP_STDERR"
+    return 1
+  }
+  [[ "$OWNERSHIP_STDERR" == *"dev-econ"* ]] || {
+    echo "Expected dev-econ guidance, got: $OWNERSHIP_STDERR"
+    return 1
+  }
+  l1=$(printf '%s\n' "$OWNERSHIP_STDERR" | sed -n '1p')
+  l2=$(printf '%s\n' "$OWNERSHIP_STDERR" | sed -n '2p')
+  [[ "$l1" == *"effort:max"* && "$l1" != *"dispatch-capability-guard"* ]] || {
+    echo "Expected effort:max only on line 1, got: $l1"
+    return 1
+  }
+  [[ "$l2" == *"dispatch-capability-guard"* && "$l2" != *"effort:max"* ]] || {
+    echo "Expected dispatch-capability-guard only on line 2, got: $l2"
+    return 1
+  }
 }
 
 @test "ownership #16: missing agent-kind library fails open through shared loader" {
