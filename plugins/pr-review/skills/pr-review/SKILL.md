@@ -21,7 +21,7 @@ description: |
 
 评审正文**重定向落盘**为评审日志，主线读原文裁决。取评审不派子任务（subagent），定位素材也不派——两者都是「评审正文不落盘」逼出来的补偿动作，落盘后一并消失。
 
-**一轮只派一次**：主线裁决 → 派修复子任务改一遍并跑一次复核 → 主线读新一轮日志再裁决。循环由主线驱动，子任务不自行收敛。
+**一轮只派一次**：主线裁决 → 派修复子任务修改并测试 → 主线启动复核 → 主线读新一轮日志再裁决。循环由主线驱动，子任务不自行收敛。
 
 ### 1. 取评审：主线自跑，后台执行，两流分文件
 
@@ -88,7 +88,7 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 
 这条判据让常见分支自然落位，不必逐种枚举：仅驳回项复述 → 采纳为空 → 收工；新 finding 全被驳回 → 采纳仍空 → 收工；采纳项没改净 → 采纳非空 → 再派。
 
-复核走同一评审 session，**被驳回的 finding 常被原样复述**。驳回清单只给修复子任务挡不住这件事——评审 session 才是复述的源头，故工单的 `--followup` 正文应带上驳回清单（「以下维持驳回，无新证据不要重开」）。
+复核走同一评审 session，**被驳回的 finding 常被原样复述**。主线在核对 immutable SHA 后，把驳回清单写进自己启动的 `--followup` 指令，作为「无新证据不要重开」的 review 上下文。
 
 安全阀：连续 3 轮采纳清单不见空，停下来交人裁决，不要继续派。这是拦跑飞，不是预算闸。
 
@@ -96,18 +96,30 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 
 ### 3. 修复：一轮一派
 
+#### 修复子任务交付合同
+
 主线把两份清单合成工单，派一个**修复子任务**。工单要素：
 
-- **采纳清单**逐条改；**驳回清单**随附——只给采纳清单，子任务会把主线已驳回的 finding 一并改掉
-- **cwd 钉死为首轮的仓库 toplevel，禁用 worktree 隔离**——脚本按 `git rev-parse --show-toplevel` 钉 session 身份，换路径直接 Fail Fast
-- 改完 `git commit` 新 commit（勿 `git amend` 首轮 tip），然后跑**一次**复核：
-  `<REVIEW 绝对路径> <PR> --followup "<复核指令 + 驳回清单>" > <日志目录>/<PR>-r<N>.log 2> <日志目录>/<PR>-r<N>.err`
-- **该复核调用与首轮同样走后台**（`run_in_background: true`），等完成通知，不轮询——前台 `timeout` 的 600000ms 上限在子任务里同样是硬顶，故子任务也**不应**用前台跑评审，理由见 §1
-- **回传 exit code 与两个日志路径，到此为止**——不判定收敛、不循环、不自行裁决
+- **采纳清单**逐条改；**驳回清单**随附——驳回清单只作为「这些项不得改」的边界。
+- **cwd 钉死为首轮的仓库 toplevel，禁用 worktree 隔离**——脚本按 `git rev-parse --show-toplevel` 钉 session 身份，换路径直接 Fail Fast。
+- **交付动作**：`modify,test,commit:new,push`
+- **交付回执**：`sha:immutable`
+- **禁止职责**：`review:start,review:wait,review:read,review:decide`
+- **禁止资源**：`review:script,review:log-dir,review:exit-log`
 
-脚本路径与日志目录在工单里**应展开成字面绝对路径**：子任务不继承主线的 shell 变量，`${CLAUDE_PLUGIN_ROOT}` 在子任务 prompt 里也不展开。
+修复子任务只修改采纳项并测试。子任务应创建新 commit，不得 amend，并 push。子任务只回 SHA；驳回清单是不得修改边界。子任务不得接管评审。
 
 档位默认 `dev`。只有当工单把每条都钉到 `文件:行:改法`、子任务纯粹转录时才降 `dev-econ`——实现评审意见通常含改法取舍，塞进经济档不合其准入判据。
+
+#### 主线接管复核
+
+- **SHA 核对**：`sha:all-equal(commit-object,local-head,remote-feature-oid,pr-head-oid)`
+主线收到修复子任务immutable SHA后，确认commit object存在、本地HEAD、远端feature OID、PR head OID四者均等于immutable SHA。
+- **SHA 核对失败**：`review:stop,git:no-reset,git:no-rebase`
+任一对象不存在或不相等即停止，不启动复核，不reset/rebase改写历史，报告主线处理。
+- **主线 background followup**：主线以后台方式启动下一轮 `--followup`。
+- **完成通知及 exit/log/head 验收**：主线收到完成通知后，确认 exit=0、日志完整且 HEAD 未漂移。
+- **Read 完整日志裁决**：主线 Read 完整日志裁决。
 
 ### 例外
 
@@ -134,7 +146,7 @@ PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改
 
 **强制指定后端**：设 `PR_REVIEW_BACKEND=grok` 或 `PR_REVIEW_BACKEND=claude` 后再调 `pr-review.sh`，或直接调用对应的 `grok-review.sh`/`claude-review.sh`。两个后端 CLI 参数形态完全一致（`<PR> [--repo] [--model] [--effort] [--followup] [--since] [--session] [--allow-divergent-base]`），仅 `--effort` 合法集合不同：grok 严格为 `none/minimal/low/medium/high`（默认 `high`，`GROK_EFFORT` 覆盖），claude 严格为 `low/medium/high/xhigh/max`（默认 `medium`，`CLAUDE_REVIEW_EFFORT` 覆盖，`CLAUDE_REVIEW_MODEL` 覆盖 model，默认 `claude-opus-5`）。grok 复核轮读到旧持久 state 的 `EFFORT=xhigh` 时会在调用前一次性迁移为 `high`（claude 无此历史包袱）。参数细节、工作原理、故障排查见 `references/grok-review.md`（grok）/ `references/claude-review.md`（claude）。
 
-**脚本路径发现**：主线用 `${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh`——展开时机与配套先验见「执行分工」§1。下发工单时把它**展开成字面绝对路径**写进去：子任务 prompt 里 `${CLAUDE_PLUGIN_ROOT}` 不展开，而 `find … | head -1` 有实测失败模式（见「执行分工」§1）。只需认识 `pr-review.sh` 这一个命令，不必先跑 `resolve-backend.sh` 再自行选脚本。
+**脚本路径发现**：主线用 `${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh`——展开时机与配套先验见「执行分工」§1。该路径只供主线调用，不得下发给修复子任务。只需认识 `pr-review.sh` 这一个命令，不必先跑 `resolve-backend.sh` 再自行选脚本。
 
 **对抗式多轮复评**：首轮 `pr-review.sh <PR>` 全量评审建 session；复核轮 `--followup "<复核指令>"` 续接同一 session、只发复核指令 + 本轮增量 diff（不重发首轮全量）。每轮的正文与诊断各自落盘为 `<PR>-r<N>.log` / `<PR>-r<N>.err`。**轮次由主线驱动**，分工与收敛判据见上文「执行分工」；本段只讲脚本侧的 session 机制。
 
@@ -153,9 +165,10 @@ REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
 LOG="$(git rev-parse --git-dir)/pr-review"
 "$REVIEW" 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
 
-# 之后每轮的 --followup 由修复子任务按 §3 执行（同样走后台，形如下行），主线只 Read 它回传的路径：
+# 修复子任务只修改、测试、新建 commit、push 并回传 immutable SHA。
+# 主线核对 SHA 后，以后台方式启动 r2；两流继续分文件：
 #   "$REVIEW" 123 --followup "<复核指令 + 驳回清单>" > "$LOG/123-r2.log" 2> "$LOG/123-r2.err"
-# 修复请 git commit 新 commit，勿 git amend 首轮 tip
+# 子任务新建 commit，且不得 amend 首轮 tip
 # （amend 会让首轮 BASE_SHA 不再是 HEAD 祖先 → 复核轮 Fail Fast，须重开首轮或 --since）
 ```
 

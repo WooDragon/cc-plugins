@@ -125,6 +125,7 @@ plugins/
     tests/grok-review.bats       # 66 个测试用例（stub grok/gh/uuidgen，git 用真实临时仓库）
     tests/claude-review.bats     # 24 个测试用例（stub claude，覆盖隔离旗标/会话续接/state 文件隔离，隔离旗标含 --safe-mode/--strict-mcp-config，在首轮与 --resume 复核轮两条路径均有断言）
     tests/resolve-backend.bats   # 10 个测试用例（后端解析优先级 + pr-review.sh 路由）
+    tests/skill-contract.bats    # 3 个测试用例（修复子任务与主线复核生命周期的 Markdown 所有权合同）
     README.md                    # 面向安装者说明
   dispatch-contract/             # 子 agent 派发契约插件（1 skill + 5 hooks）
     .claude-plugin/plugin.json   # 插件元数据（声明 skill + 5 个 hook）
