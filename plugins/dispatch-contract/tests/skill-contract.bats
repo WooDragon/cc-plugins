@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 
-# 从真实交付文档提取唯一的再派停止条件顶层 bullet。
+# 从真实交付文档提取唯一的再派停止条件顶层 bullet 及其缩进续行。
 # 参数：无。输出：完整 bullet。返回：结构不符合契约时返回 1。
 extract_stop_condition() {
   python3 - "$BATS_TEST_DIRNAME/../skills/subagent-dispatch/references/offload-scenarios.md" <<'PY'
@@ -33,14 +33,18 @@ bullets = [index for index, line in enumerate(chapter) if marker.match(line)]
 if len(bullets) != 1:
     print(f"提取失败：目标顶层 bullet 应唯一，实际 {len(bullets)} 个", file=sys.stderr)
     raise SystemExit(1)
-
-target_line = chapter[bullets[0]]
+target_index = bullets[0]
+target_line = chapter[target_index]
 first_body = marker.match(target_line).group(0)
 if not target_line[len(first_body):].strip(" ：:"):
     print("提取失败：目标再派停止条件 bullet 为空", file=sys.stderr)
     raise SystemExit(1)
-
-print(target_line.strip())
+selected = [target_line.strip()]
+for continuation in chapter[target_index + 1:]:
+    if not continuation.strip() or not continuation[0].isspace():
+        break
+    selected.append(continuation.strip())
+print("\n".join(selected))
 PY
 }
 
@@ -61,12 +65,11 @@ assert_contains() {
     printf '用例准备失败：%s\n' "$output" >&2
     return 1
   fi
-  assert_contains "$output" "足以支持当前裁决" "缺少裁决支持前置条件"
-  assert_contains "$output" "完整定稿" "缺少完整定稿前置条件"
-  assert_contains "$output" "至少一项" "缺少至少一项即可重新考虑的条件"
-  assert_contains "$output" "明确的事实缺口" "缺少事实缺口价值条件"
-  assert_contains "$output" "独立评审维度" "缺少独立评审价值条件"
-  assert_contains "$output" "两项均不满足" "缺少两项均不满足时停止的边界"
+  assert_contains "$output" "已取得足以支持当前裁决的完整定稿后" "缺少完整裁决支持前置条件"
+  assert_contains "$output" "额外即席派发应满足以下至少一项" "缺少额外派发价值门槛"
+  assert_contains "$output" "填补一个明确的事实缺口" "缺少事实缺口价值条件"
+  assert_contains "$output" "引入一个可能改变当前裁决的独立评审维度" "缺少独立评审价值条件"
+  assert_contains "$output" "两项均不满足时，主上下文应直接裁决或收工" "缺少两项均不满足时停止的边界"
 }
 
 @test "再派停止条件排除伪独立并保留专域边界" {
@@ -80,4 +83,6 @@ assert_contains() {
   assert_contains "$output" "满足任一项只表示重新套用既有卸载判断，不表示必须派发" "缺少非强制派发边界"
   assert_contains "$output" "本条只约束日常非 team-ops 的额外即席派发" "缺少日常派发边界"
   assert_contains "$output" "首次派发及 PR/plan review 的专域增量规则保持不变" "缺少首次派发与专域增量边界"
+  assert_contains "$output" "本条不阻止下一件不同工作的首次派发" "缺少下一件不同工作的首次派发边界"
+  assert_contains "$output" "评审定稿后的落地不属于再派" "缺少评审定稿落地边界"
 }
