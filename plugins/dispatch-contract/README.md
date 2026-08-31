@@ -536,8 +536,8 @@ the requirement that the main context first have a complete final result
 sufficient to support its current decision before applying the re-dispatch
 stop condition. It also locks the value of a concrete factual gap or an
 independent review dimension, excludes pseudo-independence, keeps dispatch
-non-mandatory, and preserves the boundaries for first dispatch, team-ops, PRs,
-next distinct work, team-ops, PRs, and plan review.
+non-mandatory, and preserves the boundaries for first dispatch, next distinct
+work, team-ops, PRs, and plan review.
 
 ## Block Response Shape (Deliberate Choice)
 

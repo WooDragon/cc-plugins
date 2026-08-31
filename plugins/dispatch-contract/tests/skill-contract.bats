@@ -1,9 +1,11 @@
 #!/usr/bin/env bats
 
-# 从真实交付文档提取唯一的再派停止条件顶层 bullet 及其缩进续行。
-# 参数：无。输出：完整 bullet。返回：结构不符合契约时返回 1。
+# 从交付文档提取唯一的再派停止条件顶层 bullet 及其缩进续行。
+# 参数：可选的文档路径；省略时读取真实 offload-scenarios.md。
+# 输出：完整 bullet。返回：结构不符合契约时返回 1。
 extract_stop_condition() {
-  python3 - "$BATS_TEST_DIRNAME/../skills/subagent-dispatch/references/offload-scenarios.md" <<'PY'
+  local source_path="${1:-$BATS_TEST_DIRNAME/../skills/subagent-dispatch/references/offload-scenarios.md}"
+  python3 - "$source_path" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -48,6 +50,20 @@ print("\n".join(selected))
 PY
 }
 
+# 为每个用例创建专属临时目录。
+# 参数：无。返回：目录创建成功时返回 0，否则返回 mktemp 的状态码。
+setup() {
+  fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/skill-contract.XXXXXX")"
+}
+
+# 仅删除 setup 创建的临时目录。
+# 参数：无。返回：目录不存在或删除成功时返回 0。
+teardown() {
+  if [ -n "${fixture_dir:-}" ] && [ -d "$fixture_dir" ]; then
+    rm -rf "$fixture_dir"
+  fi
+}
+
 # 断言交付 bullet 包含稳定语义片段，并在失败时说明缺失内容。
 # 参数：文本、必须出现的片段、失败原因。返回：命中时 0，否则 1。
 assert_contains() {
@@ -57,6 +73,19 @@ assert_contains() {
   esac
   printf '断言失败：%s；缺少“%s”\n' "$reason" "$phrase" >&2
   return 1
+}
+
+# 断言文本不包含指定片段，并在失败时说明不应出现的内容。
+# 参数：文本、禁止出现的片段、失败原因。返回：未命中时 0，否则 1。
+assert_not_contains() {
+  local text="$1" phrase="$2" reason="$3"
+  case "$text" in
+    *"$phrase"*)
+      printf '断言失败：%s；意外包含“%s”\n' "$reason" "$phrase" >&2
+      return 1
+      ;;
+  esac
+  return 0
 }
 
 @test "再派停止条件要求完整前置条件与至少一项价值依据" {
@@ -85,4 +114,26 @@ assert_contains() {
   assert_contains "$output" "首次派发及 PR/plan review 的专域增量规则保持不变" "缺少首次派发与专域增量边界"
   assert_contains "$output" "本条不阻止下一件不同工作的首次派发" "缺少下一件不同工作的首次派发边界"
   assert_contains "$output" "评审定稿后的落地不属于再派" "缺少评审定稿落地边界"
+}
+
+@test "再派停止条件提取连续缩进续行并截断普通段落" {
+  local fixture="$fixture_dir/offload-fixture.md"
+  cat > "$fixture" <<'EOF'
+## 反模式（不该卸载 / 卸载判断不宜机械）
+- **再派停止条件**：保留首行。
+  第一条缩进续行。
+  第二条缩进续行。
+
+普通段落不属于 bullet。
+EOF
+
+  run extract_stop_condition "$fixture"
+  if [ "$status" -ne 0 ]; then
+    printf '用例准备失败：%s\n' "$output" >&2
+    return 1
+  fi
+  assert_contains "$output" "- **再派停止条件**：保留首行。" "缺少目标 bullet 首行"
+  assert_contains "$output" "第一条缩进续行。" "缺少第一条缩进续行"
+  assert_contains "$output" "第二条缩进续行。" "缺少第二条缩进续行"
+  assert_not_contains "$output" "普通段落不属于 bullet。" "错误收集未缩进普通段落"
 }
