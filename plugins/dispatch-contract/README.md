@@ -477,6 +477,7 @@ bats plugins/dispatch-contract/tests/dispatch-agent-ownership-guard.bats
 bats plugins/dispatch-contract/tests/dispatch-capability-guard.bats
 bats plugins/dispatch-contract/tests/dispatch-channel-guard.bats
 bats plugins/dispatch-contract/tests/gate-composition.bats
+bats plugins/dispatch-contract/tests/skill-contract.bats
 ```
 
 `subagent-done-gate.bats` has 26 test cases covering: core judgment (marker
@@ -528,6 +529,15 @@ and run each against a shared payload, so an outroute one gate's own test
 file exercises is also verified not to still get caught by a sibling gate —
 see `gate-composition.bats`'s header for the issue-shaped failure mode this
 exists to catch mechanically rather than by header comment.
+
+The `skill-contract.bats` suite reads the real
+`skills/subagent-dispatch/references/offload-scenarios.md` directly. It locks
+the requirement that the main context first have a complete final result
+sufficient to support its current decision before applying the re-dispatch
+stop condition. It also locks the value of a concrete factual gap or an
+independent review dimension, excludes pseudo-independence, keeps dispatch
+non-mandatory, and preserves the boundaries for first dispatch, team-ops, PRs,
+and plan review.
 
 ## Block Response Shape (Deliberate Choice)
 
