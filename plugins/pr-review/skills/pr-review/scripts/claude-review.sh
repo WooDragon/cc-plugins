@@ -41,11 +41,12 @@
 #     变量）+ CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY（wrapper 的 grok 分支注入，见
 #     claude-wrapper.sh:1059/1268/1328）——同样可能被子进程继承，与"独立干净子进程"语义不符。
 #     清空后子进程只能走 claude 正常的 OAuth/keychain 登录态。
-#   - --tools "" 已让 claude 完全没有文件读取能力（比 grok 的 --sandbox read-only 更强——grok
-#     还能靠 --cwd 读工作区文件，claude 这条路径下连"读"都不允许），故不需要传等价的
-#     --cwd/sandbox 参数；全部上下文都在 prompt-file 里以文本形式喂给它。BASE_SHA/CWD 身份钉死
-#     逻辑仍保留（build_full_prompt/build_incremental_prompt 共用 lib），那是为了"从哪个 git
-#     仓库取 diff 文本"服务的，与 claude 进程本身能不能碰文件系统是两回事。
+#   - --tools "" 已让 claude 完全没有文件读取能力（比 grok 的 --deny "Write(**)" --deny
+#     "Edit(**)" 更强——grok 还能靠 --cwd 读工作区文件，而且这两条 deny 规则不是写入的硬保证，
+#     实测可经 run_terminal_cmd 里的 python3 间接落盘绕过；故不需要传等价的 --cwd 参数；全部上下文
+#     都在 prompt-file 里以文本形式喂给它。BASE_SHA/CWD 身份钉死逻辑仍保留（build_full_prompt/
+#     build_incremental_prompt 共用 lib），那是为了"从哪个 git 仓库取 diff 文本"服务的，与 claude
+#     进程本身能不能碰文件系统是两回事。
 #   - 复核轮无法续接 session 时 Fail Fast 报错退出，不降级为新建 session（followup 常预设
 #     claude 记得前几轮 finding，发给无记忆新会话必然幻觉）。
 set -euo pipefail
