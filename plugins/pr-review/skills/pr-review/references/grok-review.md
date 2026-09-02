@@ -66,7 +66,7 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 
 1. `gh pr view` 拉 PR 标题 / 描述，`gh pr diff` 拉远程 diff（都带 `--repo` 透传，不依赖本地 checkout）。
 2. 安全约束（角色 + 不可信声明）经 `--rules` 走 grok 系统提示；PR 元信息与 diff 用**每次随机生成的 delimiter** 包裹后写入 prompt-file。
-3. `SID=$(uuidgen)`（或兜底方案，见下），`grok --prompt-file <tmp> -m <model> --effort <effort> --sandbox "${GROK_SANDBOX:-read-only}" --output-format plain -s "$SID"` 产出评审，打印到终端。
+3. `SID=$(uuidgen)`（或兜底方案，见下），`grok --prompt-file <tmp> -m <model> --effort <effort> --deny "Write(**)" --deny "Edit(**)" --output-format plain -s "$SID"` 产出评审，打印到终端。
 4. **grok 成功返回后**才把 SID / BASE_SHA / MODEL / EFFORT / CWD 写入 session 状态文件（首轮失败不落盘，避免留下误导性 SID，见「session 状态文件」）。临时文件全程用 `trap ... EXIT` 清理。
 
 ## 多轮 session 复用
@@ -146,13 +146,7 @@ grok 的 `--output-format json` 输出**不是合法 JSON**——`thought` 字�
 ## 设计说明
 
 - **为何用 `--prompt-file` 而非 `-p`**：macOS 命令行参数总长度上限 `ARG_MAX` 约 256KB，大 diff 直接拼进 `-p` 参数会报 `Argument list too long`。写临时文件绕过这个限制，diff 多大都能传。
-- **`--sandbox "${GROK_SANDBOX:-read-only}"`**：默认 `read-only`，保证 grok 评审过程只读、不会误改本地文件；可用 `GROK_SANDBOX` 环境变量覆盖。设 `GROK_SANDBOX=""` 会被忽略并退回 `read-only`，防止 `export GROK_SANDBOX=` 这类清空写法导致静默无沙箱；想显式关闭沙箱应用请设 `GROK_SANDBOX=off`（实测合法）。副作用（issue #212）：内置带 `restrict_network` 的 profile（`read-only`/`strict`）会把容器 runtime socket（如 `/var/run/docker.sock`）加入 deny 名单，若该路径是 symlink（常见于 OrbStack），grok 的 deny 路径解析器会拒绝解析并拒绝启动。遇到此问题可在 `~/.grok/sandbox.toml` 定义一个换名的等价 profile：
-  ```toml
-  [profiles.review]
-  extends = "read-only"
-  restrict_network = false
-  ```
-  再设 `GROK_SANDBOX=<新 profile 名>` 覆盖；具体排查条目见下方「故障排查」。
+- **`--deny "Write(**)" --deny "Edit(**)"`**：这是防评审跑偏时顺手改文件的护栏，不是完整的写入封锁，也不是安全边界。规则按工具名和路径 glob 匹配，能拦住 `Write`/`Edit` 工具与 shell 重定向，但拦不住 `run_terminal_cmd` 里用 `python3` 等间接方式落盘；实测 grok 自己说过：“Write / redirect 被策略拦了，改走 Python 落盘，cat 核对过内容。”文件确实写出了。多次同类测试中，grok 有时被拦后放弃并报告干不了，有时会主动绕道，取决于当次模型的坚持程度，因此不是稳定的门禁。对没有写入动机的代码评审场景，这道护栏足够防止评审跑偏；对抗性行为则无效。若再加 `--deny "Bash(*)"` 才能真正封住这类间接写入，但会同时拿走 grok 跑 `git log`/`git blame` 追上下文的能力，等于退化成已放弃的 `--tools` 白名单方案。与 `--sandbox` 的差距不只是层级不同：当前 deny 策略能被间接写入绕过，而 Seatbelt 是内核强制、grok 进程本身无法绕过。为何不用 `--sandbox`：grok 1.0.13 给带 `restrict_network` 的内置 profile（`read-only`/`strict`）新增了容器 runtime socket（如 `/var/run/docker.sock`）deny 逻辑，其路径解析器不跟随 symlink——在该路径为 symlink 的机器（常见于 OrbStack）上，sandbox 整个无法应用、grok 直接拒绝启动（见 issue #212）；这是 grok 自身的上游回归，此前长期正常工作。
 - **`--cwd` 仅当本地 checkout 就是目标仓库时才传**：脚本会比对 `git rev-parse --show-toplevel` 对应的 `gh repo view` owner/name 与目标 PR 的 owner/name 是否一致，一致才传 `--cwd`。跨仓库评审（本地不在该仓库目录）时省略 `--cwd`，防止 grok 拿本地无关的文件树产生幻觉上下文。此为启发式判断（按 gh repo owner/name 匹配），fork + repo set-default 指 upstream 等场景可能不精确。
 - **空 diff 直接跳过**：无 `@@` 文本 hunk（纯二进制/rename/mode 改动）时，脚本打印提示后退出，不调用 grok，省一次无意义的模型调用。
 - **超大 diff 仅警告不拦截**：diff 字节数超过阈值（脚本内 `DIFF_WARN_BYTES=200000`）时打印警告到 stderr，但仍然继续评审——上下文窗口是否溢出交给 grok CLI 自身处理。
@@ -161,9 +155,9 @@ grok 的 `--output-format json` 输出**不是合法 JSON**——`thought` 字�
 
 ## 安全说明
 
-`--cwd` 命中（本地 checkout 就是目标仓库）时，grok 可以**读**工作区文件——`--sandbox`（默认 `read-only`）只防写不防读。这意味着未跟踪的 `.env`、密钥等文件即使没提交、没出现在 diff 里，也可能被 grok 读入上下文并上送模型 API。在包含敏感凭据的仓库里跨仓库评审、或对该仓库执行评审时需留意此风险。此外，PR 的 title/body/diff 全量进 prompt 并上送模型 API，若 diff 中含密钥/token，等同于主动泄露给模型侧。
+`--cwd` 命中（本地 checkout 就是目标仓库）时，grok 可以**读**工作区文件——`--deny "Write(**)" --deny "Edit(**)"` 只防写不防读。这意味着未跟踪的 `.env`、密钥等文件即使没提交、没出现在 diff 里，也可能被 grok 读入上下文并上送模型 API。在包含敏感凭据的仓库里跨仓库评审、或对该仓库执行评审时需留意此风险。此外，PR 的 title/body/diff 全量进 prompt 并上送模型 API，若 diff 中含密钥/token，等同于主动泄露给模型侧。
 
-**复核轮同样适用此风险**：复核轮的 `--cwd` 只是判定条件从"精确匹配 PR owner/name"放宽为"当前处于任一合法 git 仓库"，`--sandbox`（默认 `read-only`）只防写不防读的性质不变——上面这段风险说明对复核轮原样成立，不再重复展开。
+**复核轮同样适用此风险**：复核轮的 `--cwd` 只是判定条件从"精确匹配 PR owner/name"放宽为"当前处于任一合法 git 仓库"，`--deny "Write(**)" --deny "Edit(**)"` 只防写不防读的性质不变——上面这段风险说明对复核轮原样成立，不再重复展开。
 
 **复核轮 untracked 是"确定性上送"，比 `--cwd` 的"可能被读"更强**：复核轮会把工作区**未跟踪文件整文件序列化进 INCREMENTAL DIFF** 并上送模型 API——这不是"grok 可能读到"，而是**必定进 prompt**。因此未进 `.gitignore` 的 `.env` / 密钥 / 本地配置一旦存在于工作区，就会被送到模型侧。脚本对**疑似敏感文件名默认跳过**（覆盖清单见本段下方），跳过时 stderr 大字告警并提示"确需评审请改名到非敏感模式、或用不含密钥的独立 clone——**切勿 git add 密钥，tracked 会原样上送 API**"。这是**按文件名的启发式（大小写不敏感）**、非万能——覆盖 `.env`/`.env.*`/`*.env`/`.envrc`、`*.pem`/`*.key`/`*.crt`/`*.p12`/`*.pfx`/`*.pkcs12`/`*.keystore`/`*.jks`/`*.ppk`、`id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`、`credentials`/`*credentials*`、`secrets`/`secrets.*`/`*secrets*`/`*.secret`/`serviceaccount*.json`、`.netrc`/`.pgpass`/`.htpasswd`（`*.example`/`*.sample`/`*.template`/`*.dist` 例外放行），但奇怪命名里的密钥仍会漏网，敏感仓库评审前请自行确认工作区没有明文凭据。**untracked 体积另有硬闸**（tracked 不受限）：单个 untracked 文件超 `UNTRACKED_FILE_MAX_BYTES`（默认 256KB）跳过、untracked 累计超 `UNTRACKED_TOTAL_MAX_BYTES`（默认 1MB）停止收集，都 loud 告警——挡住"误漏 `.gitignore` 的 node_modules/大二进制 撑爆 prompt"这一上线最易踩的事故。总增量体积仍仅 `DIFF_WARN_BYTES` 警告不硬拦（见 issue #99）。
 
@@ -183,4 +177,3 @@ grok 的 `--output-format json` 输出**不是合法 JSON**——`thought` 字�
 | `BASE_SHA=... 记录存在但对象在当前 clone 不可达` | 首轮记录的基线被 rebase/GC 掉、或换了 clone；用 `--since <ref>` 显式指定本轮基线，或在正确 clone 重开首轮 |
 | `session 无工作区锚点（首轮在非 git 目录建立）` | 首轮只靠 `--repo` 拉远程 diff、没有本地工作区锚点；在该 PR 的正确 clone 内重开首轮，或 `--session <UUID>` 知情放行 |
 | `本地 HEAD ... 与 PR #<n> head ... 不一致` | 首轮所在本地 HEAD 不是 PR 分支；先 `gh pr checkout <n>` 再跑首轮，或加 `--allow-divergent-base` 以本地 HEAD 为基线 |
-| grok 直接拒绝启动，`rc` 非零、stdout 为空，stderr 出现 `sandbox could not be applied` / `could not apply the ... sandbox profile`（issue #212） | sandbox profile 应用失败：内置 `restrict_network` profile 会 deny 容器 runtime socket（如 `/var/run/docker.sock`），该路径若是 symlink（常见于 OrbStack）会被 deny 路径解析器拒绝。在 `~/.grok/sandbox.toml` 定义一个换名的等价 profile（`[profiles.review]` / `extends = "read-only"` / `restrict_network = false`），再设 `GROK_SANDBOX=review`（可写入 `~/.claude/settings.json` 的 `env` 段）覆盖默认值 |
