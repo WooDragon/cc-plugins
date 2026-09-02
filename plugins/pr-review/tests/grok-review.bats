@@ -47,6 +47,15 @@ case "${GROK_STUB_MODE:-success}" in
     echo "warning: sandbox could not be applied: runtime-socket deny resolution failed: could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a symlink" >&2
     echo "error: could not apply the 'read-only' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing." >&2
     exit 1 ;;
+  fail_sandbox_profile_missing)
+    echo "warning: sandbox could not be applied: Custom sandbox profile 'definitely-not-real' not found. Define it in ~/.grok/sandbox.toml or .grok/sandbox.toml:" >&2
+    echo "" >&2
+    echo "[profiles.definitely-not-real]" >&2
+    echo "extends = \"workspace\"" >&2
+    echo "read_only = [\"/data\"]" >&2
+    echo "" >&2
+    echo "error: could not apply the 'definitely-not-real' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing." >&2
+    exit 1 ;;
   *)
     echo "OK grok stub review" ;;
 esac
@@ -773,4 +782,30 @@ EOF
   [[ "$output" == *"sandbox.toml"* ]]
   [[ "$output" == *"GROK_SANDBOX"* ]]
   [[ "$output" == *"restrict_network"* ]]
+}
+
+@test "sandbox: 首轮 profile 不存在时报 profile 未解析且不误归因 docker.sock，且不落盘 state" {
+  export GROK_STUB_MODE=fail_sandbox_profile_missing
+  run env GROK_SANDBOX=definitely-not-real bash "$SCRIPT" 42
+  unset GROK_STUB_MODE
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"未解析到"* ]]
+  [[ "$output" == *"GROK_SANDBOX"* ]]
+  [[ "$output" == *"sandbox.toml"* ]]
+  [[ "$output" != *"docker.sock"* ]]
+  [[ "$output" != *"OrbStack"* ]]
+  [ ! -f "$STATE_FILE_42" ]
+}
+
+@test "sandbox: 复核轮 profile 不存在时报 profile 未解析而非裸退出或 docker.sock 归因" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  export GROK_STUB_MODE=fail_sandbox_profile_missing
+  run env GROK_SANDBOX=definitely-not-real bash "$SCRIPT" 42 --followup "复核"
+  unset GROK_STUB_MODE
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"未解析到"* ]]
+  [[ "$output" == *"GROK_SANDBOX"* ]]
+  [[ "$output" == *"sandbox.toml"* ]]
+  [[ "$output" != *"docker.sock"* ]]
+  [[ "$output" != *"OrbStack"* ]]
 }

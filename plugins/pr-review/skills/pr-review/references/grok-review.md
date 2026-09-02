@@ -146,7 +146,13 @@ grok 的 `--output-format json` 输出**不是合法 JSON**——`thought` 字�
 ## 设计说明
 
 - **为何用 `--prompt-file` 而非 `-p`**：macOS 命令行参数总长度上限 `ARG_MAX` 约 256KB，大 diff 直接拼进 `-p` 参数会报 `Argument list too long`。写临时文件绕过这个限制，diff 多大都能传。
-- **`--sandbox "${GROK_SANDBOX:-read-only}"`**：默认 `read-only`，保证 grok 评审过程只读、不会误改本地文件；可用 `GROK_SANDBOX` 环境变量覆盖。副作用（issue #212）：内置带 `restrict_network` 的 profile（`read-only`/`strict`）会把容器 runtime socket（如 `/var/run/docker.sock`）加入 deny 名单，若该路径是 symlink（常见于 OrbStack），grok 的 deny 路径解析器会拒绝解析并拒绝启动。遇到此问题可在 `~/.grok/sandbox.toml` 定义一个换名的等价 profile（`extends = "read-only"; restrict_network = false`），再设 `GROK_SANDBOX=<新 profile 名>` 覆盖；具体排查条目见下方「故障排查」。
+- **`--sandbox "${GROK_SANDBOX:-read-only}"`**：默认 `read-only`，保证 grok 评审过程只读、不会误改本地文件；可用 `GROK_SANDBOX` 环境变量覆盖。设 `GROK_SANDBOX=""` 会被忽略并退回 `read-only`，防止 `export GROK_SANDBOX=` 这类清空写法导致静默无沙箱；想显式关闭沙箱应用请设 `GROK_SANDBOX=off`（实测合法）。副作用（issue #212）：内置带 `restrict_network` 的 profile（`read-only`/`strict`）会把容器 runtime socket（如 `/var/run/docker.sock`）加入 deny 名单，若该路径是 symlink（常见于 OrbStack），grok 的 deny 路径解析器会拒绝解析并拒绝启动。遇到此问题可在 `~/.grok/sandbox.toml` 定义一个换名的等价 profile：
+  ```toml
+  [profiles.review]
+  extends = "read-only"
+  restrict_network = false
+  ```
+  再设 `GROK_SANDBOX=<新 profile 名>` 覆盖；具体排查条目见下方「故障排查」。
 - **`--cwd` 仅当本地 checkout 就是目标仓库时才传**：脚本会比对 `git rev-parse --show-toplevel` 对应的 `gh repo view` owner/name 与目标 PR 的 owner/name 是否一致，一致才传 `--cwd`。跨仓库评审（本地不在该仓库目录）时省略 `--cwd`，防止 grok 拿本地无关的文件树产生幻觉上下文。此为启发式判断（按 gh repo owner/name 匹配），fork + repo set-default 指 upstream 等场景可能不精确。
 - **空 diff 直接跳过**：无 `@@` 文本 hunk（纯二进制/rename/mode 改动）时，脚本打印提示后退出，不调用 grok，省一次无意义的模型调用。
 - **超大 diff 仅警告不拦截**：diff 字节数超过阈值（脚本内 `DIFF_WARN_BYTES=200000`）时打印警告到 stderr，但仍然继续评审——上下文窗口是否溢出交给 grok CLI 自身处理。
@@ -155,9 +161,9 @@ grok 的 `--output-format json` 输出**不是合法 JSON**——`thought` 字�
 
 ## 安全说明
 
-`--cwd` 命中（本地 checkout 就是目标仓库）时，grok 可以**读**工作区文件——`--sandbox read-only` 只防写不防读。这意味着未跟踪的 `.env`、密钥等文件即使没提交、没出现在 diff 里，也可能被 grok 读入上下文并上送模型 API。在包含敏感凭据的仓库里跨仓库评审、或对该仓库执行评审时需留意此风险。此外，PR 的 title/body/diff 全量进 prompt 并上送模型 API，若 diff 中含密钥/token，等同于主动泄露给模型侧。
+`--cwd` 命中（本地 checkout 就是目标仓库）时，grok 可以**读**工作区文件——`--sandbox`（默认 `read-only`）只防写不防读。这意味着未跟踪的 `.env`、密钥等文件即使没提交、没出现在 diff 里，也可能被 grok 读入上下文并上送模型 API。在包含敏感凭据的仓库里跨仓库评审、或对该仓库执行评审时需留意此风险。此外，PR 的 title/body/diff 全量进 prompt 并上送模型 API，若 diff 中含密钥/token，等同于主动泄露给模型侧。
 
-**复核轮同样适用此风险**：复核轮的 `--cwd` 只是判定条件从"精确匹配 PR owner/name"放宽为"当前处于任一合法 git 仓库"，`--sandbox read-only` 只防写不防读的性质不变——上面这段风险说明对复核轮原样成立，不再重复展开。
+**复核轮同样适用此风险**：复核轮的 `--cwd` 只是判定条件从"精确匹配 PR owner/name"放宽为"当前处于任一合法 git 仓库"，`--sandbox`（默认 `read-only`）只防写不防读的性质不变——上面这段风险说明对复核轮原样成立，不再重复展开。
 
 **复核轮 untracked 是"确定性上送"，比 `--cwd` 的"可能被读"更强**：复核轮会把工作区**未跟踪文件整文件序列化进 INCREMENTAL DIFF** 并上送模型 API——这不是"grok 可能读到"，而是**必定进 prompt**。因此未进 `.gitignore` 的 `.env` / 密钥 / 本地配置一旦存在于工作区，就会被送到模型侧。脚本对**疑似敏感文件名默认跳过**（覆盖清单见本段下方），跳过时 stderr 大字告警并提示"确需评审请改名到非敏感模式、或用不含密钥的独立 clone——**切勿 git add 密钥，tracked 会原样上送 API**"。这是**按文件名的启发式（大小写不敏感）**、非万能——覆盖 `.env`/`.env.*`/`*.env`/`.envrc`、`*.pem`/`*.key`/`*.crt`/`*.p12`/`*.pfx`/`*.pkcs12`/`*.keystore`/`*.jks`/`*.ppk`、`id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`、`credentials`/`*credentials*`、`secrets`/`secrets.*`/`*secrets*`/`*.secret`/`serviceaccount*.json`、`.netrc`/`.pgpass`/`.htpasswd`（`*.example`/`*.sample`/`*.template`/`*.dist` 例外放行），但奇怪命名里的密钥仍会漏网，敏感仓库评审前请自行确认工作区没有明文凭据。**untracked 体积另有硬闸**（tracked 不受限）：单个 untracked 文件超 `UNTRACKED_FILE_MAX_BYTES`（默认 256KB）跳过、untracked 累计超 `UNTRACKED_TOTAL_MAX_BYTES`（默认 1MB）停止收集，都 loud 告警——挡住"误漏 `.gitignore` 的 node_modules/大二进制 撑爆 prompt"这一上线最易踩的事故。总增量体积仍仅 `DIFF_WARN_BYTES` 警告不硬拦（见 issue #99）。
 
