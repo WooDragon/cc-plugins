@@ -63,7 +63,7 @@
     {
       "name": "pr-review",
       "description": "AI review for open GitHub PRs — grok/claude/copilot backends, grok and claude auto-routed via a unified entry point, both with adversarial multi-round follow-up over a persisted session; copilot optional and async",
-      "version": "1.3.1",
+      "version": "1.3.2",
       "author": {
         "name": "WooDragon"
       },

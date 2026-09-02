@@ -43,6 +43,10 @@ case "${GROK_STUB_MODE:-success}" in
   fail_network)
     echo "Error: 503 Service Unavailable" >&2
     exit 1 ;;
+  fail_sandbox)
+    echo "warning: sandbox could not be applied: runtime-socket deny resolution failed: could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a symlink" >&2
+    echo "error: could not apply the 'read-only' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing." >&2
+    exit 1 ;;
   *)
     echo "OK grok stub review" ;;
 esac
@@ -90,7 +94,7 @@ EOF
   export UUID_COUNTER_FILE="$WORK/uuid_counter"
   # 隔离宿主环境：断言默认 EFFORT=high/MODEL=grok-4.5 的用例不能吃宿主 export 的 GROK_EFFORT/GROK_MODEL
   # （这工具的用户天天 export GROK_EFFORT=low/high；不 unset 会让默认值断言随宿主环境飘红）
-  unset GROK_STUB_MODE GROK_EFFORT GROK_MODEL GH_STUB_PR_HEAD GH_STUB_PR_HEAD_EMPTY GH_STUB_REPO 2>/dev/null || true
+  unset GROK_STUB_MODE GROK_EFFORT GROK_MODEL GROK_SANDBOX GH_STUB_PR_HEAD GH_STUB_PR_HEAD_EMPTY GH_STUB_REPO 2>/dev/null || true
 
   STATE_DIR="$WORK/home/.local/state/pr-review"
   STATE_FILE_42="$STATE_DIR/testowner__testname__42.session"
@@ -719,4 +723,54 @@ EOF
   [ "$status" -ne 0 ]
   [[ "$output" == *"非法 effort: xhigh"* ]]
   [ ! -f "$GROK_ARGS_LOG" ]
+}
+
+# ---------- 15. #212 sandbox：GROK_SANDBOX 覆盖 + sandbox 失败可读报错 ----------
+
+@test "sandbox: 首轮默认传 --sandbox read-only" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--sandbox")" = "read-only" ]
+}
+
+@test "sandbox: 复核轮默认传 --sandbox read-only" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  run bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--sandbox")" = "read-only" ]
+}
+
+@test "sandbox: GROK_SANDBOX=review 时首轮传 --sandbox review" {
+  run env GROK_SANDBOX=review bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--sandbox")" = "review" ]
+}
+
+@test "sandbox: GROK_SANDBOX=review 时复核轮传 --sandbox review" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  run env GROK_SANDBOX=review bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--sandbox")" = "review" ]
+}
+
+@test "sandbox: 首轮 sandbox 失败给出根因提示且不落盘 state" {
+  export GROK_STUB_MODE=fail_sandbox
+  run bash "$SCRIPT" 42
+  unset GROK_STUB_MODE
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sandbox.toml"* ]]
+  [[ "$output" == *"GROK_SANDBOX"* ]]
+  [[ "$output" == *"restrict_network"* ]]
+  [ ! -f "$STATE_FILE_42" ]
+}
+
+@test "sandbox: 复核轮 sandbox 失败给出根因提示（而非裸退出）" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  export GROK_STUB_MODE=fail_sandbox
+  run bash "$SCRIPT" 42 --followup "复核"
+  unset GROK_STUB_MODE
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sandbox.toml"* ]]
+  [[ "$output" == *"GROK_SANDBOX"* ]]
+  [[ "$output" == *"restrict_network"* ]]
 }

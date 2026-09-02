@@ -63,7 +63,7 @@ Guardrails baked into the script:
 - **Baseline fail-fast** — if local `HEAD` ≠ the PR's head at round 1, it refuses to anchor on a wrong baseline (override with `--allow-divergent-base`).
 - **No silent session downgrade** — if a follow-up can't resume the session it errors out instead of quietly starting a fresh, amnesiac one.
 - **Secret hygiene** — suspicious untracked files (`.env`, `*.pem`, `*secrets*`, …) and oversized untracked blobs are skipped rather than uploaded; `*.example` is exempt, and tracked secrets warn instead of being silently dropped.
-- `--sandbox read-only` — grok can read the repo but never writes to it.
+- `--sandbox "${GROK_SANDBOX:-read-only}"` — defaults to `read-only` so grok can read the repo but never writes to it; override with `GROK_SANDBOX` (see env var table below, and issue #212 for why an override may be necessary).
 
 ## Prerequisites
 
@@ -80,6 +80,7 @@ Guardrails baked into the script:
 |---|---|---|
 | `GROK_MODEL` | `grok-4.6` | grok backend model override |
 | `GROK_EFFORT` | `high` | grok backend reasoning effort; legal values exactly `none`/`minimal`/`low`/`medium`/`high` (`xhigh` unsupported — a persisted legacy `xhigh` session value is migrated to `high` once before the review runs) |
+| `GROK_SANDBOX` | `read-only` | **Native grok CLI variable, not introduced by this plugin** — grok itself supports `--sandbox` via `[env: GROK_SANDBOX=]`, but the script's explicit `--sandbox "${GROK_SANDBOX:-read-only}"` flag shadows that env unless the script reads it back in, which it does. Setting this affects every other local use of grok on the same machine, not just this plugin's invocations — that tradeoff is why the default stays `read-only` and only opt-in overrides change it. Needed to work around issue #212 (OrbStack's `/var/run/docker.sock` symlink breaking the sandbox's runtime-socket deny resolution). |
 | `CLAUDE_REVIEW_MODEL` | `claude-opus-5` | claude backend model override |
 | `CLAUDE_REVIEW_EFFORT` | `medium` | claude backend reasoning effort; legal values exactly `low`/`medium`/`high`/`xhigh`/`max` |
 | `CODEX_REVIEW_MODEL` | `gpt-5.6-luna` | codex backend model override |
