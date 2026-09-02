@@ -129,8 +129,9 @@ is written, separate from `plan-review.log`.
 
 A plan with dispatch keywords must include a Dispatch Manifest with at least one
 `agent` row. A plan without dispatch keywords, including Tier0 work, remains
-Manifest-free. `plan-review.sh` stores only the approved v2 signature set. The
-fixed columns are `step | location | subagent_type | model_source | model |
+Manifest-free. `plan-review.sh` stores only the approved v2 signature set — the
+set is written on APPROVE and on safety-valve escalation alike. The fixed
+columns are `step | location | subagent_type | model_source | model |
 depends_on | parallel_with`.
 
 - `main` rows use `-` for `subagent_type`, `model_source`, and `model`.
@@ -151,7 +152,11 @@ fails open.
 ExitPlanMode → hook intercepts → engine reviews
   ├─ APPROVE → ack-deny: present review + re-call ExitPlanMode → allow (user's native go/no-go)
   ├─ CONCERNS/REJECT → deny + feedback → Claude revises → re-submit
-  └─ max rounds reached → allow through (user decides)
+  └─ max rounds reached and the plan is the exact revision the last CONCERNS round
+     reviewed → allow through (user decides). Dispatch Manifest signatures are armed
+     exactly as on APPROVE, and a Manifest that cannot be armed denies instead of
+     escalating. Any other revision — edited after the last round, or state predating
+     this mechanism — gets one more review before it can be escalated.
 ```
 
 An engine APPROVE is **not** authorization to start work — it only clears the plan
