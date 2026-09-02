@@ -80,6 +80,17 @@ render_concerns_or_reject_feedback() {
   if [ "$verdict" = "REJECT" ]; then
     feedback_header="Red Team Review — ${review_engine} — REJECT (Round ${total_rounds}/${review_max_total_rounds})"
     phase_msg="审阅引擎发现 Critical 级别问题。非 Critical 磋商计数已重置，解决 Critical 项后可重新获得 ${review_max_rounds} 轮磋商机会。"
+  elif [ "$attempt" -gt "$review_max_rounds" ]; then
+    # attempt is already post-increment here (caller bumps ATTEMPT before
+    # calling this function — see plan-review.sh's CONCERNS branch), so
+    # attempt > review_max_rounds means the round that just ran was a
+    # post-cap supplementary review: the non-Critical valve (ATTEMPT >=
+    # REVIEW_MAX_ROUNDS) had already armed, but the plan hash changed since
+    # the last reviewed revision, so the valve fell through to one more real
+    # review instead of escalating unreviewed. "Round N/MAX" and a negative
+    # remaining-rounds count would misreport this as a normal in-budget round.
+    feedback_header="Red Team Review — ${review_engine} — CONCERNS (Round ${attempt}, 补评审)"
+    phase_msg="本轮是 plan 改动后的补评审，非 Critical 磋商已达上限。同一修订再次调用 ExitPlanMode 将直接呈现给用户做最终裁决；再改 plan 则会再评审一轮。"
   else
     remaining=$((review_max_rounds - attempt))
     feedback_header="Red Team Review — ${review_engine} — CONCERNS (Round ${attempt}/${review_max_rounds})"
