@@ -13,10 +13,12 @@
 #   - 复核轮 grok -r <UUID> 续接同一会话，只发 followup 文本 + 本轮增量 diff（不重发首轮全量）。
 #   - session 状态文件：${XDG_STATE_HOME:-$HOME/.local/state}/pr-review/<owner>__<name>__<PR>.session
 #   - 用 --prompt-file 传 prompt+diff，规避 macOS ARG_MAX（大 diff 塞命令行会崩）。
-#   - --sandbox "${GROK_SANDBOX:-read-only}"：默认 read-only（grok 只读、不改文件）；
-#     可用 GROK_SANDBOX 环境变量覆盖。grok --sandbox 本身有原生 env 支持
-#     （grok --help 显示 [env: GROK_SANDBOX=]），但脚本一旦显式传 --sandbox 值就会盖掉
-#     该 env，所以脚本必须自己认 GROK_SANDBOX 才能让用户覆盖生效（而不是新增自有变量）。
+#   - --deny "Write(**)" --deny "Edit(**)" 是防评审跑偏的应用层护栏，不是完整写入封锁或安全边界：
+#     它拦 Write/Edit 与 shell 重定向，但 run_terminal_cmd 仍可经 python3 等间接落盘；实测 grok
+#     有时放弃、有时绕路，行为不稳定。对无写入动机的评审场景够用，对抗性行为无效。加
+#     --deny "Bash(*)" 才能封住间接写入，却会拿走 git log/blame，退化成 --tools 白名单。
+#     与 --sandbox 的差距不只是层级：当前策略能被绕过，而内核级 Seatbelt 不能；不用 sandbox
+#     是因 grok 1.0.13 的 runtime-socket symlink 回归会令其在 OrbStack 等环境拒绝启动（#212）。
 #   - --cwd 首轮仅当本地在目标 PR 对应仓库时传入（owner/name 精确匹配）；复核轮动态取当前
 #     git toplevel（与增量 diff 同源），不在合法 git 仓库时降级用 state 里的历史 CWD。
 #   - 无 @@ 文本 hunk（纯二进制/rename/mode 改动）直接跳过，不调 grok（仅首轮适用）。
@@ -42,23 +44,9 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/pr-review"
 # grok session 失效的 stderr 判定正则（宽松，防 grok 版本漂移；已用真实 grok 0.2.93 验证过确切文案：
 # "Error: Failed to restore session from remote: fetching session record: session get failed: 404 Not Found"）
 SESSION_INVALID_RE='[Ff]ailed to restore session|session get failed'
-# sandbox 应用失败的 stderr 判定正则（宽松，防措辞漂移；已实测确认的真实文案，见 issue #212：
-# grok 内置 sandbox profile 里凡带 restrict_network 的（read-only/strict）会把
-# /var/run/docker.sock 加入 deny 名单，OrbStack 把该路径做成 symlink，grok 的 deny 路径
-# 解析器拒绝 symlink 端点，导致 sandbox 应用失败、grok 拒绝启动，rc=1 且 stdout 零字节）。
-SANDBOX_FAILED_RE='sandbox could not be applied|could not apply the .* sandbox profile'
-# 实测 grok profile-not-found 的真实 stderr 文案："Custom sandbox profile ... not found"。
-SANDBOX_PROFILE_MISSING_RE='[Cc]ustom sandbox profile .* not found'
-
-# sandbox 应用失败的 die 文案（首轮/复核轮共用，单一事实源）。$1=生效的 sandbox profile 名。
-sandbox_failed_die() {
-  die "grok sandbox 应用失败（当前生效 profile: ${1}）：内置 profile 的 restrict_network 会 deny 容器 runtime socket（/var/run/docker.sock），而该路径是 symlink（常见于 OrbStack），grok 的 deny 路径解析器拒绝 symlink 端点导致拒绝启动。绕法：① 在 ~/.grok/sandbox.toml 里定义一个换名的等价 profile（内置名不可 shadow，必须换名），分三行写入（TOML 不支持分号分隔，三段各占一行）：[profiles.review] / extends = \"read-only\" / restrict_network = false；② 设置 GROK_SANDBOX=review（可写入 ~/.claude/settings.json 的 env 段）。"
-}
-
-# profile 未找到的 die 文案（首轮/复核轮共用，单一事实源）。$1=生效的 sandbox profile 名。
-sandbox_profile_missing_die() {
-  die "grok 未解析到当前生效的 sandbox profile（profile 名: ${1}，不是应用路径故障）。请核对 GROK_SANDBOX 的拼写，并确认该 profile 已在 ~/.grok/sandbox.toml 或 .grok/sandbox.toml 中定义；上方 grok 输出已给出可照抄的定义模板。"
-}
+# 写保护单一事实源：deny Write/Edit 工具，不依赖内核 sandbox（见文件头设计依据）。
+# 两处 grok 调用（首轮/复核轮）都引用这个数组，不各写一遍字面量。
+DENY_WRITE_FLAGS=(--deny "Write(**)" --deny "Edit(**)")
 
 # effort 合法值校验（首轮入口 + 复核轮 state 读回后各调一次，单一事实源）
 check_effort() {
@@ -213,7 +201,7 @@ if (( FOLLOWUP_MODE )); then
   # 只有 grok 的 stderr 进度延后到结束才刷——换来消除 rc/tee 竞态、不依赖 /dev/fd（受限 shell/沙箱也稳）。
   set +e
   grok --rules "$RULES_FOLLOWUP" --prompt-file "$PROMPT_FILE" -m "$MODEL" --effort "$EFFORT" \
-    --sandbox "${GROK_SANDBOX:-read-only}" --output-format plain -r "$SID" \
+    "${DENY_WRITE_FLAGS[@]}" --output-format plain -r "$SID" \
     ${CWD_FLAG[@]+"${CWD_FLAG[@]}"} \
     2>"$ERR_LOG"
   rc=$?
@@ -223,10 +211,6 @@ if (( FOLLOWUP_MODE )); then
   if (( rc != 0 )); then
     if grep -qE "$SESSION_INVALID_RE" "$ERR_LOG"; then
       die "PR #${PR} 的 session 已失效/丢失，上下文不可恢复——请重开首轮评审（grok-review.sh ${PR}）。"
-    elif grep -qE "$SANDBOX_PROFILE_MISSING_RE" "$ERR_LOG"; then
-      sandbox_profile_missing_die "${GROK_SANDBOX:-read-only}"
-    elif grep -qE "$SANDBOX_FAILED_RE" "$ERR_LOG"; then
-      sandbox_failed_die "${GROK_SANDBOX:-read-only}"
     else
       exit "$rc"
     fi
@@ -299,7 +283,7 @@ else
   ERR_LOG=$(mktemp "${TMPDIR:-/tmp}/grok-review-err.XXXXXX") || die "mktemp 失败"
   set +e
   grok --rules "$RULES" --prompt-file "$PROMPT_FILE" -m "$MODEL" --effort "$EFFORT" \
-    --sandbox "${GROK_SANDBOX:-read-only}" --output-format plain -s "$SID" \
+    "${DENY_WRITE_FLAGS[@]}" --output-format plain -s "$SID" \
     ${CWD_FLAG[@]+"${CWD_FLAG[@]}"} \
     2>"$ERR_LOG"
   rc=$?
@@ -307,13 +291,7 @@ else
   cat "$ERR_LOG" >&2   # 把 grok 的 stderr 透传出来（ERR_LOG 已完整写完，无竞态）
 
   if (( rc != 0 )); then
-    if grep -qE "$SANDBOX_PROFILE_MISSING_RE" "$ERR_LOG"; then
-      sandbox_profile_missing_die "${GROK_SANDBOX:-read-only}"
-    elif grep -qE "$SANDBOX_FAILED_RE" "$ERR_LOG"; then
-      sandbox_failed_die "${GROK_SANDBOX:-read-only}"
-    else
-      exit "$rc"
-    fi
+    exit "$rc"
   fi
 
   state_write "$SID" "$CWD_TO_STORE" "$BASE_SHA_TO_STORE"

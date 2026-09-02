@@ -1,7 +1,7 @@
 {
   "name": "pr-review",
   "description": "AI review for open GitHub PRs — grok/claude/codex CLI local synchronous review (auto-routed via pr-review.sh, both with adversarial multi-round follow-up over a persisted session) + GitHub Copilot bot asynchronous review (optional)",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "author": {
     "name": "WooDragon"
   },
