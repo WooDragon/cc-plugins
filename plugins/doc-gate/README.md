@@ -142,9 +142,9 @@ Exit codes: `0` = ok, `1` = broken links found (check only), `2` = argument/tool
 `DOC_EXIT_GATE_BUDGET_SEC` covers **two** phases of the exit-layer check, not just recall:
 
 - **Graph-build phase** (`os.walk` over the whole repo + reading every `.md`'s content): if this phase alone exceeds the budget, the check produces **no structural findings at all** — no `stale_inlinks` / `orphan` / `dangling_refs` / `broken_outlinks` for any file — and instead blocks once with a message naming both `DOC_EXIT_GATE_BUDGET_SEC` (raise it) and `DOC_EXIT_GATE_DISABLED` (turn the check off) as the two knobs to use.
-- **Recall phase** (BM25 lexical query, runs only after the graph build finishes): if the remaining budget is exhausted here, structural checks for files not yet processed still run and are still reported — only the BM25 recall suggestion is dropped for those files.
+- **Recall phase** (BM25 lexical query, runs only after the graph build finishes): if the remaining budget is exhausted here, every dirty file still gets its full structural checks and all of them are still reported — only the BM25 recall suggestion is dropped.
 
-On a repo with a large `.md` corpus (this repo qualifies), lowering the budget can therefore silently take you from "all structural findings, no recall" to "nothing at all, just one block" — the two tiers are not interchangeable.
+On a repo with a large `.md` corpus (this repo qualifies), lowering the budget can therefore flip the outcome from "all structural findings, no recall" to "no findings at all, just one block" — the two tiers are not interchangeable. The second tier says so in its own message rather than failing quietly, but the knob itself gives no hint that it governs two different behaviours.
 
 There is deliberately **no `DOC_EXIT_GATE_ROOT`**: `doc-exit.sh`'s root is `git rev-parse --show-toplevel`, a single source. Adding an override would reintroduce the exact two-root-detection split described in `Root Detection` above.
 
