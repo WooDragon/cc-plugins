@@ -13,9 +13,9 @@ description: |
 
 # 文档维护
 
-在文档写入前强制预检、写入后强制自查，防止层位违规和索引腐烂。
+文档写入时注入表述规范判据、写入完成后核对工作树一致性，防止层位违规和索引腐烂。
 
-平台兼容性：在 Claude Code 中，doc-gate 插件 hook 会自动执行 skill-gate/recall-gate；在 opencode 中，除非另行安装 opencode adapter，本 skill 只提供人工遵循的文档维护流程，不承诺自动门禁。
+平台兼容性：在 Claude Code 中，doc-gate 插件 hook 会自动执行 doc-entry（每次编辑注入判据）与 doc-exit（回合结束时核对工作树一致性）；在 opencode 中，除非另行安装 opencode adapter，本 skill 只提供人工遵循的文档维护流程，不承诺自动门禁。
 
 ## 1. 操作类型判定
 
@@ -69,7 +69,7 @@ description: |
 
 - **单一来源**：每个知识点 / 每段操作只保留一份权威版本，其余位置引用它（见「跨文档引用」），不逐字复制。多个文档重复引用同一理论或重复执行同一操作时，抽取到共享层；横切共性抽 shared，不重复堆叠。
 - **跨项目共享**：跨项目复用的内容（命令片段、配置模板、导航说明）抽到上游权威源 / 共享层，下游用祈使式引用指向，不在各子仓库逐字复制——逐字复制会随时间各自漂移。
-- **治理形态**：去重是低频人工审计，不是阻断式门禁。增量撞车由 recall-gate 写时召回覆盖；存量重复低频偶发，靠定期 DEDUP（§5.6）人工清即可。
+- **治理形态**：去重是低频人工审计，不是阻断式门禁。新建文档的增量撞车有自动信号（文档无入链 → orphan 报告呈现 → 查重结果一并显示）；已存在文档被改出的重复与存量重复一同靠定期 DEDUP（§5.6）人工审计清理。
 
 ### 跨文档引用
 
@@ -115,7 +115,7 @@ CLAUDE.md 是 Claude Code 的配置入口，会注入任务上下文，是污染
 | 全局 | `~/.claude/CLAUDE.md` | 最严 | 四判据**全部**通过才可增；任何场景特定内容一律外移到 skill/docs。注入所有任务，改动需极度克制。 |
 | 项目级 | `<project>/CLAUDE.md` | 普通 | 四判据作为参考；允许项目专属约定，但具体操作细节仍应下沉到 docs/。 |
 
-> doc-gate 门禁在编辑全局 CLAUDE.md 时会给出「最高强度」提示——命中即套用上表全局一行的要求。
+> doc-entry hook 在编辑全局 CLAUDE.md 时会在注入载荷里追加通用化四判据段落——命中即套用上表全局一行的要求。这不是 deny，是每次编辑都在场的上下文提示。
 
 ### 表述规范
 
@@ -125,12 +125,13 @@ CLAUDE.md 是 Claude Code 的配置入口，会注入任务上下文，是污染
 
 ### 内置工具
 
-doc-gate 插件包含两个零依赖 Python CLI 工具：
+doc-gate 插件包含三个零依赖 Python CLI 工具：
 
-- **`tools/recall-gate.py`** — BM25 词法召回 + 链接图谱合并引擎。由 PreToolUse hook 自动调用，在首次编辑 .md 文件时执行三维分析（内容召回、孤儿检测、出链验证），以 deny-once-per-file 模式呈现结果。无需手动调用——编辑 .md 时 hook 自动触发，结果会在 deny 消息中展示相关文档列表。
+- **`tools/recall-gate.py`** — BM25 词法召回 + 链接图谱合并引擎。不再由任何 hook 自动调用；仍可用其 `gate` 子命令独立运行做一次性查重。该子命令只从 `RECALL_GATE_ROOT` 读根目录覆盖；阈值与结果条数无环境变量，只能用 `--threshold` / `--top-n` 命令行参数指定，与 hook 无关。
+- **`tools/doc-exit-report.py`** — Stop hook（`doc-exit.sh`）的出口判定引擎。从传入的脏文件列表出发，跑一趟全库链接图谱，产出 `stale_inlinks` / `orphan` / `dangling_refs` / `recall` / `broken_outlinks` 五类 finding；其中 `orphan`（无入链）是阻断项，也是新建文档拖出查重结果的唯一载体。`DOC_EXIT_GATE_BUDGET_SEC` 预算罩两个阶段、超预算行为不同：建图阶段（`os.walk` 全仓扫描）本身超时——不产出任何结构类 finding，只回一条降级消息点名 `DOC_EXIT_GATE_BUDGET_SEC`（调高预算）与 `DOC_EXIT_GATE_DISABLED`（临时关闭本检查）两个旋钮；建图跑完后才轮到 BM25 查重（recall）阶段超时——此时 `stale_inlinks` / `orphan` / `dangling_refs` / `broken_outlinks` 等结构类检查仍照常产出，只丢查重建议。
 - **`tools/docs-graph.py`** — 链接图谱独立 CLI（7 子命令：check / backlinks / links / orphans / hubs / related / export）。重命名、归档、重组操作的引用扫描步骤优先使用此工具。
 
-**recall-gate 与 doc-maintenance 的协作**：recall-gate hook 在 skill-gate 之后运行。调用 doc-maintenance skill（写入 marker）后首次编辑 .md，recall-gate 会自动展示相关文档——Pre-flight 第 5 步「确认不存在已有文档覆盖同一内容」可直接参考此结果，无需额外手动搜索。
+**出口检查与 doc-maintenance 的协作**：出口检查在回合结束（`Stop`）时运行一次，而不是在编辑当下——它面向的是「这次改动完成后，整个工作树是否还自洽」，覆盖 Pre-flight 第 5 步无法预判的场景：改之前不知道会不会重复，改完之后全文查重才有意义。§5.2 MODIFY 检查单的「入口索引确认」一项即直接参照它报出的 `stale_inlinks` 名单。
 
 ## 3. 项目适配
 
@@ -160,7 +161,7 @@ doc-gate 插件包含两个零依赖 Python CLI 工具：
 2. 定位对应检查单（§5）
 3. 如项目有文档框架文件（§3），读取其层位定义
 4. 确认目标文档应放在哪一层、文件名是否恰当
-5. 如为 CREATE，确认不存在已有文档覆盖同一内容（recall-gate hook 会在首次编辑时自动展示相关文档列表，可直接参考其结果）
+5. 如为 CREATE，确认不存在已有文档覆盖同一内容（无实时召回可用；出口检查会在回合结束时对本次写入的最终态全文查重，作为写后校验，不作为写前预判的替代）
 
 ### 4.2 Execute（执行文档操作）
 
@@ -169,7 +170,7 @@ doc-gate 插件包含两个零依赖 Python CLI 工具：
 ### 4.3 Post-flight（写后自查）
 
 1. 逐项走检查单中的检查项，确认每项通过
-2. 入口索引已更新（CREATE 补条目，ARCHIVE 移除条目，RENAME 修正条目）
+2. 入口索引已更新（CREATE 补条目，MODIFY 核对出口检查报出的 `stale_inlinks` 名单是否需要同步描述，ARCHIVE 移除条目，RENAME 修正条目）
 3. 无断链引入（新增的链接可达，修改的路径已全局同步）
 4. 如发现违规，立即修正后再报告完成
 5. 若本次操作涉及实例化数据迁移，再次 grep 确认旧路径/旧值零残留
@@ -208,6 +209,7 @@ doc-gate 插件包含两个零依赖 Python CLI 工具：
 - [ ] **通用化检查（仅 CLAUDE.md）**：新增内容是否跨 2+ 场景、确定后基本不变、非单任务操作步骤？全局 `~/.claude/CLAUDE.md` 须四判据全过（见 §2「CLAUDE.md 通用化原则」）
 - [ ] **表述规范 §A 已过**：新增/改写段落对照 §A 歧义层逐条自查（读 `references/writing-standards.md` §A 原文判据）
 - [ ] **A3 / A9 重点复核**：这两条最易漏，按 `references/writing-standards.md` 中 A3、A9 的原文判据逐一确认；A3 的比对范围含文档既有段落，不止新增段落
+- [ ] **入口索引确认**：本次改动是否使其他链向本文件的文档描述失真？可直接参考出口检查阶段报出的 `stale_inlinks` 名单——它列出链向脏文件、但自身未被同步改动的文档
 
 **反模式：**
 
@@ -260,7 +262,7 @@ doc-gate 插件包含两个零依赖 Python CLI 工具：
 
 ### 5.6 DEDUP — 定期查重
 
-存量重复低频偶发，靠定期人工审计清理即可，不做阻断式门禁（增量撞车已由 recall-gate 写时召回覆盖）。
+存量重复低频偶发，靠定期人工审计清理即可，不做阻断式门禁（新建文档的增量撞车有自动信号、已存在文档被改出的重复无自动信号）。
 
 **发现入口：**
 
@@ -284,7 +286,8 @@ doc-gate 插件包含两个零依赖 Python CLI 工具：
 
 **反模式：**
 
-- 把去重做成阻断式硬门禁（增量 recall-gate 已覆盖、存量低频，硬门禁是解决臆想威胁）
+- 把去重做成阻断式硬门禁（新建文档的增量有信号、已存在文档的增量无信号、存量重复低频，硬门禁是解决臆想威胁）
+  - 实证：recall 曾参与阻断判定，根 `CLAUDE.md` 与 `claude-review.md` 被判 0.357 分。该分数主要来自文件名 Jaccard，两份文档内容并无重叠；而这条召回在 commit 之前每一轮各拦一次，任何编辑都无法清除它。
 - 删副本不收口引用，留下断链
 - 跨项目重复只在单仓库内扫，漏掉分属不同子仓库的副本
 - 把固有复用（占位符路径、无版本漂移的命令片段）误判为待治理重复

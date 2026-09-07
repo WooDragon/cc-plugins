@@ -84,6 +84,21 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "excluded: research/foo.md (A3: aligned with tools/_doc_gate_common.py EXCLUDED_DIRS)" {
+  run doc_gate_is_excluded_path "/project/research/foo.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "excluded: .venv/lib/notes.md (A3: aligned with EXCLUDED_DIRS)" {
+  run doc_gate_is_excluded_path "/project/.venv/lib/notes.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "excluded: docs-graph-tests/fixture.md (A3: aligned with EXCLUDED_DIRS)" {
+  run doc_gate_is_excluded_path "/project/docs-graph-tests/fixture.md"
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # NOT excluded (return 1)
 # ============================================================
@@ -106,4 +121,85 @@ setup() {
 @test "not excluded: agents/foo.md (no dot-prefix, distinct from .agents)" {
   run doc_gate_is_excluded_path "/project/agents/foo.md"
   [ "$status" -eq 1 ]
+}
+
+# ============================================================
+# doc_gate_is_excluded_basename — excluded (return 0)
+# ============================================================
+
+@test "basename excluded: MEMORY.md" {
+  run doc_gate_is_excluded_basename "MEMORY.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "basename excluded: memory.md (lowercase, case-insensitive)" {
+  run doc_gate_is_excluded_basename "memory.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "basename excluded: SKILL.md" {
+  run doc_gate_is_excluded_basename "SKILL.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "basename excluded: skill.md (lowercase, case-insensitive)" {
+  run doc_gate_is_excluded_basename "skill.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "basename excluded: CHANGELOG.md" {
+  run doc_gate_is_excluded_basename "CHANGELOG.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "basename excluded: ChangeLog.md (mixed case, case-insensitive)" {
+  run doc_gate_is_excluded_basename "ChangeLog.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "basename excluded: LICENSE.md" {
+  run doc_gate_is_excluded_basename "LICENSE.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "basename excluded: License.md (mixed case, case-insensitive)" {
+  run doc_gate_is_excluded_basename "License.md"
+  [ "$status" -eq 0 ]
+}
+
+# ============================================================
+# doc_gate_is_excluded_basename — NOT excluded (return 1): governed docs
+# ============================================================
+
+@test "basename not excluded: CLAUDE.md (governed document)" {
+  run doc_gate_is_excluded_basename "CLAUDE.md"
+  [ "$status" -eq 1 ]
+}
+
+@test "basename not excluded: README.md (governed document)" {
+  run doc_gate_is_excluded_basename "README.md"
+  [ "$status" -eq 1 ]
+}
+
+@test "basename not excluded: CONTRIBUTING.md (governed document)" {
+  run doc_gate_is_excluded_basename "CONTRIBUTING.md"
+  [ "$status" -eq 1 ]
+}
+
+@test "basename not excluded: foo.md (ordinary content file)" {
+  run doc_gate_is_excluded_basename "foo.md"
+  [ "$status" -eq 1 ]
+}
+
+# ============================================================
+# doc_gate_is_excluded_basename — nocasematch restoration
+# ============================================================
+
+@test "basename check restores nocasematch state (does not leak shopt setting)" {
+  shopt -u nocasematch
+  doc_gate_is_excluded_basename "SKILL.md" >/dev/null
+  if shopt -q nocasematch; then
+    echo "nocasematch leaked ON after doc_gate_is_excluded_basename returned"
+    return 1
+  fi
 }

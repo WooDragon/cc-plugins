@@ -5,6 +5,7 @@ import os
 import sys
 import math
 import json
+import time
 import argparse
 from pathlib import Path
 from collections import Counter
@@ -173,8 +174,42 @@ def build_indexes(corpus: list) -> tuple:
 # Single-pass scanner: BM25 corpus + link adjacency
 # ---------------------------------------------------------------------------
 
-def build_corpus_and_graph(root: str) -> tuple:
-    """Single os.walk pass building BM25 corpus, forward/backward adjacency, and all_files set."""
+class GraphBudgetExceeded(Exception):
+    """Raised by build_corpus_and_graph when start_time/budget_sec are given
+    and the os.walk pass itself — the single most expensive step (full
+    directory walk + reading every .md's content) — does not finish inside
+    budget (A7, #219). The caller must NOT fall back to reporting findings
+    off a partial graph: a truncated walk means an unknown subset of
+    all_files/backward/dangling, and stale_inlinks/orphan/dangling_refs
+    computed from that subset would be actively wrong, not just incomplete.
+    """
+
+    def __init__(self, scanned_count: int):
+        super().__init__(f'graph build budget exceeded after scanning {scanned_count} files')
+        self.scanned_count = scanned_count
+
+
+# How many .md files to scan between budget checks. A per-file check would
+# add a time.monotonic() syscall to the hottest loop in this tool; checking
+# every file is unnecessary precision when the budget is measured in whole
+# seconds - checking periodically bounds the overshoot to about one
+# interval's worth of scanning past the deadline, which is an acceptable
+# trade against a genuinely large corpus.
+_GRAPH_BUDGET_CHECK_INTERVAL = 25
+
+
+def build_corpus_and_graph(root: str, start_time: float = None, budget_sec: float = None) -> tuple:
+    """Single os.walk pass building BM25 corpus, forward/backward adjacency, all_files set,
+    and dangling-link map (edges whose target .md no longer exists).
+
+    start_time/budget_sec are both optional and both required together to
+    enable the budget check (the two existing callers — recall-gate.py's own
+    cmd_gate, and tests/test_exclude.py — never pass them, so they keep
+    running unbounded exactly as before; only doc-exit-report.py's
+    build_report passes them). When given and the walk exceeds budget_sec
+    measured from start_time, raises GraphBudgetExceeded instead of
+    returning a partial graph silently.
+    """
     root_path = Path(root).resolve()
     corpus = []
     # all_files: set of relative path strings
@@ -182,14 +217,33 @@ def build_corpus_and_graph(root: str) -> tuple:
     # adjacency keyed by relative path string
     forward: dict = {}   # rel_path -> set of rel target strings
     backward: dict = {}  # rel_path -> set of rel source strings
+    # dangling: rel_target (nonexistent .md) -> set of rel source strings that link it
+    dangling: dict = {}
+
+    _budget_active = start_time is not None and budget_sec is not None
+    _scanned = 0
 
     # First pass: collect content and tokens
     file_contents: dict = {}  # rel_path -> content
     for dirpath, dirnames, filenames in os.walk(str(root_path)):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
         for fname in filenames:
-            if not fname.endswith('.md'):
+            # Case-insensitive: filesystems and the doc-exit.sh dirty-set
+            # filter (*.[mM][dD]) both treat UPPER.MD as a markdown file.
+            # A bare `.endswith('.md')` here would skip it during os.walk,
+            # so it never enters all_files/backward — making it permanently
+            # orphan=True and turning any inbound link into a dangling edge,
+            # regardless of platform (实测: os.walk keeps the on-disk case on
+            # both Linux and macOS; this was dormant only while doc-exit.sh
+            # still pathspec-filtered to lowercase `*.md` upstream) (A4, #219).
+            if not fname.lower().endswith('.md'):
                 continue
+
+            _scanned += 1
+            if _budget_active and _scanned % _GRAPH_BUDGET_CHECK_INTERVAL == 0:
+                if time.monotonic() - start_time > budget_sec:
+                    raise GraphBudgetExceeded(_scanned)
+
             fpath = Path(dirpath) / fname
             try:
                 content = fpath.read_text(encoding='utf-8', errors='ignore')
@@ -230,20 +284,27 @@ def build_corpus_and_graph(root: str) -> tuple:
             if rel_target in all_files:
                 forward[rel_path].add(rel_target)
                 backward.setdefault(rel_target, set()).add(rel_path)
+            elif rel_target.lower().endswith('.md'):
+                dangling.setdefault(rel_target, set()).add(rel_path)
 
-    return corpus, all_files, forward, backward
+    return corpus, all_files, forward, backward, dangling
 
 
 # ---------------------------------------------------------------------------
 # Gate-specific checks
 # ---------------------------------------------------------------------------
 
+def is_orphan(inlinks: set, basename: str, whitelist: set) -> bool:
+    """Pure whitelist judgment: no inlinks and not on the whitelist → orphan."""
+    if basename in whitelist:
+        return False
+    return len(inlinks) == 0
+
+
 def check_orphan(target_file: str, backward: dict, orphan_whitelist: set) -> bool:
     basename = os.path.basename(target_file)
-    if basename in orphan_whitelist:
-        return False
     inlinks = backward.get(target_file, set())
-    return len(inlinks) == 0
+    return is_orphan(inlinks, basename, orphan_whitelist)
 
 
 def check_broken_outlinks(content: str, target_file: str, root: str, all_files: set) -> list:
@@ -293,7 +354,7 @@ def cmd_gate(args):
     else:
         target_file = ''
 
-    corpus, all_files, _forward, backward = build_corpus_and_graph(root)
+    corpus, all_files, _forward, backward, _dangling = build_corpus_and_graph(root)
 
     recall_results = []
     has_recall = False

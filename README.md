@@ -21,7 +21,7 @@ npx skills add WooDragon/cc-plugins -g
 | Plugin | Description |
 |--------|-------------|
 | [plan-review](./plugins/plan-review/) | Adversarial plan review via cross-model consultation (agy/Claude) |
-| [doc-gate](./plugins/doc-gate/) | Document editing governance — skill gate + lexical recall advisory + link graph tools |
+| [doc-gate](./plugins/doc-gate/) | Document editing governance — entry-layer writing-standards injection + exit-layer working-tree consistency check + link graph tools |
 | [ppt-press](./plugins/ppt-press/) | Self-contained PPT publishing — scaffold + create + deploy + manage |
 | [code-search](./plugins/code-search/) | Code search & symbol navigation — pick the right tool by search intent |
 | [deep-research](./plugins/deep-research/) | Deep research framework — 7-Stage pipeline + role-specialized subagents + multi-model harvest & citation-verification gate |
@@ -48,7 +48,7 @@ Each plugin's own README has full detail (env vars, architecture, test suites). 
 
 **plan-review** — fully automatic, no invocation needed. Enter plan mode as usual; when Claude calls `ExitPlanMode`, the plugin intercepts the plan for adversarial cross-model review before it reaches you.
 
-**doc-gate** — also automatic. Editing any `.md` file triggers the gate; if `doc-maintenance` hasn't been invoked this session, Claude is prompted to call it first. To use the workflow directly: ask Claude to "创建/更新文档" and it will invoke `doc-maintenance` and follow the pre/post-flight checklist.
+**doc-gate** — also automatic. Editing any `.md` file injects writing-standards judgment criteria into context on the spot, and ending a turn with uncommitted `.md` changes runs a working-tree-wide link-graph check that can block once with structural findings (stale references, dangling links, broken outlinks). To use the workflow directly: ask Claude to "创建/更新文档" and it will invoke `doc-maintenance` and follow the pre/post-flight checklist.
 
 ```bash
 # standalone link-graph queries, no skill invocation needed
