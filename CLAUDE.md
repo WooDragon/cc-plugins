@@ -8,7 +8,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 |------|------|------|
 | Plugin | plan-review | 对抗性审阅（Gemini/Claude/Codex）+ `second-opinion.sh` 通用第二意见驱动（插件外可调用） |
 | Plugin | ppt-press（4 skills） | PPT 全生命周期（init/create/deploy/manage） |
-| Plugin | doc-gate（1 skill + 3 hooks + 2 tools） | 文档编辑门禁 + 词法召回 |
+| Plugin | doc-gate（1 skill + 2 hooks + 4 tools） | 文档入口判据注入 + 出口工作树一致性检查 |
 | Plugin | code-search（1 skill） | 代码搜索与符号导航方法论（纯 skill，零 hook） |
 | Plugin | deep-research（1 skill + 4 agents + 1 hook） | 7-Stage 深度研究管线 + 多模型采集引擎 + 引用验证门禁 |
 | Plugin | guardrails（2 hooks） | 代码规模提示（信息性）+ git push 防手滑（拦截误推 main/master，非防绕过安全边界） |
@@ -58,22 +58,26 @@ plugins/
       second-opinion.bats         # second-opinion.sh 驱动测试
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
-  doc-gate/                       # 文档编辑门禁 + 词法召回插件
+  doc-gate/                       # 文档入口判据注入 + 出口工作树一致性检查插件
     .claude-plugin/plugin.json   # 插件元数据（声明 skills + hooks）
-    hooks/hooks.json             # PreToolUse: Edit(skill-gate+recall-gate), Write(同), Skill(marker)
+    hooks/hooks.json             # PostToolUse: Edit|Write(doc-entry), Stop(doc-exit)
     scripts/
-      skill-gate.sh              # 硬门禁（.md 编辑前检查 doc-maintenance marker）
-      skill-marker.sh            # 标记脚本（Skill 调用时写 marker）
-      recall-gate.sh             # 软门禁（BM25 召回 + 孤儿检测 + 出链验证，deny-once-per-file）
+      doc-entry.sh               # 入口层（零 deny、零状态）：每次 .md 编辑后注入表述规范判据
+      doc-exit.sh                # 出口层：回合结束时从 git status 推导脏文件，跑一次链接图谱，报四类 finding
+      _doc_gate_exclude.sh       # 两个 hook 共用的排除名单谓词单一来源
     tools/
-      _doc_gate_common.py        # 共享模块：排除名单 + 链接图谱原语单一来源（recall-gate/docs-graph 共用）
-      recall-gate.py             # BM25 + 链接图谱合并引擎（单趟扫描，零依赖）
+      _doc_gate_common.py        # 共享模块：排除名单 + 链接图谱原语单一来源（recall-gate/docs-graph/doc-exit-report 共用）
+      recall-gate.py             # BM25 + 链接图谱合并引擎（独立 CLI，`gate` 子命令，不再被任何 hook 调用）
+      doc-exit-report.py         # doc-exit.sh 的出口判定引擎：stale_inlinks/dangling_refs/recall/broken_outlinks
       docs-graph.py              # 链接图谱独立 CLI（7 子命令：check/backlinks/links/orphans/hubs/related/export）
     skills/
       doc-maintenance/SKILL.md   # 文档维护工作流
-    tests/                       # BDD 测试套件（skill-gate + skill-marker）
-      skill-gate.bats            # 54 个测试用例
-      skill-marker.bats          # 13 个测试用例
+    tests/                       # BDD 测试套件（doc-entry + doc-exit + exclude）
+      doc-entry.bats             # 29 个测试用例
+      doc-exit.bats              # 26 个测试用例
+      exclude.bats               # 32 个测试用例
+      test_doc_exit_report.py    # 9 个测试用例（pytest）
+      test_exclude.py            # 2 个测试用例（pytest）
       test_helper/
         common-setup.bash        # 测试基础设施
   ppt-press/                     # PPT 发布系统插件（skills-only，预留 hooks）
@@ -172,7 +176,7 @@ plugins/
 | 插件 | 变量前缀/名称 | 权威文档 |
 |------|--------------|----------|
 | plan-review | `REVIEW_*`、`AGY_MODEL`、`CLAUDE_MODEL`、`GEMINI_MODEL`、`CODEX_BIN`、`CODEX_MODEL`、`DISPATCH_CHECK_DISABLED` | [plugins/plan-review/README.md](plugins/plan-review/README.md#environment-variables) |
-| doc-gate | `SKILL_GATE_*`、`RECALL_GATE_*` | [plugins/doc-gate/README.md](plugins/doc-gate/README.md#environment-variables) |
+| doc-gate | `DOC_ENTRY_GATE_*`、`DOC_EXIT_GATE_*` | [plugins/doc-gate/README.md](plugins/doc-gate/README.md#environment-variables) |
 | deep-research | `GATEWAY_API_KEY`、`TAVILY_API_KEY`、`JINA_API_KEY`（可选凭证） | [plugins/deep-research/README.md](plugins/deep-research/README.md#prerequisites) |
 | pr-review | `GROK_MODEL`、`GROK_EFFORT`、`CLAUDE_REVIEW_MODEL`、`CLAUDE_REVIEW_EFFORT`、`PR_REVIEW_BACKEND`、`XDG_STATE_HOME`（session 落盘根） | [plugins/pr-review/README.md](plugins/pr-review/README.md#environment-variables) |
 | dispatch-contract | `ALLOW_UNMARKED_FINAL`、`ALLOW_BACKGROUND_DISPATCH`、`ALLOW_NO_RULES_INJECT`、`CLAUDE_CODE_FORK_SUBAGENT`、`ALLOW_DISPATCH_CAPABILITY_MISMATCH`、`ALLOW_UNMANAGED_TEAMMATE`、`CLAUDE_AUTO_BACKGROUND_TASKS` | [plugins/dispatch-contract/README.md](plugins/dispatch-contract/README.md#environment-variables) |
@@ -196,18 +200,19 @@ plugins/
 
 ## Doc-Gate 文档编辑门禁
 
-双层门禁：硬门禁（skill-gate）+ 软门禁（recall-gate）。
+零持久状态的两层：入口注入（entry） + 出口判定（exit），两者管辖对象不同——入口管"写的时候有没有判据在场"，出口管"改完之后工作树整体是否自洽"。
 
-**硬门禁（skill-gate）**：Edit/Write `.md` 文件时检查 session 级 marker，无 marker 则 deny 并提示调用 doc-maintenance skill。CLAUDE.md 按层级分两级强度：全局 `~/.claude/CLAUDE.md` 最严（无条件门禁 + 通用化四判据全过），项目级普通强度。
+**入口层（`doc-entry.sh`，`PostToolUse: Edit|Write`）**：每次 `.md` 编辑后触发，零 deny、零状态，把表述规范判据（writing-standards §A 的 A1-A13 条目陈述 + 判定要点）注入模型上下文。目标是全局 `~/.claude/CLAUDE.md` 时额外追加通用化四判据段落。
 
-**软门禁（recall-gate）**：首次编辑某 .md 文件时执行三维分析，deny-once-per-file（重试即通过）：
-- **内容维度**：BM25 词法召回，表面已有文档可能与待写内容重叠
-- **结构维度**：孤儿检测（backlinks），标记无入链文件（最易产生重复）
-- **完整性维度**：出链验证，检查内容引用的文件是否存在
+**出口层（`doc-exit.sh`，`Stop`）**：回合结束时从 `git status --porcelain=v1 -z` 推导当前脏 `.md` 文件集合，跑一趟全库链接图谱，产出四类 finding，发现问题时 `exit 2` 拦一次：
+- `stale_inlinks`：链向某脏文件、但自身未被改动的文档（描述可能已陈旧）——核心 finding，且自终止（改了之后就退出下次报告）
+- `dangling_refs`：链向已不存在路径的文档（覆盖 RENAME/ARCHIVE 场景）
+- `recall`：BM25 词法查重，查询用脏文件的最终态全文
+- `broken_outlinks`：脏文件自身的出链目标验证
 
-recall-gate 内含 double-deny guard：skill-gate 启用且 marker 不存在时跳过（避免双重拒绝）。`SKILL_GATE_DISABLED=1` 时 recall-gate 独立运行。
+`orphan`（无入链）也报，但对已删除的文件不报——它需要的是别人停止链它，那是 `dangling_refs` 的职责。带 `name` 的 teammate 拓扑下 `Stop` 会触发两次，`background_tasks` 仍有 `running` 项时判定为中间态并跳过。非 git 仓库下直接静默放行。
 
-**独立工具**：`tools/docs-graph.py` 提供链接图谱查询（断链检测、反向引用、孤儿文档、枢纽文档、2 跳邻域、JSON 导出）。
+**独立工具**：`tools/docs-graph.py` 提供链接图谱查询（断链检测、反向引用、孤儿文档、枢纽文档、2 跳邻域、JSON 导出）；`tools/recall-gate.py` 的 `gate` 子命令仍可独立调用做一次性查重，但不再被任何 hook 消费。
 
 ## Skills
 

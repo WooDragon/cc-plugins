@@ -18,7 +18,7 @@
     },
     {
       "name": "ppt-press",
-      "description": "Self-contained PPT publishing — scaffold + create + deploy + manage with runtime dependency checking",
+      "description": "Self-contained PPT publishing \u2014 scaffold + create + deploy + manage with runtime dependency checking",
       "version": "2.0.2",
       "author": {
         "name": "WooDragon"
@@ -29,8 +29,8 @@
     },
     {
       "name": "doc-gate",
-      "description": "Document editing governance — doc-maintenance skill + hard gate + recall advisory",
-      "version": "1.7.2",
+      "description": "Document editing governance \u2014 doc-maintenance skill + entry-side criteria injection + exit-side worktree consistency check",
+      "version": "2.0.0",
       "author": {
         "name": "WooDragon"
       },
@@ -40,7 +40,7 @@
     },
     {
       "name": "code-search",
-      "description": "Code search & symbol navigation — pick ctags / ast-grep / grep by search symptom (definition / structure / caller)",
+      "description": "Code search & symbol navigation \u2014 pick ctags / ast-grep / grep by search symptom (definition / structure / caller)",
       "version": "1.1.0",
       "author": {
         "name": "WooDragon"
@@ -51,7 +51,7 @@
     },
     {
       "name": "deep-research",
-      "description": "Deep research framework — 7-Stage pipeline + role-specialized subagents (harvester/analyst/reviewer/publisher) + multi-model harvest & citation-verification gate + deterministic report.md -> report.html renderer",
+      "description": "Deep research framework \u2014 7-Stage pipeline + role-specialized subagents (harvester/analyst/reviewer/publisher) + multi-model harvest & citation-verification gate + deterministic report.md -> report.html renderer",
       "version": "1.17.0",
       "author": {
         "name": "WooDragon"
@@ -62,7 +62,7 @@
     },
     {
       "name": "pr-review",
-      "description": "AI review for open GitHub PRs — grok/claude/copilot backends, grok and claude auto-routed via a unified entry point, both with adversarial multi-round follow-up over a persisted session; copilot optional and async",
+      "description": "AI review for open GitHub PRs \u2014 grok/claude/copilot backends, grok and claude auto-routed via a unified entry point, both with adversarial multi-round follow-up over a persisted session; copilot optional and async",
       "version": "1.3.3",
       "author": {
         "name": "WooDragon"
@@ -73,7 +73,7 @@
     },
     {
       "name": "guardrails",
-      "description": "Guardrail hooks — code size gate (informational) + git push guard (guards against accidental direct push to main/master) + instruction scan + git import scan (hidden Unicode payload detection)",
+      "description": "Guardrail hooks \u2014 code size gate (informational) + git push guard (guards against accidental direct push to main/master) + instruction scan + git import scan (hidden Unicode payload detection)",
       "version": "1.3.0",
       "author": {
         "name": "WooDragon"
@@ -84,7 +84,7 @@
     },
     {
       "name": "dispatch-contract",
-      "description": "Subagent dispatch contract — four dispatch rules + %%DONE%% finalization gate (SubagentStop) + sync, agent-ownership, capability, and channel guards (PreToolUse) + dispatch-rules injection (SubagentStart)",
+      "description": "Subagent dispatch contract \u2014 four dispatch rules + %%DONE%% finalization gate (SubagentStop) + sync, agent-ownership, capability, and channel guards (PreToolUse) + dispatch-rules injection (SubagentStart)",
       "version": "1.7.1",
       "author": {
         "name": "WooDragon"
@@ -95,7 +95,7 @@
     },
     {
       "name": "brain-route",
-      "description": "Second-brain routing — brain-recall / brain-curate skills (recall, capture, curation protocol) + soft advisory hook that prompts consideration of second-brain (cross-project) vs local memory (project-local) when writing project memory .md files",
+      "description": "Second-brain routing \u2014 brain-recall / brain-curate skills (recall, capture, curation protocol) + soft advisory hook that prompts consideration of second-brain (cross-project) vs local memory (project-local) when writing project memory .md files",
       "version": "1.2.0",
       "author": {
         "name": "WooDragon"

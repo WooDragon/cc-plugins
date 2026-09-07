@@ -174,7 +174,8 @@ def build_indexes(corpus: list) -> tuple:
 # ---------------------------------------------------------------------------
 
 def build_corpus_and_graph(root: str) -> tuple:
-    """Single os.walk pass building BM25 corpus, forward/backward adjacency, and all_files set."""
+    """Single os.walk pass building BM25 corpus, forward/backward adjacency, all_files set,
+    and dangling-link map (edges whose target .md no longer exists)."""
     root_path = Path(root).resolve()
     corpus = []
     # all_files: set of relative path strings
@@ -182,6 +183,8 @@ def build_corpus_and_graph(root: str) -> tuple:
     # adjacency keyed by relative path string
     forward: dict = {}   # rel_path -> set of rel target strings
     backward: dict = {}  # rel_path -> set of rel source strings
+    # dangling: rel_target (nonexistent .md) -> set of rel source strings that link it
+    dangling: dict = {}
 
     # First pass: collect content and tokens
     file_contents: dict = {}  # rel_path -> content
@@ -230,20 +233,27 @@ def build_corpus_and_graph(root: str) -> tuple:
             if rel_target in all_files:
                 forward[rel_path].add(rel_target)
                 backward.setdefault(rel_target, set()).add(rel_path)
+            elif rel_target.lower().endswith('.md'):
+                dangling.setdefault(rel_target, set()).add(rel_path)
 
-    return corpus, all_files, forward, backward
+    return corpus, all_files, forward, backward, dangling
 
 
 # ---------------------------------------------------------------------------
 # Gate-specific checks
 # ---------------------------------------------------------------------------
 
+def is_orphan(inlinks: set, basename: str, whitelist: set) -> bool:
+    """Pure whitelist judgment: no inlinks and not on the whitelist → orphan."""
+    if basename in whitelist:
+        return False
+    return len(inlinks) == 0
+
+
 def check_orphan(target_file: str, backward: dict, orphan_whitelist: set) -> bool:
     basename = os.path.basename(target_file)
-    if basename in orphan_whitelist:
-        return False
     inlinks = backward.get(target_file, set())
-    return len(inlinks) == 0
+    return is_orphan(inlinks, basename, orphan_whitelist)
 
 
 def check_broken_outlinks(content: str, target_file: str, root: str, all_files: set) -> list:
@@ -293,7 +303,7 @@ def cmd_gate(args):
     else:
         target_file = ''
 
-    corpus, all_files, _forward, backward = build_corpus_and_graph(root)
+    corpus, all_files, _forward, backward, _dangling = build_corpus_and_graph(root)
 
     recall_results = []
     has_recall = False
