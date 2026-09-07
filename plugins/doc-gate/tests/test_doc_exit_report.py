@@ -40,6 +40,20 @@ def test_read_dirty_paths_splits_on_nul_not_newline(monkeypatch):
     assert paths == ["a.md", "weird\nname.md", "b.md"]
 
 
+# ---------------------------------------------------------------------------
+# read_nul_paths_from_file — same NUL-not-newline discipline, from a file on
+# disk (the --dirty-superset-file transport, B2 #219)
+# ---------------------------------------------------------------------------
+
+def test_read_nul_paths_from_file_splits_on_nul_not_newline(tmp_path):
+    superset_file = tmp_path / "superset"
+    superset_file.write_bytes(b"a.md\0weird\nname.md\0b.md\0")
+
+    paths = doc_exit_report.read_nul_paths_from_file(str(superset_file))
+
+    assert paths == ["a.md", "weird\nname.md", "b.md"]
+
+
 def test_read_dirty_paths_skips_empty_segments(monkeypatch):
     raw = b"a.md\0\0\0b.md\0"
     monkeypatch.setattr(doc_exit_report.sys, "stdin", _FakeStdin(raw))

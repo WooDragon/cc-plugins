@@ -49,6 +49,42 @@ teardown() {
   fi
 }
 
+@test "B2: --dirty-superset-file pipeline — basename-excluded SKILL.md still counts as touched for self-termination" {
+  # SKILL.md is basename-excluded (doc_gate_is_excluded_basename) so it never
+  # enters FILTERED_PATHS / the report set -- but it IS a real dirty file and
+  # must still count as "touched" via the unfiltered superset passed through
+  # --dirty-superset-file. If that transport pipe were silently dropped,
+  # B.md's stale_inlinks would wrongly keep naming SKILL.md forever (an
+  # unsatisfiable finding), because build_report would only see the
+  # exclusion-filtered set and never learn SKILL.md was edited too.
+  write_md "SKILL.md" $'# Skill\n\n[b](B.md)\n'
+  write_md "B.md" $'# B\n\noriginal content\n'
+  git_commit_all "init"
+
+  write_md "B.md" $'# B\n\nedited content\n'
+  write_md "SKILL.md" $'# Skill updated\n\n[b](B.md)\n'
+
+  run_exit_gate
+  # SKILL.md itself is excluded from the report set entirely -- it must
+  # never appear as a reported file header.
+  if echo "$HOOK_STDERR" | grep -qF -- "--- SKILL.md ---"; then
+    echo "unexpected: excluded SKILL.md was reported as a file in the exit gate output" >&2
+    return 1
+  fi
+  # B.md's stale_inlinks must NOT still name SKILL.md as untouched -- it was
+  # edited too, just outside the report set. This is the assertion that
+  # catches the transport pipe being silently dropped (B2, #219): without
+  # --dirty-superset-file reaching Python, dirty_set falls back to the
+  # filtered-only set (which excludes SKILL.md), so SKILL.md would look
+  # permanently untouched and this finding would never self-terminate.
+  if [ "$HOOK_EXIT" -eq 2 ]; then
+    if echo "$HOOK_STDERR" | grep -qF "以下文件链向它且自身未被改动，其中的描述可能已经陈旧：SKILL.md"; then
+      echo "unexpected: B.md's stale_inlinks still names excluded-but-touched SKILL.md" >&2
+      return 1
+    fi
+  fi
+}
+
 # ============================================================
 # dangling — reverse edge to a deleted target
 # ============================================================

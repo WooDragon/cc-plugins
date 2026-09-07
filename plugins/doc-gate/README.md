@@ -137,7 +137,14 @@ Exit codes: `0` = ok, `1` = broken links found (check only), `2` = argument/tool
 | `DOC_EXIT_GATE_DISABLED` | `0` | `1` disables the exit-layer check (`doc-exit.sh`) |
 | `DOC_EXIT_GATE_THRESHOLD` | `0.30` | Minimum BM25 recall score surfaced in the exit report |
 | `DOC_EXIT_GATE_TOP_N` | `5` | Maximum recall results shown per file in the exit report |
-| `DOC_EXIT_GATE_BUDGET_SEC` | `25` | Time budget (seconds) for the exit-layer recall pass before it degrades to structural-only checks |
+| `DOC_EXIT_GATE_BUDGET_SEC` | `25` | Time budget (seconds) for the exit-layer check, in two tiers (see note below) |
+
+`DOC_EXIT_GATE_BUDGET_SEC` covers **two** phases of the exit-layer check, not just recall:
+
+- **Graph-build phase** (`os.walk` over the whole repo + reading every `.md`'s content): if this phase alone exceeds the budget, the check produces **no structural findings at all** — no `stale_inlinks` / `orphan` / `dangling_refs` / `broken_outlinks` for any file — and instead blocks once with a message naming both `DOC_EXIT_GATE_BUDGET_SEC` (raise it) and `DOC_EXIT_GATE_DISABLED` (turn the check off) as the two knobs to use.
+- **Recall phase** (BM25 lexical query, runs only after the graph build finishes): if the remaining budget is exhausted here, structural checks for files not yet processed still run and are still reported — only the BM25 recall suggestion is dropped for those files.
+
+On a repo with a large `.md` corpus (this repo qualifies), lowering the budget can therefore silently take you from "all structural findings, no recall" to "nothing at all, just one block" — the two tiers are not interchangeable.
 
 There is deliberately **no `DOC_EXIT_GATE_ROOT`**: `doc-exit.sh`'s root is `git rev-parse --show-toplevel`, a single source. Adding an override would reintroduce the exact two-root-detection split described in `Root Detection` above.
 
@@ -167,9 +174,9 @@ python3 -m pytest plugins/doc-gate/tests/ -q
 | Suite | Tests | Coverage |
 |-------|-------|----------|
 | `doc-entry.bats` | 29 | Filters, exclusions, injection payload shape, global-CLAUDE.md segment, kill switch, fail-open |
-| `doc-exit.bats` | 32 | git-status parsing (incl. rename records in either column), stop_hook_active gating, background_tasks mid-flight skip, non-git repo, exclusion filtering, finding rendering, kill switch, robustness (space in path, deleted file) |
+| `doc-exit.bats` | 33 | git-status parsing (incl. rename records in either column), stop_hook_active gating, background_tasks mid-flight skip, non-git repo, exclusion filtering, finding rendering, kill switch, robustness (space in path, deleted file), `--dirty-superset-file` transport end-to-end |
 | `exclude.bats` | 35 | Shared `_doc_gate_exclude.sh` predicate — basename and path exclusions (incl. relative & nested paths), governed paths |
-| `test_doc_exit_report.py` | 12 | `build_report()`: stale_inlinks, orphan (incl. deleted-file suppression), dangling_refs, broken_outlinks, recall non-blocking, degrade-on-budget |
+| `test_doc_exit_report.py` | 13 | `build_report()`: stale_inlinks, orphan (incl. deleted-file suppression), dangling_refs, broken_outlinks, recall non-blocking, degrade-on-budget, `read_nul_paths_from_file` NUL-not-newline parsing |
 | `test_exclude.py` | 2 | Shared exclusion predicate parity checks |
 
 ## Known Boundaries

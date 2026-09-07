@@ -74,9 +74,9 @@ plugins/
       doc-maintenance/SKILL.md   # 文档维护工作流
     tests/                       # BDD 测试套件（doc-entry + doc-exit + exclude）
       doc-entry.bats             # 29 个测试用例
-      doc-exit.bats              # 32 个测试用例
+      doc-exit.bats              # 33 个测试用例
       exclude.bats               # 35 个测试用例
-      test_doc_exit_report.py    # 12 个测试用例（pytest）
+      test_doc_exit_report.py    # 13 个测试用例（pytest）
       test_exclude.py            # 2 个测试用例（pytest）
       test_helper/
         common-setup.bash        # 测试基础设施
