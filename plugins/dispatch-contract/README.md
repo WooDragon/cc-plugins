@@ -547,8 +547,9 @@ All five blocking hooks in this plugin — `dispatch-sync-guard.sh`
 (PreToolUse), and `subagent-done-gate.sh` (SubagentStop) — block via `exit 2`
 plus a stderr message. Some sibling plugins
 in this repo use a different shape instead: `plan-review`'s `dispatch-check.sh`
-and `doc-gate`'s `skill-gate.sh` return JSON `permissionDecision: deny`. This
-repo does not use one block-response shape across all plugins — `guardrails`'
+returns JSON `permissionDecision: deny`, while `doc-gate`'s `doc-exit.sh`
+(Stop) blocks the same way this plugin's hooks do — `exit 2` plus a stderr
+message. This repo does not use one block-response shape across all plugins — `guardrails`'
 `git-push-guard.sh` also blocks via `exit 2`. Within this plugin, consistency
 across the four blocking hooks takes priority over matching an unrelated
 plugin's shape. The two forms are functionally equivalent here. The runtime

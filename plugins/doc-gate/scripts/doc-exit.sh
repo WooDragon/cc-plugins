@@ -106,6 +106,15 @@ ROOT=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)
 # Phase 8: parse `git status -z` for dirty .md files (see header comment for
 # the rename-record layout this loop must consume correctly).
 #
+# --untracked-files=all (not the default `normal`): with `normal`, git
+# folds an entire untracked directory into a single `?? dir/` record whose
+# basename never matches `*.[mM][dD]` — a brand-new doc tree (new plugin,
+# new skill, new docs/ subfolder) is silently dropped in full, and a user
+# with `status.showUntrackedFiles=no` loses even already-tracked-directory
+# untracked .md files. `=all` forces per-file records and overrides that
+# config setting explicitly (实测: `mkdir d && echo x > d/g.md` reports only
+# `?? d/` under `normal`, `?? d/g.md` under `all`).
+#
 # Deliberately no `-- '*.md'` pathspec here: git pathspec matching is
 # case-sensitive even when the filesystem/core.ignorecase is not, so a
 # `*.md` pathspec silently drops a dirty `UPPER.MD` before it ever reaches
@@ -152,9 +161,20 @@ while IFS= read -r -d '' rec; do
       fi
       ;;
   esac
-done < <(git -C "$ROOT" status --porcelain=v1 -z 2>/dev/null)
+done < <(git -C "$ROOT" status --porcelain=v1 -z --untracked-files=all 2>/dev/null)
 
 # Phase 9: exclusion filter — same source as doc-entry.sh, not a second copy.
+#
+# Two concepts, deliberately kept apart (see header comment on the A2 fix
+# this codifies): DIRTY_PATHS (this phase's input) is the superset of every
+# git-dirty .md path, unfiltered by the exclusion list — it answers "has this
+# file been touched at all", which is what makes stale_inlinks self-
+# terminating even when the file that got edited is itself on the exclusion
+# list (SKILL.md, deliverables/*, .claude-plugin/*, ...). FILTERED_PATHS is
+# the exclusion-filtered subset this hook actually reports ON. Passing only
+# the filtered set to Python as "the dirty set" would make a stale_inlinks
+# finding permanently unsatisfiable whenever the linker is itself excluded
+# from reporting but not from git.
 declare -a FILTERED_PATHS=()
 if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
   for p in "${DIRTY_PATHS[@]}"; do
@@ -171,12 +191,39 @@ fi
 
 # Phase 11: invoke doc-exit-report.py — single call over the whole batch,
 # fail-open on any error (missing tool, non-zero exit, unparsable output).
-TOOL_DIR="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/tools"
+#
+# The full dirty superset travels through a separate NUL-delimited temp file
+# (not a second stdin, not newline-joined — paths may contain literal
+# newlines, see header comment) so Python can tell "reported on" apart from
+# "touched at all".
+# Two-candidate loop (not `${CLAUDE_PLUGIN_ROOT:-fallback}`) — same shape as
+# doc-entry.sh's standards_path resolution, and for the same reason: a stale
+# or wrong CLAUDE_PLUGIN_ROOT (e.g. pointing at a marketplace-installed copy
+# of this same plugin, not this working tree) must not suppress the
+# script-relative fallback. `:-fallback` only substitutes when the variable
+# is UNSET or empty — a non-empty-but-wrong value wins outright and there is
+# no second attempt (A5, #219: this is exactly what made a bats run under a
+# CC session silently exercise the installed plugin copy instead of the PR's
+# own tools/, producing a false green).
+TOOL_DIR=""
+for _tool_root_cand in "${CLAUDE_PLUGIN_ROOT:-}" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"; do
+  [ -n "$_tool_root_cand" ] || continue
+  if [ -f "${_tool_root_cand}/tools/doc-exit-report.py" ]; then
+    TOOL_DIR="${_tool_root_cand}/tools"
+    break
+  fi
+done
+[ -n "$TOOL_DIR" ] || exit 0
+SUPERSET_FILE=$(mktemp 2>/dev/null) || exit 0
+trap 'rm -f "$SUPERSET_FILE"' EXIT
+printf '%s\0' "${DIRTY_PATHS[@]}" > "$SUPERSET_FILE" 2>/dev/null
+
 RESULT=$(printf '%s\0' "${FILTERED_PATHS[@]}" | python3 "$TOOL_DIR/doc-exit-report.py" \
   --root "$ROOT" \
   --threshold "${DOC_EXIT_GATE_THRESHOLD:-0.30}" \
   --top-n "${DOC_EXIT_GATE_TOP_N:-5}" \
-  --budget-sec "${DOC_EXIT_GATE_BUDGET_SEC:-25}" 2>/dev/null)
+  --budget-sec "${DOC_EXIT_GATE_BUDGET_SEC:-25}" \
+  --dirty-superset-file "$SUPERSET_FILE" 2>/dev/null)
 [ $? -eq 0 ] || exit 0
 [ -n "$RESULT" ] || exit 0
 
@@ -191,10 +238,17 @@ DEGRADED_REASON=$(printf '%s' "$RESULT" | jq -r '.degraded_reason // ""' 2>/dev/
 
 MSG="文档出口检查：以下 .md 文件当前处于未提交状态，发现下列结构性问题："
 
+# Rendered verbatim from Python's degraded_reason rather than a bash-side
+# hardcoded sentence — there are now two distinct degrade shapes (A7,
+# #219): the original "recall pass alone was skipped, structural checks
+# still ran" case, and the graph-build-itself-timed-out case where NO
+# per-file structural check ran at all. Each is worded correctly only in
+# the Python side that knows which one actually happened; a single fixed
+# bash prefix can't describe both without being wrong about one of them.
 if [ "$DEGRADED" = "true" ]; then
   MSG="${MSG}
 
-[降级] 因耗时预算已放弃查重检查，本次只做了结构检查。${DEGRADED_REASON}"
+[降级] ${DEGRADED_REASON}"
 fi
 
 # Iterate file keys NUL-separated (not jq -r + line-read) — a legal path may

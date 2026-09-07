@@ -84,6 +84,21 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "excluded: research/foo.md (A3: aligned with tools/_doc_gate_common.py EXCLUDED_DIRS)" {
+  run doc_gate_is_excluded_path "/project/research/foo.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "excluded: .venv/lib/notes.md (A3: aligned with EXCLUDED_DIRS)" {
+  run doc_gate_is_excluded_path "/project/.venv/lib/notes.md"
+  [ "$status" -eq 0 ]
+}
+
+@test "excluded: docs-graph-tests/fixture.md (A3: aligned with EXCLUDED_DIRS)" {
+  run doc_gate_is_excluded_path "/project/docs-graph-tests/fixture.md"
+  [ "$status" -eq 0 ]
+}
+
 # ============================================================
 # NOT excluded (return 1)
 # ============================================================

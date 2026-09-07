@@ -93,6 +93,40 @@ teardown() {
   echo "$HOOK_STDERR" | grep -qF "THIRD.md"
 }
 
+@test "A6: Y-column rename (worktree-only, git add -N) consumes old-path segment correctly" {
+  # `git mv` always stages the rename itself, so it can only ever produce
+  # the X-column form (`R `) already covered above. To exercise the
+  # Y-column form (` R`, X is a space or D) the rename must arrive at the
+  # index via `git add -N` on a plain filesystem `mv` -- NOT `git mv` --
+  # which git's own rename detection then reports as an UNSTAGED rename
+  # (实测 git 2.48.1: plain `mv old new` + `git add -N new` emits
+  # ` R new\0old\0`, confirming the header comment's claimed byte layout).
+  write_md "OLD2.md" $'# Old2\n\ncontent\n'
+  write_md "THIRD2.md" $'# Third2\n\n[old](OLD2.md)\n'
+  git_commit_all "init"
+
+  mv "${REPO_DIR}/OLD2.md" "${REPO_DIR}/NEW2.md"
+  git -C "$REPO_DIR" add -N NEW2.md
+
+  # Precondition: confirm this really is the Y-column form before trusting
+  # the rest of the assertions to mean anything (X is a space, Y is 'R').
+  local xy
+  xy=$(git -C "$REPO_DIR" status --porcelain=v1 -z --untracked-files=all | head -c 2)
+  [ "$xy" = " R" ]
+
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 2 ]
+  # (a) NEW2.md entered the check set
+  echo "$HOOK_STDERR" | grep -qF -- "--- NEW2.md ---"
+  # (b) OLD2.md's own block is not duplicated (old-path segment consumed
+  # exactly once, not misparsed as an independent record).
+  local old_section_count
+  old_section_count=$(echo "$HOOK_STDERR" | grep -cF -- "--- OLD2.md ---")
+  [ "$old_section_count" -eq 1 ]
+  # (c) THIRD2.md is reported as still linking the now-renamed-away OLD2.md
+  echo "$HOOK_STDERR" | grep -qF "THIRD2.md"
+}
+
 # ============================================================
 # Newline-embedded path survives NUL-delimited transfer intact
 # ============================================================
@@ -261,6 +295,43 @@ teardown() {
   ! echo "$HOOK_STDERR" | grep -qF -- "--- notes.txt ---"
 }
 
+@test "A4: linked UPPER.MD is not misjudged orphan, and its linker is not misjudged dangling" {
+  # recall-gate.py's os.walk previously used a bare `.endswith('.md')`
+  # (case-sensitive), so UPPER.MD never entered all_files/backward at all --
+  # it would report orphan=True even WITH a real inlink, and the linker
+  # would be told its link is dangling (target "doesn't exist"). Before A4
+  # this test would have been a false green on the OLD "UPPER.MD enters the
+  # check set" test above, which only asserted exit=2 without checking
+  # WHICH finding produced it -- exit=2 was true either way (correct orphan
+  # signal pre-fix here, since it had no inlink; this test adds the inlink
+  # to isolate the bug precisely).
+  write_md "linker.md" $'# Linker\n\n[upper](UPPER.MD)\n'
+  write_md "UPPER.MD" $'# Upper\n\ncontent\n'
+  git_commit_all "init"
+
+  write_md "UPPER.MD" $'# Upper\n\nedited\n'
+
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 2 ]
+  echo "$HOOK_STDERR" | grep -qF -- "--- UPPER.MD ---"
+  # UPPER.MD must NOT be reported as orphan (it has a real inlink). A bare
+  # `! cmd` here would be exempt from errexit unless it's the function's
+  # LAST statement (bash: a `!`-negated pipeline never triggers -e on its
+  # own), so a failing negated assertion followed by more statements would
+  # silently NOT fail the test -- use an explicit if/return instead.
+  if echo "$HOOK_STDERR" | grep -qF "建议补充索引链接"; then
+    echo "unexpected: UPPER.MD reported as orphan despite having a real inlink" >&2
+    return 1
+  fi
+  # linker.md's link to UPPER.MD must NOT be reported dangling anywhere.
+  if echo "$HOOK_STDERR" | grep -qF "断链反查"; then
+    echo "unexpected: UPPER.MD's real inlink reported as dangling" >&2
+    return 1
+  fi
+  # And UPPER.MD's stale_inlinks must correctly name the untouched linker.
+  echo "$HOOK_STDERR" | grep -qF "linker.md"
+}
+
 @test "exclusion: dirty node_modules/x.md is not checked" {
   write_md "node_modules/pkg/x.md" $'# X\n\ncontent\n'
   git_commit_all "init"
@@ -268,6 +339,47 @@ teardown() {
 
   run_exit_gate
   [ "$HOOK_EXIT" -eq 0 ]
+}
+
+@test "exclusion: dirty research/foo.md is not checked (A3: aligned with EXCLUDED_DIRS)" {
+  write_md "research/foo.md" $'# Foo\n\ncontent\n'
+  git_commit_all "init"
+  write_md "research/foo.md" $'# Foo\n\nedited\n'
+
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 0 ]
+}
+
+# ============================================================
+# Untracked new directory (A1: --untracked-files=all)
+# ============================================================
+
+@test "A1: untracked new directory's .md enters the check set and produces a finding" {
+  # git status --porcelain -z with the default --untracked-files=normal
+  # folds an entirely-untracked directory into one '?? dir/' record whose
+  # basename never matches *.[mM][dD] -- the whole new doc tree is silently
+  # dropped. A brand-new, never-committed directory with one orphan .md
+  # inside it is a forced, deterministic finding once correctly picked up.
+  mkdir -p "${REPO_DIR}/brand-new"
+  printf '%s' $'# Guide\n\ncontent\n' > "${REPO_DIR}/brand-new/guide.md"
+  # Nothing committed yet in this repo at all -- but init_test_git_repo only
+  # creates an empty repo, so there is no HEAD; that's fine, git status
+  # still reports the untracked file relative to the (empty) index.
+
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 2 ]
+  echo "$HOOK_STDERR" | grep -qF -- "--- brand-new/guide.md ---"
+}
+
+@test "A1: status.showUntrackedFiles=no still surfaces untracked .md (explicit --untracked-files=all overrides config)" {
+  git -C "$REPO_DIR" config status.showUntrackedFiles no
+
+  mkdir -p "${REPO_DIR}/brand-new2"
+  printf '%s' $'# Guide2\n\ncontent\n' > "${REPO_DIR}/brand-new2/guide2.md"
+
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 2 ]
+  echo "$HOOK_STDERR" | grep -qF -- "--- brand-new2/guide2.md ---"
 }
 
 # ============================================================
@@ -338,6 +450,40 @@ teardown() {
   [ "$HOOK_EXIT" -eq 2 ]
   echo "$HOOK_STDERR" | grep -qF "[降级]"
   echo "$HOOK_STDERR" | grep -qF "耗时预算"
+}
+
+@test "A7: budget exceeded during graph build itself degrades with no partial findings" {
+  # The old degrade test above only proves the RECALL pass can be skipped
+  # under budget pressure -- with a single-file corpus, the graph-build
+  # budget check (which fires only once per _GRAPH_BUDGET_CHECK_INTERVAL=25
+  # scanned files) never triggers, so that test cannot distinguish "graph
+  # build itself ran out of budget" from "recall pass was skipped after a
+  # complete graph". This test forces a corpus large enough (30 filler
+  # files) that the graph-build check interval is crossed at least once,
+  # so DOC_EXIT_GATE_BUDGET_SEC=0 raises GraphBudgetExceeded during
+  # build_corpus_and_graph itself, before any per-file structural check
+  # (stale_inlinks/orphan/dangling_refs) ever runs.
+  for i in $(seq 1 30); do
+    write_md "filler${i}.md" "# Filler ${i}"$'\n\ncontent number '"${i}"$'.\n'
+  done
+  write_md "TARGET.md" $'# Target\n\ncontent\n'
+  git_commit_all "init"
+  write_md "TARGET.md" $'# Target\n\nedited\n'
+
+  DOC_EXIT_GATE_BUDGET_SEC=0 run_exit_gate
+  [ "$HOOK_EXIT" -eq 2 ]
+  echo "$HOOK_STDERR" | grep -qF "[降级]"
+  # Names both adjustable knobs, per spec.
+  echo "$HOOK_STDERR" | grep -qF "DOC_EXIT_GATE_BUDGET_SEC"
+  echo "$HOOK_STDERR" | grep -qF "DOC_EXIT_GATE_DISABLED"
+  # Names the scan count, distinguishing this from the recall-only degrade.
+  echo "$HOOK_STDERR" | grep -qF "已扫描"
+  # No per-file structural block must appear -- a partial graph must never
+  # be used to render findings (files={} on this path).
+  if echo "$HOOK_STDERR" | grep -qF -- "--- TARGET.md ---"; then
+    echo "unexpected: a structural finding block rendered from a partial (budget-exceeded) graph" >&2
+    return 1
+  fi
 }
 
 # ============================================================

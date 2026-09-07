@@ -216,6 +216,97 @@ def test_stale_inlinks_filters_out_dirty_set_members(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# A2: dirty_superset vs report set — an excluded-from-reporting linker that
+# is nonetheless git-dirty must still count as "touched" for stale_inlinks
+# self-termination (#219).
+# ---------------------------------------------------------------------------
+
+def test_dirty_superset_retires_stale_inlinks_for_excluded_linker(tmp_path):
+    # SKILL.md links B.md. SKILL.md is basename-excluded from doc-exit.sh's
+    # report set (see _doc_gate_exclude.sh), so the bash caller's FILTERED
+    # report set never includes it — but it IS git-dirty. Without the A2
+    # fix, dirty_set would be derived from the filtered report set alone,
+    # so SKILL.md editing it can never retire this finding.
+    _write(tmp_path / "SKILL.md", "# Skill\n\n[b](B.md)\n")
+    _write(tmp_path / "B.md", "# B\n\ncontent\n")
+
+    # Report set (what doc-exit.sh actually iterates/reports on) excludes
+    # SKILL.md — only B.md is a report target here, matching real behavior.
+    report = doc_exit_report.build_report(
+        root=str(tmp_path),
+        dirty_paths=["B.md"],
+        threshold=0.30,
+        top_n=5,
+        budget_sec=25.0,
+        start_time=time.monotonic(),
+        dirty_superset=["B.md", "SKILL.md"],
+    )
+    entry = report["files"]["B.md"]
+    assert entry["inlinks"] == ["SKILL.md"]
+    # The core assertion: SKILL.md must NOT appear in stale_inlinks, because
+    # the superset says it has been touched too.
+    assert entry["stale_inlinks"] == []
+
+
+def test_dirty_superset_omitted_falls_back_to_report_set(tmp_path):
+    # Without dirty_superset, behavior must be identical to before A2 —
+    # dirty_set derives from dirty_paths alone.
+    _write(tmp_path / "SKILL.md", "# Skill\n\n[b](B.md)\n")
+    _write(tmp_path / "B.md", "# B\n\ncontent\n")
+
+    report = doc_exit_report.build_report(
+        root=str(tmp_path),
+        dirty_paths=["B.md"],
+        threshold=0.30,
+        top_n=5,
+        budget_sec=25.0,
+        start_time=time.monotonic(),
+    )
+    entry = report["files"]["B.md"]
+    assert entry["stale_inlinks"] == ["SKILL.md"]
+
+
+# ---------------------------------------------------------------------------
+# A6: recall must NOT gate has_findings, even in isolation (#219). The bats
+# "recall uses final full-text content" test can't isolate this: its
+# "other.md" target has zero inlinks, so orphan=True already forces
+# has_findings independent of recall. This fixture uses two files that link
+# EACH OTHER (both indexed, neither orphan, neither stale since both are
+# dirty) so recall is the only non-empty field on the target entry.
+# ---------------------------------------------------------------------------
+
+def test_recall_alone_does_not_gate_has_findings(tmp_path):
+    _write(
+        tmp_path / "topic.md",
+        "# Topic\n\n[other](other.md)\n\n配置文件热重载与动态刷新机制说明甲配置文件热重载与动态刷新机制。\n",
+    )
+    _write(
+        tmp_path / "other.md",
+        "# Other\n\n[topic](topic.md)\n\n配置文件热重载与动态刷新机制说明乙配置文件热重载与动态刷新机制补充。\n",
+    )
+
+    report = doc_exit_report.build_report(
+        root=str(tmp_path),
+        dirty_paths=["other.md"],
+        threshold=0.10,
+        top_n=5,
+        budget_sec=25.0,
+        start_time=time.monotonic(),
+        dirty_superset=["other.md", "topic.md"],
+    )
+    entry = report["files"]["other.md"]
+    assert entry["orphan"] is False
+    assert entry["stale_inlinks"] == []
+    assert entry["broken_outlinks"] == []
+    assert entry["dangling_refs"] == []
+    # recall is the ONLY non-empty signal on this entry.
+    assert len(entry["recall"]) > 0
+    assert entry["recall"][0]["path"] == "topic.md"
+    # The core assertion: recall alone must not gate has_findings.
+    assert report["has_findings"] is False
+
+
+# ---------------------------------------------------------------------------
 # has_findings: inlinks alone must NOT count as a finding
 # ---------------------------------------------------------------------------
 

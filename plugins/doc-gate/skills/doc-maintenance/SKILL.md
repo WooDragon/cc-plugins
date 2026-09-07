@@ -128,7 +128,7 @@ CLAUDE.md 是 Claude Code 的配置入口，会注入任务上下文，是污染
 doc-gate 插件包含三个零依赖 Python CLI 工具：
 
 - **`tools/recall-gate.py`** — BM25 词法召回 + 链接图谱合并引擎。不再由任何 hook 自动调用；仍可用其 `gate` 子命令独立运行做一次性查重。该子命令只从 `RECALL_GATE_ROOT` 读根目录覆盖；阈值与结果条数无环境变量，只能用 `--threshold` / `--top-n` 命令行参数指定，与 hook 无关。
-- **`tools/doc-exit-report.py`** — Stop hook（`doc-exit.sh`）的出口判定引擎。从传入的脏文件列表出发，跑一趟全库链接图谱，产出 `stale_inlinks` / `dangling_refs` / `recall` / `broken_outlinks` 四类 finding，超预算时降级但仍返回纯图谱类结果。
+- **`tools/doc-exit-report.py`** — Stop hook（`doc-exit.sh`）的出口判定引擎。从传入的脏文件列表出发，跑一趟全库链接图谱，产出 `stale_inlinks` / `orphan` / `dangling_refs` / `recall` / `broken_outlinks` 五类 finding；其中 `orphan`（无入链）是阻断项，也是新建文档拖出查重结果的唯一载体，超预算时降级但仍返回纯图谱类结果。
 - **`tools/docs-graph.py`** — 链接图谱独立 CLI（7 子命令：check / backlinks / links / orphans / hubs / related / export）。重命名、归档、重组操作的引用扫描步骤优先使用此工具。
 
 **出口检查与 doc-maintenance 的协作**：出口检查在回合结束（`Stop`）时运行一次，而不是在编辑当下——它面向的是「这次改动完成后，整个工作树是否还自洽」，覆盖 Pre-flight 第 5 步无法预判的场景：改之前不知道会不会重复，改完之后全文查重才有意义。§5.2 MODIFY 检查单的「入口索引确认」一项即直接参照它报出的 `stale_inlinks` 名单。

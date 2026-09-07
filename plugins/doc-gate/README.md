@@ -17,8 +17,13 @@ PostToolUse:Edit|Write (.md files)
   └─ doc-entry.sh
          Zero-deny, zero-state. On every matching edit, injects writing-standards
          judgment criteria (references/writing-standards.md §A, items A1-A13) plus
-         objective trigger conditions into model context via additionalContext.
-         Global ~/.claude/CLAUDE.md gets an extra generalization-principles segment.
+         trigger conditions anchored in the model's direct knowledge of the edit
+         it just made — not on withheld document content, so this doesn't
+         self-reference — into model context via additionalContext. CREATE /
+         RENAME / ARCHIVE are directly observable; RESTRUCTURE / DEDUP call for
+         judgment, a deliberate bias where the cost of a false positive is one
+         extra doc-maintenance invocation. Global ~/.claude/CLAUDE.md gets an
+         extra generalization-principles segment.
 
 Stop
   │

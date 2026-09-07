@@ -49,6 +49,21 @@ def read_dirty_paths_from_stdin() -> list:
     return paths
 
 
+def read_nul_paths_from_file(path: str) -> list:
+    """NUL-delimited relative paths from a file on disk — same decoding
+    discipline as read_dirty_paths_from_stdin (never split on newline)."""
+    raw = Path(path).read_bytes()
+    paths = []
+    for chunk in raw.split(b'\0'):
+        if not chunk:
+            continue
+        try:
+            paths.append(chunk.decode('utf-8'))
+        except UnicodeDecodeError:
+            continue
+    return paths
+
+
 def _dedupe_preserve_order(paths: list) -> list:
     seen = set()
     out = []
@@ -61,11 +76,49 @@ def _dedupe_preserve_order(paths: list) -> list:
 
 
 def build_report(root: str, dirty_paths: list, threshold: float, top_n: int,
-                  budget_sec: float, start_time: float) -> dict:
-    dirty_set = set(dirty_paths)
+                  budget_sec: float, start_time: float,
+                  dirty_superset: list = None) -> dict:
+    # dirty_paths is the report set — the files this call actually iterates
+    # and emits findings for (already exclusion-filtered by the caller).
+    # dirty_superset (when given) is the UNFILTERED superset of every dirty
+    # .md path — used only to answer "has this file been touched at all" for
+    # stale_inlinks self-termination. A file the caller excludes from
+    # reporting (SKILL.md, deliverables/*, ...) can still be a genuine
+    # inlink-source whose own edit should retire a stale_inlinks finding;
+    # computing "touched" from the filtered set alone would make that
+    # finding permanently unsatisfiable. dirty_superset=None (the default)
+    # preserves the pre-A2 behavior for callers — notably existing tests —
+    # that only ever had one list to begin with.
+    dirty_set = set(dirty_superset) if dirty_superset is not None else set(dirty_paths)
     ordered_paths = _dedupe_preserve_order(dirty_paths)
 
-    corpus, all_files, _forward, backward, dangling = recall_gate.build_corpus_and_graph(root)
+    # The budget must cover graph construction itself, not just the BM25
+    # pass that follows it — os.walk + reading every .md's content is the
+    # single most expensive step in this tool, and it used to run BEFORE any
+    # budget check existed at all (A7, #219). A large doc corpus could blow
+    # past the hook's own 60s timeout during this call alone, and a timed-
+    # out hook is killed SILENTLY by the platform (see doc-exit.sh's header
+    # comment) — indistinguishable from "nothing to report". Turning that
+    # into a visible, bounded-once-per-Stop-cycle block is strictly better
+    # than an invisible kill, so a truncated walk produces a degraded report
+    # rather than either silently completing on a partial graph (wrong
+    # stale_inlinks/orphan/dangling_refs) or silently exiting clean.
+    try:
+        corpus, all_files, _forward, backward, dangling = recall_gate.build_corpus_and_graph(
+            root, start_time=start_time, budget_sec=budget_sec,
+        )
+    except recall_gate.GraphBudgetExceeded as exc:
+        return {
+            'root': root,
+            'degraded': True,
+            'degraded_reason': (
+                f'本次检查因超出耗时预算未能完成（已扫描 {exc.scanned_count} 个文件），'
+                f'未做一致性判定。可调整 DOC_EXIT_GATE_BUDGET_SEC 提高预算，'
+                f'或设置 DOC_EXIT_GATE_DISABLED=1 临时关闭本检查。'
+            ),
+            'has_findings': True,
+            'files': {},
+        }
 
     content_idf = title_idf = avg_dl = avg_title_dl = None
     if corpus:
@@ -179,14 +232,19 @@ def main():
     parser.add_argument('--threshold', type=float, default=0.30, help='Min combined recall score (default: 0.30)')
     parser.add_argument('--top-n', type=int, default=5, help='Max recall results per file (default: 5)')
     parser.add_argument('--budget-sec', type=float, default=25.0, help='Recall time budget in seconds (default: 25)')
+    parser.add_argument('--dirty-superset-file', default=None,
+                         help='Path to a NUL-delimited file listing every dirty .md path '
+                              'unfiltered by the exclusion list (see build_report docstring)')
     args = parser.parse_args()
 
     start_time = time.monotonic()
     root = str(Path(args.root).resolve())
 
     dirty_paths = read_dirty_paths_from_stdin()
+    dirty_superset = read_nul_paths_from_file(args.dirty_superset_file) if args.dirty_superset_file else None
 
-    report = build_report(root, dirty_paths, args.threshold, args.top_n, args.budget_sec, start_time)
+    report = build_report(root, dirty_paths, args.threshold, args.top_n, args.budget_sec, start_time,
+                           dirty_superset=dirty_superset)
     print(json.dumps(report, ensure_ascii=False))
     sys.exit(0)
 

@@ -10,6 +10,24 @@ EXIT_SCRIPT="${BATS_TEST_DIRNAME}/../scripts/doc-exit.sh"
 
 common_setup() {
   TEST_TEMP_DIR=$(mktemp -d)
+
+  # Strip escape-hatch / root-override env vars that may leak in from the
+  # host shell running this bats suite (A5, #219). CLAUDE_PLUGIN_ROOT in
+  # particular: when bats runs inside a live CC session, the session's own
+  # environment can carry a CLAUDE_PLUGIN_ROOT pointing at the
+  # marketplace-INSTALLED copy of this same plugin, not this working tree.
+  # Without stripping it, doc-exit.sh's root resolution would silently
+  # exercise the installed copy's tools/ instead of the PR's own edits --
+  # a false green indistinguishable from "the fix works" (the exact bug A5
+  # exists to prevent). run_exit_gate below pins CLAUDE_PLUGIN_ROOT back to
+  # this checkout explicitly, so tests are never at the mercy of whatever
+  # ambient value the host happened to have.
+  unset CLAUDE_PLUGIN_ROOT
+  unset DOC_ENTRY_GATE_DISABLED
+  unset DOC_EXIT_GATE_DISABLED
+  unset DOC_EXIT_GATE_THRESHOLD
+  unset DOC_EXIT_GATE_TOP_N
+  unset DOC_EXIT_GATE_BUDGET_SEC
 }
 
 common_teardown() {
@@ -170,6 +188,15 @@ run_entry_gate_with_root() {
 
 # run_exit_gate — same shape as run_entry_gate but for EXIT_SCRIPT, default
 # input is build_stop_input (cwd defaults to $REPO_DIR).
+#
+# CLAUDE_PLUGIN_ROOT is pinned to "${BATS_TEST_DIRNAME}/.." (this checkout's
+# plugins/doc-gate/, resolved from bats' own knowledge of where the test
+# file lives) rather than left ambient or derived from $PWD. Using $PWD here
+# would make the test suite's root resolution depend on the CALLER's current
+# directory when invoking bats -- pass a different cwd to `bats` and this
+# would silently degrade to a no-op against the wrong tree, exactly the
+# false-green shape A5 exists to close (#219, and a repeat of a mistake this
+# project has made twice before per MEMORY.md).
 run_exit_gate() {
   local input
   if [ "${INPUT+set}" = "set" ]; then
@@ -185,7 +212,7 @@ run_exit_gate() {
   local stderr_file
   stderr_file=$(mktemp)
 
-  HOOK_STDOUT=$(printf '%s' "$input" | bash "$EXIT_SCRIPT" 2>"$stderr_file") || HOOK_EXIT=$?
+  HOOK_STDOUT=$(printf '%s' "$input" | CLAUDE_PLUGIN_ROOT="${BATS_TEST_DIRNAME}/.." bash "$EXIT_SCRIPT" 2>"$stderr_file") || HOOK_EXIT=$?
   HOOK_STDERR=$(cat "$stderr_file")
   rm -f "$stderr_file"
 }
