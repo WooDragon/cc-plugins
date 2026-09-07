@@ -397,7 +397,7 @@ case "$TYPE" in
   general-purpose|claude)
     if [ "$EXEC_HIT" -eq 0 ] && [ "$WRITE_HIT_A" -eq 0 ] && { [ "$RO_HIT" -eq 1 ] || [ "$NEG_HIT" -eq 1 ]; }; then
       printf '[dispatch-capability-guard] 命中判据 A: 只读任务声明但派了全权 agent(subagent_type=%s),应改派内置 Explore(Edit/Write/NotebookEdit 物理禁用,越权改不了文件)。\n' "$TYPE" >&2
-      printf '[dispatch-capability-guard] 修复方式：只读任务改派 Agent(subagent_type="Explore", model="sonnet", ...)。若任务需要执行脚本或跑测试，保留 Agent(subagent_type="general-purpose", model="sonnet", ...) 并在 prompt 中明确执行意图；Explore 的 Bash 仅允许只读操作。\n' >&2
+      printf '[dispatch-capability-guard] 修复方式：普通一次性派发（不传 name、非 teammate 上下文且调用能表达同步字段）时，保留原 prompt、description 和其他未列字段，只读任务改派 Agent(subagent_type="Explore", model="sonnet", run_in_background=false, ...)。若判断与实际任务不符，应先核实任务意图或误判，不要为绕过门禁改写 prompt。\n' >&2
       REJECT=1
     fi
     ;;
@@ -408,7 +408,7 @@ case "$TYPE" in
   explore|plan)
     if [ "$NEEDS_CAP" -eq 1 ]; then
       printf '[dispatch-capability-guard] 命中判据 B: 本任务需要超出只读的能力(subagent_type=%s),但 Explore/Plan 的 Edit/Write/NotebookEdit 被平台物理禁用、Bash 限只读白名单,派过去会空转一轮后 dead-end。\n' "$TYPE" >&2
-      printf '[dispatch-capability-guard] 修复方式：改派 Agent(subagent_type="general-purpose", model="sonnet", ...)。team-ops 场景改派 Agent(subagent_type="dev", ...) 且省略 model，让注册 agent 的 frontmatter 决定模型。\n' >&2
+      printf '[dispatch-capability-guard] 修复方式：普通一次性派发（不传 name、非 teammate 上下文且调用能表达同步字段）时，保留原 prompt、description 和其他未列字段，改派 Agent(subagent_type="general-purpose", model="sonnet", run_in_background=false, ...)。普通任务不要新增 name。team-ops 场景改派 Agent(subagent_type="dev", ...) 且省略 model，让注册 agent 的 frontmatter 决定模型。\n' >&2
       REJECT=1
     fi
     ;;

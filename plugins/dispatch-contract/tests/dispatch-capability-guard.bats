@@ -720,25 +720,78 @@ teardown() {
   [[ "$CAP_STDERR" == *"[GATE-DEGRADE] dispatch-capability-guard: agent-kind.sh unavailable"* ]]
 }
 
-@test "cap #49: A and B rejection exits provide complete executable dispatch fields" {
-  local payload
+@test "cap #49: A and B repair lines provide complete one-shot fields and retain task context" {
+  local payload repair_line line
   payload=$(mk_cap_payload "general-purpose" "只读调研，查看代码逻辑" "sonnet")
   run_cap_guard "$payload"
   assert_cap_block "A"
-  [[ "$CAP_STDERR" == *'Agent(subagent_type="Explore", model="sonnet", ...)'* ]] || {
-    echo "Expected complete Explore re-dispatch fields, got: $CAP_STDERR"
+  repair_line=""
+  while IFS= read -r line; do
+    if [[ "$line" == *'只读任务改派 Agent(subagent_type="Explore"'* ]]; then
+      repair_line="$line"
+      break
+    fi
+  done <<< "$CAP_STDERR"
+  [ -n "$repair_line" ] || {
+    echo "Expected judgment-A repair line, got: $CAP_STDERR"
+    return 1
+  }
+  [[ "$repair_line" == *'subagent_type="Explore"'* &&
+     "$repair_line" == *'model="sonnet"'* &&
+     "$repair_line" == *'run_in_background=false'* ]] || {
+    echo "Expected A's own repair line to carry Explore, sonnet, and false, got: $repair_line"
+    return 1
+  }
+  [[ "$repair_line" != *'subagent_type="general-purpose"'* ]] || {
+    echo "A's repair line must not offer general-purpose, got: $repair_line"
+    return 1
+  }
+  [[ "$repair_line" == *"普通一次性派发"* &&
+     "$repair_line" == *"不传 name"* &&
+     "$repair_line" == *"非 teammate 上下文"* &&
+     "$repair_line" == *"同步字段"* &&
+     "$repair_line" == *"保留原 prompt、description 和其他未列字段"* ]] || {
+    echo "Expected A's one-shot applicability and task-preservation wording, got: $repair_line"
+    return 1
+  }
+  [[ "$repair_line" == *"先核实任务意图"* &&
+     "$repair_line" == *"不要为绕过门禁改写 prompt"* ]] || {
+    echo "Expected A's execution guidance to verify intent without rewriting the prompt, got: $repair_line"
     return 1
   }
 
   payload=$(mk_cap_payload "explore" "修复 main.py" "omit")
   run_cap_guard "$payload"
   assert_cap_block "B"
-  [[ "$CAP_STDERR" == *'Agent(subagent_type="general-purpose", model="sonnet", ...)'* ]] || {
-    echo "Expected complete general-purpose re-dispatch fields, got: $CAP_STDERR"
+  repair_line=""
+  while IFS= read -r line; do
+    if [[ "$line" == *'改派 Agent(subagent_type="general-purpose"'* ]]; then
+      repair_line="$line"
+      break
+    fi
+  done <<< "$CAP_STDERR"
+  [ -n "$repair_line" ] || {
+    echo "Expected judgment-B repair line, got: $CAP_STDERR"
     return 1
   }
-  [[ "$CAP_STDERR" == *'Agent(subagent_type="dev", ...)'* && "$CAP_STDERR" == *"省略 model"* ]] || {
-    echo "Expected registered-agent model ownership guidance, got: $CAP_STDERR"
+  [[ "$repair_line" == *'subagent_type="general-purpose"'* &&
+     "$repair_line" == *'model="sonnet"'* &&
+     "$repair_line" == *'run_in_background=false'* ]] || {
+    echo "Expected B's own repair line to carry general-purpose, sonnet, and false, got: $repair_line"
+    return 1
+  }
+  [[ "$repair_line" == *"普通一次性派发"* &&
+     "$repair_line" == *"不传 name"* &&
+     "$repair_line" == *"非 teammate 上下文"* &&
+     "$repair_line" == *"同步字段"* &&
+     "$repair_line" == *"保留原 prompt、description 和其他未列字段"* ]] || {
+    echo "Expected B's one-shot applicability and task-preservation wording, got: $repair_line"
+    return 1
+  }
+  [[ "$repair_line" == *'team-ops 场景改派 Agent(subagent_type="dev", ...)'* &&
+     "$repair_line" == *"省略 model"* &&
+     "$repair_line" == *"普通任务不要新增 name"* ]] || {
+    echo "Expected B's team-ops route and no-name boundary, got: $repair_line"
     return 1
   }
 }

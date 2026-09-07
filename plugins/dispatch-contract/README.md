@@ -323,6 +323,11 @@ stderr message before a single trailing `exit 2`:
   unpinned tradeoff, redispatch to `dev`/`worker` and omit `model`; or raise
   the runtime-owned built-in's `model` to `sonnet`.
 
+**Repair-message behavior:** A/B guidance for an ordinary one-shot dispatch
+includes the synchronous `run_in_background:false` field. The dispatcher keeps
+the original `prompt`, `description`, and other unspecified fields; teammate
+and registered-agent routes remain separate.
+
 **Why A's condition had to widen**: the original `pre-dispatch-readonly-guard.sh`
 had no WRITE signal at all, so `!EXEC` meant "this task needs nothing beyond
 read-only" in that world. Once WRITE was introduced to this hook, a mixed

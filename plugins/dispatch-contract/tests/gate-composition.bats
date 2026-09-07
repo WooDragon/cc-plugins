@@ -401,6 +401,213 @@ teardown() {
   }
 }
 
+@test "composition #18: judgment A repair preserves payload context and clears Agent/Task gates" {
+  local tool cwd prompt desc payload corrected repair_line line s
+  local cap_script="${PLUGIN_ROOT_DIR}/hooks/dispatch-capability-guard.sh"
+  prompt="只读调研，查看代码逻辑"
+  desc="A 场景保留任务说明"
+  for tool in Agent Task; do
+    discover_agent_gates
+    [[ "$tool" == "Task" ]] && discover_task_gates
+    cwd="$TEST_TEMP_DIR/composition-a-${tool}"
+    payload=$(mk_composed_payload "$tool" "omit" "omit" "general-purpose" "$cwd" "$prompt" "$desc" "sonnet")
+    [[ "$(jq -r '.tool_input.prompt' <<< "$payload")" == "$prompt" ]]
+    [[ "$(jq -r '.tool_input.description' <<< "$payload")" == "$desc" ]]
+    [[ "$(jq -e '.tool_input | has("run_in_background") | not' <<< "$payload")" == "true" ]]
+
+    run_one_gate "$cap_script" "$payload"
+    [ "$ONE_GATE_EXIT" -eq 2 ] || {
+      echo "Expected judgment A for $tool, got exit $ONE_GATE_EXIT"
+      echo "stderr: $ONE_GATE_STDERR"
+      return 1
+    }
+    [[ "$ONE_GATE_STDERR" == *"命中判据 A"* ]] || {
+      echo "Expected judgment A for $tool, got: $ONE_GATE_STDERR"
+      return 1
+    }
+    repair_line=""
+    while IFS= read -r line; do
+      if [[ "$line" == *'只读任务改派 Agent(subagent_type="Explore"'* ]]; then
+        repair_line="$line"
+        break
+      fi
+    done <<< "$ONE_GATE_STDERR"
+    [ -n "$repair_line" ] || {
+      echo "Expected judgment-A repair line for $tool, got: $ONE_GATE_STDERR"
+      return 1
+    }
+    [[ "$repair_line" == *'subagent_type="Explore"'* &&
+       "$repair_line" == *'model="sonnet"'* &&
+       "$repair_line" == *'run_in_background=false'* ]] || {
+      echo "Expected A repair fields on one line for $tool, got: $repair_line"
+      return 1
+    }
+
+    corrected=$(mk_composed_payload "$tool" "false" "omit" "Explore" "$cwd" "$prompt" "$desc" "sonnet")
+    [[ "$(jq -e '.tool_input.run_in_background == false' <<< "$corrected")" == "true" ]]
+    jq -n --argjson original "$payload" --argjson corrected "$corrected" '
+      (($original | del(.tool_input.subagent_type, .tool_input.model, .tool_input.run_in_background)) ==
+       ($corrected | del(.tool_input.subagent_type, .tool_input.model, .tool_input.run_in_background)))
+    ' | grep -qx true || {
+      echo "A correction changed prompt, description, cwd, or another field for $tool"
+      echo "original=$payload"
+      echo "corrected=$corrected"
+      return 1
+    }
+    for s in "${GATE_SCRIPTS[@]}"; do
+      run_one_gate "$s" "$corrected"
+      [ "$ONE_GATE_EXIT" -eq 0 ] || {
+        echo "A correction was BLOCKed by $(basename "$s") for $tool (exit $ONE_GATE_EXIT)"
+        echo "stderr: $ONE_GATE_STDERR"
+        return 1
+      }
+    done
+  done
+}
+
+@test "composition #19: judgment B repair preserves payload context, clears Agent/Task gates, and does not trigger A" {
+  local tool cwd prompt desc payload corrected repair_line line s
+  local cap_script="${PLUGIN_ROOT_DIR}/hooks/dispatch-capability-guard.sh"
+  prompt="修复 main.py 里的 bug"
+  desc="B 场景保留任务说明"
+  for tool in Agent Task; do
+    discover_agent_gates
+    [[ "$tool" == "Task" ]] && discover_task_gates
+    cwd="$TEST_TEMP_DIR/composition-b-${tool}"
+    payload=$(mk_composed_payload "$tool" "omit" "omit" "Explore" "$cwd" "$prompt" "$desc" "sonnet")
+    [[ "$(jq -r '.tool_input.prompt' <<< "$payload")" == "$prompt" ]]
+    [[ "$(jq -r '.tool_input.description' <<< "$payload")" == "$desc" ]]
+    [[ "$(jq -e '.tool_input | has("run_in_background") | not' <<< "$payload")" == "true" ]]
+
+    run_one_gate "$cap_script" "$payload"
+    [ "$ONE_GATE_EXIT" -eq 2 ] || {
+      echo "Expected judgment B for $tool, got exit $ONE_GATE_EXIT"
+      echo "stderr: $ONE_GATE_STDERR"
+      return 1
+    }
+    [[ "$ONE_GATE_STDERR" == *"命中判据 B"* ]] || {
+      echo "Expected judgment B for $tool, got: $ONE_GATE_STDERR"
+      return 1
+    }
+    [[ "$ONE_GATE_STDERR" != *"命中判据 A"* ]] || {
+      echo "B source payload must not trigger judgment A for $tool: $ONE_GATE_STDERR"
+      return 1
+    }
+    repair_line=""
+    while IFS= read -r line; do
+      if [[ "$line" == *'改派 Agent(subagent_type="general-purpose"'* ]]; then
+        repair_line="$line"
+        break
+      fi
+    done <<< "$ONE_GATE_STDERR"
+    [ -n "$repair_line" ] || {
+      echo "Expected judgment-B repair line for $tool, got: $ONE_GATE_STDERR"
+      return 1
+    }
+    [[ "$repair_line" == *'subagent_type="general-purpose"'* &&
+       "$repair_line" == *'model="sonnet"'* &&
+       "$repair_line" == *'run_in_background=false'* ]] || {
+      echo "Expected B repair fields on one line for $tool, got: $repair_line"
+      return 1
+    }
+
+    corrected=$(mk_composed_payload "$tool" "false" "omit" "general-purpose" "$cwd" "$prompt" "$desc" "sonnet")
+    [[ "$(jq -e '.tool_input.run_in_background == false' <<< "$corrected")" == "true" ]]
+    jq -n --argjson original "$payload" --argjson corrected "$corrected" '
+      (($original | del(.tool_input.subagent_type, .tool_input.model, .tool_input.run_in_background)) ==
+       ($corrected | del(.tool_input.subagent_type, .tool_input.model, .tool_input.run_in_background)))
+    ' | grep -qx true || {
+      echo "B correction changed prompt, description, cwd, or another field for $tool"
+      echo "original=$payload"
+      echo "corrected=$corrected"
+      return 1
+    }
+    run_one_gate "$cap_script" "$corrected"
+    [ "$ONE_GATE_EXIT" -eq 0 ] || {
+      echo "B correction was BLOCKed by capability guard for $tool (exit $ONE_GATE_EXIT)"
+      echo "stderr: $ONE_GATE_STDERR"
+      return 1
+    }
+    [[ "$ONE_GATE_STDERR" != *"命中判据 A"* ]] || {
+      echo "B correction must not reverse-trigger judgment A for $tool: $ONE_GATE_STDERR"
+      return 1
+    }
+    for s in "${GATE_SCRIPTS[@]}"; do
+      run_one_gate "$s" "$corrected"
+      [ "$ONE_GATE_EXIT" -eq 0 ] || {
+        echo "B correction was BLOCKed by $(basename "$s") for $tool (exit $ONE_GATE_EXIT)"
+        echo "stderr: $ONE_GATE_STDERR"
+        return 1
+      }
+    done
+  done
+}
+
+@test "composition #20: judgment B+C repair preserves payload context and clears Agent/Task gates" {
+  local tool cwd prompt desc payload corrected repair_line line s
+  local cap_script="${PLUGIN_ROOT_DIR}/hooks/dispatch-capability-guard.sh"
+  prompt="请跑测试确认全绿"
+  desc="B+C 场景保留任务说明"
+  for tool in Agent Task; do
+    discover_agent_gates
+    [[ "$tool" == "Task" ]] && discover_task_gates
+    cwd="$TEST_TEMP_DIR/composition-bc-${tool}"
+    payload=$(mk_composed_payload "$tool" "false" "omit" "Explore" "$cwd" "$prompt" "$desc" "haiku")
+    [[ "$(jq -r '.tool_input.prompt' <<< "$payload")" == "$prompt" ]]
+    [[ "$(jq -r '.tool_input.description' <<< "$payload")" == "$desc" ]]
+    [[ "$(jq -e '.tool_input.run_in_background == false' <<< "$payload")" == "true" ]]
+
+    run_one_gate "$cap_script" "$payload"
+    [ "$ONE_GATE_EXIT" -eq 2 ] || {
+      echo "Expected B+C rejection for $tool, got exit $ONE_GATE_EXIT"
+      echo "stderr: $ONE_GATE_STDERR"
+      return 1
+    }
+    [[ "$ONE_GATE_STDERR" == *"命中判据 B"* &&
+       "$ONE_GATE_STDERR" == *"命中判据 C"* ]] || {
+      echo "Expected both judgments B and C for $tool, got: $ONE_GATE_STDERR"
+      return 1
+    }
+    repair_line=""
+    while IFS= read -r line; do
+      if [[ "$line" == *'改派 Agent(subagent_type="general-purpose"'* ]]; then
+        repair_line="$line"
+        break
+      fi
+    done <<< "$ONE_GATE_STDERR"
+    [ -n "$repair_line" ] || {
+      echo "Expected judgment-B repair line for B+C/$tool, got: $ONE_GATE_STDERR"
+      return 1
+    }
+    [[ "$repair_line" == *'subagent_type="general-purpose"'* &&
+       "$repair_line" == *'model="sonnet"'* &&
+       "$repair_line" == *'run_in_background=false'* ]] || {
+      echo "Expected B+C repair fields on one line for $tool, got: $repair_line"
+      return 1
+    }
+
+    corrected=$(mk_composed_payload "$tool" "false" "omit" "general-purpose" "$cwd" "$prompt" "$desc" "sonnet")
+    [[ "$(jq -e '.tool_input.run_in_background == false' <<< "$corrected")" == "true" ]]
+    jq -n --argjson original "$payload" --argjson corrected "$corrected" '
+      (($original | del(.tool_input.subagent_type, .tool_input.model, .tool_input.run_in_background)) ==
+       ($corrected | del(.tool_input.subagent_type, .tool_input.model, .tool_input.run_in_background)))
+    ' | grep -qx true || {
+      echo "B+C correction changed prompt, description, cwd, or another field for $tool"
+      echo "original=$payload"
+      echo "corrected=$corrected"
+      return 1
+    }
+    for s in "${GATE_SCRIPTS[@]}"; do
+      run_one_gate "$s" "$corrected"
+      [ "$ONE_GATE_EXIT" -eq 0 ] || {
+        echo "B+C correction was BLOCKed by $(basename "$s") for $tool (exit $ONE_GATE_EXIT)"
+        echo "stderr: $ONE_GATE_STDERR"
+        return 1
+      }
+    done
+  done
+}
+
 @test "composition #12: ownership guard blocks an Agent and Task runtime default without model" {
   local ownership_script="${PLUGIN_ROOT_DIR}/hooks/dispatch-agent-ownership-guard.sh"
   local tool payload
