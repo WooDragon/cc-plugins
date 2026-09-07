@@ -167,9 +167,9 @@ python3 -m pytest plugins/doc-gate/tests/ -q
 | Suite | Tests | Coverage |
 |-------|-------|----------|
 | `doc-entry.bats` | 29 | Filters, exclusions, injection payload shape, global-CLAUDE.md segment, kill switch, fail-open |
-| `doc-exit.bats` | 26 | git-status parsing (incl. rename records in either column), stop_hook_active gating, background_tasks mid-flight skip, non-git repo, exclusion filtering, finding rendering, kill switch, robustness (space in path, deleted file) |
-| `exclude.bats` | 32 | Shared `_doc_gate_exclude.sh` predicate — basename and path exclusions (incl. relative & nested paths), governed paths |
-| `test_doc_exit_report.py` | 9 | `build_report()`: stale_inlinks, orphan (incl. deleted-file suppression), dangling_refs, broken_outlinks, recall non-blocking, degrade-on-budget |
+| `doc-exit.bats` | 32 | git-status parsing (incl. rename records in either column), stop_hook_active gating, background_tasks mid-flight skip, non-git repo, exclusion filtering, finding rendering, kill switch, robustness (space in path, deleted file) |
+| `exclude.bats` | 35 | Shared `_doc_gate_exclude.sh` predicate — basename and path exclusions (incl. relative & nested paths), governed paths |
+| `test_doc_exit_report.py` | 12 | `build_report()`: stale_inlinks, orphan (incl. deleted-file suppression), dangling_refs, broken_outlinks, recall non-blocking, degrade-on-budget |
 | `test_exclude.py` | 2 | Shared exclusion predicate parity checks |
 
 ## Known Boundaries
