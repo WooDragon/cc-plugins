@@ -401,7 +401,7 @@ teardown() {
   }
 }
 
-@test "composition #12: judgment A repair preserves payload context and clears Agent/Task gates" {
+@test "composition #18: judgment A repair preserves payload context and clears Agent/Task gates" {
   local tool cwd prompt desc payload corrected repair_line line s
   local cap_script="${PLUGIN_ROOT_DIR}/hooks/dispatch-capability-guard.sh"
   prompt="只读调研，查看代码逻辑"
@@ -465,7 +465,7 @@ teardown() {
   done
 }
 
-@test "composition #13: judgment B repair preserves payload context, clears Agent/Task gates, and does not trigger A" {
+@test "composition #19: judgment B repair preserves payload context, clears Agent/Task gates, and does not trigger A" {
   local tool cwd prompt desc payload corrected repair_line line s
   local cap_script="${PLUGIN_ROOT_DIR}/hooks/dispatch-capability-guard.sh"
   prompt="修复 main.py 里的 bug"
@@ -543,7 +543,7 @@ teardown() {
   done
 }
 
-@test "composition #14: judgment B+C repair preserves payload context and clears Agent/Task gates" {
+@test "composition #20: judgment B+C repair preserves payload context and clears Agent/Task gates" {
   local tool cwd prompt desc payload corrected repair_line line s
   local cap_script="${PLUGIN_ROOT_DIR}/hooks/dispatch-capability-guard.sh"
   prompt="请跑测试确认全绿"
@@ -608,7 +608,7 @@ teardown() {
   done
 }
 
-@test "composition #15: ownership guard blocks an Agent and Task runtime default without model" {
+@test "composition #12: ownership guard blocks an Agent and Task runtime default without model" {
   local ownership_script="${PLUGIN_ROOT_DIR}/hooks/dispatch-agent-ownership-guard.sh"
   local tool payload
   for tool in Agent Task; do
