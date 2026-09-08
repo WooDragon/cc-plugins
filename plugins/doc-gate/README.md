@@ -171,7 +171,7 @@ bats plugins/doc-gate/tests/exclude.bats
 python3 -m pytest plugins/doc-gate/tests/ -q
 ```
 
-The BM25 unit test covers term-frequency reuse, the legacy call interface, candidate ordering, and threshold boundaries.
+The BM25 unit tests cover reusable body/title indexes, the legacy call interface, candidate ordering, and threshold boundaries.
 
 | Suite | Coverage |
 |-------|----------|

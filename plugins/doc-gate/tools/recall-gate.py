@@ -170,6 +170,7 @@ def filename_jaccard(query_filename: str, doc_filename: str) -> float:
 def rank_candidates(query_text: str, query_filename: str, corpus: list,
                     content_index: BM25Index, title_index: BM25Index,
                     threshold: float = 0.0, top_n: int = 10) -> list:
+    """Rank candidates using indexes built for this unchanged corpus order."""
     query_frequencies = Counter(tokenize(query_text))
     query_fname_base = os.path.basename(query_filename)
 
