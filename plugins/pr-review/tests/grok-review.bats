@@ -752,3 +752,39 @@ EOF
   [ "$status" -eq 0 ]
   ! grep -qF -- '--sandbox' "$GROK_ARGS_LOG"
 }
+
+@test "deny: 首轮传 git 写子命令黑名单" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  grep -qxF -- 'Bash(git checkout:*)' "$GROK_ARGS_LOG"
+  grep -qxF -- 'Bash(git switch:*)' "$GROK_ARGS_LOG"
+  grep -qxF -- 'Bash(git branch:*)' "$GROK_ARGS_LOG"
+  grep -qxF -- 'Bash(git symbolic-ref:*)' "$GROK_ARGS_LOG"
+  grep -qxF -- 'Bash(git reset:*)' "$GROK_ARGS_LOG"
+  grep -qxF -- 'Bash(git commit:*)' "$GROK_ARGS_LOG"
+  grep -qxF -- 'Bash(git push:*)' "$GROK_ARGS_LOG"
+}
+
+@test "deny: 复核轮传 git 写子命令黑名单" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  run bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  grep -qxF -- 'Bash(git checkout:*)' "$GROK_ARGS_LOG"
+  grep -qxF -- 'Bash(git symbolic-ref:*)' "$GROK_ARGS_LOG"
+  grep -qxF -- 'Bash(git commit:*)' "$GROK_ARGS_LOG"
+}
+
+@test "deny: 封 git -C 形态（前缀匹配可被 -C 顶掉，#221 实测）" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  grep -qxF -- 'Bash(git -C:*)' "$GROK_ARGS_LOG"
+}
+
+@test "deny: 只读 git 子命令不在黑名单内（评审能力不受伤）" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  ! grep -qxF -- 'Bash(git log:*)' "$GROK_ARGS_LOG"
+  ! grep -qxF -- 'Bash(git diff:*)' "$GROK_ARGS_LOG"
+  ! grep -qxF -- 'Bash(git show:*)' "$GROK_ARGS_LOG"
+  ! grep -qxF -- 'Bash(git blame:*)' "$GROK_ARGS_LOG"
+}
