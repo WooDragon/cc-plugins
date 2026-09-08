@@ -19,6 +19,14 @@ get_perm() {
   stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
 }
 
+# 从被测脚本提取 GIT_WRITE_SUBCMDS，避免在测试里誊抄名单。
+# 注意它锁的是「数组每一项都被装配进 grok argv」这条装配契约，不是名单内容——
+# 期望与实现同源，从脚本里删掉一项，期望也跟着少一项，用例照绿。
+# 名单内容的底线由下方「事故形态子命令是硬底线」用例守，那条必须写死。
+_git_write_subcmds() {
+  sed -n '/^GIT_WRITE_SUBCMDS=(/,/^)/p' "$SCRIPT" | sed '1d;$d' | tr -s ' \t\n' '\n' | grep -v '^$'
+}
+
 setup() {
   WORK="$BATS_TEST_TMPDIR"
   mkdir -p "$WORK/bin" "$WORK/home" "$WORK/repo" "$WORK/nongit"
@@ -751,4 +759,99 @@ EOF
   run bash "$SCRIPT" 42 --followup "复核"
   [ "$status" -eq 0 ]
   ! grep -qF -- '--sandbox' "$GROK_ARGS_LOG"
+}
+
+@test "deny: GIT_WRITE_SUBCMDS 每一项都装配进 argv（锁装配，不锁名单内容）" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  local n=0 sub
+  while IFS= read -r sub; do
+    if ! grep -qxF -- "Bash(git ${sub}:*)" "$GROK_ARGS_LOG"; then
+      echo "缺失 deny 规则: Bash(git ${sub}:*)" >&2
+      return 1
+    fi
+    n=$((n + 1))
+  done < <(_git_write_subcmds)
+  [ "$n" -gt 0 ]
+  # --deny 出现次数 = Write(**) + Edit(**) + Bash(git -C:*) + 每个写子命令一条
+  local deny_count
+  deny_count=$(grep -cxF -- '--deny' "$GROK_ARGS_LOG")
+  [ "$deny_count" -eq "$((3 + n))" ]
+}
+
+@test "deny: 复核轮 GIT_WRITE_SUBCMDS 每一项都装配进 argv（锁装配，不锁名单内容）" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  run bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  local n=0 sub
+  while IFS= read -r sub; do
+    if ! grep -qxF -- "Bash(git ${sub}:*)" "$GROK_ARGS_LOG"; then
+      echo "缺失 deny 规则: Bash(git ${sub}:*)" >&2
+      return 1
+    fi
+    n=$((n + 1))
+  done < <(_git_write_subcmds)
+  [ "$n" -gt 0 ]
+  local deny_count
+  deny_count=$(grep -cxF -- '--deny' "$GROK_ARGS_LOG")
+  [ "$deny_count" -eq "$((3 + n))" ]
+}
+
+@test "deny: 事故形态子命令是硬底线（删任一条即转红）" {
+  # 这里的名单必须写死：#221 的事故形态（git checkout）与 P4 实测的等价路径
+  # （git branch + git symbolic-ref），以及会改工作树/索引的破坏性子命令。
+  # GIT_WRITE_SUBCMDS 可以继续增长，但删掉下列任何一条都必须让本用例转红。
+  local floor=(
+    checkout switch branch symbolic-ref update-ref reset
+    restore clean stash worktree merge rebase commit add push
+  )
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  local sub
+  for sub in "${floor[@]}"; do
+    if ! grep -qxF -- "Bash(git ${sub}:*)" "$GROK_ARGS_LOG"; then
+      echo "底线子命令缺失，写保护出现缺口: git ${sub}" >&2
+      return 1
+    fi
+  done
+}
+
+@test "deny: 封 git -C 形态（前缀匹配可被 -C 顶掉，#221 实测）" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  grep -qxF -- 'Bash(git -C:*)' "$GROK_ARGS_LOG"
+}
+
+@test "deny: log/diff/show/blame 不在黑名单内（评审主路径可用）" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  ! grep -qxF -- 'Bash(git log:*)' "$GROK_ARGS_LOG"
+  ! grep -qxF -- 'Bash(git diff:*)' "$GROK_ARGS_LOG"
+  ! grep -qxF -- 'Bash(git show:*)' "$GROK_ARGS_LOG"
+  ! grep -qxF -- 'Bash(git blame:*)' "$GROK_ARGS_LOG"
+}
+
+@test "复核轮: 未跟踪的嵌套 git 仓库不再让整轮静默失败（#223）" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  mkdir -p "$WORK/repo/.claude/worktrees/nested"
+  git -C "$WORK/repo/.claude/worktrees/nested" init -q
+  run bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+}
+
+@test "复核轮: 跳过未跟踪目录条目时给出告警（#223）" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  mkdir -p "$WORK/repo/.claude/worktrees/nested"
+  git -C "$WORK/repo/.claude/worktrees/nested" init -q
+  run bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"跳过未跟踪目录条目"* ]]
+}
+
+@test "复核轮: untracked 非普通文件被跳过、不挂死（#223 第二道闸）" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  ln -s /nonexistent/path "$WORK/repo/broken.link"
+  run bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"跳过非普通文件"* ]]
 }

@@ -13,12 +13,23 @@
 #   - 复核轮 grok -r <UUID> 续接同一会话，只发 followup 文本 + 本轮增量 diff（不重发首轮全量）。
 #   - session 状态文件：${XDG_STATE_HOME:-$HOME/.local/state}/pr-review/<owner>__<name>__<PR>.session
 #   - 用 --prompt-file 传 prompt+diff，规避 macOS ARG_MAX（大 diff 塞命令行会崩）。
-#   - --deny "Write(**)" --deny "Edit(**)" 是防评审跑偏的应用层护栏，不是完整写入封锁或安全边界：
-#     它拦 Write/Edit 与 shell 重定向，但 run_terminal_cmd 仍可经 python3 等间接落盘；实测 grok
-#     有时放弃、有时绕路，行为不稳定。对无写入动机的评审场景够用，对抗性行为无效。加
-#     --deny "Bash(*)" 才能封住间接写入，却会拿走 git log/blame，退化成 --tools 白名单。
+#   - DENY_WRITE_FLAGS 是防评审跑偏的应用层护栏，不是完整写入封锁或安全边界。它覆盖三类：
+#     Write/Edit 工具、shell 重定向（实测也归 Edit 管）、git 写子命令与 `git -C` 形态。
+#     加 git 子命令的动因是实测事故：只 deny Write/Edit 时，grok 在一次真实评审中自行
+#     `git checkout` 切走了调用方仓库的分支——写保护只盯落盘，漏了工作树与 ref 状态（#221）。
+#     强度实测（grok 1.0.13，明示要求它绕行）：
+#       常态有效——只 deny checkout/switch 时 grok 被拦即报告失败，不主动绕；
+#       对抗无效——44 条 git 写黑名单下，它用 python3 直写 .git/HEAD 与 .git/refs/heads/<b>
+#       完成了切分支。deny 锚在「工具名 + 命令前缀 + 路径 glob」，而 shell 是通用执行器，
+#       任何写都能换个前缀重新表达。仍敞着的口子：`git --git-dir=`、`env git`、
+#       `/usr/bin/git`、`sh -c`、以及任何解释器直写文件。
+#     加 --deny "Bash(*)" 才能封住间接写入，却会拿走 git log/blame，退化成 --tools 白名单。
 #     与 --sandbox 的差距不只是层级：当前策略能被绕过，而内核级 Seatbelt 不能；不用 sandbox
 #     是因 grok 1.0.13 的 runtime-socket symlink 回归会令其在 OrbStack 等环境拒绝启动（#212）。
+#     真正的隔离应走容器化（一次性 clone + --cwd），不在本文件范围内。
+#     连带代价：branch/remote/config/stash/tag/reflog/submodule/worktree 是读写一体命令，
+#     整条收进名单后其 listing 形态（git branch、git remote -v、git config --get、
+#     git stash list）也被挡；评审查分支状态改用 git status / git rev-parse。
 #   - --cwd 首轮仅当本地在目标 PR 对应仓库时传入（owner/name 精确匹配）；复核轮动态取当前
 #     git toplevel（与增量 diff 同源），不在合法 git 仓库时降级用 state 里的历史 CWD。
 #   - 无 @@ 文本 hunk（纯二进制/rename/mode 改动）直接跳过，不调 grok（仅首轮适用）。
@@ -44,9 +55,25 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/pr-review"
 # grok session 失效的 stderr 判定正则（宽松，防 grok 版本漂移；已用真实 grok 0.2.93 验证过确切文案：
 # "Error: Failed to restore session from remote: fetching session record: session get failed: 404 Not Found"）
 SESSION_INVALID_RE='[Ff]ailed to restore session|session get failed'
-# 写保护单一事实源：deny Write/Edit 工具，不依赖内核 sandbox（见文件头设计依据）。
+# 写保护单一事实源：deny Write/Edit 工具 + git 写子命令，不依赖内核 sandbox（见文件头设计依据）。
 # 两处 grok 调用（首轮/复核轮）都引用这个数组，不各写一遍字面量。
-DENY_WRITE_FLAGS=(--deny "Write(**)" --deny "Edit(**)")
+# `git -C` 必须单独封：deny 按命令前缀匹配，`git -C . checkout -b x` 实测不命中
+# `Bash(git checkout:*)`（#221）。代价是 `git -C <path> log` 这类读形态一并被挡；评审已用
+# --cwd 定位仓库，不需要该形态，接受。
+# 名单只收模型会自然伸手去用的写子命令，不收 filter-branch/commit-tree 这类冷门管道——
+# python3 直写已证明黑名单挡不住对抗行为，为冷门形态加规则是纯表演。
+GIT_WRITE_SUBCMDS=(
+  checkout switch branch symbolic-ref update-ref reset revert
+  merge rebase cherry-pick am apply stash worktree bisect
+  restore clean add rm mv commit tag
+  push fetch pull clone remote submodule
+  init config gc reflog sparse-checkout update-index
+)
+DENY_WRITE_FLAGS=(--deny "Write(**)" --deny "Edit(**)" --deny "Bash(git -C:*)")
+for _git_sub in "${GIT_WRITE_SUBCMDS[@]}"; do
+  DENY_WRITE_FLAGS+=(--deny "Bash(git ${_git_sub}:*)")
+done
+unset _git_sub
 
 # effort 合法值校验（首轮入口 + 复核轮 state 读回后各调一次，单一事实源）
 check_effort() {
