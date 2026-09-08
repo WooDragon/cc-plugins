@@ -169,7 +169,6 @@ bats plugins/doc-gate/tests/doc-entry.bats
 bats plugins/doc-gate/tests/doc-exit.bats
 bats plugins/doc-gate/tests/exclude.bats
 python3 -m pytest plugins/doc-gate/tests/ -q
-python3 -m pytest plugins/doc-gate/tests/test_bm25.py -q
 ```
 
 The BM25 unit test covers term-frequency reuse, the legacy call interface, candidate ordering, and threshold boundaries.

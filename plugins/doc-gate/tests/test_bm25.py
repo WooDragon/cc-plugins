@@ -364,7 +364,7 @@ def test_rank_matches_frozen_legacy_oracle_for_seeded_corpora():
         assert actual == expected
 
 
-def test_rank_keeps_filtering_weighting_threshold_and_rounding_boundaries():
+def test_rank_filters_self_and_applies_exact_score_threshold():
     corpus = [
         _doc("query.md", ["alpha", "alpha"], ["alpha"]),
         _doc("alpha-note.md", ["alpha", "alpha"], ["alpha"]),
