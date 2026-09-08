@@ -1,6 +1,6 @@
 # doc-gate
 
-Document editing governance for Claude Code — a stateless entry layer that injects writing-standards judgment into every `.md` edit, plus a stateless exit layer that checks working-tree-wide documentation consistency when a turn ends. Both layers are fail-open — any anomaly silently allows work to continue rather than blocking it.
+Document editing governance for Claude Code — a stateless entry layer that injects writing-standards judgment into every `.md` edit, plus a stateless exit layer that checks working-tree-wide documentation consistency when a turn ends. Both layers are fail-open — any anomaly silently allows work to continue rather than blocking it. For a dirty-file batch, the exit layer builds body and title BM25 indexes once. It reuses them across recall queries. The runtime remains Python-standard-library-only and requires neither dependencies nor configuration migration.
 
 ## Installation
 
@@ -34,8 +34,8 @@ Stop
   │      cycle with exit 2 + stderr when structural findings exist.
   │
   └─ tools/doc-exit-report.py
-         Python engine (zero dependencies, reuses recall-gate.py's corpus/index
-         primitives). Runs one link-graph pass over the whole repo and reports,
+         Python engine (zero dependencies; builds and reuses body/title BM25
+         indexes for the batch). Runs one link-graph pass over the whole repo and reports,
          per dirty file: stale_inlinks, orphan, dangling_refs, broken_outlinks,
          recall.
 ```
@@ -178,8 +178,8 @@ The BM25 unit test covers term-frequency reuse, the legacy call interface, candi
 | `doc-entry.bats` | Filters, exclusions, injection payload shape, global-CLAUDE.md segment, kill switch, fail-open |
 | `doc-exit.bats` | git-status parsing (incl. rename records in either column), stop_hook_active gating, background_tasks mid-flight skip, non-git repo, exclusion filtering, finding rendering, kill switch, robustness (space in path, deleted file), `--dirty-superset-file` transport end-to-end |
 | `exclude.bats` | Shared `_doc_gate_exclude.sh` predicate — basename and path exclusions (incl. relative & nested paths), governed paths |
-| `test_bm25.py` | Term-frequency reuse, legacy list and body-only inputs, hand-calculated BM25 boundaries, stable candidate ordering, and pre-rounding thresholds |
-| `test_doc_exit_report.py` | `build_report()`: stale_inlinks, orphan (incl. deleted-file suppression), dangling_refs, broken_outlinks, recall non-blocking, degrade-on-budget, `read_nul_paths_from_file` NUL-not-newline parsing |
+| `test_bm25.py` | Body/title index scoring, legacy list and body-only inputs, sparse postings in query Counter order, one normalization per document, zero-score and self/whitelist boundaries, stable candidate ordering, and pre-rounding thresholds |
+| `test_doc_exit_report.py` | `build_report()`: one body/title-index build per batch, stale_inlinks, orphan (including deleted-file suppression), dangling_refs, broken_outlinks, non-blocking recall, budget degradation, and `read_nul_paths_from_file` NUL-not-newline parsing |
 | `test_exclude.py` | Shared exclusion predicate parity checks |
 
 ## Known Boundaries

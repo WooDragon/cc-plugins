@@ -400,3 +400,29 @@ def test_budget_not_exceeded_runs_recall_normally(tmp_path):
     assert not report["degraded"]
     paths_found = {c["path"] for c in entry["recall"]}
     assert "topic.md" in paths_found
+
+
+def test_multi_file_report_builds_the_content_and_title_indexes_once(monkeypatch, tmp_path):
+    _write(tmp_path / "reference.md", "# Reference\n\nalpha alpha beta shared text\n")
+    _write(tmp_path / "first.md", "# First\n\nalpha alpha beta shared text\n")
+    _write(tmp_path / "second.md", "# Second\n\nalpha alpha beta shared text\n")
+    original_build_indexes = doc_exit_report.recall_gate.build_indexes
+    calls = []
+
+    def tracking_build_indexes(corpus):
+        calls.append(len(corpus))
+        return original_build_indexes(corpus)
+
+    monkeypatch.setattr(doc_exit_report.recall_gate, "build_indexes", tracking_build_indexes)
+    report = doc_exit_report.build_report(
+        root=str(tmp_path),
+        dirty_paths=["first.md", "second.md"],
+        threshold=0.10,
+        top_n=5,
+        budget_sec=25.0,
+        start_time=time.monotonic(),
+    )
+
+    assert calls == [3]
+    assert report["files"]["first.md"]["recall"]
+    assert report["files"]["second.md"]["recall"]

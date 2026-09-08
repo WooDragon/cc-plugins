@@ -120,9 +120,9 @@ def build_report(root: str, dirty_paths: list, threshold: float, top_n: int,
             'files': {},
         }
 
-    content_idf = title_idf = avg_dl = avg_title_dl = None
+    content_index = title_index = None
     if corpus:
-        content_idf, title_idf, avg_dl, avg_title_dl = recall_gate.build_indexes(corpus)
+        content_index, title_index = recall_gate.build_indexes(corpus)
 
     degraded = False
     degraded_reason = ''
@@ -174,8 +174,7 @@ def build_report(root: str, dirty_paths: list, threshold: float, top_n: int,
                         )
                     elif corpus:
                         candidates = recall_gate.rank_candidates(
-                            content, relpath, corpus,
-                            content_idf, title_idf, avg_dl, avg_title_dl,
+                            content, relpath, corpus, content_index, title_index,
                             threshold=threshold, top_n=top_n,
                         )
                         recall_results = [
