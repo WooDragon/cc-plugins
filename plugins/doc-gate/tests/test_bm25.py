@@ -1,8 +1,11 @@
-"""Behavior and compatibility tests for doc-gate's BM25 scorer."""
+"""Behavior and compatibility tests for doc-gate's sparse BM25 scorer."""
 
+import copy
 import importlib.util
+import json
 import math
 import random
+import subprocess
 import sys
 from collections import Counter as StdCounter
 from pathlib import Path
@@ -26,8 +29,22 @@ def _doc(path, tokens, title_tokens=()):
     }
 
 
+def _counter_score(query_tokens, doc_tokens, doc_len, avg_dl, idf, k1=1.2, b=0.75):
+    """Independent Counter-weighted oracle for the current BM25 arithmetic."""
+    frequencies = StdCounter(doc_tokens)
+    score = 0.0
+    denominator_base = 1.0 - b + b * (doc_len / avg_dl) if avg_dl > 0 else 1.0
+    for term, query_frequency in StdCounter(query_tokens).items():
+        term_frequency = frequencies.get(term, 0)
+        if term_frequency and term in idf:
+            numerator = term_frequency * (k1 + 1)
+            denominator = term_frequency + k1 * denominator_base
+            score += query_frequency * idf[term] * (numerator / denominator if denominator > 0 else 0.0)
+    return score
+
+
 def _legacy_score(query_tokens, doc_tokens, doc_len, avg_dl, idf, k1=1.2, b=0.75):
-    """Frozen pre-optimization BM25 oracle for mathematical compatibility."""
+    """Frozen earlier token-by-token oracle retained for historical compatibility."""
     frequencies = StdCounter(doc_tokens)
     score = 0.0
     denominator_base = 1.0 - b + b * (doc_len / avg_dl) if avg_dl > 0 else 1.0
@@ -41,19 +58,33 @@ def _legacy_score(query_tokens, doc_tokens, doc_len, avg_dl, idf, k1=1.2, b=0.75
     return score
 
 
-def _legacy_rank(query_text, query_filename, corpus, content_idf, title_idf, avg_dl, avg_title_dl,
-                 threshold=0.0, top_n=10):
-    """Frozen external-result oracle preserving the legacy ranking pipeline."""
+def _legacy_indexes(corpus):
+    content_tokens = [doc["tokens"] for doc in corpus]
+    title_tokens = [doc["title_tokens"] for doc in corpus]
+    document_count = len(corpus)
+    avg_dl = sum(doc["token_count"] for doc in corpus) / document_count if document_count else 1.0
+    avg_title_dl = sum(len(tokens) for tokens in title_tokens) / document_count if document_count else 1.0
+    return (
+        recall_gate.build_idf(content_tokens),
+        recall_gate.build_idf(title_tokens),
+        avg_dl,
+        avg_title_dl,
+    )
+
+
+def _legacy_rank(query_text, query_filename, corpus, threshold=0.0, top_n=10):
+    """Counter-weighted ranking oracle preserving public ranking behavior."""
+    content_idf, title_idf, avg_dl, avg_title_dl = _legacy_indexes(corpus)
     query_tokens = recall_gate.tokenize(query_text)
     query_basename = Path(query_filename).name
     content_scores = [
-        (index, _legacy_score(query_tokens, doc["tokens"], doc["token_count"], avg_dl, content_idf))
+        (index, _counter_score(query_tokens, doc["tokens"], doc["token_count"], avg_dl, content_idf))
         for index, doc in enumerate(corpus)
     ]
     content_scores.sort(key=lambda item: item[1], reverse=True)
     max_content = max((score for _, score in content_scores), default=0.0)
     title_scores = [
-        _legacy_score(query_tokens, doc["title_tokens"], len(doc["title_tokens"]), avg_title_dl, title_idf)
+        _counter_score(query_tokens, doc["title_tokens"], len(doc["title_tokens"]), avg_title_dl, title_idf)
         for doc in corpus
     ]
     max_title = max(title_scores, default=0.0)
@@ -83,35 +114,88 @@ def _indexes(corpus):
     return recall_gate.build_indexes(corpus)
 
 
-def test_rank_prepares_document_counters_once_and_reuses_them(monkeypatch):
+def _rank(query_text, query_filename, corpus, threshold=0.0, top_n=10):
+    content_index, title_index = _indexes(corpus)
+    return recall_gate.rank_candidates(
+        query_text, query_filename, corpus, content_index, title_index, threshold, top_n,
+    )
+
+
+def test_build_indexes_does_not_cache_counters_in_caller_corpus():
+    """Given reusable corpus tokens, indexing must not mutate caller-owned docs."""
+    corpus = [_doc("one.md", ["alpha", "beta", "alpha"], ["alpha"]), _doc("two.md", ["beta"], [])]
+    before_indexing = copy.deepcopy(corpus)
+
+    _indexes(corpus)
+
+    assert corpus == before_indexing
+    assert all("term_frequencies" not in " ".join(doc) for doc in corpus)
+
+
+def test_index_scores_raw_floats_exactly_like_counter_weighted_oracle():
     corpus = [
-        _doc("one.md", ["alpha", "beta", "alpha"], ["alpha"]),
-        _doc("two.md", ["beta", "gamma"], ["gamma"]),
+        _doc("mixed.md", ["alpha", "alpha", "中文", "文档"], ["alpha", "标题"]),
+        _doc("other.md", ["beta", "中文", "资料"], ["beta"]),
+        _doc("zero.md", [], []),
     ]
-    counter_calls = []
+    content_index, title_index = _indexes(corpus)
+    content_idf, title_idf, avg_dl, avg_title_dl = _legacy_indexes(corpus)
+    query_tokens = ["alpha", "alpha", "中文", "unknown"]
 
-    def tracking_counter(values=()):
-        counter_calls.append(id(values))
-        return StdCounter(values)
+    expected_content = [
+        _counter_score(query_tokens, doc["tokens"], doc["token_count"], avg_dl, content_idf)
+        for doc in corpus
+    ]
+    expected_title = [
+        _counter_score(query_tokens, doc["title_tokens"], len(doc["title_tokens"]), avg_title_dl, title_idf)
+        for doc in corpus
+    ]
 
-    monkeypatch.setattr(recall_gate, "Counter", tracking_counter)
-    content_idf, title_idf, avg_dl, avg_title_dl = _indexes(corpus)
-    recall_gate.rank_candidates("alpha beta", "query.md", corpus, content_idf, title_idf, avg_dl, avg_title_dl)
-    content_frequency_ids = [id(doc["content_term_frequencies"]) for doc in corpus]
-    title_frequency_ids = [id(doc["title_term_frequencies"]) for doc in corpus]
-    content_frequency_values = [doc["content_term_frequencies"].copy() for doc in corpus]
-    title_frequency_values = [doc["title_term_frequencies"].copy() for doc in corpus]
-    recall_gate.rank_candidates("beta gamma", "query.md", corpus, content_idf, title_idf, avg_dl, avg_title_dl)
+    assert content_index.score(StdCounter(query_tokens)) == expected_content
+    assert title_index.score(StdCounter(query_tokens)) == expected_title
 
-    # Two corpus documents need content and title frequencies once each; each
-    # rank call may build exactly one query Counter, but no document Counter.
-    assert len(counter_calls) == 6
-    assert all(isinstance(doc["tokens"], list) for doc in corpus)
-    assert all(isinstance(doc["title_tokens"], list) for doc in corpus)
-    assert [id(doc["content_term_frequencies"]) for doc in corpus] == content_frequency_ids
-    assert [id(doc["title_term_frequencies"]) for doc in corpus] == title_frequency_ids
-    assert [doc["content_term_frequencies"] for doc in corpus] == content_frequency_values
-    assert [doc["title_term_frequencies"] for doc in corpus] == title_frequency_values
+
+class _DivisionCountingLength:
+    def __init__(self, value):
+        self.value = value
+        self.division_count = 0
+
+    def __truediv__(self, denominator):
+        self.division_count += 1
+        return self.value / denominator
+
+
+def test_index_normalizes_each_document_once_before_term_iteration():
+    lengths = [_DivisionCountingLength(2), _DivisionCountingLength(3)]
+    tokens = [["alpha", "beta"], ["gamma", "delta"]]
+    idf = {term: 1.0 for term in ("alpha", "beta", "gamma", "delta")}
+
+    recall_gate._build_bm25_index(tokens, lengths, idf, avg_dl=2.5)
+
+    assert [length.division_count for length in lengths] == [1, 1]
+
+
+def test_scalar_normalizes_once_for_multiple_matching_query_terms_and_skips_zero_average():
+    length = _DivisionCountingLength(2)
+    query = StdCounter(["alpha", "beta", "alpha", "beta"])
+    document = StdCounter(["alpha", "beta"])
+    idf = {"alpha": 1.0, "beta": 1.0}
+
+    actual = recall_gate.bm25_score(query, document, length, 2.0, idf)
+
+    assert length.division_count == 1
+    assert actual == _counter_score(query, document, 2, 2.0, idf)
+
+    zero_average_length = _DivisionCountingLength(7)
+    zero_average_index = recall_gate._build_bm25_index(
+        [["alpha", "beta"]], [zero_average_length], idf, avg_dl=0.0,
+    )
+    zero_average_score = zero_average_index.score(query)[0]
+
+    assert zero_average_length.division_count == 0
+    assert zero_average_score == _counter_score(
+        query, ["alpha", "beta"], 7, 0.0, idf,
+    )
 
 
 @pytest.mark.parametrize(
@@ -122,266 +206,271 @@ def test_rank_prepares_document_counters_once_and_reuses_them(monkeypatch):
         ([], [], 0, 0.0, {}, 1.2, 0.75),
     ],
 )
-def test_bm25_score_keeps_legacy_list_api_and_formula(query, document, doc_len, avg_dl, idf, k1, b):
-    expected = _legacy_score(query, document, doc_len, avg_dl, idf, k1, b)
-    actual = recall_gate.bm25_score(query, document, doc_len, avg_dl, idf, k1, b)
-    assert actual == pytest.approx(expected, abs=1e-12)
+def test_bm25_score_keeps_list_and_counter_compatibility(query, document, doc_len, avg_dl, idf, k1, b):
+    legacy_expected = _legacy_score(query, document, doc_len, avg_dl, idf, k1, b)
+    counter_expected = _counter_score(query, document, doc_len, avg_dl, idf, k1, b)
+    assert legacy_expected == pytest.approx(counter_expected, rel=0, abs=1e-12)
+
+    list_score = recall_gate.bm25_score(query, document, doc_len, avg_dl, idf, k1, b)
+    counter_score = recall_gate.bm25_score(
+        StdCounter(query), StdCounter(document), doc_len, avg_dl, idf, k1, b,
+    )
+    assert list_score == pytest.approx(legacy_expected, rel=0, abs=1e-12)
+    assert counter_score == pytest.approx(legacy_expected, rel=0, abs=1e-12)
+    assert list_score == counter_expected
+    assert counter_score == counter_expected
 
 
 @pytest.mark.parametrize(
     "avg_dl,k1,b,expected",
-    [
-        (0.0, 1.2, 0.75, 11 / 8),
-        (2.0, 2.0, 0.75, 3 / 2),
-        (4.0, 1.2, 0.0, 11 / 8),
-        (4.0, 2.0, 1.0, 2.0),
-        (4.0, 0.0, 1.0, 1.0),
-    ],
+    [(0.0, 1.2, 0.75, 11 / 8), (2.0, 2.0, 0.75, 3 / 2), (4.0, 1.2, 0.0, 11 / 8), (4.0, 2.0, 1.0, 2.0), (4.0, 0.0, 1.0, 1.0)],
 )
 def test_bm25_hit_boundaries_have_hand_calculated_results(avg_dl, k1, b, expected):
-    query = ["alpha"]
-    document = ["alpha", "alpha"]
-    doc_len = 2
-    idf = {"alpha": 1.0}
-
-    # term_frequency=2 and IDF=1. denominator_base is 1 for the zero-length
-    # fallback, avg_dl=doc_len, and b=0; it is 0.5 for avg_dl=4,b=1.
-    # The hand-calculated expected values are 11/8, 3/2, 11/8, 2, and 1.
-    public_score = recall_gate.bm25_score(query, document, doc_len, avg_dl, idf, k1, b)
-    frequency_score = recall_gate._bm25_score_from_frequencies(
-        StdCounter(query), StdCounter(document), doc_len, avg_dl, idf, k1, b,
+    list_score = recall_gate.bm25_score(
+        ["alpha"], ["alpha", "alpha"], 2, avg_dl, {"alpha": 1.0}, k1, b,
     )
-    legacy_score = _legacy_score(query, document, doc_len, avg_dl, idf, k1, b)
+    counter_score = recall_gate.bm25_score(
+        StdCounter(["alpha"]), StdCounter(["alpha", "alpha"]), 2,
+        avg_dl, {"alpha": 1.0}, k1, b,
+    )
+    assert list_score == pytest.approx(expected, rel=1e-12, abs=1e-12)
+    assert counter_score == pytest.approx(expected, rel=1e-12, abs=1e-12)
 
-    assert public_score == pytest.approx(expected, rel=1e-12, abs=1e-12)
-    assert frequency_score == pytest.approx(expected, rel=1e-12, abs=1e-12)
-    assert legacy_score == pytest.approx(expected, rel=1e-12, abs=1e-12)
 
-
-def test_batch_bm25_accepts_body_only_legacy_documents():
+def test_batch_bm25_uses_sparse_index_for_body_only_legacy_documents_without_mutation():
     corpus = [
         {"tokens": ["alpha", "beta", "alpha"], "token_count": 3},
         {"tokens": ["beta", "gamma"], "token_count": 2},
         {"tokens": ["gamma"], "token_count": 1},
     ]
+    before = copy.deepcopy(corpus)
     query_tokens = ["alpha", "beta", "alpha"]
     idf = {"alpha": 1.2, "beta": 0.7, "gamma": 0.4}
-    avg_dl = 2.0
-    expected = [
-        (
-            index,
-            _legacy_score(query_tokens, doc["tokens"], doc["token_count"], avg_dl, idf),
-        )
-        for index, doc in enumerate(corpus)
-    ]
-    expected.sort(key=lambda item: item[1], reverse=True)
-
-    first = recall_gate.batch_bm25(query_tokens, corpus, idf, avg_dl)
-    second = recall_gate.batch_bm25(query_tokens, corpus, idf, avg_dl)
-
-    assert first == second
-    for actual in (first, second):
-        assert [index for index, _score in actual] == [index for index, _score in expected]
-        for (_actual_index, actual_score), (_expected_index, expected_score) in zip(actual, expected):
-            assert actual_score == pytest.approx(expected_score, abs=1e-12)
-
-
-def test_batch_bm25_handles_unprepared_corpus_and_keeps_stable_order():
-    corpus = [_doc("none.md", ["beta"]), _doc("first.md", ["alpha"]), _doc("second.md", ["alpha"])]
-    idf = recall_gate.build_idf([doc["tokens"] for doc in corpus])
-    results = recall_gate.batch_bm25(["alpha", "alpha"], corpus, idf, 1.0)
-
-    assert [index for index, _score in results] == [1, 2, 0]
-    assert results[0][1] == pytest.approx(results[1][1], abs=1e-12)
-    assert results[2][1] == 0.0
-
-
-def test_rank_empty_corpus_returns_empty():
-    content_idf, title_idf, avg_dl, avg_title_dl = _indexes([])
-
-    assert recall_gate.rank_candidates(
-        "alpha", "query.md", [], content_idf, title_idf,
-        avg_dl, avg_title_dl,
-    ) == []
-
-
-def test_rank_empty_query_filename_preserves_duplicate_query_weighting():
-    corpus = [
-        _doc("alpha.md", ["alpha", "alpha", "beta"], ["alpha"]),
-        _doc("beta.md", ["beta", "gamma"], ["beta"]),
-    ]
-    content_idf, title_idf, avg_dl, avg_title_dl = _indexes(corpus)
-    expected = _legacy_rank(
-        "alpha alpha beta", "", corpus, content_idf, title_idf,
-        avg_dl, avg_title_dl, threshold=0.0, top_n=10,
-    )
-    actual = recall_gate.rank_candidates(
-        "alpha alpha beta", "", corpus, content_idf, title_idf,
-        avg_dl, avg_title_dl, threshold=0.0, top_n=10,
+    expected = sorted(
+        [(index, _counter_score(query_tokens, doc["tokens"], doc["token_count"], 2.0, idf)) for index, doc in enumerate(corpus)],
+        key=lambda item: item[1], reverse=True,
     )
 
-    assert actual == expected
+    assert recall_gate.batch_bm25(query_tokens, corpus, idf, 2.0) == expected
+    assert corpus == before
 
 
-def test_rank_whitelist_participates_in_normalization_but_not_results():
+def test_batch_bm25_preserves_complete_equal_score_order_and_zero_tail():
     corpus = [
-        _doc("README.md", ["alpha"] * 6, ["alpha"] * 3),
-        _doc("candidate.md", ["alpha"], ["alpha"]),
-        _doc("other.md", ["beta"], ["beta"]),
+        {"tokens": ["beta"], "token_count": 1},
+        {"tokens": ["alpha"], "token_count": 1},
+        {"tokens": ["alpha"], "token_count": 1},
     ]
-    content_idf, title_idf, avg_dl, avg_title_dl = _indexes(corpus)
-    query_tokens = recall_gate.tokenize("alpha")
-    content_scores = [
-        _legacy_score(query_tokens, doc["tokens"], doc["token_count"], avg_dl, content_idf)
+    before = copy.deepcopy(corpus)
+
+    actual = recall_gate.batch_bm25(
+        ["alpha", "alpha"], corpus, {"alpha": 1.0, "beta": 1.0}, 1.0,
+    )
+
+    assert [index for index, _score in actual] == [1, 2, 0]
+    assert actual[0][1] == actual[1][1]
+    assert actual[2][1] == 0.0
+    assert corpus == before
+
+
+def test_score_visits_only_postings_for_query_terms_and_preserves_counter_order():
+    corpus = [_doc("one.md", ["alpha", "beta"]), _doc("two.md", ["beta"])]
+    content_index, _title_index = _indexes(corpus)
+    original_postings = content_index.postings
+    accesses = []
+
+    class TrackingPostings(dict):
+        def get(self, term, default=None):
+            accesses.append(term)
+            if term == "unknown":
+                return ()
+            return super().get(term, default)
+
+    content_index.postings = TrackingPostings(original_postings)
+    scores = content_index.score(StdCounter(["beta", "unknown", "alpha", "beta"]))
+
+    assert accesses == ["beta", "unknown", "alpha"]
+    assert scores == [
+        _counter_score(["beta", "unknown", "alpha", "beta"], corpus[0]["tokens"], 2, 1.5, recall_gate.build_idf([doc["tokens"] for doc in corpus])),
+        _counter_score(["beta", "unknown", "alpha", "beta"], corpus[1]["tokens"], 1, 1.5, recall_gate.build_idf([doc["tokens"] for doc in corpus])),
+    ]
+
+
+def test_rank_does_not_recompute_document_contributions_after_index_build(monkeypatch):
+    corpus = [_doc("one.md", ["alpha", "beta", "alpha"], ["alpha"]), _doc("two.md", ["beta", "gamma"], ["gamma"])]
+    content_index, title_index = _indexes(corpus)
+
+    def unexpected_recomputation(*_args, **_kwargs):
+        raise AssertionError("rank recomputed a document contribution")
+
+    monkeypatch.setattr(recall_gate, "_bm25_term_contribution", unexpected_recomputation)
+    actual = recall_gate.rank_candidates("alpha beta", "query.md", corpus, content_index, title_index)
+
+    assert [item["path"] for item in actual] == ["one.md", "two.md"]
+
+
+def test_each_rank_builds_only_its_query_counter_after_indexing(monkeypatch):
+    corpus = [_doc("one.md", ["alpha", "beta"]), _doc("two.md", ["beta", "gamma"])]
+    content_index, title_index = _indexes(corpus)
+    counter_calls = []
+
+    def tracking_counter(values=()):
+        counter_calls.append(tuple(values))
+        return StdCounter(values)
+
+    monkeypatch.setattr(recall_gate, "Counter", tracking_counter)
+    recall_gate.rank_candidates("alpha beta", "query.md", corpus, content_index, title_index)
+    recall_gate.rank_candidates("beta gamma", "query.md", corpus, content_index, title_index)
+
+    assert counter_calls == [("alpha", "beta"), ("beta", "gamma")]
+
+
+def test_rank_handles_empty_corpus_empty_query_empty_titles_and_all_zero_scores():
+    empty_content, empty_title = _indexes([])
+    assert recall_gate.rank_candidates("alpha", "query.md", [], empty_content, empty_title) == []
+
+    corpus = [_doc("one.md", ["alpha"], []), _doc("two.md", ["beta"], [])]
+    assert _rank("", "query.md", corpus) == _legacy_rank("", "query.md", corpus)
+    assert _rank("unknown", "query.md", corpus) == _legacy_rank("unknown", "query.md", corpus)
+
+
+def test_rank_empty_query_filename_uses_counter_oracle_and_body_title_weights():
+    corpus = [
+        _doc("body.md", ["alpha", "alpha", "alpha", "beta"], ["title"]),
+        _doc("title.md", ["beta"], ["alpha", "alpha", "alpha"]),
+        _doc("mixed.md", ["alpha", "beta"], ["alpha", "beta"]),
+    ]
+
+    actual = _rank("alpha alpha beta", "", corpus)
+
+    assert actual == _legacy_rank("alpha alpha beta", "", corpus)
+
+    content_idf, title_idf, avg_dl, avg_title_dl = _legacy_indexes(corpus)
+    query_tokens = recall_gate.tokenize("alpha alpha beta")
+    body_scores = [
+        _counter_score(query_tokens, doc["tokens"], doc["token_count"], avg_dl, content_idf)
         for doc in corpus
     ]
     title_scores = [
-        _legacy_score(query_tokens, doc["title_tokens"], len(doc["title_tokens"]), avg_title_dl, title_idf)
+        _counter_score(query_tokens, doc["title_tokens"], len(doc["title_tokens"]), avg_title_dl, title_idf)
         for doc in corpus
     ]
-    assert content_scores[0] > content_scores[1]
-    assert title_scores[0] > title_scores[1]
-
-    max_content = max(content_scores)
+    max_body = max(body_scores)
     max_title = max(title_scores)
-    candidate_correct = (
-        0.65 * content_scores[1] / max_content
-        + 0.10 * title_scores[1] / max_title
+    expected_by_path = {
+        doc["path"]: round(
+            0.75 * body_scores[index] / max_body + 0.25 * title_scores[index] / max_title,
+            4,
+        )
+        for index, doc in enumerate(corpus)
+    }
+    actual_by_path = {item["path"]: item["score"] for item in actual}
+    assert actual_by_path == expected_by_path
+    body_expected = expected_by_path["body.md"]
+    body_wrong_filename_weight = round(
+        0.65 * body_scores[0] / max_body + 0.25 * title_scores[0] / max_title,
+        4,
     )
-    candidate_content_without_readme = max(content_scores[1:])
-    candidate_title_without_readme = max(title_scores[1:])
-    candidate_if_readme_filtered_first = (
-        0.65 * content_scores[1] / candidate_content_without_readme
-        + 0.10 * title_scores[1] / candidate_title_without_readme
-    )
-    assert candidate_correct < candidate_if_readme_filtered_first
-
-    expected = _legacy_rank(
-        "alpha", "query.md", corpus, content_idf, title_idf,
-        avg_dl, avg_title_dl, threshold=0.0, top_n=10,
-    )
-    actual = recall_gate.rank_candidates(
-        "alpha", "query.md", corpus, content_idf, title_idf,
-        avg_dl, avg_title_dl, threshold=0.0, top_n=10,
-    )
-    assert actual == expected
-    assert all(item["path"] != "README.md" for item in actual)
+    assert body_expected != body_wrong_filename_weight
 
 
-def test_bm25_score_accepts_counter_inputs_like_expanded_legacy_lists():
-    query_counter = StdCounter({"alpha": 2, "beta": 1})
-    document_counter = StdCounter({"alpha": 3, "beta": 1, "gamma": 2})
-    idf = {"alpha": 1.2, "beta": 0.7, "gamma": 0.4}
-    doc_tokens = list(document_counter.elements())
-    query_tokens = list(query_counter.elements())
-    expected = _legacy_score(query_tokens, doc_tokens, len(doc_tokens), 4.0, idf)
-
-    actual = recall_gate.bm25_score(
-        query_counter, document_counter, len(doc_tokens), 4.0, idf,
-    )
-
-    assert actual == pytest.approx(expected, abs=1e-12)
-
-
-def test_rank_preserves_raw_float_order_when_rounded_scores_tie():
+def test_rank_keeps_self_in_unique_body_and_title_maxima_before_filtering():
     corpus = [
-        _doc("low.md", ["alpha"] + ["filler"] * 10000, []),
-        _doc("high.md", ["alpha"] + ["filler"] * 9999, []),
+        _doc("query.md", ["alpha"] * 6, ["alpha"] * 6),
+        _doc("candidate.md", ["alpha"], ["alpha"]),
+        _doc("other.md", ["beta"], ["beta"]),
     ]
-    query_text = "alpha"
-    query_filename = "query.md"
-    content_idf, title_idf, avg_dl, avg_title_dl = _indexes(corpus)
-    query_tokens = recall_gate.tokenize(query_text)
-    raw_scores = [
-        _legacy_score(query_tokens, doc["tokens"], doc["token_count"], avg_dl, content_idf)
+    content_idf, title_idf, avg_dl, avg_title_dl = _legacy_indexes(corpus)
+    query_tokens = ["alpha"]
+    body_scores = [
+        _counter_score(query_tokens, doc["tokens"], doc["token_count"], avg_dl, content_idf)
         for doc in corpus
     ]
-    max_raw = max(raw_scores)
-    combined_scores = [0.65 * raw_score / max_raw for raw_score in raw_scores]
+    title_scores = [
+        _counter_score(query_tokens, doc["title_tokens"], len(doc["title_tokens"]), avg_title_dl, title_idf)
+        for doc in corpus
+    ]
 
-    assert raw_scores[0] < raw_scores[1]
-    assert [round(score, 4) for score in combined_scores] == [0.65, 0.65]
+    assert body_scores[0] > max(body_scores[1:])
+    assert title_scores[0] > max(title_scores[1:])
 
-    baseline = recall_gate.rank_candidates(
-        query_text, query_filename, corpus, content_idf, title_idf,
-        avg_dl, avg_title_dl, threshold=0.0, top_n=2,
-    )
-    legacy_baseline = _legacy_rank(
-        query_text, query_filename, corpus, content_idf, title_idf,
-        avg_dl, avg_title_dl, threshold=0.0, top_n=2,
-    )
-    assert baseline == legacy_baseline
+    actual = _rank("alpha", "query.md", corpus)
+
+    assert actual == _legacy_rank("alpha", "query.md", corpus)
+    assert all(item["path"] != "query.md" for item in actual)
+
+
+def test_rank_keeps_zero_bm25_documents_for_filename_only_matches():
+    corpus = [_doc("alpha-reference.md", ["unrelated"]), _doc("other.md", ["different"])]
+
+    actual = _rank("unknown", "alpha-note.md", corpus)
+
+    assert actual == _legacy_rank("unknown", "alpha-note.md", corpus)
+    assert actual[0]["path"] == "alpha-reference.md"
+    assert actual[0]["score"] > 0.0
+
+
+def test_rank_keeps_whitelist_and_self_in_normalization_but_not_results():
+    corpus = [
+        _doc("README.md", ["alpha"] * 6, ["alpha"] * 3),
+        _doc("query.md", ["alpha"] * 5, ["alpha"] * 2),
+        _doc("candidate.md", ["alpha"], ["alpha"]),
+        _doc("other.md", ["beta"], ["beta"]),
+    ]
+
+    actual = _rank("alpha", "query.md", corpus)
+
+    assert actual == _legacy_rank("alpha", "query.md", corpus)
+    assert [item["path"] for item in actual] == ["candidate.md", "other.md"]
+
+
+def test_rank_preserves_raw_order_rounding_threshold_and_top_n_boundaries():
+    corpus = [_doc("low.md", ["alpha"] + ["filler"] * 10000), _doc("high.md", ["alpha"] + ["filler"] * 9999)]
+    content_idf, _title_idf, avg_dl, _avg_title_dl = _legacy_indexes(corpus)
+    raw_scores = [_counter_score(["alpha"], doc["tokens"], doc["token_count"], avg_dl, content_idf) for doc in corpus]
+    low_combined = 0.65 * raw_scores[0] / max(raw_scores)
+
+    baseline = _rank("alpha", "query.md", corpus, top_n=2)
+    assert baseline == _legacy_rank("alpha", "query.md", corpus, top_n=2)
     assert [item["path"] for item in baseline] == ["high.md", "low.md"]
     assert [item["score"] for item in baseline] == [0.65, 0.65]
+    assert _rank("alpha", "query.md", corpus, top_n=1) == [baseline[0]]
 
-    top_one = recall_gate.rank_candidates(
-        query_text, query_filename, corpus, content_idf, title_idf,
-        avg_dl, avg_title_dl, threshold=0.0, top_n=1,
-    )
-    assert top_one == [baseline[0]]
-    assert top_one[0]["path"] == "high.md"
-
-    low_combined = combined_scores[0]
-    thresholds = (
-        math.nextafter(low_combined, -math.inf),
-        low_combined,
-        math.nextafter(low_combined, math.inf),
-    )
-    for threshold in thresholds:
-        actual = recall_gate.rank_candidates(
-            query_text, query_filename, corpus, content_idf, title_idf,
-            avg_dl, avg_title_dl, threshold=threshold, top_n=2,
-        )
-        expected = _legacy_rank(
-            query_text, query_filename, corpus, content_idf, title_idf,
-            avg_dl, avg_title_dl, threshold=threshold, top_n=2,
-        )
-        assert actual == expected, (
-            f"threshold={threshold!r} low_combined={low_combined!r} "
-            f"actual={actual!r} expected={expected!r}"
-        )
-        if threshold <= low_combined:
-            assert "low.md" in [item["path"] for item in actual]
-        else:
-            assert [item["path"] for item in actual] == ["high.md"]
+    for threshold in (math.nextafter(low_combined, -math.inf), low_combined, math.nextafter(low_combined, math.inf)):
+        actual = _rank("alpha", "query.md", corpus, threshold=threshold, top_n=2)
+        assert actual == _legacy_rank("alpha", "query.md", corpus, threshold=threshold, top_n=2)
 
 
-def test_rank_matches_frozen_legacy_oracle_for_seeded_corpora():
+def test_rank_matches_counter_weighted_oracle_for_seeded_random_boundaries():
     randomizer = random.Random(20260908)
-    vocabulary = ["alpha", "beta", "gamma", "delta", "epsilon"]
-    corpus = []
-    for index in range(8):
-        tokens = [randomizer.choice(vocabulary) for _ in range(randomizer.randint(0, 9))]
-        title_tokens = [randomizer.choice(vocabulary) for _ in range(randomizer.randint(0, 3))]
-        corpus.append(_doc(f"candidate-{index}.md", tokens, title_tokens))
-
-    content_idf, title_idf, avg_dl, avg_title_dl = _indexes(corpus)
-    for query in ("alpha alpha gamma", "unknown beta", ""):
-        expected = _legacy_rank(query, "query-file.md", corpus, content_idf, title_idf, avg_dl, avg_title_dl,
-                                threshold=0.15, top_n=4)
-        actual = recall_gate.rank_candidates(query, "query-file.md", corpus, content_idf, title_idf, avg_dl,
-                                             avg_title_dl, threshold=0.15, top_n=4)
-        assert actual == expected
-
-
-def test_rank_filters_self_and_applies_exact_score_threshold():
+    vocabulary = ["alpha", "beta", "gamma", "delta", "epsilon", "中文"]
     corpus = [
-        _doc("query.md", ["alpha", "alpha"], ["alpha"]),
-        _doc("alpha-note.md", ["alpha", "alpha"], ["alpha"]),
-        _doc("beta-note.md", ["alpha"], []),
+        _doc(
+            f"candidate-{index}.md",
+            [randomizer.choice(vocabulary) for _ in range(randomizer.randint(0, 9))],
+            [randomizer.choice(vocabulary) for _ in range(randomizer.randint(0, 3))],
+        )
+        for index in range(8)
     ]
-    content_idf, title_idf, avg_dl, avg_title_dl = _indexes(corpus)
-    baseline = recall_gate.rank_candidates("alpha alpha", "query.md", corpus, content_idf, title_idf, avg_dl,
-                                           avg_title_dl, threshold=0.0, top_n=10)
 
-    assert [item["path"] for item in baseline] == ["alpha-note.md", "beta-note.md"]
-    score = baseline[0]["score"]
-    at_threshold = recall_gate.rank_candidates("alpha alpha", "query.md", corpus, content_idf, title_idf,
-                                               avg_dl, avg_title_dl, threshold=score, top_n=1)
-    above_threshold = recall_gate.rank_candidates("alpha alpha", "query.md", corpus, content_idf, title_idf,
-                                                  avg_dl, avg_title_dl, threshold=math.nextafter(score, math.inf), top_n=1)
+    for query in ("alpha alpha gamma", "unknown beta", "", "中文 alpha 中文"):
+        assert _rank(query, "query-file.md", corpus, threshold=0.15, top_n=4) == _legacy_rank(
+            query, "query-file.md", corpus, threshold=0.15, top_n=4,
+        )
 
-    assert at_threshold == [baseline[0]]
-    assert above_threshold == []
-    assert all(item["path"] != "query.md" for item in baseline)
-    assert all(item["score"] == round(item["score"], 4) for item in baseline)
+
+def test_cli_gate_returns_nonempty_recall_from_real_subprocess(tmp_path):
+    (tmp_path / "topic.md").write_text("# Topic\n\nalpha alpha beta shared context\n", encoding="utf-8")
+    (tmp_path / "other.md").write_text("# Other\n\nplaceholder\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, str(_TOOLS_DIR / "recall-gate.py"), "--root", str(tmp_path), "--target-file", "other.md", "--threshold", "0.1", "gate"],
+        input="# Other\n\nalpha alpha beta shared context\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["recall"]
+    assert result["recall"][0]["path"] == "topic.md"

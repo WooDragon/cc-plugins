@@ -77,31 +77,62 @@ def build_idf(corpus_tokens: list) -> dict:
     return idf
 
 
-def _prepare_term_frequencies(doc: dict) -> None:
-    """Add reusable body/title frequency maps without changing token-list APIs."""
-    if 'content_term_frequencies' not in doc:
-        doc['content_term_frequencies'] = Counter(doc['tokens'])
-    if 'title_tokens' in doc and 'title_term_frequencies' not in doc:
-        doc['title_term_frequencies'] = Counter(doc['title_tokens'])
+def _bm25_term_contribution(term_frequency: int, denominator_base: float,
+                            term_idf: float, k1: float = 1.2) -> float:
+    """Return one document term's BM25 contribution using the legacy arithmetic order."""
+    numerator = term_frequency * (k1 + 1)
+    denominator = term_frequency + k1 * denominator_base
+    return term_idf * (numerator / denominator if denominator > 0 else 0.0)
+
+
+class BM25Index:
+    """Precomputed BM25 postings bound to one immutable corpus ordering.
+
+    `postings` maps a token to (document index, contribution) pairs. The
+    source corpus must remain in the same order for this index's lifetime.
+    """
+
+    def __init__(self, postings: dict, document_count: int):
+        self.postings = postings
+        self.document_count = document_count
+
+    def score(self, query_frequencies: dict) -> list:
+        """Return complete corpus-order scores, visiting only matching postings."""
+        scores = [0.0] * self.document_count
+        for term, query_frequency in query_frequencies.items():
+            for document_index, contribution in self.postings.get(term, ()):
+                scores[document_index] += query_frequency * contribution
+        return scores
 
 
 def _bm25_score_from_frequencies(query_frequencies: dict, doc_frequencies: dict,
                                  doc_len: int, avg_dl: float, idf: dict,
                                  k1: float = 1.2, b: float = 0.75) -> float:
-    """Score precomputed frequencies while preserving legacy BM25 arithmetic."""
+    """Score frequency maps through the same single-term contribution formula."""
+    denominator_base = 1.0 - b + b * (doc_len / avg_dl) if avg_dl > 0 else 1.0
     score = 0.0
-    denom_base = 1.0 - b + b * (doc_len / avg_dl) if avg_dl > 0 else 1.0
     for term, query_frequency in query_frequencies.items():
-        if term not in idf:
-            continue
         term_frequency = doc_frequencies.get(term, 0)
-        if term_frequency == 0:
-            continue
-        numerator = term_frequency * (k1 + 1)
-        denominator = term_frequency + k1 * denom_base
-        contribution = idf[term] * (numerator / denominator if denominator > 0 else 0.0)
-        score += query_frequency * contribution
+        if term_frequency and term in idf:
+            score += query_frequency * _bm25_term_contribution(
+                term_frequency, denominator_base, idf[term], k1,
+            )
     return score
+
+
+def _build_bm25_index(corpus_tokens: list, document_lengths: list, idf: dict,
+                      avg_dl: float, k1: float = 1.2, b: float = 0.75) -> BM25Index:
+    """Build postings from token lists without retaining counters in caller corpus data."""
+    postings = {}
+    for document_index, (tokens, doc_len) in enumerate(zip(corpus_tokens, document_lengths)):
+        denominator_base = 1.0 - b + b * (doc_len / avg_dl) if avg_dl > 0 else 1.0
+        for term, term_frequency in Counter(tokens).items():
+            if term in idf:
+                contribution = _bm25_term_contribution(
+                    term_frequency, denominator_base, idf[term], k1,
+                )
+                postings.setdefault(term, []).append((document_index, contribution))
+    return BM25Index(postings, len(corpus_tokens))
 
 
 def bm25_score(query_tokens: list, doc_tokens: list, doc_len: int, avg_dl: float,
@@ -112,24 +143,14 @@ def bm25_score(query_tokens: list, doc_tokens: list, doc_len: int, avg_dl: float
     )
 
 
-def _batch_bm25_from_frequencies(query_frequencies: dict, corpus: list,
-                                 idf: dict, avg_dl: float) -> list:
-    """Rank prepared corpus documents using one already-normalized query."""
-    results = []
-    for idx, doc in enumerate(corpus):
-        _prepare_term_frequencies(doc)
-        score = _bm25_score_from_frequencies(
-            query_frequencies, doc['content_term_frequencies'],
-            doc['token_count'], avg_dl, idf,
-        )
-        results.append((idx, score))
-    results.sort(key=lambda x: x[1], reverse=True)
-    return results
-
-
 def batch_bm25(query_tokens: list, corpus: list, idf: dict, avg_dl: float) -> list:
-    """Compatibility batch API that prepares legacy corpus dictionaries once."""
-    return _batch_bm25_from_frequencies(Counter(query_tokens), corpus, idf, avg_dl)
+    """Score body-only legacy documents through a temporary sparse index."""
+    index = _build_bm25_index(
+        [doc['tokens'] for doc in corpus], [doc['token_count'] for doc in corpus], idf, avg_dl,
+    )
+    results = list(enumerate(index.score(Counter(query_tokens))))
+    results.sort(key=lambda item: item[1], reverse=True)
+    return results
 
 
 def filename_jaccard(query_filename: str, doc_filename: str) -> float:
@@ -147,23 +168,18 @@ def filename_jaccard(query_filename: str, doc_filename: str) -> float:
 
 
 def rank_candidates(query_text: str, query_filename: str, corpus: list,
-                    content_idf: dict, title_idf: dict,
-                    avg_dl: float, avg_title_dl: float,
+                    content_index: BM25Index, title_index: BM25Index,
                     threshold: float = 0.0, top_n: int = 10) -> list:
+    """Rank candidates using indexes built for this unchanged corpus order."""
     query_frequencies = Counter(tokenize(query_text))
     query_fname_base = os.path.basename(query_filename)
 
-    content_scores = _batch_bm25_from_frequencies(query_frequencies, corpus, content_idf, avg_dl)
-    max_content = max((s for _, s in content_scores), default=0.0)
+    content_raw = content_index.score(query_frequencies)
+    content_scores = list(enumerate(content_raw))
+    content_scores.sort(key=lambda item: item[1], reverse=True)
+    max_content = max(content_raw, default=0.0)
 
-    title_raw = []
-    for doc in corpus:
-        _prepare_term_frequencies(doc)
-        title_score = _bm25_score_from_frequencies(
-            query_frequencies, doc['title_term_frequencies'],
-            len(doc['title_tokens']), avg_title_dl, title_idf,
-        )
-        title_raw.append(title_score)
+    title_raw = title_index.score(query_frequencies)
     max_title = max(title_raw, default=0.0)
 
     ranked = []
@@ -195,15 +211,21 @@ def rank_candidates(query_text: str, query_filename: str, corpus: list,
 
 
 def build_indexes(corpus: list) -> tuple:
-    for doc in corpus:
-        _prepare_term_frequencies(doc)
-    content_idf = build_idf([doc['tokens'] for doc in corpus])
-    title_idf = build_idf([doc['title_tokens'] for doc in corpus])
-    total_len = sum(doc['token_count'] for doc in corpus)
-    avg_dl = total_len / len(corpus) if corpus else 1.0
-    total_title_len = sum(len(doc['title_tokens']) for doc in corpus)
-    avg_title_dl = total_title_len / len(corpus) if corpus else 1.0
-    return content_idf, title_idf, avg_dl, avg_title_dl
+    """Build independent content and title indexes for one fixed corpus batch."""
+    content_tokens = [doc['tokens'] for doc in corpus]
+    title_tokens = [doc['title_tokens'] for doc in corpus]
+    content_lengths = [doc['token_count'] for doc in corpus]
+    title_lengths = [len(tokens) for tokens in title_tokens]
+    document_count = len(corpus)
+    avg_dl = sum(content_lengths) / document_count if document_count else 1.0
+    avg_title_dl = sum(title_lengths) / document_count if document_count else 1.0
+    content_index = _build_bm25_index(
+        content_tokens, content_lengths, build_idf(content_tokens), avg_dl,
+    )
+    title_index = _build_bm25_index(
+        title_tokens, title_lengths, build_idf(title_tokens), avg_title_dl,
+    )
+    return content_index, title_index
 
 
 # ---------------------------------------------------------------------------
@@ -395,10 +417,9 @@ def cmd_gate(args):
     recall_results = []
     has_recall = False
     if corpus and content.strip():
-        content_idf, title_idf, avg_dl, avg_title_dl = build_indexes(corpus)
+        content_index, title_index = build_indexes(corpus)
         candidates = rank_candidates(
-            content, target_file, corpus,
-            content_idf, title_idf, avg_dl, avg_title_dl,
+            content, target_file, corpus, content_index, title_index,
             threshold=args.threshold,
             top_n=args.top_n,
         )
