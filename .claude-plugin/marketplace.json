@@ -30,7 +30,7 @@
     {
       "name": "doc-gate",
       "description": "Document editing governance — doc-maintenance skill + entry-side criteria injection + exit-side worktree consistency check",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "author": {
         "name": "WooDragon"
       },
