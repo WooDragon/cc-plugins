@@ -77,28 +77,59 @@ def build_idf(corpus_tokens: list) -> dict:
     return idf
 
 
-def bm25_score(query_tokens: list, doc_tokens: list, doc_len: int, avg_dl: float,
-               idf: dict, k1: float = 1.2, b: float = 0.75) -> float:
-    tf_map = Counter(doc_tokens)
+def _prepare_term_frequencies(doc: dict) -> None:
+    """Add reusable body/title frequency maps without changing token-list APIs."""
+    if 'content_term_frequencies' not in doc:
+        doc['content_term_frequencies'] = Counter(doc['tokens'])
+    if 'title_tokens' in doc and 'title_term_frequencies' not in doc:
+        doc['title_term_frequencies'] = Counter(doc['title_tokens'])
+
+
+def _bm25_score_from_frequencies(query_frequencies: dict, doc_frequencies: dict,
+                                 doc_len: int, avg_dl: float, idf: dict,
+                                 k1: float = 1.2, b: float = 0.75) -> float:
+    """Score precomputed frequencies while preserving legacy BM25 arithmetic."""
     score = 0.0
     denom_base = 1.0 - b + b * (doc_len / avg_dl) if avg_dl > 0 else 1.0
-    for term in query_tokens:
+    for term, query_frequency in query_frequencies.items():
         if term not in idf:
             continue
-        tf = tf_map.get(term, 0)
-        numerator = tf * (k1 + 1)
-        denominator = tf + k1 * denom_base
-        score += idf[term] * (numerator / denominator if denominator > 0 else 0.0)
+        term_frequency = doc_frequencies.get(term, 0)
+        if term_frequency == 0:
+            continue
+        numerator = term_frequency * (k1 + 1)
+        denominator = term_frequency + k1 * denom_base
+        contribution = idf[term] * (numerator / denominator if denominator > 0 else 0.0)
+        score += query_frequency * contribution
     return score
 
 
-def batch_bm25(query_tokens: list, corpus: list, idf: dict, avg_dl: float) -> list:
+def bm25_score(query_tokens: list, doc_tokens: list, doc_len: int, avg_dl: float,
+               idf: dict, k1: float = 1.2, b: float = 0.75) -> float:
+    """Compatibility adapter for callers supplying the original token lists."""
+    return _bm25_score_from_frequencies(
+        Counter(query_tokens), Counter(doc_tokens), doc_len, avg_dl, idf, k1, b,
+    )
+
+
+def _batch_bm25_from_frequencies(query_frequencies: dict, corpus: list,
+                                 idf: dict, avg_dl: float) -> list:
+    """Rank prepared corpus documents using one already-normalized query."""
     results = []
     for idx, doc in enumerate(corpus):
-        score = bm25_score(query_tokens, doc['tokens'], doc['token_count'], avg_dl, idf)
+        _prepare_term_frequencies(doc)
+        score = _bm25_score_from_frequencies(
+            query_frequencies, doc['content_term_frequencies'],
+            doc['token_count'], avg_dl, idf,
+        )
         results.append((idx, score))
     results.sort(key=lambda x: x[1], reverse=True)
     return results
+
+
+def batch_bm25(query_tokens: list, corpus: list, idf: dict, avg_dl: float) -> list:
+    """Compatibility batch API that prepares legacy corpus dictionaries once."""
+    return _batch_bm25_from_frequencies(Counter(query_tokens), corpus, idf, avg_dl)
 
 
 def filename_jaccard(query_filename: str, doc_filename: str) -> float:
@@ -119,17 +150,20 @@ def rank_candidates(query_text: str, query_filename: str, corpus: list,
                     content_idf: dict, title_idf: dict,
                     avg_dl: float, avg_title_dl: float,
                     threshold: float = 0.0, top_n: int = 10) -> list:
-    query_tokens = tokenize(query_text)
+    query_frequencies = Counter(tokenize(query_text))
     query_fname_base = os.path.basename(query_filename)
 
-    content_scores = batch_bm25(query_tokens, corpus, content_idf, avg_dl)
+    content_scores = _batch_bm25_from_frequencies(query_frequencies, corpus, content_idf, avg_dl)
     max_content = max((s for _, s in content_scores), default=0.0)
 
     title_raw = []
     for doc in corpus:
-        ts = bm25_score(query_tokens, doc['title_tokens'],
-                        len(doc['title_tokens']), avg_title_dl, title_idf)
-        title_raw.append(ts)
+        _prepare_term_frequencies(doc)
+        title_score = _bm25_score_from_frequencies(
+            query_frequencies, doc['title_term_frequencies'],
+            len(doc['title_tokens']), avg_title_dl, title_idf,
+        )
+        title_raw.append(title_score)
     max_title = max(title_raw, default=0.0)
 
     ranked = []
@@ -161,6 +195,8 @@ def rank_candidates(query_text: str, query_filename: str, corpus: list,
 
 
 def build_indexes(corpus: list) -> tuple:
+    for doc in corpus:
+        _prepare_term_frequencies(doc)
     content_idf = build_idf([doc['tokens'] for doc in corpus])
     title_idf = build_idf([doc['title_tokens'] for doc in corpus])
     total_len = sum(doc['token_count'] for doc in corpus)

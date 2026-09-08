@@ -169,15 +169,19 @@ bats plugins/doc-gate/tests/doc-entry.bats
 bats plugins/doc-gate/tests/doc-exit.bats
 bats plugins/doc-gate/tests/exclude.bats
 python3 -m pytest plugins/doc-gate/tests/ -q
+python3 -m pytest plugins/doc-gate/tests/test_bm25.py -q
 ```
 
-| Suite | Tests | Coverage |
-|-------|-------|----------|
-| `doc-entry.bats` | 29 | Filters, exclusions, injection payload shape, global-CLAUDE.md segment, kill switch, fail-open |
-| `doc-exit.bats` | 33 | git-status parsing (incl. rename records in either column), stop_hook_active gating, background_tasks mid-flight skip, non-git repo, exclusion filtering, finding rendering, kill switch, robustness (space in path, deleted file), `--dirty-superset-file` transport end-to-end |
-| `exclude.bats` | 35 | Shared `_doc_gate_exclude.sh` predicate — basename and path exclusions (incl. relative & nested paths), governed paths |
-| `test_doc_exit_report.py` | 13 | `build_report()`: stale_inlinks, orphan (incl. deleted-file suppression), dangling_refs, broken_outlinks, recall non-blocking, degrade-on-budget, `read_nul_paths_from_file` NUL-not-newline parsing |
-| `test_exclude.py` | 2 | Shared exclusion predicate parity checks |
+The BM25 unit test covers term-frequency reuse, the legacy call interface, candidate ordering, and threshold boundaries.
+
+| Suite | Coverage |
+|-------|----------|
+| `doc-entry.bats` | Filters, exclusions, injection payload shape, global-CLAUDE.md segment, kill switch, fail-open |
+| `doc-exit.bats` | git-status parsing (incl. rename records in either column), stop_hook_active gating, background_tasks mid-flight skip, non-git repo, exclusion filtering, finding rendering, kill switch, robustness (space in path, deleted file), `--dirty-superset-file` transport end-to-end |
+| `exclude.bats` | Shared `_doc_gate_exclude.sh` predicate — basename and path exclusions (incl. relative & nested paths), governed paths |
+| `test_bm25.py` | Term-frequency reuse, legacy list and body-only inputs, hand-calculated BM25 boundaries, stable candidate ordering, and pre-rounding thresholds |
+| `test_doc_exit_report.py` | `build_report()`: stale_inlinks, orphan (incl. deleted-file suppression), dangling_refs, broken_outlinks, recall non-blocking, degrade-on-budget, `read_nul_paths_from_file` NUL-not-newline parsing |
+| `test_exclude.py` | Shared exclusion predicate parity checks |
 
 ## Known Boundaries
 

@@ -211,6 +211,34 @@ teardown() {
   echo "$HOOK_STDERR" | grep -qF "topic.md"
 }
 
+@test "recall batch: real Stop fixture renders the shared reference for two dirty duplicate-term documents" {
+  # The untouched hub provides a deterministic stale-inlinks finding for both
+  # dirty documents. That proves the full Stop pipeline ran; the assertions
+  # below then verify each rendered recall block contains the expected stable
+  # reference candidate rather than merely sharing the same exit code.
+  write_md "reference.md" $'# Reference\n\nalpha alpha alpha beta beta shared vocabulary.\n'
+  write_md "draft-one.md" $'# Draft One\n\nplaceholder one.\n'
+  write_md "draft-two.md" $'# Draft Two\n\nplaceholder two.\n'
+  write_md "hub.md" $'# Hub\n\n[one](draft-one.md) [two](draft-two.md)\n'
+  git_commit_all "init"
+
+  write_md "draft-one.md" $'# Draft One\n\nalpha alpha alpha beta beta shared vocabulary.\n'
+  write_md "draft-two.md" $'# Draft Two\n\nalpha alpha alpha beta beta shared vocabulary.\n'
+
+  DOC_EXIT_GATE_THRESHOLD=0.10 run_exit_gate
+  [ "$HOOK_EXIT" -eq 2 ]
+  echo "$HOOK_STDERR" | grep -qF -- "--- draft-one.md ---"
+  echo "$HOOK_STDERR" | grep -qF -- "--- draft-two.md ---"
+  echo "$HOOK_STDERR" | grep -qF "相关文档（可能存在内容重叠）："
+  local first_block="${HOOK_STDERR#*--- draft-one.md ---}"
+  first_block="${first_block%%--- *}"
+  local second_block="${HOOK_STDERR#*--- draft-two.md ---}"
+  second_block="${second_block%%--- *}"
+  echo "$first_block" | grep -qF "reference.md"
+  echo "$second_block" | grep -qF "reference.md"
+  echo "$HOOK_STDERR" | grep -qF "以下文件链向它且自身未被改动，其中的描述可能已经陈旧：hub.md"
+}
+
 # ============================================================
 # Skip conditions
 # ============================================================
