@@ -27,6 +27,9 @@
 #     与 --sandbox 的差距不只是层级：当前策略能被绕过，而内核级 Seatbelt 不能；不用 sandbox
 #     是因 grok 1.0.13 的 runtime-socket symlink 回归会令其在 OrbStack 等环境拒绝启动（#212）。
 #     真正的隔离应走容器化（一次性 clone + --cwd），不在本文件范围内。
+#     连带代价：branch/remote/config/stash/tag/reflog/submodule/worktree 是读写一体命令，
+#     整条收进名单后其 listing 形态（git branch、git remote -v、git config --get、
+#     git stash list）也被挡；评审查分支状态改用 git status / git rev-parse。
 #   - --cwd 首轮仅当本地在目标 PR 对应仓库时传入（owner/name 精确匹配）；复核轮动态取当前
 #     git toplevel（与增量 diff 同源），不在合法 git 仓库时降级用 state 里的历史 CWD。
 #   - 无 @@ 文本 hunk（纯二进制/rename/mode 改动）直接跳过，不调 grok（仅首轮适用）。

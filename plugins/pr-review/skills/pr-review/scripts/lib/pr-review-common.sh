@@ -255,11 +255,28 @@ build_incremental_prompt() {
     # 逐文件读取（NUL 分隔，防含空格/换行的文件名断裂）；--no-index 复用 git 原生二进制静默 + 标准 diff 格式。
     untracked_total=0
     while IFS= read -r -d '' uf; do
+      [ -n "$uf" ] || continue
+      # git ls-files --others 对「未跟踪的嵌套 git 仓库/worktree」不逐个列出内容，而是输出
+      # 以 / 结尾的目录条目（实测 `.claude/worktrees/<name>/`，CC 的 EnterWorktree 天然产生）。
+      # 它不是可 diff 的普通文件：wc -c 与 git diff --no-index 对目录都失败，而本脚本是
+      # set -euo pipefail——pipefail 让 `wc -c < dir | tr` 整条管道 rc=1，set -e 当场终止，
+      # 2>/dev/null 又吞掉唯一诊断，表现为整个复核轮 rc=1 零输出（#223）。
+      case "$uf" in
+        */)
+          echo "警告: 跳过未跟踪目录条目（嵌套 git 仓库/worktree，不纳入评审）: ${uf}" >&2
+          continue
+          ;;
+      esac
+      if [ ! -f "$repo_toplevel/$uf" ]; then
+        echo "警告: 跳过非普通文件的 untracked 条目（无法 diff）: ${uf}" >&2
+        continue
+      fi
       if is_sensitive_name "${uf##*/}"; then
         echo "警告: 跳过疑似敏感 untracked 文件（不纳入评审、不上送 API）: ${uf}（确需评审请改名到非敏感模式、或移出工作区/用不含密钥的独立 clone——勿 git add 密钥，tracked 会照样上送）" >&2
         continue
       fi
-      ufsize=$(wc -c < "$repo_toplevel/$uf" 2>/dev/null | tr -d '[:space:]'); ufsize=${ufsize:-0}
+      ufsize=$(wc -c < "$repo_toplevel/$uf" 2>/dev/null | tr -d '[:space:]') || ufsize=""
+      ufsize=${ufsize:-0}
       if (( ufsize > UNTRACKED_FILE_MAX_BYTES )); then
         echo "警告: 跳过超大 untracked 文件（${ufsize} 字节 > ${UNTRACKED_FILE_MAX_BYTES}，疑似构建产物/大二进制，不纳入评审）: ${uf}" >&2
         continue

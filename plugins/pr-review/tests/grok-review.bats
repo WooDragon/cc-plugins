@@ -830,3 +830,28 @@ EOF
   ! grep -qxF -- 'Bash(git show:*)' "$GROK_ARGS_LOG"
   ! grep -qxF -- 'Bash(git blame:*)' "$GROK_ARGS_LOG"
 }
+
+@test "复核轮: 未跟踪的嵌套 git 仓库不再让整轮静默失败（#223）" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  mkdir -p "$WORK/repo/.claude/worktrees/nested"
+  git -C "$WORK/repo/.claude/worktrees/nested" init -q
+  run bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+}
+
+@test "复核轮: 跳过未跟踪目录条目时给出告警（#223）" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  mkdir -p "$WORK/repo/.claude/worktrees/nested"
+  git -C "$WORK/repo/.claude/worktrees/nested" init -q
+  run bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"跳过未跟踪目录条目"* ]]
+}
+
+@test "复核轮: untracked 非普通文件被跳过、不挂死（#223 第二道闸）" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  ln -s /nonexistent/path "$WORK/repo/broken.link"
+  run bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"跳过非普通文件"* ]]
+}
