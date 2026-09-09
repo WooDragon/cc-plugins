@@ -27,6 +27,8 @@ import sys
 import time
 from pathlib import Path
 
+from _doc_gate_common import is_auto_memory_path
+
 _SELF_DIR = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("recall_gate", _SELF_DIR / "recall-gate.py")
 recall_gate = importlib.util.module_from_spec(_spec)
@@ -89,8 +91,24 @@ def build_report(root: str, dirty_paths: list, threshold: float, top_n: int,
     # finding permanently unsatisfiable. dirty_superset=None (the default)
     # preserves the pre-A2 behavior for callers — notably existing tests —
     # that only ever had one list to begin with.
-    dirty_set = set(dirty_superset) if dirty_superset is not None else set(dirty_paths)
-    ordered_paths = _dedupe_preserve_order(dirty_paths)
+    root_path = Path(root)
+    raw_dirty_set = dirty_superset if dirty_superset is not None else dirty_paths
+    dirty_set = {
+        path for path in raw_dirty_set
+        if not is_auto_memory_path(root_path / path, root_path)
+    }
+    ordered_paths = [
+        path for path in _dedupe_preserve_order(dirty_paths)
+        if not is_auto_memory_path(root_path / path, root_path)
+    ]
+    if not ordered_paths:
+        return {
+            'root': root,
+            'degraded': False,
+            'degraded_reason': '',
+            'has_findings': False,
+            'files': {},
+        }
 
     # The budget must cover graph construction itself, not just the BM25
     # pass that follows it — os.walk + reading every .md's content is the

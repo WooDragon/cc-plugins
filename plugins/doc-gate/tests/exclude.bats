@@ -2,7 +2,13 @@
 # BDD tests for _doc_gate_exclude.sh (shared path-exclusion predicate)
 
 setup() {
+  source "${BATS_TEST_DIRNAME}/test_helper/common-setup.bash"
+  common_setup
   source "${BATS_TEST_DIRNAME}/../scripts/_doc_gate_exclude.sh"
+}
+
+teardown() {
+  common_teardown
 }
 
 # ============================================================
@@ -202,4 +208,133 @@ setup() {
     echo "nocasematch leaked ON after doc_gate_is_excluded_basename returned"
     return 1
   fi
+}
+
+# ============================================================
+# Claude Code auto-memory — root-aware lexical path predicate
+# ============================================================
+
+@test "auto-memory: shared JSON matrix excludes only exact normalized components" {
+  local fixture="${BATS_TEST_DIRNAME}/fixtures/auto-memory-paths.json"
+  local root="/tmp/fake claude root/.claude"
+  local ordinary_root="/tmp/fake claude root/ordinary"
+  local path case_root expected
+  local case_count=0
+  local expected_count
+  expected_count=$(jq 'length' "$fixture")
+  [ "$expected_count" -gt 0 ]
+
+  while IFS= read -r -d $'\036' path && \
+        IFS= read -r -d $'\036' case_root && \
+        IFS= read -r -d $'\036' expected; do
+    path="${path//ORDINARY_ROOT/$ordinary_root}"
+    path="${path//ROOT/$root}"
+    case_root="${case_root//ORDINARY_ROOT/$ordinary_root}"
+    case_root="${case_root//ROOT/$root}"
+    run doc_gate_is_auto_memory_path "$path" "$case_root"
+    [ "$status" -eq "$expected" ]
+    case_count=$((case_count + 1))
+  done < <(jq -j '.[] | .path, "", .root, "", (if .expected then "0" else "1" end), ""' "$fixture")
+
+  [ "$case_count" -eq "$expected_count" ]
+  printf 'auto-memory shared cases=%s\n' "$case_count" >&3
+}
+
+@test "auto-memory: excluded-path wrapper applies only new rule with explicit root" {
+  local root="/tmp/fake-root/.claude"
+
+  run doc_gate_is_excluded_path "projects/fictional/memory/entry.md" "$root"
+  [ "$status" -eq 0 ]
+  run doc_gate_is_excluded_path "projects/fictional/docs/guide.md" "$root"
+  [ "$status" -eq 1 ]
+  run doc_gate_is_excluded_path "projects/fictional/memory/entry.md"
+  [ "$status" -eq 1 ]
+}
+
+@test "auto-memory: PATH Bash runs the shared JSON matrix under nounset" {
+  local fixture="${BATS_TEST_DIRNAME}/fixtures/auto-memory-paths.json"
+  local runner="${BATS_TEST_DIRNAME}/auto-memory-paths.sh"
+  local exclude_script="${BATS_TEST_DIRNAME}/../scripts/_doc_gate_exclude.sh"
+  local primary_bash
+  local expected_count
+  primary_bash="$(command -v bash)"
+  [ -x "$primary_bash" ]
+  expected_count=$(jq 'length' "$fixture")
+  [ "$expected_count" -gt 0 ]
+
+  run "$primary_bash" -u "$runner" "$fixture" "$exclude_script"
+  [ "$status" -eq 0 ]
+  [ "$output" = "auto-memory shared cases=$expected_count" ]
+}
+
+@test "auto-memory: a distinct system Bash also runs the shared JSON matrix" {
+  local fixture="${BATS_TEST_DIRNAME}/fixtures/auto-memory-paths.json"
+  local runner="${BATS_TEST_DIRNAME}/auto-memory-paths.sh"
+  local exclude_script="${BATS_TEST_DIRNAME}/../scripts/_doc_gate_exclude.sh"
+  local primary_bash system_bash
+  local expected_count
+  primary_bash="$(command -v bash)"
+  system_bash="/bin/bash"
+  [ -x "$primary_bash" ]
+  if [ ! -x "$system_bash" ]; then
+    skip "no system Bash is available"
+  fi
+  if [ "$primary_bash" = "$system_bash" ]; then
+    skip "PATH Bash and system Bash are the same interpreter"
+  fi
+  expected_count=$(jq 'length' "$fixture")
+  [ "$expected_count" -gt 0 ]
+
+  run "$system_bash" -u "$runner" "$fixture" "$exclude_script"
+  [ "$status" -eq 0 ]
+  [ "$output" = "auto-memory shared cases=$expected_count" ]
+}
+
+@test "auto-memory runner rejects an empty fixture under PATH Bash without success output" {
+  local fixture="${TEST_TEMP_DIR}/empty.json"
+  local runner="${BATS_TEST_DIRNAME}/auto-memory-paths.sh"
+  local exclude_script="${BATS_TEST_DIRNAME}/../scripts/_doc_gate_exclude.sh"
+  local primary_bash
+  primary_bash="$(command -v bash)"
+  [ -x "$primary_bash" ]
+  printf '[]\n' > "$fixture"
+
+  run "$primary_bash" -u "$runner" "$fixture" "$exclude_script"
+  printf '%s\n' "$output" >&3
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *"auto-memory shared cases="*) return 1 ;;
+  esac
+}
+
+@test "auto-memory runner rejects a count mutation under PATH Bash in a temporary copy" {
+  local fixture="${BATS_TEST_DIRNAME}/fixtures/auto-memory-paths.json"
+  local runner="${BATS_TEST_DIRNAME}/auto-memory-paths.sh"
+  local mutated_runner="${TEST_TEMP_DIR}/auto-memory-paths-mutated.sh"
+  local exclude_script="${BATS_TEST_DIRNAME}/../scripts/_doc_gate_exclude.sh"
+  local primary_bash
+  local expected_count
+  local mutation_applied=0
+  primary_bash="$(command -v bash)"
+  [ -x "$primary_bash" ]
+  expected_count=$(jq -er 'if (type == "array" and length > 0) then length else error("fixture must be a non-empty array") end' "$fixture")
+
+  while IFS= read -r line; do
+    case "$line" in
+      '  case_count=$((case_count + 1))')
+        printf '%s\n' '  case_count=$((case_count + 0))' >> "$mutated_runner"
+        mutation_applied=1
+        ;;
+      *) printf '%s\n' "$line" >> "$mutated_runner" ;;
+    esac
+  done < "$runner"
+
+  [ "$mutation_applied" -eq 1 ]
+  run "$primary_bash" -u "$mutated_runner" "$fixture" "$exclude_script"
+  printf '%s\n' "$output" >&3
+  [ "$status" -ne 0 ]
+  case "$output" in
+    *"auto-memory matrix count mismatch: expected=${expected_count} actual=0"*) ;;
+    *) return 1 ;;
+  esac
 }

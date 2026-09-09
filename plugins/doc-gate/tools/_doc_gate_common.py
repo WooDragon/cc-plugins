@@ -61,6 +61,34 @@ def detect_root(start_path: str, override_root: str = None) -> str:
     return os.getcwd()
 
 
+def is_auto_memory_path(path, root=None) -> bool:
+    """Return whether *path* is Claude Code auto-memory under optional *root*.
+
+    The check is lexical: it neither resolves symlinks nor requires the target
+    to exist, which keeps deleted and not-yet-created memory entries out of
+    scope just like existing ones. A relative path becomes root-relative only
+    when ``root`` is supplied. The sole accepted shape is a continuous
+    ``.claude/projects/<non-empty project>/memory`` component sequence.
+    """
+    path_text = os.fspath(path)
+    root_text = os.fspath(root) if root is not None else ""
+    if os.path.isabs(path_text):
+        candidate = path_text
+    elif root_text:
+        candidate = os.path.join(root_text, path_text)
+    else:
+        candidate = path_text
+
+    normalized_parts = Path(os.path.normpath(candidate)).parts
+    for index in range(len(normalized_parts) - 3):
+        if (normalized_parts[index] == '.claude'
+                and normalized_parts[index + 1] == 'projects'
+                and normalized_parts[index + 2]
+                and normalized_parts[index + 3] == 'memory'):
+            return True
+    return False
+
+
 def should_skip_link(target: str) -> bool:
     """外部链接 / 纯锚点 / 绝对路径 → 跳过（不纳入图）。"""
     return target.startswith(('http://', 'https://', 'mailto:', '#', 'file://', '/'))

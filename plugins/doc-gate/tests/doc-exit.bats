@@ -639,3 +639,80 @@ teardown() {
   # Must NOT report orphan signal — deleted files have orphan=false.
   ! echo "$HOOK_STDERR" | grep -qF "建议补充索引链接"
 }
+
+# ============================================================
+# Claude Code auto-memory — a real .claude git root
+# ============================================================
+
+@test "auto-memory: add, modify, delete are ignored while docs CLAUDE and plans remain governed" {
+  # The root itself must be .claude: relative git-status paths otherwise lack
+  # the leading component that distinguishes Claude Code auto-memory from an
+  # ordinary repository memory directory.
+  rm -rf "$REPO_DIR"
+  REPO_DIR="${TEST_TEMP_DIR}/.claude"
+  mkdir -p "$REPO_DIR"
+  git -C "$REPO_DIR" init -q
+  git -C "$REPO_DIR" config user.email "doc-gate-test@example.com"
+  git -C "$REPO_DIR" config user.name "doc-gate-test"
+  export REPO_DIR
+
+  # Untracked add is ignored.
+  write_md "projects/example/memory/new.md" $'# Private\n\nnew memory\n'
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 0 ]
+
+  # An untouched formal document links memory so deleting it would produce a
+  # dangling finding without the new exclusion; this makes the delete case
+  # discriminate against the old implementation rather than merely exit 0.
+  write_md "projects/example/docs/guide.md" $'# Guide\n\ninitial guide\n'
+  write_md "projects/example/CLAUDE.md" $'# Project rules\n\ninitial rules\n'
+  write_md "plans/example.md" $'# Plan\n\ninitial plan\n'
+  write_md "projects/example/docs/index.md" $'# Index\n\n[memory](../memory/new.md) [guide](guide.md) [rules](../CLAUDE.md) [plan](../../../plans/example.md)\n'
+  git_commit_all "add memory and governed documents"
+
+  # Modification is ignored.
+  write_md "projects/example/memory/new.md" $'# Private\n\nchanged memory\n'
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 0 ]
+
+  git -C "$REPO_DIR" checkout -- "projects/example/memory/new.md"
+  # Deletion is ignored even though index.md remains an untouched inlink.
+  rm "${REPO_DIR}/projects/example/memory/new.md"
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDERR" ]
+
+  git -C "$REPO_DIR" checkout -- "projects/example/memory/new.md"
+  write_md "projects/example/memory/new.md" $'# Private\n\nchanged again\n'
+  write_md "projects/example/docs/guide.md" $'# Guide\n\nupdated guide\n'
+  write_md "projects/example/CLAUDE.md" $'# Project rules\n\nupdated rules\n'
+  write_md "plans/example.md" $'# Plan\n\nupdated plan\n'
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 2 ]
+  echo "$HOOK_STDERR" | grep -qF -- "--- projects/example/docs/guide.md ---"
+  echo "$HOOK_STDERR" | grep -qF -- "--- projects/example/CLAUDE.md ---"
+  echo "$HOOK_STDERR" | grep -qF -- "--- plans/example.md ---"
+  if echo "$HOOK_STDERR" | grep -qF -- "--- projects/example/memory/new.md ---"; then
+    echo "unexpected: auto-memory was reported beside governed documents" >&2
+    return 1
+  fi
+}
+
+@test "auto-memory: deleting memory with an untouched formal inlink is silent" {
+  rm -rf "$REPO_DIR"
+  REPO_DIR="${TEST_TEMP_DIR}/.claude"
+  mkdir -p "$REPO_DIR"
+  git -C "$REPO_DIR" init -q
+  git -C "$REPO_DIR" config user.email "doc-gate-test@example.com"
+  git -C "$REPO_DIR" config user.name "doc-gate-test"
+  export REPO_DIR
+
+  write_md "projects/example/memory/entry.md" $'# Private\n\ncontent\n'
+  write_md "projects/example/docs/index.md" $'# Index\n\n[memory](../memory/entry.md)\n'
+  git_commit_all "add memory and formal inlink"
+
+  rm "${REPO_DIR}/projects/example/memory/entry.md"
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDERR" ]
+}

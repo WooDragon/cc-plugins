@@ -72,12 +72,17 @@ plugins/
       docs-graph.py              # 链接图谱独立 CLI（7 子命令：check/backlinks/links/orphans/hubs/related/export）
     skills/
       doc-maintenance/SKILL.md   # 文档维护工作流
-    tests/                       # BDD 测试套件（doc-entry + doc-exit + exclude）
-      doc-entry.bats             # 29 个测试用例
-      doc-exit.bats              # 33 个测试用例
-      exclude.bats               # 35 个测试用例
-      test_doc_exit_report.py    # 13 个测试用例（pytest）
-      test_exclude.py            # 2 个测试用例（pytest）
+    tests/                       # BDD 测试套件：入口、出口、排除、BM25 与 auto-memory 行为
+      doc-entry.bats             # 入口过滤、注入载荷、全局配置、开关与 fail-open
+      doc-exit.bats              # git 状态传输、生命周期门控、finding、排除与鲁棒性
+      exclude.bats               # 共享 Shell 排除谓词与受治理路径覆盖
+      test_bm25.py               # 正文/标题索引评分、排序、阈值与兼容性
+      test_doc_exit_report.py    # 批量 finding、删除处理、预算降级与 NUL 路径传输
+      test_exclude.py            # Shell/Python 排除规则一致性
+      test_auto_memory.py        # 根路径感知排除、memory 读取隔离、链接豁免、standalone 空结果与零预算
+      auto-memory-paths.sh       # Shell/Python 共享 auto-memory 路径矩阵运行器
+      fixtures/
+        auto-memory-paths.json   # 共享 auto-memory 路径矩阵
       test_helper/
         common-setup.bash        # 测试基础设施
   ppt-press/                     # PPT 发布系统插件（skills-only，预留 hooks）
@@ -201,6 +206,8 @@ plugins/
 ## Doc-Gate 文档编辑门禁
 
 零持久状态的两层：入口注入（entry） + 出口判定（exit），两者管辖对象不同——入口管"写的时候有没有判据在场"，出口管"改完之后工作树整体是否自洽"。
+
+Claude Code auto-memory 子树使用根路径上下文精确排除；行为边界见 [doc-gate README](plugins/doc-gate/README.md#exclusions)。
 
 **入口层（`doc-entry.sh`，`PostToolUse: Edit|Write`）**：每次 `.md` 编辑后触发，零 deny、零状态，把表述规范判据（writing-standards §A 的 A1-A13 条目陈述 + 判定要点）注入模型上下文。目标是全局 `~/.claude/CLAUDE.md` 时额外追加通用化四判据段落。
 

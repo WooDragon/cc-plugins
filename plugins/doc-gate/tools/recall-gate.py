@@ -12,7 +12,8 @@ from collections import Counter
 
 from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST, CODE_FENCE,
-    detect_root, should_skip_link, resolve_link, extract_links_from_content,
+    detect_root, is_auto_memory_path, should_skip_link, resolve_link,
+    extract_links_from_content,
 )
 
 _EN_TOKEN_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9_.-]{1,}')
@@ -269,6 +270,9 @@ def build_corpus_and_graph(root: str, start_time: float = None, budget_sec: floa
     returning a partial graph silently.
     """
     root_path = Path(root).resolve()
+    if is_auto_memory_path(root_path):
+        return [], set(), {}, {}, {}
+
     corpus = []
     # all_files: set of relative path strings
     all_files: set = set()
@@ -284,7 +288,15 @@ def build_corpus_and_graph(root: str, start_time: float = None, budget_sec: floa
     # First pass: collect content and tokens
     file_contents: dict = {}  # rel_path -> content
     for dirpath, dirnames, filenames in os.walk(str(root_path)):
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
+        directory = Path(dirpath)
+        if is_auto_memory_path(directory):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            name for name in dirnames
+            if name not in EXCLUDED_DIRS
+            and not is_auto_memory_path(directory / name, root_path)
+        ]
         for fname in filenames:
             # Case-insensitive: filesystems and the doc-exit.sh dirty-set
             # filter (*.[mM][dD]) both treat UPPER.MD as a markdown file.
@@ -333,7 +345,7 @@ def build_corpus_and_graph(root: str, start_time: float = None, budget_sec: floa
             if should_skip_link(target):
                 continue
             resolved = resolve_link(src_path, target, root_path)
-            if resolved is None:
+            if resolved is None or is_auto_memory_path(resolved, root_path):
                 continue
             try:
                 rel_target = os.path.relpath(str(resolved), str(root_path))
@@ -378,6 +390,8 @@ def check_broken_outlinks(content: str, target_file: str, root: str, all_files: 
         if resolved is None:
             broken.append({'target': target, 'line': lineno})
             continue
+        if is_auto_memory_path(resolved, root_path):
+            continue
         try:
             rel_target = os.path.relpath(str(resolved), str(root_path))
         except ValueError:
@@ -411,6 +425,16 @@ def cmd_gate(args):
         target_file = os.path.relpath(args.target_file, root) if os.path.isabs(args.target_file) else args.target_file
     else:
         target_file = ''
+
+    target_path = Path(root) / target_file if target_file else Path(root)
+    if is_auto_memory_path(target_path, root):
+        print(json.dumps({
+            'has_findings': False,
+            'recall': [],
+            'orphan': False,
+            'broken_outlinks': [],
+        }, ensure_ascii=False))
+        return
 
     corpus, all_files, _forward, backward, _dangling = build_corpus_and_graph(root)
 

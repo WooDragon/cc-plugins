@@ -23,7 +23,8 @@ from collections import defaultdict, deque
 
 from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST,
-    detect_root, should_skip_link, resolve_link, extract_links_from_content,
+    detect_root, is_auto_memory_path, should_skip_link, resolve_link,
+    extract_links_from_content,
 )
 
 
@@ -33,7 +34,8 @@ def is_excluded(path: Path, root: Path) -> bool:
         relative = path.relative_to(root)
     except ValueError:
         return False
-    return any(part in EXCLUDED_DIRS for part in relative.parts)
+    return (any(part in EXCLUDED_DIRS for part in relative.parts)
+            or is_auto_memory_path(path, root))
 
 
 def extract_links(filepath: Path):
@@ -81,6 +83,8 @@ def build_graph(root: Path):
             if should_skip_link(target):
                 continue
             resolved = resolve_link(src, target, root)
+            if resolved is not None and is_auto_memory_path(resolved, root):
+                continue
             outgoing[src].append((lineno, target, resolved))
 
             if resolved is not None and resolved in all_files:
