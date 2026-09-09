@@ -1,6 +1,6 @@
 # github-collab
 
-GitHub maintainer/collaborator workflow skill for Claude Code — teaches Claude how each role actually works once a repository is set up as "maintainer owns main and issues, collaborators can only open PRs and issues, not merge code."
+GitHub maintainer/collaborator workflow skill for Claude Code — teaches Claude how each role actually works once a repository is set up so that main is branch-protected and nothing lands without the maintainer's approval.
 
 A **pure skill plugin** (no hooks, no scripts). It injects two role-specific workflows plus a friction-point lookup table, so both sides of a maintainer/collaborator repo get concrete next steps instead of generic Git advice.
 
@@ -16,8 +16,8 @@ claude plugin install github-collab@cc-plugins
 
 | Role | What the skill covers |
 |------|------------------------|
-| **Maintainer** | Assigning issues at the right granularity, triaging incoming PRs (CI first, then code), delegating first-pass review to AI while owning the accept/reject call, `Request changes` vs. comment, merging with squash + delete-branch, and the `--admin` bypass needed to merge your own PR (GitHub forbids self-approval) |
-| **Collaborator** | Claiming an issue, same-repo branch vs. fork (token scope and first-time-contributor gotchas), what a PR description should contain, diagnosing your own CI failures, responding to review comments line by line, and why `BLOCKED` / `REVIEW_REQUIRED` is expected — not a permission bug |
+| **Maintainer** | Agreeing the issue boundary before anyone starts — whoever filed it — with the issue body as the single source of truth and assignment as the go signal, triaging incoming PRs (CI first, then code), delegating first-pass review to AI while owning the accept/reject call, `Request changes` vs. comment, merging with squash + delete-branch, and the `--admin` bypass needed to merge your own PR (GitHub forbids self-approval) |
+| **Collaborator** | Claiming an assigned issue or filing your own (writing the acceptance criteria into the body yourself, and waiting for the assignment rather than self-assigning), same-repo branch vs. fork (token scope and first-time-contributor gotchas), what a PR description should contain, diagnosing your own CI failures, responding to review comments line by line, and why `BLOCKED` / `REVIEW_REQUIRED` is expected — not a permission bug |
 | **Friction lookup** | A symptom → root cause → who-fixes-it table for the ways a PR gets stuck: red CI, a check stuck pending forever, unresolved review threads, a stale branch, unmatched CODEOWNERS |
 | **Repo setup (appendix only)** | Personal-account permission granularity vs. organizations, a copy-pasteable branch protection payload, and four traps: `enforce_admins` deadlock on single-maintainer repos, conditional-job required checks that never resolve, CODEOWNERS needing to land on the default branch first, and the `paths-ignore` vs. required-check tradeoff |
 
