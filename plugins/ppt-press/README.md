@@ -7,7 +7,8 @@
 ## 快速开始
 
 ```bash
-# 安装插件
+# 从 marketplace 安装
+claude plugin marketplace add WooDragon/cc-plugins
 claude plugin install ppt-press@cc-plugins
 
 # 在空目录中初始化 PPT 框架
@@ -68,6 +69,7 @@ mkdir my-ppt && cd my-ppt
 
 ```bash
 # 从 marketplace 安装
+claude plugin marketplace add WooDragon/cc-plugins
 claude plugin install ppt-press@cc-plugins
 
 # 验证

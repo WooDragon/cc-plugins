@@ -8,6 +8,7 @@ A **pure skill plugin** (no hooks, no scripts). It injects two role-specific wor
 
 ```bash
 # From marketplace
+claude plugin marketplace add WooDragon/cc-plugins
 claude plugin install github-collab@cc-plugins
 ```
 
