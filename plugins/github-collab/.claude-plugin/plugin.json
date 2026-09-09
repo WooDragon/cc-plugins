@@ -1,7 +1,11 @@
 {
   "name": "github-collab",
   "description": "GitHub maintainer/collaborator workflow — how each role works once a repo is set up as maintainer-owns-main, collaborators-PR-only",
-  "version": "1.0.0",
-  "author": { "name": "WooDragon" },
-  "skills": ["./skills/github-collab"]
+  "version": "1.0.1",
+  "author": {
+    "name": "WooDragon"
+  },
+  "skills": [
+    "./skills/github-collab"
+  ]
 }

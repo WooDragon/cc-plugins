@@ -26,7 +26,7 @@ description: |
 | 合并 PR 到 main | ✅ | 条件满足后 ✅——见表下说明 |
 | 改分支保护规则 / 仓库设置 | ✅ | ❌ |
 
-> **分支保护挡的是「条件」，不是「人」。** 管理者 approve、CI 转绿之后，有 write 权限的协作者**可以自己点 merge**——GitHub 不会因为他不是 owner 就拦住他。要把「只有某些人能合」限死到身份，需要分支保护的 `restrictions` 字段，而它**只对 organization 拥有的仓库生效**，个人账号仓库设非 `null` 会被 API 拒绝。
+> **分支保护挡的是「条件」，不是「人」。** 管理者 approve、CI 转绿之后，有 write 权限的协作者**可以自己点 merge**——GitHub 不会因为他不是 owner 就拦住他。要把「只有某些人能合」限死到身份，需要分支保护的 `restrictions` 字段，而它**只对 organization 拥有的仓库生效**（官方原文：*"User, app, and team restrictions are only available for organization-owned repositories."*），个人账号仓库用不了它。
 >
 > 所以个人账号仓库下这套形态的真实保证是：**没有管理者的 approve，谁都合不了**；而不是「只有管理者能合」。要后者就得迁到 organization（见 §5）。
 
@@ -106,8 +106,8 @@ gh pr merge <pr-number> --squash --delete-branch --admin
 
 判据是 CI 需不需要 secrets 或私有 package 拉取授权，不是"我有没有 write 权限"这么简单：
 
-- **fork PR 的 `GITHUB_TOKEN` 作用域绑定在 fork 仓库自己身上**，不继承上游仓库的私有 package 拉取授权——如果 CI 要拉上游的私有 package，fork 出来的 PR 跑 CI 会直接失败
-- **首次贡献者从 fork 提的 PR，workflow 默认不会自动跑**，需要管理者去 Actions 页面手动点 "Approve and run"，之后同一贡献者的后续 PR 才会自动跑
+- **fork PR 的 `GITHUB_TOKEN` 被降级为只读，且拿不到仓库 secrets**——这两点是官方明说的。实践后果是它通常也拉不动需要认证的上游私有 package：CI 要拉私有 package 时，fork 出来的 PR 会卡在这一步
+- **首次贡献者从 fork 提的 PR，workflow 默认不会自动跑**——官方原文 *"By default, all first-time contributors require approval to run workflows"*，需要有 write 权限的人批准（Actions 页面点 "Approve and run"，也可走 API）。**这条说的是公共仓库**：私有仓库的 fork workflow 审批是另一套机制，别把公共仓库的默认值直接套过去。该设置在仓库 / 组织 / 企业三级都可配，管理员可以调成「所有外部贡献者都需审批」或干脆关掉
 
 有 write 权限时优先开同仓分支，绕开上面两个坑：
 
@@ -174,7 +174,7 @@ gh pr view <pr-number> --json mergeStateStatus,reviewDecision
 
 | 方案 | 权限粒度 | 能强制 PR 审查 | 能限死谁可以合并（`restrictions`） | Actions 额度 | 成本 |
 |------|----------|----------------|-----------------------------------|--------------|------|
-| 个人账号 + Pro | 只有 read+write 捆绑一档 | 能（靠分支保护） | ❌ 不支持，`restrictions` 只能是 `null` | 私有仓库有限额度 | 个人订阅费 |
+| 个人账号 + Pro | 只有 read+write 捆绑一档 | 能（靠分支保护） | ❌ 不支持，`restrictions` 是 organization 专属 | 私有仓库有限额度 | 个人订阅费 |
 | Free organization | 五档细粒度角色 | 能 | ✅ | 组织级额度，免费档更紧 | 免费 |
 | Team organization | 五档细粒度角色 + 更多治理功能 | 能 | ✅ | 组织级额度，更宽 | 按席位收费 |
 
@@ -188,7 +188,10 @@ gh api -X PUT repos/{owner}/{repo}/branches/{branch}/protection \
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["ci/build", "ci/test"]
+    "checks": [
+      { "context": "ci/build" },
+      { "context": "ci/test" }
+    ]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": {
@@ -206,12 +209,12 @@ EOF
 | 字段 | 作用 |
 |------|------|
 | `required_status_checks.strict` | 要求分支与 base 分支保持最新才能合并 |
-| `required_status_checks.contexts` | 必须跑绿的 CI check 名单 |
+| `required_status_checks.checks` | 必须跑绿的 CI check 名单，元素形如 `{"context": "<check 名>"}`，可选加 `"app_id"` 锁定出具该 check 的 App。旧的 `contexts` 字段是纯字符串数组，官方已对它挂出 "Closing down notice" 并明说 *"Use `checks` instead of `contexts` for more fine-grained control"*，新配置不要再用 |
 | `enforce_admins` | 是否连管理者也受这套规则约束（见陷阱①，通常设 `false`） |
 | `required_pull_request_reviews.required_approving_review_count` | 至少几个 approve 才能合 |
 | `required_pull_request_reviews.dismiss_stale_reviews` | 新 commit 是否自动作废旧 approve |
 | `required_pull_request_reviews.require_code_owner_reviews` | 是否强制 CODEOWNERS 命中的人 approve |
-| `restrictions` | 限制谁能推送 / 合并到该分支。**organization 仓库专属**：个人账号仓库必须传 `null`，传非 `null` 会被 API 拒绝 |
+| `restrictions` | 限制谁能推送 / 合并到该分支。**organization 仓库专属**——官方原文 *"User, app, and team restrictions are only available for organization-owned repositories. Set to null to disable."*；个人账号仓库传 `null`（实测：个人账号仓库回读 protection 时，返回体里根本没有 `restrictions` 这个 key）。传非 `null` 时究竟是报错还是被忽略，官方未作说明，不要当成确定的 422 |
 
 回读验证：
 
