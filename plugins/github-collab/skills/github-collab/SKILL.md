@@ -30,13 +30,25 @@ description: |
 >
 > 所以个人账号仓库下这套形态的真实保证是：**没有管理者的 approve，谁都合不了**；而不是「只有管理者能合」。要后者就得迁到 organization（见 §5）。
 
-判断自己当前是哪个角色，别猜，查权限位：
+判断自己当前是哪个角色，别猜，查权限位。**角色不是相对当前目录这个仓库，而是相对「改动最终要合进哪个仓库」**——当前仓库是 fork 时二者不是一回事，所以先解析目标仓库，再查自己对它的权限：
 
 ```bash
-gh api repos/{owner}/{repo} --jq .permissions
-# {"admin":true,"maintain":true,"push":true,"triage":true,"pull":true}  → 管理者
-# {"admin":false,"maintain":false,"push":true,"triage":true,"pull":true} → 协作者（push=true 但 main 被分支保护挡住）
+# 1. 目标仓库 = fork 的上游，或仓库自己
+TARGET=$(gh api 'repos/{owner}/{repo}' --jq '.parent.full_name // .full_name')
+
+# 2. 查自己对目标仓库的权限
+gh api "repos/$TARGET" --jq '.permissions |
+  if .admin then "管理者 → §2"
+  elif .push then "协作者·可开同仓分支 → §3"
+  else "协作者·只能 fork → §3" end'
 ```
+
+`repos/{owner}/{repo}` 是 `gh` 的占位符，从当前工作目录的 remote 自动解析，不用手填。第三档（无 push 权限）直接决定了 §3 第 2 步走 fork 而不是同仓分支。
+
+两个坑：
+
+- **`.parent` 只有 REST 通道有。** `gh repo view --json parent` 走 GraphQL，对 fork 也返回 `null`，用它会把所有 fork 都判成管理者。必须走 `gh api repos/...`。
+- **这里假定 fork 是为了回贡上游。** 如果你的 fork 是独立演进、不打算提 PR 回去，那它就是你自己的项目，跳过第 1 步直接查自己即可。
 
 ## §2 管理者工作流
 
