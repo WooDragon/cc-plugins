@@ -181,7 +181,7 @@ if [ "${#DIRTY_PATHS[@]}" -gt 0 ]; then
     [ -n "$p" ] || continue
     bn="${p##*/}"
     doc_gate_is_excluded_basename "$bn" && continue
-    doc_gate_is_excluded_path "$p" && continue
+    doc_gate_is_excluded_path "$p" "$ROOT" && continue
     FILTERED_PATHS+=("$p")
   done
 fi

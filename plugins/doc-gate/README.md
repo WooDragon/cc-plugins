@@ -76,6 +76,10 @@ Both hooks share this exclusion list from a single source, `scripts/_doc_gate_ex
 
 **Exception**: `~/.claude/CLAUDE.md` is always governed despite living under `.claude/` — it's the global config with the highest pollution surface, and `doc-entry.sh` bypasses all path exclusions for it (only the basename exclusions still apply).
 
+#### Claude Code auto-memory
+
+The exact Claude Code auto-memory exclusion is `.claude/projects/<project>/memory/` and all descendants, where `<project>` is exactly one directory component. When the Git root is `.claude`, the exit report does not treat this subtree as a report target, BM25 candidate, or link-graph node. In an ordinary repository, this rule does not exclude `memory/`, `docs/memory/`, or `projects/<project>/memory/`. Under a `.claude` Git root, a project's sibling `docs/`, `CLAUDE.md`, and `plans/` paths are not excluded by this rule; the existing `.claude` subdirectory exclusion remains unchanged. Links whose targets are in the excluded memory subtree do not produce dangling-link findings, whether the targets exist or not. A standalone report or recall invocation whose direct target is an excluded memory path returns the existing empty-result schema. The rule does not require the target to exist, read settings, or recognize custom auto-memory directories.
+
 ## Exit Gate Analysis
 
 When `doc-exit.sh` fires, `doc-exit-report.py` runs a single link-graph pass and produces up to five finding categories per dirty file:
@@ -169,6 +173,8 @@ bats plugins/doc-gate/tests/doc-entry.bats
 bats plugins/doc-gate/tests/doc-exit.bats
 bats plugins/doc-gate/tests/exclude.bats
 python3 -m pytest plugins/doc-gate/tests/ -q
+bash plugins/doc-gate/tests/auto-memory-paths.sh plugins/doc-gate/tests/fixtures/auto-memory-paths.json plugins/doc-gate/scripts/_doc_gate_exclude.sh
+bash -u plugins/doc-gate/tests/auto-memory-paths.sh plugins/doc-gate/tests/fixtures/auto-memory-paths.json plugins/doc-gate/scripts/_doc_gate_exclude.sh
 ```
 
 The BM25 unit tests cover reusable body/title indexes, the legacy call interface, candidate ordering, and threshold boundaries.
@@ -181,6 +187,8 @@ The BM25 unit tests cover reusable body/title indexes, the legacy call interface
 | `test_bm25.py` | Body/title index scoring, legacy list and body-only inputs, sparse postings in query Counter order, one normalization per document, zero-score and self/whitelist boundaries, stable candidate ordering, and pre-rounding thresholds |
 | `test_doc_exit_report.py` | `build_report()`: one body/title-index build per batch, stale_inlinks, orphan (including deleted-file suppression), dangling_refs, broken_outlinks, non-blocking recall, budget degradation, and `read_nul_paths_from_file` NUL-not-newline parsing |
 | `test_exclude.py` | Shared exclusion predicate parity checks |
+| `test_auto_memory.py` | Root-aware exclusion, no reads from `memory/`, link exemptions, standalone empty results, and zero-budget behavior |
+| `auto-memory-paths.sh` + `fixtures/auto-memory-paths.json` | Shared Shell/Python auto-memory path matrix, validated with Bash 3.2 and Bash 5 under `-u` |
 
 ## Known Boundaries
 
