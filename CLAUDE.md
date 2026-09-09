@@ -10,6 +10,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 | Plugin | ppt-press（4 skills） | PPT 全生命周期（init/create/deploy/manage） |
 | Plugin | doc-gate（1 skill + 2 hooks + 4 tools） | 文档入口判据注入 + 出口工作树一致性检查 |
 | Plugin | code-search（1 skill） | 代码搜索与符号导航方法论（纯 skill，零 hook） |
+| Plugin | github-collab（1 skill） | 管理者 / 协作者两条 GitHub 协作工作流；纯 skill，零 hook |
 | Plugin | deep-research（1 skill + 4 agents + 1 hook） | 7-Stage 深度研究管线 + 多模型采集引擎 + 引用验证门禁 |
 | Plugin | guardrails（2 hooks） | 代码规模提示（信息性）+ git push 防手滑（拦截误推 main/master，非防绕过安全边界） |
 | Plugin | pr-review（1 skill + 5 scripts） | 已开 PR 的 AI 评审：grok/claude/codex 本地同步评审（`pr-review.sh` 统一入口自动路由，均含多轮对抗复评的 session 状态管理）+ Copilot bot 异步评审（可选） |
@@ -102,6 +103,11 @@ plugins/
     .claude-plugin/plugin.json   # 插件元数据（纯 skill）
     skills/
       code-search/SKILL.md       # 工具决策树 + 按意图策略 + 组合技巧 + 上下文经济
+    README.md                    # 面向安装者说明
+  github-collab/                 # GitHub 协作工作流插件（纯 skill，零 hook）
+    .claude-plugin/plugin.json   # 插件元数据（纯 skill）
+    skills/
+      github-collab/SKILL.md     # 管理者 / 协作者两条工作流 + PR 卡住速查表 + 分支保护配置附录
     README.md                    # 面向安装者说明
   deep-research/                 # 深度研究管线插件
     .claude-plugin/plugin.json   # 插件元数据（声明 skill + 4 个 native subagent）

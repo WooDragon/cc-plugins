@@ -24,6 +24,7 @@ npx skills add WooDragon/cc-plugins -g
 | [doc-gate](./plugins/doc-gate/) | Document editing governance — entry-layer writing-standards injection + exit-layer working-tree consistency check + link graph tools |
 | [ppt-press](./plugins/ppt-press/) | Self-contained PPT publishing — scaffold + create + deploy + manage |
 | [code-search](./plugins/code-search/) | Code search & symbol navigation — pick the right tool by search intent |
+| [github-collab](./plugins/github-collab/) | GitHub maintainer/collaborator workflow — role boundaries, both roles' event-ordered workflows, a PR-stuck lookup table, and a branch-protection setup appendix |
 | [deep-research](./plugins/deep-research/) | Deep research framework — 7-Stage pipeline + role-specialized subagents + multi-model harvest & citation-verification gate |
 | [pr-review](./plugins/pr-review/) | AI review for open GitHub PRs — grok CLI local synchronous review (default, multi-round follow-up) + Copilot bot asynchronous review (optional) |
 | [dispatch-contract](./plugins/dispatch-contract/) | Subagent dispatch contract — four dispatch rules + `%%DONE%%` finalization gate (SubagentStop) |
@@ -38,6 +39,7 @@ npx skills add WooDragon/cc-plugins -g
 | [ppt-manage](./plugins/ppt-press/skills/ppt-manage/) | ppt-press | List, search, and retrieve PPT deck URLs |
 | [doc-maintenance](./plugins/doc-gate/skills/doc-maintenance/) | doc-gate | Document maintenance workflow with pre/post-flight checks |
 | [code-search](./plugins/code-search/skills/code-search/) | code-search | Pick the right search tool (ctags/ast-grep/grep) by intent |
+| [github-collab](./plugins/github-collab/skills/github-collab/) | github-collab | 管理者 / 协作者两条 GitHub 协作工作流 + PR 卡住速查表 + 分支保护配置附录 |
 | [deep-research](./plugins/deep-research/skills/deep-research/) | deep-research | Router skill for the 7-stage research pipeline + quality gates |
 | [pr-review](./plugins/pr-review/skills/pr-review/) | pr-review | Review an open PR by number — grok (default) or Copilot bot backend |
 | [subagent-dispatch](./plugins/dispatch-contract/skills/subagent-dispatch/) | dispatch-contract | Four dispatch rules + `%%DONE%%` finalization contract for subagent delegation |
