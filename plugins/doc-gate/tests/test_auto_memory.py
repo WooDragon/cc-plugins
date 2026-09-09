@@ -62,18 +62,23 @@ def test_scanners_prune_auto_memory_before_reading_content(monkeypatch, tmp_path
     reads = []
 
     def tracking_read_text(path, *args, **kwargs):
-        reads.append(path)
+        reads.append(path.resolve())
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", tracking_read_text)
     corpus, all_files, _forward, _backward, _dangling = recall_gate.build_corpus_and_graph(str(root))
     graph_files = docs_graph.scan_all_files(root)
+    graph_nodes, _outgoing, _graph_forward, _graph_backward = docs_graph.build_graph(root)
 
     assert "projects/fictional/memory/secret.md" not in all_files
     assert "projects/fictional/memory/secret.md" not in {doc["path"] for doc in corpus}
     assert docs_file.resolve() in graph_files
     assert plans_file.resolve() in graph_files
-    assert memory_file not in reads
+    assert memory_file.resolve() not in graph_files
+    assert docs_file.resolve() in graph_nodes
+    assert plans_file.resolve() in graph_nodes
+    assert memory_file.resolve() not in graph_nodes
+    assert memory_file.resolve() not in reads
 
 
 @pytest.mark.parametrize("root_kind", ["ancestor", "memory", "memory-descendant"])

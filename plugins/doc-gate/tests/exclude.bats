@@ -251,30 +251,55 @@ teardown() {
   [ "$status" -eq 1 ]
 }
 
-@test "auto-memory: Bash 3.2 and Homebrew Bash run the same JSON matrix under nounset" {
+@test "auto-memory: PATH Bash runs the shared JSON matrix under nounset" {
   local fixture="${BATS_TEST_DIRNAME}/fixtures/auto-memory-paths.json"
   local runner="${BATS_TEST_DIRNAME}/auto-memory-paths.sh"
   local exclude_script="${BATS_TEST_DIRNAME}/../scripts/_doc_gate_exclude.sh"
+  local primary_bash
   local expected_count
+  primary_bash="$(command -v bash)"
+  [ -x "$primary_bash" ]
   expected_count=$(jq 'length' "$fixture")
   [ "$expected_count" -gt 0 ]
 
-  run /bin/bash "$runner" "$fixture" "$exclude_script"
-  [ "$status" -eq 0 ]
-  [ "$output" = "auto-memory shared cases=$expected_count" ]
-
-  run /opt/homebrew/bin/bash "$runner" "$fixture" "$exclude_script"
+  run "$primary_bash" -u "$runner" "$fixture" "$exclude_script"
   [ "$status" -eq 0 ]
   [ "$output" = "auto-memory shared cases=$expected_count" ]
 }
 
-@test "auto-memory runner rejects an empty fixture without success output" {
+@test "auto-memory: a distinct system Bash also runs the shared JSON matrix" {
+  local fixture="${BATS_TEST_DIRNAME}/fixtures/auto-memory-paths.json"
+  local runner="${BATS_TEST_DIRNAME}/auto-memory-paths.sh"
+  local exclude_script="${BATS_TEST_DIRNAME}/../scripts/_doc_gate_exclude.sh"
+  local primary_bash system_bash
+  local expected_count
+  primary_bash="$(command -v bash)"
+  system_bash="/bin/bash"
+  [ -x "$primary_bash" ]
+  if [ ! -x "$system_bash" ]; then
+    skip "no system Bash is available"
+  fi
+  if [ "$primary_bash" = "$system_bash" ]; then
+    skip "PATH Bash and system Bash are the same interpreter"
+  fi
+  expected_count=$(jq 'length' "$fixture")
+  [ "$expected_count" -gt 0 ]
+
+  run "$system_bash" -u "$runner" "$fixture" "$exclude_script"
+  [ "$status" -eq 0 ]
+  [ "$output" = "auto-memory shared cases=$expected_count" ]
+}
+
+@test "auto-memory runner rejects an empty fixture under PATH Bash without success output" {
   local fixture="${TEST_TEMP_DIR}/empty.json"
   local runner="${BATS_TEST_DIRNAME}/auto-memory-paths.sh"
   local exclude_script="${BATS_TEST_DIRNAME}/../scripts/_doc_gate_exclude.sh"
+  local primary_bash
+  primary_bash="$(command -v bash)"
+  [ -x "$primary_bash" ]
   printf '[]\n' > "$fixture"
 
-  run /opt/homebrew/bin/bash -u "$runner" "$fixture" "$exclude_script"
+  run "$primary_bash" -u "$runner" "$fixture" "$exclude_script"
   printf '%s\n' "$output" >&3
   [ "$status" -ne 0 ]
   case "$output" in
@@ -282,13 +307,16 @@ teardown() {
   esac
 }
 
-@test "auto-memory runner rejects a count mutation in a temporary copy" {
+@test "auto-memory runner rejects a count mutation under PATH Bash in a temporary copy" {
   local fixture="${BATS_TEST_DIRNAME}/fixtures/auto-memory-paths.json"
   local runner="${BATS_TEST_DIRNAME}/auto-memory-paths.sh"
   local mutated_runner="${TEST_TEMP_DIR}/auto-memory-paths-mutated.sh"
   local exclude_script="${BATS_TEST_DIRNAME}/../scripts/_doc_gate_exclude.sh"
+  local primary_bash
   local expected_count
   local mutation_applied=0
+  primary_bash="$(command -v bash)"
+  [ -x "$primary_bash" ]
   expected_count=$(jq -er 'if (type == "array" and length > 0) then length else error("fixture must be a non-empty array") end' "$fixture")
 
   while IFS= read -r line; do
@@ -302,7 +330,7 @@ teardown() {
   done < "$runner"
 
   [ "$mutation_applied" -eq 1 ]
-  run /opt/homebrew/bin/bash -u "$mutated_runner" "$fixture" "$exclude_script"
+  run "$primary_bash" -u "$mutated_runner" "$fixture" "$exclude_script"
   printf '%s\n' "$output" >&3
   [ "$status" -ne 0 ]
   case "$output" in
