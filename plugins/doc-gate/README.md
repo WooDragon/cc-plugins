@@ -6,7 +6,8 @@ Document editing governance for Claude Code — a stateless entry layer that inj
 
 ```bash
 # From marketplace
-claude plugin add doc-gate@WooDragon-cc-plugins
+claude plugin marketplace add WooDragon/cc-plugins
+claude plugin install doc-gate@cc-plugins
 ```
 
 ## Architecture
