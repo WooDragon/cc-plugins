@@ -118,7 +118,7 @@ git push -u origin feat/xxx
 gh pr create --title "..." --body "..." --base main
 ```
 
-`gh repo fork --remote` 会把新 fork 设成 `origin`、把原来的 `origin`（上游）改名成 `upstream`，要换名用 `--remote-name`。cwd 已经是自己 fork 的 clone 时跳过第一条，`origin` 本来就指向 fork。cwd 是上游只读 clone 又不 fork 就直接 `git push -u origin`，会被权限拒绝——那是权限问题，不是配置问题。
+`gh repo fork --remote` 会把新 fork 设成 `origin`、把原来的 `origin`（上游）改名成 `upstream`，要换名用 `--remote-name`。cwd 是上游只读 clone 又不 fork 就直接 `git push -u origin`，会被权限拒绝——那是权限问题，不是配置问题。
 
 **有 push 权限（`协作者·可开同仓分支`）→ 优先同仓分支**，因为 fork PR 有两个坑：
 
