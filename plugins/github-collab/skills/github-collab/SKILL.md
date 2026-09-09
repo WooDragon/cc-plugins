@@ -30,25 +30,16 @@ description: |
 >
 > 所以个人账号仓库下这套形态的真实保证是：**没有管理者的 approve，谁都合不了**；而不是「只有管理者能合」。要后者就得迁到 organization（见 §5）。
 
-判断自己当前是哪个角色，别猜，查权限位。**角色不是相对当前目录这个仓库，而是相对「改动最终要合进哪个仓库」**——当前仓库是 fork 时二者不是一回事，所以先解析目标仓库，再查自己对它的权限：
+判断自己当前是哪个角色，别猜，查权限位——判的就是当前这个仓库，不用管它是不是 fork：
 
 ```bash
-# 1. 目标仓库 = fork 的上游，或仓库自己
-TARGET=$(gh api 'repos/{owner}/{repo}' --jq '.parent.full_name // .full_name')
-
-# 2. 查自己对目标仓库的权限
-gh api "repos/$TARGET" --jq '.permissions |
+gh api 'repos/{owner}/{repo}' --jq '.permissions |
   if .admin then "管理者 → §2"
   elif .push then "协作者·可开同仓分支 → §3"
-  else "协作者·只能 fork → §3" end'
+  else "协作者·须 fork → §3" end'
 ```
 
-`repos/{owner}/{repo}` 是 `gh` 的占位符，从当前工作目录的 remote 自动解析，不用手填。第三档（无 push 权限）直接决定了 §3 第 2 步走 fork 而不是同仓分支。
-
-两个坑：
-
-- **`.parent` 只有 REST 通道有。** `gh repo view --json parent` 走 GraphQL，对 fork 也返回 `null`，用它会把所有 fork 都判成管理者。必须走 `gh api repos/...`。
-- **这里假定 fork 是为了回贡上游。** 如果你的 fork 是独立演进、不打算提 PR 回去，那它就是你自己的项目，跳过第 1 步直接查自己即可。
+`repos/{owner}/{repo}` 是 `gh` 的占位符，从当前工作目录的 remote 自动解析，不用手填。第三档（无 push 权限）决定 §3 第 2 步只能走 fork。
 
 ## §2 管理者工作流
 
@@ -116,12 +107,23 @@ gh pr merge <pr-number> --squash --delete-branch --admin
 
 ### 2. 开分支
 
-判据是 CI 需不需要 secrets 或私有 package 拉取授权，不是"我有没有 write 权限"这么简单：
+先过硬门禁，再谈偏好——§1 的判定直接决定这一步，不是「看情况」。
+
+**无 push 权限（`协作者·须 fork`）→ 只能 fork，没有第二条路：**
+
+```bash
+gh repo fork --remote          # 在上游的 clone 里执行
+git checkout -b feat/xxx
+git push -u origin feat/xxx
+gh pr create --title "..." --body "..." --base main
+```
+
+`gh repo fork --remote` 会把新 fork 设成 `origin`、把原来的 `origin`（上游）改名成 `upstream`，要换名用 `--remote-name`。cwd 已经是自己 fork 的 clone 时跳过第一条，`origin` 本来就指向 fork。cwd 是上游只读 clone 又不 fork 就直接 `git push -u origin`，会被权限拒绝——那是权限问题，不是配置问题。
+
+**有 push 权限（`协作者·可开同仓分支`）→ 优先同仓分支**，因为 fork PR 有两个坑：
 
 - **fork PR 的 `GITHUB_TOKEN` 被降级为只读，且拿不到仓库 secrets**——这两点是官方明说的。实践后果是它通常也拉不动需要认证的上游私有 package：CI 要拉私有 package 时，fork 出来的 PR 会卡在这一步
 - **首次贡献者从 fork 提的 PR，workflow 默认不会自动跑**——官方原文 *"By default, all first-time contributors require approval to run workflows"*，需要有 write 权限的人批准（Actions 页面点 "Approve and run"，也可走 API）。**这条说的是公共仓库**：私有仓库的 fork workflow 审批是另一套机制，别把公共仓库的默认值直接套过去。该设置在仓库 / 组织 / 企业三级都可配，管理员可以调成「所有外部贡献者都需审批」或干脆关掉
-
-有 write 权限时优先开同仓分支，绕开上面两个坑：
 
 ```bash
 git checkout -b feat/xxx
