@@ -6,7 +6,7 @@ Four independent, fail-open guardrail hooks for Claude Code: an informational **
 
 ```bash
 # From marketplace
-claude plugin add guardrails@WooDragon-cc-plugins
+claude plugin install guardrails@cc-plugins
 ```
 
 ## Hooks

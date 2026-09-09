@@ -10,7 +10,7 @@ A **pure skill plugin** (no hooks) bundling one skill, three reference docs, and
 
 ```bash
 # From marketplace
-claude plugin add pr-review@cc-plugins
+claude plugin install pr-review@cc-plugins
 ```
 
 ## Backends

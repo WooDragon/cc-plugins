@@ -8,7 +8,7 @@ A **pure skill plugin** (no hooks, no scripts). It injects a code-search methodo
 
 ```bash
 # From marketplace
-claude plugin add code-search@WooDragon-cc-plugins
+claude plugin install code-search@cc-plugins
 ```
 
 ## What it does

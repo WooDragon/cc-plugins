@@ -7,7 +7,8 @@ WooDragon's CC plugin & skill marketplace.
 **Plugins:**
 
 ```bash
-claude plugin add WooDragon/cc-plugins
+claude plugin marketplace add WooDragon/cc-plugins
+claude plugin install <plugin-name>@cc-plugins
 ```
 
 **Skills:**

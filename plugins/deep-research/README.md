@@ -7,7 +7,7 @@ The framework treats the main session as a **Lead** that orchestrates the pipeli
 ## Installation
 
 ```bash
-claude plugin add deep-research@WooDragon-cc-plugins
+claude plugin install deep-research@cc-plugins
 ```
 
 ## Prerequisites

@@ -12,7 +12,7 @@ The plugin has seven parts: four **PreToolUse hooks** — one blocks dispatch ca
 
 ```bash
 # From marketplace
-claude plugin add dispatch-contract@WooDragon-cc-plugins
+claude plugin install dispatch-contract@cc-plugins
 ```
 
 ## Architecture

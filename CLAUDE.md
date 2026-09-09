@@ -260,7 +260,7 @@ Claude Code auto-memory 子树使用根路径上下文精确排除；行为边�
 | 机制 | Hook 拦截（`hooks.json` + 脚本） | 知识注入（`SKILL.md` + references） |
 | 发现 | `.claude-plugin/` 目录 | `skills/<name>/SKILL.md` 目录 |
 | 执行 | 脚本自动执行 | AI 读取并遵循 |
-| 安装 | `claude plugin add` | `npx skills add` |
+| 安装 | `claude plugin install` | `npx skills add` |
 
 ## 历史记录
 
