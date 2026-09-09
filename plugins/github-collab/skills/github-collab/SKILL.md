@@ -1,18 +1,18 @@
 ---
 name: github-collab
 description: |
-  仓库已配成「管理者掌管 main 分支与 issue，协作者不能合并代码、只能提 PR 和 issue」的形态之后，两个角色各自怎么干活。当需要：
-  - 管理者视角：怎么把任务分派给协作者、协作者的 PR 到了怎么处理（先看 CI 再看代码）、怎么做评审裁决、要求修改和 approve 的区别、怎么合并、自己的 PR 怎么合（作者不能 approve 自己）
-  - 协作者视角：怎么认领 issue、同仓分支还是 fork、PR 描述该写什么、CI 挂了怎么自己诊断、收到 review 意见怎么逐条响应、PR 显示 `BLOCKED`/`REVIEW_REQUIRED` 合不了是不是权限故障
+  仓库已配成「管理者掌管 main 分支的合并权，协作者不能合并代码、只能提 PR 和 issue」的形态之后，两个角色各自怎么干活。当需要：
+  - 管理者视角：怎么和协作者对齐 issue 边界（不管 issue 是你派的还是他自己开的）、协作者的 PR 到了怎么处理（先看 CI 再看代码）、怎么做评审裁决、要求修改和 approve 的区别、怎么合并、自己的 PR 怎么合（作者不能 approve 自己）
+  - 协作者视角：怎么认领 issue、自己开 issue 自己做要注意什么、同仓分支还是 fork、PR 描述该写什么、CI 挂了怎么自己诊断、收到 review 意见怎么逐条响应、PR 显示 `BLOCKED`/`REVIEW_REQUIRED` 合不了是不是权限故障
   - 摩擦点排查：PR 卡住了，卡在 CI 红 / check 一直 pending / review 未 resolve / 分支落后 main / CODEOWNERS 没匹配到人的哪一环，该找谁解决
   - 把仓库配成这个形态：个人仓库 collaborator 权限颗粒度、分支保护规则怎么配、`enforce_admins` 死锁陷阱、required status checks 永久 pending 陷阱
   时调用此 Skill。
-  Triggers: github collaboration, 协作者工作流, 管理者工作流, 分支保护, branch protection, PR 卡住, PR blocked, review required, request changes, dismiss stale reviews, enforce_admins, CODEOWNERS, required status checks, 合并权限, collaborator permission, PR 合不了, 派任务给协作者, 提 PR 给这个仓库, 分派 issue.
+  Triggers: github collaboration, 协作者工作流, 管理者工作流, 分支保护, branch protection, PR 卡住, PR blocked, review required, request changes, dismiss stale reviews, enforce_admins, CODEOWNERS, required status checks, 合并权限, collaborator permission, PR 合不了, 派任务给协作者, 提 PR 给这个仓库, 分派 issue, 自己开 issue, issue 边界, 自认领.
 ---
 
 # GitHub 协作模式：管理者与协作者怎么干活
 
-前提形态：仓库已配成「管理者掌管 main 与 issue，协作者只能提 PR 和 issue，不能直接合并」。本 skill 讲两个角色在这个形态下**各自的日常工作流**，配置本身只在 §5 附录里给一次性动作。
+前提形态：仓库已配成「管理者掌管 main 的合并权，协作者只能提 PR 和 issue，不能直接合并」。issue 两边都能开——本 skill 讲两个角色在这个形态下**各自的日常工作流**，配置本身只在 §5 附录里给一次性动作。
 
 ## §1 角色与能力边界
 
@@ -45,15 +45,24 @@ gh api 'repos/{owner}/{repo}' --jq '.permissions |
 
 按事件顺序排列，不按功能罗列。
 
-### 1. 分派任务
+### 1. 对齐 issue 边界
 
-issue 要写到协作者**不用回来追问就能直接开工**的粒度，三要素缺一不可：
+issue 从哪边来都行——你出题指派，或者协作者自己发现问题自己开。**你在这一步的职责不是"出题"，是在有人动手之前把边界钉死**，因为最后是你来合。
+
+不管谁写的，动手前它得写到协作者**不用回来追问就能直接开工**的粒度，三要素缺一不可：
 - **背景**：为什么要做这个、现状是什么
 - **验收标准**：怎么判定这个 issue 算做完（可验证的行为，不是"优化一下"这种空话）
 - **边界**：明确不做什么，防止协作者顺手扩大范围
 
+协作者自己开的 issue 常缺后两项——它是按「我遇到了什么」写的，不是按「要做成什么」写的。这时候你的动作是**补上边界再放行**，不是另起一份自己的。
+
 ```bash
+# 你出题并指派
 gh issue create --title "..." --body "..." --assignee <collaborator-username> --label "..."
+
+# 协作者已开的 issue：补边界，指派，放行
+gh issue edit <issue-number> --body "..." --add-assignee <collaborator-username>
+gh issue comment <issue-number> --body "边界确认：..."
 ```
 
 ### 2. PR 到达
@@ -101,9 +110,13 @@ gh pr merge <pr-number> --squash --delete-branch --admin
 
 ## §3 协作者工作流
 
-### 1. 认领
+### 1. 认领或自开 issue
 
-从 issue 起步，动手前先确认边界读懂了没有；不确定的地方**在 issue 里问清楚再动手**，不要写完一半发现理解错了再回头问——那时候返工成本已经出去了。
+任务可以是管理者派给你的，也可以是你自己发现问题自己开的——issue 不是管理者的专属产出，`gh issue create --assignee "@me"` 是正常路径。
+
+两条路的差别不在于谁写，在于**动手前边界有没有被管理者确认过**。派给你的 issue，边界通常已经在正文里；自开自领的，正文往往只写了「我遇到了什么」，没写「要做成什么、不做什么」——这一段得补上并等一句确认再动手。管理者掌管 merge，你写完他不认，返工成本已经出去了。
+
+确认可以很轻：在 issue 里写清楚打算怎么改、动哪些文件、边界划在哪，等他回一句。不确定的地方**在 issue 里问清楚再动手**，不要写完一半发现理解错了再回头问。
 
 ### 2. 开分支
 
