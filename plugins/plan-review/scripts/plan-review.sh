@@ -271,6 +271,14 @@ CONV_FILE="$COUNTER_DIR/.conversation-${SESSION_ID}"
 # clearing it (see that branch below) — that is the highest-value moment for
 # cross-round memory, not a cycle end.
 HISTORY_FILE="$COUNTER_DIR/.review-history-${SESSION_ID}"
+# Plan hash of the most recent CONCERNS/REJECT-reviewed revision. The
+# non-Critical safety valve (below) only escalates a plan whose hash matches
+# this file's content — an edit made after the last review round must get
+# one more review, never ride the valve on the strength of a stale hash.
+# Written on CONCERNS (A.4), deleted on REJECT (Critical resets the whole
+# non-Critical cycle) and at every cycle-ending cleanup point alongside
+# CONV_FILE/HISTORY_FILE.
+REVIEWED_HASH_FILE="$COUNTER_DIR/.review-hash-${SESSION_ID}"
 # Dispatch state is session-scoped, but stale files are global debris. Clean
 # them for every valid plan-review invocation, including Tier0 plans that have
 # no Manifest and therefore never enter the approval serializer branch.
@@ -320,7 +328,7 @@ if [ -z "$PLAN" ] || [ "$PLAN" = "null" ]; then
   TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // ""' 2>/dev/null || echo "")
   CWD_VAL=$(echo "$INPUT" | jq -r '.cwd // ""' 2>/dev/null || echo "")
   log_decision "decision=deny reason=no-plan-content-fail-closed resolve=${RESOLVE_REASON:-none} resolvePath=${RESOLVE_PATH:-empty} planFilePath=${PLAN_FILE_PATH:-empty} top_keys=${TOP_KEYS} tool_input_keys=${TI_KEYS} transcript_path=${TRANSCRIPT_PATH:-empty} cwd=${CWD_VAL:-empty}"
-  rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
+  rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}" "${REVIEWED_HASH_FILE:-}"
   # Error message routed by the resolver's RESOLVE_REASON (see
   # lib/plan-source.sh: plan_source_error_reason) — sets $REASON directly.
   plan_source_error_reason
@@ -337,7 +345,7 @@ if [ -f "$APPROVE_MARKER" ]; then
   if [ -z "$APPROVED_HASH" ] || [ "$CURRENT_HASH" = "$APPROVED_HASH" ]; then
     # True ack-round: plan unchanged (empty marker = legacy format, unconditional allow)
     log_decision "decision=allow reason=ack-round-approved"
-    rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
+    rm -f "$APPROVE_MARKER" "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}" "${REVIEWED_HASH_FILE:-}"
     allow_with_reason "Red Team 审阅已通过，plan 放行。"
   else
     # Plan was modified after approve: marker invalid, delete and fall through to re-review.
@@ -360,13 +368,109 @@ if [ -f "$APPROVE_MARKER" ]; then
   fi
 fi
 
+# --- Safety-valve helper functions (defined here, before both valves use them) ---
+
+# arm_dispatch_state — parse the plan's Dispatch Manifest into dispatch-check's
+# state file so subsequent Agent/Task calls are enforced against it. Shared by
+# the APPROVE branch (below) and the non-Critical safety valve's escalation
+# branch (A.3): a Manifest that APPROVE would have armed is armed identically
+# when the round instead terminates via the valve — enforcement must not
+# silently lapse just because the cycle ended by escalation instead of a
+# clean APPROVE.
+#
+# Two landing checks beyond the pre-refactor inline version:
+#   - Pre-mv guard: if DISPATCH_FILE already exists and is NOT a regular file
+#     (e.g. pre-created as a directory), fail immediately WITHOUT attempting
+#     mv — `mv -f srcfile dir` does not error, it silently moves srcfile INTO
+#     the directory, which would both misreport success and leave a stray
+#     temp file behind.
+#   - Post-mv guard: after mv, re-require `-f` on DISPATCH_FILE AND a second
+#     dispatch_state_is_valid_v2 pass on the file actually sitting at that
+#     path (not the one validated before the move) — catches any other
+#     landing failure the pre-check does not.
+#
+# Returns 0 on success (state armed and re-verified), 1 on any failure. The
+# APPROVE call site ignores the return (fail-silent, unchanged contract); the
+# valve call site treats 1 as fail-closed (deny, do not escalate).
+arm_dispatch_state() {
+  mkdir -p "$DISPATCH_DIR" 2>/dev/null || true
+  DISPATCH_FILE="$DISPATCH_DIR/.dispatch-${SESSION_ID}.json"
+  if [ -e "$DISPATCH_FILE" ] && [ ! -f "$DISPATCH_FILE" ]; then
+    log_decision "manifest-write-skipped reason=target-not-regular"
+    return 1
+  fi
+  local dispatch_temp
+  dispatch_temp=$(mktemp "$DISPATCH_DIR/.dispatch-${SESSION_ID}.json.XXXXXX" 2>/dev/null || true)
+  if [ -z "$dispatch_temp" ] \
+     || ! parse_manifest_to_json "$PLAN" "$(plan_hash "$PLAN")" > "$dispatch_temp" 2>/dev/null \
+     || ! dispatch_state_is_valid_v2 "$dispatch_temp"; then
+    rm -f "${dispatch_temp:-}" "$DISPATCH_FILE"
+    log_decision "manifest-write-skipped reason=invalid-json"
+    return 1
+  fi
+  mv -f "$dispatch_temp" "$DISPATCH_FILE"
+  if [ -f "$DISPATCH_FILE" ] && dispatch_state_is_valid_v2 "$DISPATCH_FILE"; then
+    local dispatch_bytes
+    dispatch_bytes=$(wc -c < "$DISPATCH_FILE" | tr -d ' ')
+    log_decision "manifest-written file=$DISPATCH_FILE bytes=$dispatch_bytes"
+    return 0
+  fi
+  rm -f "${dispatch_temp:-}" "$DISPATCH_FILE"
+  log_decision "manifest-write-skipped reason=landing-failed"
+  return 1
+}
+
+# record_reviewed_hash <hash> — persist the plan hash this round's CONCERNS
+# verdict reviewed, so the non-Critical safety valve can distinguish "this
+# exact revision was just reviewed" from "the author edited the plan after
+# the last review round." Same region as arm_dispatch_state: both are
+# escalation-path helpers the valve branch consults.
+#
+# mktemp+mv (not a direct `printf > file`) for the same reason DISPATCH_FILE
+# uses a temp-then-rename: the valve's next-round `cat` on REVIEWED_HASH_FILE
+# must never observe a partially-written hash.
+#
+# Returns 0 on success, 1 on any failure (temp-file creation or write) —
+# callers must guard with `|| true` under set -euo pipefail. A failed write
+# degrades to "no hash recorded," which the valve already treats safely
+# (empty REVIEWED_HASH_FILE → review again, never a false escalation).
+# Same two landing checks as arm_dispatch_state: a pre-mv guard (fail before
+# attempting mv if REVIEWED_HASH_FILE exists and isn't a regular file — `mv -f
+# srcfile dir` doesn't error, it silently moves srcfile INTO the directory,
+# which would both misreport success and leave a stray temp file behind) and
+# a post-mv guard (re-require `-f` on REVIEWED_HASH_FILE after the move).
+record_reviewed_hash() {
+  local hash="$1"
+  if [ -e "$REVIEWED_HASH_FILE" ] && [ ! -f "$REVIEWED_HASH_FILE" ]; then
+    log_decision "reviewed-hash-write-failed reason=target-not-regular"
+    return 1
+  fi
+  local hash_temp
+  hash_temp=$(mktemp "$COUNTER_DIR/.review-hash-${SESSION_ID}.XXXXXX" 2>/dev/null || true)
+  if [ -z "$hash_temp" ] || ! printf '%s' "$hash" > "$hash_temp" 2>/dev/null; then
+    rm -f "${hash_temp:-}"
+    log_decision "reviewed-hash-write-failed"
+    return 1
+  fi
+  if ! mv -f "$hash_temp" "$REVIEWED_HASH_FILE" 2>/dev/null; then
+    rm -f "${hash_temp:-}"
+    log_decision "reviewed-hash-write-failed reason=mv-failed"
+    return 1
+  fi
+  if [ ! -f "$REVIEWED_HASH_FILE" ]; then
+    log_decision "reviewed-hash-write-failed reason=landing-failed"
+    return 1
+  fi
+  return 0
+}
+
 # --- Global safety valve: total rounds exhausted → hard deny (tombstone counter) ---
 # Never delete counter — tombstone blocks subsequent calls until human intervenes
 if [ "$TOTAL_ROUNDS" -ge "$REVIEW_MAX_TOTAL_ROUNDS" ]; then
   log_decision "decision=deny reason=global-safety-valve total=$TOTAL_ROUNDS"
   # Keep the COUNTER_FILE tombstone, but the review cycle is over — no further
   # engine call will happen, so drop the session ref to avoid an orphan CONV_FILE.
-  rm -f "${CONV_FILE:-}" "${HISTORY_FILE:-}"
+  rm -f "${CONV_FILE:-}" "${HISTORY_FILE:-}" "${REVIEWED_HASH_FILE:-}"
   BLOCK_MSG="## Red Team Review — HARD STOP
 
 审阅已达全局上限（${TOTAL_ROUNDS}/${REVIEW_MAX_TOTAL_ROUNDS}），仍存在未解决的审阅意见。
@@ -378,18 +482,67 @@ EOF
   exit 0
 fi
 
-# --- Non-Critical safety valve: CONCERNS rounds exhausted → allow (escalate to user) ---
+# --- Non-Critical safety valve: CONCERNS rounds exhausted → allow, but ONLY
+# if this exact plan revision is the one the last CONCERNS round reviewed
+# (A.3). Any other revision — edited after the last round, or a legacy
+# counter state predating this hash mechanism — gets one more real review
+# instead of riding the valve unreviewed. ---
 if [ "$ATTEMPT" -ge "$REVIEW_MAX_ROUNDS" ]; then
-  log_decision "decision=allow reason=non-critical-safety-valve round=$ATTEMPT total=$TOTAL_ROUNDS"
-  rm -f "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
-  VALVE_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
+  CURRENT_HASH=$(plan_hash "$PLAN")
+  REVIEWED_HASH=$(cat "$REVIEWED_HASH_FILE" 2>/dev/null || true)
+  if [ -z "$REVIEWED_HASH" ] || [ "$CURRENT_HASH" != "$REVIEWED_HASH" ]; then
+    # Empty REVIEWED_HASH covers every "not reviewed at this revision" case
+    # uniformly: hash file absent, a directory, or unreadable. Do NOT allow,
+    # do NOT clear the counter — fall through to pre-flight and the engine
+    # review below. A CONCERNS verdict there increments the counter as usual
+    # and records this revision's hash (A.4), so the next identical-revision
+    # ExitPlanMode call clears the valve.
+    log_decision "decision=review-again reason=plan-not-reviewed-at-this-revision round=$ATTEMPT total=$TOTAL_ROUNDS"
+  else
+    if has_manifest "$PLAN"; then
+      if arm_dispatch_state; then
+        log_decision "decision=allow reason=non-critical-safety-valve round=$ATTEMPT total=$TOTAL_ROUNDS"
+        rm -f "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}" "$REVIEWED_HASH_FILE"
+        VALVE_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
 
-非 Critical 磋商已达上限（${ATTEMPT}/${REVIEW_MAX_ROUNDS}），未能达成一致。Plan 直接呈现给用户做最终裁决。"
-  VALVE_JSON=$(printf '%s' "$VALVE_MSG" | jq -Rs .)
-  cat << EOF
+非 Critical 磋商已达上限（${ATTEMPT}/${REVIEW_MAX_ROUNDS}），未能达成一致。Plan 直接呈现给用户做最终裁决。
+已按 plan 的 Dispatch Manifest 写入 dispatch-check 状态，Agent 调用须与 Manifest 签名一致。"
+        VALVE_JSON=$(printf '%s' "$VALVE_MSG" | jq -Rs .)
+        cat << EOF
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${VALVE_JSON}}}
 EOF
-  exit 0
+        exit 0
+      else
+        # Fail-closed: a Manifest that cannot be armed must not let the plan
+        # through un-enforced. Same accounting as a pre-flight rejection —
+        # TOTAL_ROUNDS increments, ATTEMPT is frozen — so persistent failure
+        # still eventually trips the global valve. arm_dispatch_state already
+        # cleaned up any dispatch temp/target file it touched internally.
+        TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
+        echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
+        log_decision "decision=deny reason=valve-arm-failed round=$ATTEMPT total=$TOTAL_ROUNDS"
+        ARM_FAIL_MSG="## Red Team Pre-flight — DISPATCH STATE NOT ARMED
+
+Manifest 无法序列化为 dispatch 状态，请按 v2 七列修正 Manifest 后重试。"
+        ARM_FAIL_JSON=$(printf '%s' "$ARM_FAIL_MSG" | jq -Rs .)
+        cat << EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${ARM_FAIL_JSON}}}
+EOF
+        exit 0
+      fi
+    else
+      log_decision "decision=allow reason=non-critical-safety-valve round=$ATTEMPT total=$TOTAL_ROUNDS"
+      rm -f "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}" "$REVIEWED_HASH_FILE"
+      VALVE_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
+
+非 Critical 磋商已达上限（${ATTEMPT}/${REVIEW_MAX_ROUNDS}），未能达成一致。Plan 直接呈现给用户做最终裁决。"
+      VALVE_JSON=$(printf '%s' "$VALVE_MSG" | jq -Rs .)
+      cat << EOF
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${VALVE_JSON}}}
+EOF
+      exit 0
+    fi
+  fi
 fi
 
 # --- Pre-flight manifest checks (AFTER non-critical valve, not before) ---
@@ -725,21 +878,12 @@ if [ "$VERDICT" = "APPROVE" ]; then
   # Write plan hash to marker — ack-round guard compares hash to detect post-approve edits
   printf '%s' "$(plan_hash "$PLAN")" > "$APPROVE_MARKER"
 
-  # Parse manifest → dispatch JSON for Layer 2 enforcement (fail-silent: Layer 2 self-disables)
+  # Parse manifest → dispatch JSON for Layer 2 enforcement (fail-silent: Layer 2
+  # self-disables). arm_dispatch_state (defined above, shared with the
+  # non-Critical safety valve's escalation branch) does the parse/validate/
+  # write/re-verify sequence; this call site ignores its return value.
   if has_manifest "$PLAN"; then
-    mkdir -p "$DISPATCH_DIR" 2>/dev/null || true
-    DISPATCH_FILE="$DISPATCH_DIR/.dispatch-${SESSION_ID}.json"
-    DISPATCH_TEMP=$(mktemp "$DISPATCH_DIR/.dispatch-${SESSION_ID}.json.XXXXXX" 2>/dev/null || true)
-    if [ -n "$DISPATCH_TEMP" ] \
-       && parse_manifest_to_json "$PLAN" "$(plan_hash "$PLAN")" > "$DISPATCH_TEMP" 2>/dev/null \
-       && dispatch_state_is_valid_v2 "$DISPATCH_TEMP"; then
-      mv -f "$DISPATCH_TEMP" "$DISPATCH_FILE"
-      dispatch_bytes=$(wc -c < "$DISPATCH_FILE" | tr -d ' ')
-      log_decision "manifest-written file=$DISPATCH_FILE bytes=$dispatch_bytes"
-    else
-      rm -f "${DISPATCH_TEMP:-}" "$DISPATCH_FILE"
-      log_decision "manifest-write-skipped reason=invalid-json"
-    fi
+    arm_dispatch_state || true
   fi
 
   # Emit deny so Claude presents the approval to the user (allow reasons are invisible)
@@ -750,11 +894,22 @@ fi
 TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
 
 if [ "$VERDICT" = "REJECT" ]; then
-  # REJECT (Critical): reset ATTEMPT so subsequent non-Critical rounds restart fresh
+  # REJECT (Critical): reset ATTEMPT so subsequent non-Critical rounds restart fresh.
+  # Also drop the reviewed-hash marker (A.4) — a Critical reset restarts the
+  # whole non-Critical cycle, so no revision should be treated as "already
+  # reviewed" by the safety valve after this point.
   ATTEMPT=0
+  rm -f "$REVIEWED_HASH_FILE"
 else
-  # CONCERNS: non-Critical, increment ATTEMPT
+  # CONCERNS: non-Critical, increment ATTEMPT.
   ATTEMPT=$((ATTEMPT + 1))
+  # Record which revision this CONCERNS round reviewed (A.4) — the safety
+  # valve only escalates a revision whose hash matches this file's content.
+  # `|| true`: under set -euo pipefail a failed hash write must never abort
+  # the hook mid-deny; record_reviewed_hash's own cleanup already makes a
+  # write failure equivalent to "no hash recorded," which the valve already
+  # treats safely (empty file → review again, never a false escalation).
+  record_reviewed_hash "$(plan_hash "$PLAN")" || true
 fi
 
 echo "${ATTEMPT}:${TOTAL_ROUNDS}" > "$COUNTER_FILE"
