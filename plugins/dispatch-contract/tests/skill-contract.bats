@@ -88,6 +88,88 @@ assert_not_contains() {
   return 0
 }
 
+# 读取真实交付文档；指定标题时只返回该顶层章节，避免别节措辞掩盖缺项。
+read_contract_text() {
+  python3 - "$BATS_TEST_DIRNAME/../$1" "${2:-}" <<'PY'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+heading = sys.argv[2]
+if heading:
+    lines = text.splitlines()
+    matches = [index for index, line in enumerate(lines) if line == heading]
+    if len(matches) != 1:
+        raise SystemExit(f"目标章节应唯一：{heading}，实际 {len(matches)} 个")
+    start = matches[0] + 1
+    end = next((index for index in range(start, len(lines))
+                if re.match(r"^##(?:\s|$)", lines[index])), len(lines))
+    text = "\n".join(lines[start:end])
+if not text.strip():
+    raise SystemExit("目标契约为空")
+print(text)
+PY
+}
+
+@test "定稿纪律摘要要求定稿依据而不按篇幅拒绝" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/SKILL.md '## 四铁律速查')"
+  assert_contains "$text" "结论须来自已定稿的产物" "摘要缺少定稿前置条件"
+  assert_contains "$text" "影响决定的依据和未决事项" "摘要缺少决定所需内容"
+  assert_contains "$text" "原始证据可通过可核查的引用提供" "摘要未允许证据引用"
+  assert_contains "$text" "中间回传不能替代定稿" "摘要缺少中间回传边界"
+  assert_not_contains "$text" "不采信精简/中间回传" "摘要仍按篇幅一刀切拒绝"
+}
+
+@test "定稿纪律允许证据直接定位并保留最终消息义务" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律④：定稿纪律（己方，主 agent 侧）')"
+  assert_contains "$text" "完整性指当前交付的结论、影响决定的依据和未决事项" "完整性未定义为决定所需内容"
+  assert_contains "$text" "不要求复制全文日志" "完整性仍可能被读为全文复制"
+  assert_contains "$text" "接收者可读的直接定位" "引用缺少可核查的访问边界"
+  assert_contains "$text" "关键原文可摘录" "缺少关键原文摘录许可"
+  assert_contains "$text" "摘录应保留已证与未证的边界" "摘录可能丢失证据边界"
+  assert_contains "$text" "最终报告本身仍应在最终消息中交付" "引用取代了最终消息产物"
+  assert_contains "$text" '不应只回“已完成/见文件”' "缺少单行完成说明的排除"
+}
+
+@test "定稿纪律正反例区分简短定稿与初步定性" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律④：定稿纪律（己方，主 agent 侧）')"
+  assert_contains "$text" "4 个 bug 全 CONFIRMED" "原反例的初步定性丢失"
+  assert_contains "$text" "3 个 REFUTED" "原反例的最终反证丢失"
+  assert_contains "$text" "问题在最终定性缺失，不在篇幅短" "反例仍归罪于篇幅"
+  assert_contains "$text" "简短的定稿报告" "正例未允许简短定稿"
+  assert_contains "$text" "依据和未决事项" "正例缺少决定所需内容"
+  assert_contains "$text" "中间回传不能替代定稿" "缺少不应据初步定性决策的边界"
+  assert_not_contains "$text" "不采信精简/中间回传" "规范仍一刀切排除精简回传"
+  assert_not_contains "$text" "收到精简/中间回传时" "正例仍将篇幅等同于未定稿"
+  assert_not_contains "$text" "先拿到精简回传" "反例仍把篇幅作为失败原因"
+}
+
+@test "定稿证据引用不改变标准行与消息文件双载体边界" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/SKILL.md '## 定稿标记：`%%DONE%%`')"
+  assert_contains "$text" '> 末尾单独一行输出 `%%DONE%%`。在此之前给出完整报告，含验证矩阵（被验证物路径+实际执行的命令 vs 交付物路径）与未完成项两节。' "标准行被改写"
+  assert_contains "$text" "两个载体各管各的、不互相替代" "消息与文件边界丢失"
+  assert_contains "$text" "报告与结论**仍须在最终消息里**给出" "最终消息义务丢失"
+  assert_contains "$text" "`.wip` 追加写 + 末行 `%%DONE%%`" "WIP 交付模式丢失"
+  assert_contains "$text" "promote-wip.sh <target_path>" "WIP 发布入口丢失"
+}
+
+@test "README 定稿契约允许引用但不允许仅回完成说明" {
+  local text
+  text="$(read_contract_text README.md '## The `%%DONE%%` Contract')"
+  assert_contains "$text" "Finalization is independent of report length" "README 混淆篇幅与最终性"
+  assert_contains "$text" "conclusions, decision-relevant grounds, and unresolved matters" "README 缺少决定所需内容"
+  assert_contains "$text" "direct references that the recipient can read and verify" "README 缺少可核查引用许可"
+  assert_contains "$text" "not a requirement to copy full logs" "README 将完整性扩大为全文日志"
+  assert_contains "$text" "established and unverified claims" "README 摘录丢失已证与未证边界"
+  assert_contains "$text" "Intermediate updates cannot replace a finalized deliverable" "README 未排除中间回传替代定稿"
+  assert_contains "$text" "The final message must still deliver the report itself" "README 缺少最终消息义务"
+  assert_contains "$text" 'not just a "done / see file" status note' "README 未排除完成说明替代产物"
+}
+
 @test "再派停止条件要求完整前置条件与至少一项价值依据" {
   run extract_stop_condition
   if [ "$status" -ne 0 ]; then

@@ -90,6 +90,13 @@ deliverable, append the canonical marker line, copied verbatim from the `定稿�
 `skills/subagent-dispatch/SKILL.md`. That line carries both halves of the ask: give the full
 report, *then* end with the marker.
 
+Finalization is independent of report length. A complete report includes the current
+conclusions, decision-relevant grounds, and unresolved matters; it is not a requirement to copy full logs.
+Raw evidence may be supplied through direct references that the recipient can read and verify.
+Excerpts of key evidence must preserve the distinction between established and unverified claims.
+The final message must still deliver the report itself, not just a "done / see file" status note.
+Intermediate updates cannot replace a finalized deliverable for dispatch decisions or irreversible actions.
+
 This README deliberately shows no shortened version. A format-only paraphrase such as
 `末尾单独一行输出 %%DONE%%。` drops the report half and reads literally as "output nothing but
 the marker" — the exact failure the gate now rejects.
@@ -536,8 +543,10 @@ file exercises is also verified not to still get caught by a sibling gate —
 see `gate-composition.bats`'s header for the issue-shaped failure mode this
 exists to catch mechanically rather than by header comment.
 
-The `skill-contract.bats` suite reads the real
-`skills/subagent-dispatch/references/offload-scenarios.md` directly. It locks
+The `skill-contract.bats` suite reads the real `skills/subagent-dispatch/SKILL.md`,
+`references/dispatch-contract.md`, `references/offload-scenarios.md`, and this README.
+It checks finalization independently of report length, verifiable evidence references,
+final-message delivery, and the canonical marker line and file-delivery boundaries. It locks
 the requirement that the main context first have a complete final result
 sufficient to support its current decision before applying the re-dispatch
 stop condition. It also locks the value of a concrete factual gap or an

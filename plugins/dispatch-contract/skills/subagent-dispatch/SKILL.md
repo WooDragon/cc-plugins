@@ -24,7 +24,7 @@ description: |
 | ①输出即产物 | 最终返回消息本身就是产物，禁止写完成说明或元总结；需要定稿交付时用 `%%DONE%%` 结束标记声明，由 SubagentStop 门禁强制 | 见 references/dispatch-contract.md |
 | ②范围围栏 | 只改指定文件/只做指定事，范围外发现只报告不动手 | 见 references/dispatch-contract.md |
 | ③渐进产出 | 大调研/长任务分段读、尽早吐中间进展，避免触发 stall watchdog | 见 references/dispatch-contract.md |
-| ④定稿纪律 | 据以派活或做不可逆动作的结论必须来自完整定稿产物，不采信精简/中间回传 | 见 references/dispatch-contract.md |
+| ④定稿纪律 | 据以派活或做不可逆动作的结论须来自已定稿的产物。产物应包含影响决定的依据和未决事项。原始证据可通过可核查的引用提供。中间回传不能替代定稿 | 见 references/dispatch-contract.md |
 
 ## Explore 任务级别（派发端）
 
