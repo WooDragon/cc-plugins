@@ -179,6 +179,36 @@ teardown() {
   done
 }
 
+@test "composition #2a: Team redteam with explicit sonnet and SendMessage routing clears Agent and Task gates" {
+  local cwd="$TEST_TEMP_DIR/team-redteam"
+  local team_prompt='请确认现有派发流程的说明是否完整，并把结论汇报给我。开始前使用 ToolSearch select:SendMessage 加载 SendMessage。完成后通过 SendMessage(to:"main") 发送同一份完整报告；不要依赖 teammate 最终消息自动回传。'
+  mkdir -p "$cwd/.claude/agents"
+  printf 'redteam role\n' > "$cwd/.claude/agents/redteam.md"
+  local tool payload s rc
+  for tool in Agent Task; do
+    discover_agent_gates
+    [[ "$tool" == "Task" ]] && discover_task_gates
+    payload=$(mk_composed_payload "$tool" "omit" "redteam-1" "redteam" "$cwd" "$team_prompt" "$NEUTRAL_DESC" "sonnet")
+    [[ "$(jq -r '.tool_input.name' <<<"$payload")" == "redteam-1" ]]
+    [[ "$(jq -r '.tool_input.model' <<<"$payload")" == "sonnet" ]]
+    [[ "$(jq -r '.tool_input.prompt' <<<"$payload")" == "$team_prompt" ]]
+    [[ "$team_prompt" == *'ToolSearch select:SendMessage'* ]]
+    [[ "$team_prompt" == *'SendMessage(to:"main")'* ]]
+    [[ "$team_prompt" == *'不要依赖 teammate 最终消息自动回传'* ]]
+    run jq -e '.tool_input | has("run_in_background")' <<<"$payload"
+    [ "$status" -eq 1 ]
+    for s in "${GATE_SCRIPTS[@]}"; do
+      run_one_gate "$s" "$payload"
+      rc="$ONE_GATE_EXIT"
+      [ "$rc" -eq 0 ] || {
+        echo "Team redteam sonnet payload was BLOCKed by $(basename "$s") for $tool (exit $rc)"
+        echo "stderr: $ONE_GATE_STDERR"
+        return 1
+      }
+    done
+  done
+}
+
 # ============================================================
 # Negative controls (Design requirement C — the load-bearing check).
 # ============================================================

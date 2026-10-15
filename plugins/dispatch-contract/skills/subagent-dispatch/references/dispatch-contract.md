@@ -74,6 +74,8 @@
 
 `Agent` 和 `Task` 调用应让正确的一方拥有 `model`。runtime-owned 内置类型必须在调用中提供非空、非空白的 model。model-optional 内置类型（唯一成员是 `plan`）可省略 model 或填 `null`，表示跟随主 session 档位；调用方也可显式提供有效模型名。空字符串和纯空白不表示跟随，也不是有效模型名，因此会被拒绝。具名注册 agent 必须省略 model 或填 `null`；任何其他值（包括 `inherit`、空字符串和空白）都会被视为覆盖并被拒绝。
 
+此即席模型 ownership 门禁只适用于顶层 `agent_id` 与 `tool_input.name` 均缺失或为空白的调用。任一字段非空白时，门禁跳过自身检查；其他门禁仍检查各自契约。
+
 > **前置阅读**：三分类（runtime-owned / model-optional / 其余即注册）的唯一维护清单，修改类型归属或判断派发字段前必须先读取：
 > [`hooks/lib/agent-kind.sh`](../../../hooks/lib/agent-kind.sh)
 

@@ -415,9 +415,9 @@ case "$TYPE" in
 esac
 
 # --- Judgment C (new): NEEDS_CAP && runtime-owned type && explicit haiku ---
-# Registered agents own their model in frontmatter. Their model field must be
-# omitted (enforced by dispatch-agent-ownership-guard.sh), so C only judges
-# runtime-owned built-ins that explicitly select a haiku model on this call.
+# Ad-hoc registered-agent calls must omit model (enforced by
+# dispatch-agent-ownership-guard.sh). Team calls bypass that ownership check;
+# C still judges only runtime-owned built-ins with an explicit haiku model.
 if [ "$NEEDS_CAP" -eq 1 ] \
    && is_runtime_model_agent "$TYPE" \
    && [[ "$MODEL_LC" == *haiku* ]]; then

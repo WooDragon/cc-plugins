@@ -4,6 +4,8 @@
 # the parent session when omitted or null, and named registered types own model
 # selection in their definitions. Missing subagent_type follows the runtime's
 # general-purpose default.
+# A nonblank top-level agent_id or tool_input.name skips this guard. The model
+# ownership classes below apply only to ad-hoc dispatches.
 #
 # This guard deliberately does not rely on sibling gates: model ownership is a
 # complete judgment over this call's payload and is valid regardless of whether
@@ -29,6 +31,16 @@ if ! jq -e '.tool_input | type == "object"' <<<"$GATE_INPUT" >/dev/null 2>&1; th
   printf '[GATE-DEGRADE] dispatch-agent-ownership-guard: tool_input extract failed\n' >&2
   exit 0
 fi
+
+# Team-owned calls do not use this ad-hoc model-ownership matrix. Keep the
+# same identity checks as dispatch-sync-guard; sibling gates still judge their
+# own channel and capability contracts.
+if jq -e 'has("agent_id") and .agent_id != null' <<<"$GATE_INPUT" >/dev/null 2>&1; then
+  TEAM_AGENT_ID=$(jq -r '.agent_id' <<<"$GATE_INPUT" 2>/dev/null) || exit 0
+  [[ ! "$TEAM_AGENT_ID" =~ ^[[:space:]]*$ ]] && exit 0
+fi
+TEAM_NAME=$(jq -r '.tool_input.name // empty' <<<"$GATE_INPUT" 2>/dev/null) || exit 0
+[[ ! "$TEAM_NAME" =~ ^[[:space:]]*$ ]] && exit 0
 
 ownership_reject() {
   printf '[dispatch-agent-ownership-guard] 逃生舱：在 ~/.claude/settings.json 的 env 段设置 "ALLOW_AGENT_MODEL_INHERIT": "1"（Bash 内 export 对 hook 进程不生效，仅可作直接调用本脚本时的同进程调试用；临时开启后须销账关闭，长期常开会致门禁全局失效）。\n' >&2

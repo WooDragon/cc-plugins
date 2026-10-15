@@ -258,6 +258,10 @@ document. Read
 `skills/subagent-dispatch/references/dispatch-contract.md` before changing the
 policy, the caller-side model field, or its escape hatch.
 
+This ad-hoc model check applies only when both Team identity signals are absent
+or blank: top-level `agent_id` and `tool_input.name`. If either is nonblank, this
+guard skips its model check; sibling guards still evaluate their own contracts.
+
 The guard has three repairs. Add a non-empty runtime model for a runtime-owned
 built-in. For a model-optional built-in, omit `model` or use `null` to follow the
 parent session, or provide a valid model name. For a registered-agent call,
