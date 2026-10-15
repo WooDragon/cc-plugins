@@ -110,4 +110,6 @@ description: |
 
 Team 仅复用铁律②的必要性内容；派发授权、生命周期、回传与阶段仍归 TeamOps。不将 ad-hoc 的整套机制套入 Team。Team 派发方应通过上方前置阅读入口读取必要性正文；该阅读不替代 TeamOps 的正式派发授权。web-search 的搜索隔离用 web-search skill 自己的规范。
 
+模型 ownership 门禁仅检查缺少 Team 身份的即席调用：顶层 `agent_id` 与 `tool_input.name` 均缺失或为空白时才执行模型分类。任一字段非空白时，该门禁跳过自身检查；其他门禁仍检查各自契约。
+
 **即席派发经济性**：先按任务能力选择角色和模型，再按所有权填写调用字段。`hooks/dispatch-capability-guard.sh` 判断角色/模型能否执行请求（判据 A/B/C）。`hooks/dispatch-agent-ownership-guard.sh` 判断调用者是否有权覆盖 `model`：runtime-owned 内置类型必须显式提供非空、非空白 model；model-optional 内置类型可省略或填 `null` 以跟随主 session 档位，也可显式提供有效模型名，但空串和纯空白仍拒绝；具名注册 agent 必须省略 model 或填 `null`。派发前应先读取 `references/dispatch-contract.md` 的「Model ownership」；该节再指向唯一维护类型清单的 helper。紧急放行可在 `~/.claude/settings.json` 的 `env` 段设 `"ALLOW_AGENT_MODEL_INHERIT": "1"`；Bash 内 `export` 不会传给 hook 进程。
