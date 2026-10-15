@@ -111,6 +111,76 @@ print(text)
 PY
 }
 
+@test "范围围栏以原要求和可读来源说明工作必要性" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "不做这件事，原来的哪项完成条件或必要约束会不成立？现有证据为什么回答不了？" "缺少必要性两问原文"
+  assert_contains "$text" "每次真实工作委托" "必要性义务未覆盖真实工作委托"
+  assert_contains "$text" "原用户授权、适用的既有安全／质量约束，以及这些边界内批准的计划" "原要求来源不完整"
+  assert_contains "$text" "接收者可直接读取的来源定位" "缺少可读取的原要求依据"
+  assert_contains "$text" "候选任务自己新增的 DoD、报告、测试或 manifest 不能循环证明自身必要" "候选交付可以自证必要"
+}
+
+@test "范围围栏区分首次证据缺口与复验证据失效" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "首次实现尚无结果证据时，说明尚缺什么即可" "首次工作被要求先造证明"
+  assert_contains "$text" "不要求先制作证明材料" "缺少首次证明边界"
+  assert_contains "$text" "复验应说明已有证据为何失效或尚未覆盖" "缺少复验依据"
+  assert_contains "$text" "换执行者、换报告、非功能表示差异不自动使证据失效" "无关变化可作废已有证据"
+}
+
+@test "范围围栏保留原授权内纠错而不授权新增目标" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "原授权内必要调查、修复和针对性复测仍属原执行" "必要纠错被新规则阻断"
+  assert_contains "$text" "原计划未逐字列出不构成禁止" "计划被误读成逐字白名单"
+  assert_contains "$text" "新增目标、权限或独立交付仍走原有停止和裁决路径" "必要性说明扩大了授权"
+}
+
+@test "范围围栏允许简短复用并排除通知和递归前审" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "短正文或可直接读取的既有引用" "必要性说明强制增加证明文件"
+  assert_contains "$text" "纯通知、待命和不改变工作的澄清不是新工作委托" "非工作消息被强制重新派发"
+  assert_contains "$text" "审阅委托同样应说明必要性" "审阅委托缺少必要性义务"
+  assert_contains "$text" "不递归新增“审阅这次审阅是否必要”的任务" "审阅要求递归造前审"
+}
+
+@test "范围围栏只复用已有 redteam 前审且不承诺全路径拦截" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "已有 redteam 前审入口" "未接入既有前审"
+  assert_contains "$text" "无前审路径保留原执行路径，不新增前审流程" "无前审路径被补造前审"
+  assert_contains "$text" "前审批准只覆盖送审对象" "前审批准被扩展到以后派发"
+  assert_contains "$text" "后置审阅不计作执行前防护" "后审冒充前审"
+  assert_contains "$text" "不保证所有路径都自动加载或执行前阻断" "夸大全路径硬拦截"
+}
+
+@test "必要性两问仅在范围围栏维护正文且 skill 入口要求前置阅读" {
+  local text skill question
+  question='不做这件事，原来的哪项完成条件或必要约束会不成立？现有证据为什么回答不了？'
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md)"
+  skill="$(read_contract_text skills/subagent-dispatch/SKILL.md)"
+  run python3 -c 'import sys; assert sys.argv[1].count(sys.argv[2]) == 1' "$text" "$question"
+  [ "$status" -eq 0 ]
+  assert_not_contains "$skill" "$question" "skill 入口复制了两问正文"
+  assert_contains "${skill%%---$'\n\n'*}" "派发必要性" "description 未暴露必要性入口"
+  text="$(read_contract_text skills/subagent-dispatch/SKILL.md '## 四铁律速查')"
+  assert_contains "$text" "②范围围栏 | 说明工作必要性与证据缺口" "铁律②摘要未同步"
+  assert_contains "$skill" "真实工作委托前应先读取" "缺少派发前置阅读义务"
+  assert_contains "$skill" '[references/dispatch-contract.md 的「铁律②：范围围栏」](references/dispatch-contract.md#铁律②范围围栏)' "入口未定位权威章节"
+}
+
+@test "Team 只复用必要性内容且授权生命周期仍归 TeamOps" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/SKILL.md '## 与其他机制的边界')"
+  assert_contains "$text" "Team 仅复用铁律②的必要性内容" "Team 未复用必要性规则"
+  assert_contains "$text" "派发授权、生命周期、回传与阶段仍归 TeamOps" "Team 控制边界丢失"
+  assert_contains "$text" "不将 ad-hoc 的整套机制套入 Team" "ad-hoc 机制侵入 Team"
+  assert_not_contains "$text" "不适用本 skill" "旧的全盘排除与必要性复用冲突"
+}
+
 @test "定稿纪律摘要要求定稿依据而不按篇幅拒绝" {
   local text
   text="$(read_contract_text skills/subagent-dispatch/SKILL.md '## 四铁律速查')"

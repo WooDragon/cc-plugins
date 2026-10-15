@@ -1,8 +1,8 @@
 ---
 name: subagent-dispatch
 description: |
-  子 agent 派发契约——四条铁律正反例、卸载场景判断、Explore 任务级别三档、定稿标记机制、Workflow schema 用法。当需要：
-  - 派发 subagent / spawn agent / delegate to agent，想确认 prompt 格式与交付物形态是否合规
+  子 agent 派发契约——派发必要性与证据缺口、四条铁律正反例、卸载场景判断、Explore 任务级别三档、定稿标记机制、Workflow schema 用法。当需要：
+  - 派发 subagent / spawn agent / delegate to agent，需说明工作必要性、证据缺口，或确认 prompt 格式与交付物形态是否合规
   - dispatch subagent 时不确定「输出即产物」「范围围栏」「渐进产出」「定稿纪律」哪条该套用
   - 判断某任务该不该卸载（offload）、用哪个模型档位
   - 派发 Explore 时不确定任务级别该钉 `quick` / `medium` / `very thorough` 哪一档
@@ -15,14 +15,17 @@ description: |
 
 # 子 agent 派发契约
 
-四条铁律的一句话版常驻全局 CLAUDE.md，对一切派发生效。本 skill 是低频查阅的展开——需要正反例、拿不准场景归类、或要用 Workflow 强制结构化产物时才读。
+四条铁律的一句话版常驻全局 CLAUDE.md。本 skill 维护展开正文及派发必要性规则；Team 的适用范围见「与其他机制的边界」。
+
+> **前置阅读**：工作必要性、证据缺口与原授权内执行的边界，真实工作委托前应先读取：
+> [references/dispatch-contract.md 的「铁律②：范围围栏」](references/dispatch-contract.md#铁律②范围围栏)。
 
 ## 四铁律速查
 
 | 铁律 | 一句话 | 展开 |
 |---|---|---|
 | ①输出即产物 | 最终返回消息本身就是产物，禁止写完成说明或元总结；需要定稿交付时用 `%%DONE%%` 结束标记声明，由 SubagentStop 门禁强制 | 见 references/dispatch-contract.md |
-| ②范围围栏 | 只改指定文件/只做指定事，范围外发现只报告不动手 | 见 references/dispatch-contract.md |
+| ②范围围栏 | 说明工作必要性与证据缺口；只改指定文件/只做指定事，范围外发现只报告不动手 | 见 references/dispatch-contract.md |
 | ③渐进产出 | 大调研/长任务分段读、尽早吐中间进展，避免触发 stall watchdog | 见 references/dispatch-contract.md |
 | ④定稿纪律 | 据以派活或做不可逆动作的结论须来自已定稿的产物。产物应包含影响决定的依据和未决事项。原始证据可通过可核查的引用提供。中间回传不能替代定稿 | 见 references/dispatch-contract.md |
 
@@ -105,6 +108,6 @@ description: |
 
 ## 与其他机制的边界
 
-team-ops 语境下派发由 team-ops 协议（handoff/control-signal）接管，不适用本 skill；web-search 的搜索隔离用 web-search skill 自己的规范。
+Team 仅复用铁律②的必要性内容；派发授权、生命周期、回传与阶段仍归 TeamOps。不将 ad-hoc 的整套机制套入 Team。Team 派发方应通过上方前置阅读入口读取必要性正文；该阅读不替代 TeamOps 的正式派发授权。web-search 的搜索隔离用 web-search skill 自己的规范。
 
 **即席派发经济性**：先按任务能力选择角色和模型，再按所有权填写调用字段。`hooks/dispatch-capability-guard.sh` 判断角色/模型能否执行请求（判据 A/B/C）。`hooks/dispatch-agent-ownership-guard.sh` 判断调用者是否有权覆盖 `model`：runtime-owned 内置类型必须显式提供非空、非空白 model；model-optional 内置类型可省略或填 `null` 以跟随主 session 档位，也可显式提供有效模型名，但空串和纯空白仍拒绝；具名注册 agent 必须省略 model 或填 `null`。派发前应先读取 `references/dispatch-contract.md` 的「Model ownership」；该节再指向唯一维护类型清单的 helper。紧急放行可在 `~/.claude/settings.json` 的 `env` 段设 `"ALLOW_AGENT_MODEL_INHERIT": "1"`；Bash 内 `export` 不会传给 hook 进程。
