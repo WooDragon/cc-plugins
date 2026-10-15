@@ -393,3 +393,20 @@ EOF
     done
   done
 }
+
+@test "ownership #22: Team identity skips runtime model requirement before classification" {
+  local tool payload
+  for tool in Agent Task; do
+    payload=$(mk_ownership_payload "$tool" general-purpose omit __OMIT__ __OMIT__ teammate-1)
+    [[ "$(jq -e '.tool_input | has("model") | not' <<<"$payload")" == "true" ]]
+    [[ "$(jq -r '.agent_id' <<<"$payload")" == "teammate-1" ]]
+    run_ownership_guard "$payload"
+    assert_ownership_pass
+
+    payload=$(mk_ownership_payload "$tool" general-purpose omit __OMIT__ lead)
+    [[ "$(jq -e '.tool_input | has("model") | not' <<<"$payload")" == "true" ]]
+    [[ "$(jq -r '.tool_input.name' <<<"$payload")" == "lead" ]]
+    run_ownership_guard "$payload"
+    assert_ownership_pass
+  done
+}

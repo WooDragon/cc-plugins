@@ -4,6 +4,8 @@
 # the parent session when omitted or null, and named registered types own model
 # selection in their definitions. Missing subagent_type follows the runtime's
 # general-purpose default.
+# A nonblank top-level agent_id or tool_input.name skips this guard. The model
+# ownership classes below apply only to ad-hoc dispatches.
 #
 # This guard deliberately does not rely on sibling gates: model ownership is a
 # complete judgment over this call's payload and is valid regardless of whether
