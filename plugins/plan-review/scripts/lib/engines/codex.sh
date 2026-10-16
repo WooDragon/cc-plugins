@@ -83,7 +83,7 @@ engine_probe() {
 #     ENGINE_ERR_POLICY — see backfill_engine_err() in lib/common.sh and
 #     engine_err_filter() below, NOT handled inline here anymore. ---
 engine_invoke() {
-  # Model id can contain spaces (see AGY_MODEL's default "Gemini 3.1 Pro
+  # Model id can contain spaces (see AGY_MODEL's default "Gemini 4 Argon
   # (High)" precedent) — must be an array, not ${VAR:+...} word-splitting.
   CODEX_MODEL_ARGS=()
   [ -z "$CODEX_MODEL" ] || CODEX_MODEL_ARGS=(-m "$CODEX_MODEL")

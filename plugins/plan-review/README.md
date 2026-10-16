@@ -87,7 +87,7 @@ names.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REVIEW_ENGINE` | `gemini` | Review engine: `gemini` (default, routed through the local `agy` CLI), `claude` (`claude -p` subprocess), or `codex` (`codex exec` subprocess) |
-| `AGY_MODEL` | `Gemini 3.1 Pro (High)` | Model id passed to the `agy` CLI when `REVIEW_ENGINE=gemini` |
+| `AGY_MODEL` | `Gemini 4 Argon (High)` | Model id passed to the `agy` CLI when `REVIEW_ENGINE=gemini` |
 | `CLAUDE_MODEL` | `opus` | Claude model when `REVIEW_ENGINE=claude` |
 | `CODEX_BIN` | _(empty)_ | Path to the `codex` binary. Default: `codex` as resolved on `PATH`. Set this when codex is not on `PATH` |
 | `CODEX_MODEL` | _(empty)_ | Model id passed to `codex exec` when `REVIEW_ENGINE=codex`. Empty means inherit whatever `~/.codex/config.toml` specifies |
@@ -236,7 +236,7 @@ No new environment variables — the byte budgets are fixed defaults in `lib/com
 ## Second Opinion Entry Point (second-opinion.sh)
 
 `second-opinion.sh` is a generic, out-of-hook driver built on the same engine infrastructure
-(agy + Gemini 3.1 Pro + REST fallback + session reuse) that `plan-review.sh` uses. Unlike the
+(agy + Gemini 4 Argon (High) + REST fallback + session reuse) that `plan-review.sh` uses. Unlike the
 hook, it is a plain CLI: any caller invokes it directly to get a second opinion on any artifact —
 not just an implementation plan — and gets back raw review text, not a verdict decision.
 

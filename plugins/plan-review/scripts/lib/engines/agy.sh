@@ -48,7 +48,7 @@ engine_probe() {
   fi
   # GEMINI_MODEL retained as the REST fallback's model id (OpenAI-compatible payload).
   GEMINI_MODEL="${GEMINI_MODEL:-gemini-3.1-pro-preview}"
-  AGY_MODEL="${AGY_MODEL:-Gemini 3.1 Pro (High)}"
+  AGY_MODEL="${AGY_MODEL:-Gemini 4 Argon (High)}"
   # agy's stderr carries no prompt echo / privacy concern — the orchestrator
   # may backfill it into LOG_FILE verbatim (see backfill_engine_err in
   # lib/common.sh), unconditionally on both success and failure.

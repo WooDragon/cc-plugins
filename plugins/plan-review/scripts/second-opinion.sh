@@ -1,6 +1,6 @@
 #!/bin/bash
 # second-opinion.sh — out-of-plugin driver for plan-review's engine
-# infrastructure (agy + Gemini 3.1 Pro + REST fallback + session reuse),
+# infrastructure (agy + Gemini 4 Argon (High) + REST fallback + session reuse),
 # built on top of lib/consult.sh's run_consultation() state machine (PR1).
 #
 # Unlike plan-review.sh (a PreToolUse hook with plan-specific policy: plan
