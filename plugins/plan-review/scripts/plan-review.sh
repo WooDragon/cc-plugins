@@ -20,7 +20,7 @@
 #   REVIEW_MAX_TOTAL_ROUNDS=N    — absolute max total rounds (incl. REJECT), default 20
 #   REVIEW_ENGINE=gemini         — review engine: "gemini" (default), "claude", or "codex"
 #   CLAUDE_MODEL=opus            — Claude engine model (default: opus)
-#   AGY_MODEL=<id>               — agy CLI model (default: Gemini 3.1 Pro (High))
+#   AGY_MODEL=<id>               — agy CLI model (default: Gemini 4 Argon (High))
 #   GEMINI_MODEL=<id>            — REST fallback model id (default: gemini-3.1-pro-preview)
 #   CODEX_BIN=<path>             — codex engine binary override (default: codex on PATH)
 #   CODEX_MODEL=<id>             — codex engine model (default: inherit ~/.codex/config.toml)
