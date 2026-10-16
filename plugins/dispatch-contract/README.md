@@ -600,7 +600,9 @@ exists to catch mechanically rather than by header comment.
 
 The `skill-contract.bats` suite reads the real `skills/subagent-dispatch/SKILL.md`,
 `references/dispatch-contract.md`, `references/offload-scenarios.md`, and this README.
-It checks finalization independently of report length, verifiable evidence references,
+It checks item-level dispatch necessity, inherited-plan boundaries, directly affected premise tracing,
+removal of unsupported work, and the separation of necessity pre-review from implementation quality.
+It also checks finalization independently of report length, verifiable evidence references,
 final-message delivery, and the canonical marker line and file-delivery boundaries. It locks
 the requirement that the main context first have a complete final result
 sufficient to support its current decision before applying the re-dispatch
