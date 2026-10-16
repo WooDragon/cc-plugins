@@ -116,9 +116,44 @@ PY
   text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
   assert_contains "$text" "不做这件事，原来的哪项完成条件或必要约束会不成立？现有证据为什么回答不了？" "缺少必要性两问原文"
   assert_contains "$text" "每次真实工作委托" "必要性义务未覆盖真实工作委托"
-  assert_contains "$text" "原用户授权、适用的既有安全／质量约束，以及这些边界内批准的计划" "原要求来源不完整"
+  assert_contains "$text" "原要求来自原用户授权、适用的既有安全／质量约束" "原要求来源不完整"
+  assert_not_contains "$text" "以及这些边界内批准的计划" "批准计划仍被列为独立的原要求来源"
   assert_contains "$text" "接收者可直接读取的来源定位" "缺少可读取的原要求依据"
   assert_contains "$text" "候选任务自己新增的 DoD、报告、测试或 manifest 不能循环证明自身必要" "候选交付可以自证必要"
+}
+
+@test "范围围栏逐项审查实质工作而不以整体必要担保附加项" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "派发方和已有前审应逐项检查候选中的实质工作" "整体必要性可能掩盖附加工作"
+  assert_contains "$text" "整体业务目标必要，不代表附加项必要" "缺少整体与逐项必要性的区分"
+  assert_contains "$text" "维护回执、报告、测试或 manifest 的工作同样应回答必要性两问" "附加维护项未受逐项规则约束"
+}
+
+@test "范围围栏不以原计划和消费者独立证明新增工作必要" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "批准的计划、中间工件或消费者只能证明依赖存在" "依赖存在被误读为原始必要性依据"
+  assert_contains "$text" "不能独立证明新增工作必要" "批准计划仍可担保新增工作"
+  assert_contains "$text" "新增工作应沿直接受影响的前提追溯到原用户目标或真实必要约束" "新增工作缺少直接前提回溯"
+  assert_contains "$text" "不重审全部历史" "回溯要求扩大为全历史审计"
+}
+
+@test "范围围栏必要性不足默认删除而不制造证明工作" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "必要性不足的项默认删除" "缺少删除不必要工作的默认动作"
+  assert_contains "$text" "不应为保留该项而新建证明报告或补证任务" "必要性审查反而制造证明工作"
+}
+
+@test "范围围栏的已有前审只判断必要性而不承担后审质量" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "前审只判断派发必要性，不评判实现质量" "前审仍可施加质量要求"
+  assert_contains "$text" "必要工作的实现缺陷由既有执行纠错和后置质量审阅处理" "必要性与实现缺陷没有分离"
+  assert_not_contains "$text" "NEEDS REVISION" "共享原则复制了场景专用状态机"
+  assert_not_contains "$text" "REJECTED" "共享原则复制了场景专用拒绝状态"
+  assert_not_contains "$text" "frontmatter" "共享原则复制了场景专用产物模板"
 }
 
 @test "范围围栏区分首次证据缺口与复验证据失效" {
@@ -136,6 +171,7 @@ PY
   assert_contains "$text" "原授权内必要调查、修复和针对性复测仍属原执行" "必要纠错被新规则阻断"
   assert_contains "$text" "原计划未逐字列出不构成禁止" "计划被误读成逐字白名单"
   assert_contains "$text" "新增目标、权限或独立交付仍走原有停止和裁决路径" "必要性说明扩大了授权"
+  assert_contains "$text" "必要性说明不扩大允许修改的文件范围或操作权限" "必要性说明绕过了路径或权限边界"
 }
 
 @test "范围围栏允许简短复用并排除通知和递归前审" {
