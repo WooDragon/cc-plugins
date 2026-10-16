@@ -6,7 +6,7 @@ Subagent dispatch contract enforcement for Claude Code — a `%%DONE%%` finaliza
 
 Version 1.6.0 makes caller-side `model` ownership explicit. Runtime-owned built-ins must carry a non-empty `model` in an `Agent` or `Task` call. Registered agents must omit `model`; `model: null` is equivalent to omission and preserves the agent frontmatter preset. Any other registered-agent model value is rejected because it overrides that preset. This is a breaking contract for callers that previously supplied a model for a registered agent.
 
-The plugin has seven parts: four **PreToolUse hooks** — one blocks dispatch calls omitting `run_in_background:false`, one enforces model ownership, one blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, and one blocks a `name`-carrying dispatch (upgrading a one-shot subagent to a teammate) whose `subagent_type` is not a recognized team-ops role — a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
+The plugin has eight parts: a **PostToolUse hook** that reminds the main session when a subagent has completed at least three automatic compactions, plus four **PreToolUse hooks** — one blocks dispatch calls omitting `run_in_background:false`, one enforces model ownership, one blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, and one blocks a `name`-carrying dispatch (upgrading a one-shot subagent to a teammate) whose `subagent_type` is not a recognized team-ops role — a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
 
 ## Installation
 
@@ -47,6 +47,13 @@ PreToolUse (matcher: Agent, Task)
          entirely out of scope for this hook and falls straight through —
          see § Two-Domain Split below.
 
+PostToolUse (matcher: ^(Agent|Task|SendMessage|TaskOutput)$)
+  │
+  └─ subagent-compact-reminder.sh → subagent-compact-reminder.py
+         Reminds only the main session after a dispatch tool returns.
+         Reports each provable subagent with >=3 completed auto compactions.
+         Requires python3; missing runtime or unknown sources fail open.
+
 SubagentStart (matcher: *)
   │
   └─ dispatch-rules-inject.sh (5s timeout)
@@ -75,10 +82,10 @@ skills/subagent-dispatch  (no hook — loaded by description match)
          contract is reachable at dispatch time rather than only after a block.
 ```
 
-This plugin registers six hooks: `PreToolUse` (dispatch-sync-guard,
+This plugin registers seven hooks: `PreToolUse` (dispatch-sync-guard,
 dispatch-agent-ownership-guard, dispatch-capability-guard,
-pre-dispatch-channel-guard), `SubagentStart` (dispatch-rules-inject), and
-`SubagentStop` (subagent-done-gate).
+pre-dispatch-channel-guard), `SubagentStart` (dispatch-rules-inject),
+`SubagentStop` (subagent-done-gate), and `PostToolUse` (subagent-compact-reminder).
 There is no dispatch-side hook that guesses whether a given task needs a
 `%%DONE%%` deliverable — that judgment is semantic, and a keyword guess would
 misfire often enough to be ignored. The skill closes that gap instead.
@@ -490,6 +497,42 @@ The bundled skill covers:
 
 The skill triggers on dispatch-related requests: "派发 subagent", "dispatch subagent", "delegate to agent", "offload", "%%DONE%%", and related terms. It does not use a hook — code dispatch has no deterministic tool-level signal, so the skill loads by description-match instead.
 
+## Automatic Compaction Reminder
+
+The reminder requires `python3` with its standard library. It runs after the main
+session completes an `Agent`, `Task`, `SendMessage`, or `TaskOutput` tool call.
+A top-level non-empty `agent_id` makes the hook return silently. The hook sends
+`hookSpecificOutput.additionalContext` to the main model; it does not send a
+message from a subagent context.
+
+Each check reads the current session's `subagents/agent-*.jsonl` transcripts and
+metadata, including native transcript subdirectories. The hook follows only
+explicit native parent references when it needs inherited history. Adopted
+transcripts may contain older session IDs. The main transcript serves only as
+source evidence, never as a reminder object.
+
+The count includes unique UUIDs of completed `system/compact_boundary` records
+with `compactMetadata.trigger: auto` and the instance's actual `agentId`.
+Manual compactions, attempts, duplicate UUIDs, explicit `forkedFrom` copies,
+and boundaries inherited from a parent do not count. Resume preserves the
+instance's accumulated count. A newly created in-process teammate has independent
+history. Named agents, including PM, have no role-based exemption.
+
+For every provable instance with a count of at least three, every check emits
+its instance ID and count. The reminder asks the main model to check the current
+deliverable's load while preserving execution continuity for unfinished work.
+The hook creates no state files, reminder markers, cooldowns, or cross-check
+cache. It does not terminate agents or force task splitting or replacement.
+
+**Timing and limitations:** A synchronous `Agent` call must return before the
+main session can receive this reminder. The hook does not wake the main session
+during a running synchronous call, and it does not poll between matching tool
+returns. Missing Python, invalid input, unreadable or non-regular files, and
+missing, damaged, or ambiguous provenance fail open. An instance with unknown
+provenance is omitted rather than assigned an unverified count; other provable
+instances remain eligible. The hook reads native JSONL relationships and does
+not guarantee compatibility with future changes to that log format.
+
 ## Running Tests
 
 ```bash
@@ -501,6 +544,7 @@ bats plugins/dispatch-contract/tests/dispatch-capability-guard.bats
 bats plugins/dispatch-contract/tests/dispatch-channel-guard.bats
 bats plugins/dispatch-contract/tests/gate-composition.bats
 bats plugins/dispatch-contract/tests/skill-contract.bats
+bats plugins/dispatch-contract/tests/subagent-compact-reminder.bats
 ```
 
 `subagent-done-gate.bats` has 26 test cases covering: core judgment (marker
