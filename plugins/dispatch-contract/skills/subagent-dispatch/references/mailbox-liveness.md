@@ -2,6 +2,10 @@
 
 本文件管"派发之后"：产物怎么收回、活性怎么判、什么时候能停。与 dispatch-contract.md（派发前怎么写 prompt）互补。触发场景：spawn background subagent / teammate 后等待产物，或考虑 TaskStop 中止某 agent 时。
 
+> **前置阅读**：当前交付边界与完成依据，使用本文件前应先读取 [dispatch-contract.md 的「铁律②：范围围栏」](dispatch-contract.md#铁律②范围围栏)。
+
+**回传适用范围**：派发方应明确实际 dispatcher 及回传协议。下文 `main` 示例限于实际 dispatcher 为 main 且约定消息交付的场景。Team 按既有正式产物与控制信号协议回传，不统一向 main 发送全文；本文件不替代 Team 生命周期。
+
 来源：一次真实事故——三个 background subagent 被误判卡死并 TaskStop，事后全部复活并发来完整产物。根因是「回传通道断裂」+「等待模型错误」两个叠加，非 agent 真死。
 
 ## 解法优先级：能同步就同步
@@ -31,7 +35,7 @@ issue #184 的 6 变体实测表（A–F）：传 `name` 把一次性 subagent �
 
 **是否调用 `SendMessage` 不由 prompt 措辞可靠决定**：送达的那个变体，与一个不传 `name` 的对照变体措辞一字不差，唯一变量就是 `name`——它并没有被措辞"教会"去发。反向的排他措辞则会主动堵死这条路：被"SendMessage 我收不到"之类表述钉住的变体就真的没去发，产物锁死在自己 transcript 里。所以派发 prompt 必须**正向**钉死 `SendMessage(to:"main")`，但那是必要条件、不构成送达保证——绝不可写成任何暗示"发了也没用"的措辞。
 
-**诊断法**：收到 idle_notification 但正文为空 = 它没调 `SendMessage`，产物烂在自己 final text 里，此轮已丢，不必再等；完全没有任何动静（无 idle_notification）= 还在跑，继续等，不构成判死证据（见下节判死无效证据清单）。
+**诊断边界**：空的 idle_notification 不证明是否调用过 `SendMessage`，也不单独证明当前交付已完成或产物已丢。派发方应按约定产物与完成条件核对回传；没有通知同样不构成判死证据（见下节判死无效证据清单）。
 
 ## 活性判定与等待纪律（己方端，与铁律④同族）
 

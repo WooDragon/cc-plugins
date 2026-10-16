@@ -409,9 +409,11 @@ guard moves the dispatch into the sync guard's domain, so the re-dispatch must c
 `pre-dispatch-channel-guard.sh` runs on `PreToolUse` for `Agent` and `Task` calls,
 immediately after `dispatch-sync-guard.sh`. It owns the non-blank-`name` domain
 described above: passing `name` upgrades a one-shot subagent into a teammate, whose
-output then travels through the mailbox (an explicit `SendMessage(to:"main")` from
-the subagent side) rather than the tool's return value — miss that step and the
-result is silently lost.
+output then travels through the mailbox rather than the tool's return value.
+The dispatch must identify the actual dispatcher and delivery protocol. Team
+agents retain their existing artifact and control-signal protocol; they do not
+send every full report to `main`. When `main` is the actual dispatcher and the
+contract requires a message artifact, use `SendMessage(to:"main")` to deliver it.
 
 Decision chain, each step fail-opening before the next runs. `gate_preamble` checks
 the escape hatch before the degrade conditions — a human deliberately opening the
@@ -455,15 +457,19 @@ Bash tool call does not reach the hook process).
 ## The SubagentStart Rules Injector
 
 `dispatch-rules-inject.sh` runs on `SubagentStart` for every spawned subagent
-(`matcher: "*"`). It writes `additionalContext` carrying the three dispatch rules
-(output-is-deliverable, scope fence, incremental progress) plus a pointer to the
-`subagent-dispatch` skill, so the rules reach the subagent even when the dispatching
-prompt omitted them.
+(`matcher: "*"`). It writes `additionalContext` carrying the dispatch rules
+(output-is-deliverable, scope fence, incremental progress, and the conditional
+finalization marker) plus a pointer to the `subagent-dispatch` skill.
+
+Every type receives the current-deliverable boundary: one instance defaults to
+one current deliverable; a later independent deliverable defaults to a new
+instance. Necessary investigation, correction, and re-testing within an unfinished
+deliverable remain in the original execution. A final message, failure, or idle
+signal alone does not establish completion. Named teammates follow the actual
+dispatcher and delivery protocol; Team retains its artifact and control signals.
 
 Agent types with Edit/Write disabled by the platform (`Explore`, `Plan`, matched
-case-insensitively) receive only the output-is-deliverable and incremental-progress
-rules — the scope-fence rule's file-boundary wording would be a no-op reminder for a
-type that cannot write files at all.
+case-insensitively) receive that same boundary without file-edit instructions.
 
 The hook writes stdout exactly once, in a single statement at the end of the script.
 Every fail-open path (empty stdin, no `jq`, unparsable JSON,
@@ -511,8 +517,9 @@ unset, FIFO must not hang), and the kill switch.
 `{Agent, Task}`, the `agent_id` and `tool_input.name` exemptions including an
 empty-string `agent_id` that must still block, the two escape hatches, and three
 malformed-stdin shapes), plus the rules-injector's JSON-shape checks (normal
-`agent_type` gets all three rules, `Explore` omits the scope-fence rule, empty stdin
-and `ALLOW_NO_RULES_INJECT=1` both leave stdout fully empty).
+`agent_type` gets the current-deliverable boundary, `Explore` and `Plan` omit only
+file-edit instructions, named delivery retains the actual dispatcher and Team
+protocol, and empty stdin and `ALLOW_NO_RULES_INJECT=1` leave stdout fully empty).
 
 `dispatch-agent-ownership-guard.bats` covers all runtime-owned types, model-optional Plan omission, `null`, valid-model, empty, and whitespace shapes, model field presence states, case normalization, registered-agent `inherit`/empty/whitespace overrides, both `Agent` and `Task`, escape-hatch and fail-open paths, plus Plan-classification mutation and runtime-rejection wording-anchor cases that prove the policy is load-bearing.
 
