@@ -172,13 +172,70 @@ PY
   assert_contains "$skill" '[references/dispatch-contract.md 的「铁律②：范围围栏」](references/dispatch-contract.md#铁律②范围围栏)' "入口未定位权威章节"
 }
 
-@test "Team 只复用必要性内容且授权生命周期仍归 TeamOps" {
+@test "Team 复用共同交付边界且授权生命周期仍归 TeamOps" {
   local text
   text="$(read_contract_text skills/subagent-dispatch/SKILL.md '## 与其他机制的边界')"
-  assert_contains "$text" "Team 仅复用铁律②的必要性内容" "Team 未复用必要性规则"
+  assert_contains "$text" "Team 复用铁律②的必要性内容与共同交付边界" "Team 未复用共同交付边界"
+  assert_contains "$text" "读取必要性与共同交付边界正文" "Team 前置阅读仍只加载必要性"
   assert_contains "$text" "派发授权、生命周期、回传与阶段仍归 TeamOps" "Team 控制边界丢失"
   assert_contains "$text" "不将 ad-hoc 的整套机制套入 Team" "ad-hoc 机制侵入 Team"
   assert_not_contains "$text" "不适用本 skill" "旧的全盘排除与必要性复用冲突"
+}
+
+@test "范围围栏先限定当前交付再打包且不预装后续工作" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "一个执行 Agent 实例默认只承担一个当前交付" "缺少单实例当前交付边界"
+  assert_contains "$text" "本次应回传的结果、完成条件和允许范围" "缺少交付定义"
+  assert_contains "$text" "只对完成当前交付所需的工作按文件集与未决取舍打包" "亲和打包未限定当前交付"
+  assert_contains "$text" "不预装须在接收本次结果后另行调度的工作" "允许预装后续交付"
+  assert_contains "$text" "不通过续作消息追加下一独立交付" "允许消息追加后续交付"
+}
+
+@test "范围围栏完成后默认新实例且显式复用不另加申请" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "当前交付完成后，后续独立交付默认使用新实例" "缺少完成后新实例规则"
+  assert_contains "$text" "文件、领域相同或旧实例熟悉背景，不构成 resume 的理由" "亲和仍可跨交付复用"
+  assert_contains "$text" "用户显式要求跨交付复用时按该授权处理，不新增例外申请链" "显式授权被增加审批"
+  assert_contains "$text" "不因换实例无故重做仍有效的验证" "新实例导致无依据复验"
+}
+
+@test "范围围栏按交付条件判完成而非final失败或idle" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 铁律②：范围围栏')"
+  assert_contains "$text" "即席以约定结果及完成条件为准" "即席缺少完成依据"
+  assert_contains "$text" "Team 以既有正式产物和任务终态规则为准" "Team 缺少既有终态依据"
+  assert_contains "$text" "任意一次 final、中间消息、idle、普通失败或阻塞都不单独构成交付完成" "非完成信号可触发轮换"
+  assert_contains "$text" "尚未完成的当前交付" "连续性未限定未完成交付"
+  assert_contains "$text" "原执行者继续必要调查、纠错和复测" "新实例规则截断当前纠错"
+  assert_contains "$text" "已发布的 Team 报告仍不可变" "Team 历史可被重开"
+  assert_contains "$text" "Ref-linked 新任务链" "正式finding丢失原链"
+}
+
+@test "亲和正文把同一当前交付作为两轴前提并保留合法机械打包" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/offload-scenarios.md '## 上下文亲和性')"
+  assert_contains "$text" "先限定当前交付，再按文件集与未决取舍两轴拆分" "缺少先交付后亲和顺序"
+  assert_contains "$text" "打包进同一次委托" "亲和仍以复用实例为目标"
+  assert_not_contains "$text" "打包给同一 agent" "旧的跨交付复用措辞残留"
+  assert_contains "$text" "当前交付完成后，后续独立交付默认使用新实例" "亲和正文未排除跨交付复用"
+  assert_contains "$text" "改码规格与 commit message 都已钉死" "合法机械打包示例丢失"
+  assert_contains "$text" "同一当前交付内" "示例未限定当前交付"
+  assert_contains "$text" "仅不受收敛项数量上限约束" "确定性动作豁免扩大"
+  assert_contains "$text" "仍受当前交付边界约束" "确定性动作绕过交付边界"
+}
+
+@test "技能摘要加载交付边界且named回传不改投main" {
+  local skill text
+  skill="$(read_contract_text skills/subagent-dispatch/SKILL.md)"
+  assert_contains "$skill" "工作必要性、证据缺口与当前交付边界" "前置阅读缺少交付边界"
+  text="$(read_contract_text skills/subagent-dispatch/SKILL.md '## 四铁律速查')"
+  assert_contains "$text" "一个实例默认一个当前交付" "速查摘要未同步"
+  text="$(read_contract_text skills/subagent-dispatch/SKILL.md '## 己方端补充纪律（background 派发后，与④同族）')"
+  assert_contains "$text" "实际 dispatcher" "回传丢失实际派发者"
+  assert_contains "$text" "Team 按既有正式产物与控制信号协议回传" "Team被要求全文main回传"
+  assert_not_contains "$text" '产物必须走 `SendMessage(to:"main")`' "回传仍无条件强制main"
 }
 
 @test "定稿纪律摘要要求定稿依据而不按篇幅拒绝" {

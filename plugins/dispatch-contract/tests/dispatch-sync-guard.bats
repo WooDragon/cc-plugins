@@ -195,7 +195,10 @@ teardown() {
   local ctx
   ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<< "$INJECT_STDOUT")
   [[ "$ctx" == *"只改指定文件"* ]]
-  [[ "$ctx" == *'SendMessage(to:"main")'* ]]
+  [[ "$ctx" == *"实际 dispatcher"* ]]
+  [[ "$ctx" == *"Team 按既有正式产物与控制信号协议回传"* ]]
+  [[ "$ctx" != *'SendMessage(to:"main")'* ]]
+  [[ "$ctx" == *"一个实例默认一个当前交付"* ]]
   [[ "$ctx" == *"铁律④定稿标记"* ]]
   [[ "$ctx" == *'%%DONE%%'* ]]
 }
@@ -204,7 +207,7 @@ teardown() {
 # dispatch-rules-inject: read-only agent_type tiering (13)
 # ============================================================
 
-@test "inject #13: agent_type=Explore -> omits scope-fence wording" {
+@test "inject #13: agent_type=Explore -> current-delivery fence without write instructions" {
   local payload
   payload=$(mk_start_payload "Explore")
   [[ "$(jq -r '.agent_type' <<< "$payload")" == "Explore" ]]
@@ -215,11 +218,14 @@ teardown() {
   [[ "$ctx" != *"只改指定文件"* ]]
   [[ "$ctx" == *"输出即产物"* ]]
   [[ "$ctx" == *"渐进产出"* ]]
-  [[ "$ctx" == *'SendMessage(to:"main")'* ]]
+  [[ "$ctx" == *"实际 dispatcher"* ]]
+  [[ "$ctx" == *"Team 按既有正式产物与控制信号协议回传"* ]]
+  [[ "$ctx" != *'SendMessage(to:"main")'* ]]
+  [[ "$ctx" == *"一个实例默认一个当前交付"* ]]
   [[ "$ctx" == *"铁律④定稿标记"* ]]
 }
 
-@test "inject #13b: agent_type=Plan -> same read-only tier as Explore (omits scope-fence wording)" {
+@test "inject #13b: agent_type=Plan -> same current-delivery fence without write instructions" {
   local payload
   payload=$(mk_start_payload "Plan")
   [[ "$(jq -r '.agent_type' <<< "$payload")" == "Plan" ]]
@@ -230,8 +236,35 @@ teardown() {
   [[ "$ctx" != *"只改指定文件"* ]]
   [[ "$ctx" == *"输出即产物"* ]]
   [[ "$ctx" == *"渐进产出"* ]]
-  [[ "$ctx" == *'SendMessage(to:"main")'* ]]
+  [[ "$ctx" == *"实际 dispatcher"* ]]
+  [[ "$ctx" == *"Team 按既有正式产物与控制信号协议回传"* ]]
+  [[ "$ctx" != *'SendMessage(to:"main")'* ]]
+  [[ "$ctx" == *"一个实例默认一个当前交付"* ]]
   [[ "$ctx" == *"铁律④定稿标记"* ]]
+}
+
+@test "inject delivery: all applicable types get boundary continuity and real dispatcher without guessing identity" {
+  local agent_type payload ctx
+  for agent_type in worker dev ops redteam intel pm dev-econ worker-econ Explore Plan eXpLoRe pLaN unknown ''; do
+    payload=$(mk_start_payload "$agent_type")
+    [[ "$(jq -r '.agent_type // empty' <<< "$payload")" == "$agent_type" ]]
+    run_rules_inject "$payload"
+    [ "$INJECT_EXIT" -eq 0 ]
+    jq -e '.hookSpecificOutput.hookEventName == "SubagentStart"' <<< "$INJECT_STDOUT" >/dev/null
+    ctx=$(jq -r '.hookSpecificOutput.additionalContext' <<< "$INJECT_STDOUT")
+    [[ "$ctx" == *"铁律②范围围栏"* ]]
+    [[ "$ctx" == *"一个实例默认一个当前交付"* ]]
+    [[ "$ctx" == *"后续独立交付默认新实例"* ]]
+    [[ "$ctx" == *"未完成交付的原授权内调查、纠错和复测继续原执行"* ]]
+    [[ "$ctx" == *"不凭 final、失败或 idle 判完成"* ]]
+    [[ "$ctx" == *"实际 dispatcher"* ]]
+    [[ "$ctx" == *"Team 按既有正式产物与控制信号协议回传"* ]]
+    [[ "$ctx" != *'SendMessage(to:"main")'* ]]
+    case "$agent_type" in
+      Explore|Plan|eXpLoRe|pLaN) [[ "$ctx" != *"只改指定文件"* ]] ;;
+      *) [[ "$ctx" == *"只改指定文件"* ]] ;;
+    esac
+  done
 }
 
 # ============================================================

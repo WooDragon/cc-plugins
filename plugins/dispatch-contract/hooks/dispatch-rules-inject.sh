@@ -14,21 +14,13 @@
 # times in aggregate context; full positive/negative examples belong in the
 # skill, not in every subagent's startup context.
 #
-# RULE1 carries a teammate-channel branch (not just "output is the artifact")
-# because this hook can only read `.agent_type` from the SubagentStart
-# payload — there is no teammate/name flag in that payload, so the hook has
-# no way to tell a plain subagent dispatch from a named-teammate dispatch and
-# branch the wording accordingly. The rule is written to cover both cases in
-# one sentence instead: for a plain dispatch the final message already reaches
-# the dispatcher; for a teammate dispatch it does not, and a SendMessage(to:
-# "main") call is required to actually deliver it.
+# SubagentStart has no teammate/name flag. RULE1 therefore describes the
+# channel conditionally without guessing Team identity or its dispatcher.
+# Team's existing artifact and control-signal protocol owns its routing.
 #
-# Tiering by agent_type: read-only agent types (Explore, Plan — case
-# insensitive) have Edit/Write physically disabled by the platform, so
-# injecting rule ②'s "only touch the files you were told to" wording would
-# be a no-op admonition about a constraint that already can't be violated.
-# Those types get rules ① and ③ plus the skill pointer only; every other
-# agent_type gets all three rules.
+# Every type receives the current-delivery boundary in RULE2. Read-only
+# types (Explore, Plan — case insensitive) have Edit/Write disabled by the
+# platform, so only other types receive the additional file-edit reminder.
 #
 # stdout purity (hard constraint — this hook's payload is parsed as JSON by
 # the harness, any stray byte on stdout corrupts it):
@@ -49,8 +41,8 @@
 # Fail-open conditions (exit 0, stdout empty): empty stdin, no jq, `jq .`
 # parse failure, missing/blank agent_type field is NOT fail-open by itself —
 # agent_type absent is treated as "not a known read-only type" and gets the
-# full three-rule injection, since the safer default when we can't identify
-# the type is to inject the file-scope reminder rather than omit it.
+# common rules plus the file-scope reminder. This fallback does not infer
+# Team identity or choose a dispatcher.
 set -u
 
 INPUT=$(cat)
@@ -65,8 +57,9 @@ jq . >/dev/null 2>&1 <<< "$INPUT" || exit 0
 AGENT_TYPE=$(jq -r '.agent_type // empty' <<< "$INPUT" 2>/dev/null) || exit 0
 AGENT_TYPE_LC=$(printf '%s' "$AGENT_TYPE" | tr '[:upper:]' '[:lower:]')
 
-RULE1='[dispatch-contract] 铁律①输出即产物：最终消息本身就是产物，禁止写完成说明或元总结。若你被赋了 name（teammate），最终消息不会自动回到派发方，须再用 SendMessage(to:"main") 送出同一份产物。'
-RULE2='[dispatch-contract] 铁律②范围围栏：只改指定文件/只做指定事，范围外只报告不擅动。'
+RULE1='[dispatch-contract] 铁律①输出即产物：最终消息本身就是产物，禁止写完成说明或元总结。若为 named teammate，按实际 dispatcher 与约定回传通道交付；Team 按既有正式产物与控制信号协议回传，不统一向 main 发送全文。'
+RULE2='[dispatch-contract] 铁律②范围围栏：一个实例默认一个当前交付；后续独立交付默认新实例，不因亲和 resume（用户显式授权复用除外）。未完成交付的原授权内调查、纠错和复测继续原执行；不凭 final、失败或 idle 判完成。只做指定事，范围外只报告不擅动。'
+EDIT_SCOPE='只改指定文件。'
 RULE3='[dispatch-contract] 铁律③渐进产出：长任务分段读、尽早吐中间进展。'
 # 条件式：只在派发 prompt 确实要求了 %%DONE%% 时才有意义，但这个 hook 读不到
 # 派发 prompt 内容（SubagentStart payload 没有该字段），所以措辞本身就是条件式
@@ -84,10 +77,10 @@ POINTER='[dispatch-contract] 详规见 Skill(subagent-dispatch)。'
 
 case "$AGENT_TYPE_LC" in
   explore|plan)
-    CONTEXT=$(printf '%s\n%s\n%s\n%s' "$RULE1" "$RULE3" "$RULE4" "$POINTER")
+    CONTEXT=$(printf '%s\n%s\n%s\n%s\n%s' "$RULE1" "$RULE2" "$RULE3" "$RULE4" "$POINTER")
     ;;
   *)
-    CONTEXT=$(printf '%s\n%s\n%s\n%s\n%s' "$RULE1" "$RULE2" "$RULE3" "$RULE4" "$POINTER")
+    CONTEXT=$(printf '%s\n%s%s\n%s\n%s\n%s' "$RULE1" "$RULE2" "$EDIT_SCOPE" "$RULE3" "$RULE4" "$POINTER")
     ;;
 esac
 

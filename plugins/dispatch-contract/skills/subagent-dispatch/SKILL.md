@@ -17,7 +17,7 @@ description: |
 
 四条铁律的一句话版常驻全局 CLAUDE.md。本 skill 维护展开正文及派发必要性规则；Team 的适用范围见「与其他机制的边界」。
 
-> **前置阅读**：工作必要性、证据缺口与原授权内执行的边界，真实工作委托前应先读取：
+> **前置阅读**：工作必要性、证据缺口与当前交付边界（含原授权内执行连续性），真实工作委托前应先读取：
 > [references/dispatch-contract.md 的「铁律②：范围围栏」](references/dispatch-contract.md#铁律②范围围栏)。
 
 ## 四铁律速查
@@ -25,7 +25,7 @@ description: |
 | 铁律 | 一句话 | 展开 |
 |---|---|---|
 | ①输出即产物 | 最终返回消息本身就是产物，禁止写完成说明或元总结；需要定稿交付时用 `%%DONE%%` 结束标记声明，由 SubagentStop 门禁强制 | 见 references/dispatch-contract.md |
-| ②范围围栏 | 说明工作必要性与证据缺口；只改指定文件/只做指定事，范围外发现只报告不动手 | 见 references/dispatch-contract.md |
+| ②范围围栏 | 说明工作必要性与证据缺口；一个实例默认一个当前交付，完成后后续独立交付默认新实例；未完成交付保留原授权内纠错；只改指定文件/只做指定事，范围外发现只报告不动手 | 见 references/dispatch-contract.md |
 | ③渐进产出 | 大调研/长任务分段读、尽早吐中间进展，避免触发 stall watchdog | 见 references/dispatch-contract.md |
 | ④定稿纪律 | 据以派活或做不可逆动作的结论须来自已定稿的产物。产物应包含影响决定的依据和未决事项。原始证据可通过可核查的引用提供。中间回传不能替代定稿 | 见 references/dispatch-contract.md |
 
@@ -79,7 +79,7 @@ description: |
 | 纪律 | 一句话 | 展开 |
 |---|---|---|
 | 通道选择 | `name` 是提升为 teammate 的唯一开关：不传 `name`，产物走工具返回值（可靠）；传 `name` 即提升为 teammate、产物改走 mailbox。即席一次性派发不传 `name`；确需常驻多轮协作才传 `name`，并按 team-ops 协议管理其生命周期。禁止 sleep/轮询/主动查进度这条现在有机器强制：本插件 `hooks/dispatch-sync-guard.sh` 在 PreToolUse 拦截省略 `run_in_background:false` 的派发；逃生舱 `ALLOW_BACKGROUND_DISPATCH=1` 需写进 `settings.json` 的 `env` 段（Bash 里 export 传不进 hook 进程） | 见 references/mailbox-liveness.md |
-| 回传通道 | background subagent 的 final text 不自动进主 mailbox，产物必须走 `SendMessage(to:"main")`；该工具在 subagent 里默认 deferred，prompt 须要求它先 `ToolSearch select:SendMessage` 加载。能同步就 `run_in_background:false` 绕开此坑 | 见 references/mailbox-liveness.md |
+| 回传通道 | named teammate 的 final text 不自动回到派发方；派发方应明确实际 dispatcher 与回传协议。Team 按既有正式产物与控制信号协议回传，不统一向 main 发送全文。实际 dispatcher 为 main 且约定消息交付时，用 `SendMessage(to:"main")` 送出产物；工具未加载时先 `ToolSearch select:SendMessage`。即席需要同步结果时用 `run_in_background:false` 且不传 `name` | 见 references/mailbox-liveness.md |
 | 活性判定 | 完成/进展是 mailbox 异步、下一 turn 才可见；文件没变 / ps 查不到进程 / sleep 期间没消息都不算 agent 死了；TaskStop 不可逆，存疑多等一 turn 不错杀 | 见 references/mailbox-liveness.md |
 
 ## 派发端补充纪律（仅上游带焊死 persona 时发作）
@@ -108,7 +108,7 @@ description: |
 
 ## 与其他机制的边界
 
-Team 仅复用铁律②的必要性内容；派发授权、生命周期、回传与阶段仍归 TeamOps。不将 ad-hoc 的整套机制套入 Team。Team 派发方应通过上方前置阅读入口读取必要性正文；该阅读不替代 TeamOps 的正式派发授权。web-search 的搜索隔离用 web-search skill 自己的规范。
+Team 复用铁律②的必要性内容与共同交付边界；派发授权、生命周期、回传与阶段仍归 TeamOps。不将 ad-hoc 的整套机制套入 Team。Team 派发方应通过上方前置阅读入口读取必要性与共同交付边界正文；该阅读不替代 TeamOps 的正式派发授权。web-search 的搜索隔离用 web-search skill 自己的规范。
 
 模型 ownership 门禁仅检查缺少 Team 身份的即席调用：顶层 `agent_id` 与 `tool_input.name` 均缺失或为空白时才执行模型分类。任一字段非空白时，该门禁跳过自身检查；其他门禁仍检查各自契约。
 
