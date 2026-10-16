@@ -1,5 +1,5 @@
 {
-  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop, sync, agent-ownership, capability, and channel guards on PreToolUse, dispatch-rules injection on SubagentStart",
+  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop, sync, agent-ownership, capability, and channel guards on PreToolUse, dispatch-rules injection on SubagentStart, auto-compaction reminders on main-session PostToolUse",
   "hooks": {
     "PreToolUse": [
       {
@@ -18,6 +18,14 @@
           { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-agent-ownership-guard.sh", "timeout": 5 },
           { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-capability-guard.sh", "timeout": 5 },
           { "type": "command", "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-dispatch-channel-guard.sh", "timeout": 5 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Agent|Task|SendMessage|TaskOutput)$",
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent-compact-reminder.sh\"" }
         ]
       }
     ],
