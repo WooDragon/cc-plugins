@@ -12,7 +12,7 @@
 
 派发一个「需要拿结果才能往下走」的任务，优先级从高到低：
 
-1. **同步派发（默认首选）**：`run_in_background: false` 或普通 Agent 调用。子 agent 的最终文本直接作为 tool result 返回，不经 mailbox、不碰 SendMessage deferred 问题，最干净。呼应等待纪律——需要结果才能推进就同步拿返回值，别 spawn 后盲等。
+1. **同步派发（默认首选）**：`run_in_background: false`。子 agent 的最终文本直接作为 tool result 返回，不经 mailbox、不碰 SendMessage deferred 问题，最干净。呼应等待纪律——需要结果才能推进就同步拿返回值，别 spawn 后盲等。
 2. **异步 background teammate**：必须并行 / 长驻时才用。产物只能靠 `SendMessage(to:"main")` 异步回传（见下节通道补丁），下一个 turn 才可见。
 3. **环境级配置（兜底，不主推）**：见文末二进制实证节。
 
@@ -27,7 +27,7 @@
 **派发 prompt 必须钉死（异步 teammate 场景）**：
 > 你的产物必须通过 `SendMessage(to:"main")` 回传，你的最终文本不会自动进主对话。若你的工具列表里没有 SendMessage，先调 `ToolSearch` 查询 `select:SendMessage` 把它加载进来，再用它回传。
 
-**对比**：同步派发（run_in_background:false / 普通 Agent）不需要这条——final text 即 tool result。通道补丁只对异步 background teammate 生效。
+**对比**：同步派发（run_in_background:false）不需要这条——final text 即 tool result。通道补丁只对异步 background teammate 生效。
 
 **到达时刻语义（issue #184）**：`SendMessage(to:"main")` 不是即时投递，到达时刻绑定在派发方空闲——派发方主循环有工具在飞时消息会积压，直到派发方停下来才 flush。实测曾见数分钟级积压，且等待时长不可预测。因此 teammate 通道不适合"拿到产物才能往下走"的同步决策：延迟到决策点之后等价于丢失。需要即时产物、决策点绑死在拿到结果那一刻，就别传 `name`，走同步派发（解法优先级 #1）。
 
