@@ -421,7 +421,11 @@ level = len(heading.split(" ", 1)[0])
 end = re.search(r"^#{1," + str(level) + r"} ", text[start:], re.M)
 section = text[start:start + end.start()] if end else text[start:]
 for obligation in obligations:
-    assert obligation in section, f"{path}: {heading}: missing obligation: {obligation}"
+    if obligation.startswith("!regex:"):
+        pattern = obligation.removeprefix("!regex:")
+        assert not re.search(pattern, section), f"{path}: {heading}: forbidden summary: {pattern}"
+    else:
+        assert obligation in section, f"{path}: {heading}: missing obligation: {obligation}"
 PY
   if [ "$status" -ne 0 ]; then
     printf '%s\n' "$output"
@@ -472,12 +476,13 @@ PY
     '四判据作为参考；允许项目专属约定' '这不是 deny'
 }
 
-@test "skill contract: narrative writing reads full standards and preserves A13 materials" {
+@test "skill contract: narrative writing reads full standards without repeating entries" {
   assert_skill_contract '### 表述规范' \
     '§A 歧义层（硬约束，逐条必判）' '§B 排版层（次要，机械可判定）' \
     '撰写或改写任何叙述性段落前，应先读取 `references/writing-standards.md`' \
-    'CREATE 与 MODIFY 同样适用' '条目编号、判据、正反例与语种适用细则只有那一份权威版本' \
-    '按 A13 原样保留代码、命令、标识符、产品名、法律文本、引文和文件路径'
+    'CREATE 与 MODIFY 同样适用' '本文件不复述条目' \
+    '条目编号、判据、正反例与语种适用细则只有那一份权威版本' \
+    '!regex:[AB][0-9]+'
 }
 
 @test "skill contract: pre-flight converges instance data and checks CREATE collisions before writing" {
@@ -500,13 +505,17 @@ PY
     '新增的链接可达，修改的路径已全局同步' \
     '立即修正后再报告完成' '旧路径/旧值零残留' \
     '确认为空壳则直接删除并记录，不确定则保留并在完成报告中标注 warning' \
-    'CREATE 全文、MODIFY 新增/改写段落应对照 §A 原文判据逐条自查' \
-    '按原文重点复核 A3 / A9' '仅 CLAUDE.md 按 §2「CLAUDE.md 通用化原则」检查'
+    '仅 CLAUDE.md 按 §2「CLAUDE.md 通用化原则」检查' \
+    'CREATE：应确认信息已按理论/架构说明或可执行操作步骤放进对应的层级目录' \
+    '文件名应暴露业务域和场景' '不使用泛化动作词（如 `setup.md`、`guide.md`）' \
+    'MODIFY：应确认未把理论/架构内容写进操作手册，未把操作步骤写进理论文档' \
+    '未把具体业务细节（参数、节点名、命令）回灌到上层入口索引'
 }
 
 @test "skill contract: CREATE inherits shared checks and retains its own obligations" {
   assert_skill_contract '### 5.1 CREATE — 新增文档' \
     '应先执行 §4.1、遵循 §2，写后逐项完成 §4.3' \
+    '全文应对照 `references/writing-standards.md` §A 原文判据逐条自查，并重点复核其中 A3 / A9' \
     '**兄弟可判别**' '索引条目已加入可观测判别特征以区分' \
     '**无冗余重复**' '与已有共享文档不重复' '若重复超 60%，应考虑抽取共享层' \
     '实例化数据（具体主机名、IP、端口）写入面向所有实例的通用文档' \
@@ -517,6 +526,7 @@ PY
 @test "skill contract: MODIFY inherits shared checks and compares A3 against existing paragraphs" {
   assert_skill_contract '### 5.2 MODIFY — 修改文档' \
     '应先执行 §4.1、遵循 §2，写后逐项完成 §4.3' \
+    '新增/改写段落应对照 `references/writing-standards.md` §A 原文判据逐条自查，并重点复核其中 A3 / A9' \
     '**相邻入口清晰**' '仍能从本文档找到相邻的兄弟文档' \
     '**风格一致**' '占位符风格、命名惯例与文档现有内容一致' \
     'A3 的比对范围含文档既有段落，不止新增段落' \

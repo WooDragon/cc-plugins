@@ -30,7 +30,7 @@
     {
       "name": "doc-gate",
       "description": "Document editing governance — doc-maintenance skill + entry-side criteria injection + exit-side worktree consistency check",
-      "version": "2.0.3",
+      "version": "2.0.4",
       "author": {
         "name": "WooDragon"
       },
@@ -96,7 +96,7 @@
     {
       "name": "dispatch-contract",
       "description": "Subagent dispatch contract — four dispatch rules + %%DONE%% finalization gate (SubagentStop) + sync, agent-ownership, capability, and channel guards (PreToolUse) + dispatch-rules injection (SubagentStart)",
-      "version": "1.10.2",
+      "version": "1.10.3",
       "author": {
         "name": "WooDragon"
       },
