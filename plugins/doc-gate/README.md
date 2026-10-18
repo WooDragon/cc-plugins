@@ -155,9 +155,22 @@ There is deliberately **no `DOC_EXIT_GATE_ROOT`**: `doc-exit.sh`'s root is `git 
 
 `RECALL_GATE_ROOT` still exists, but it only applies to `tools/recall-gate.py gate` as a standalone CLI invocation — no hook reads it. There are no environment variables for that CLI's recall threshold or result count; those are `--threshold` / `--top-n` command-line arguments only (the old `RECALL_GATE_THRESHOLD` / `RECALL_GATE_TOP_N` env vars lived in the now-deleted `recall-gate.sh` hook wrapper, which read them and forwarded them as flags).
 
+## Skills
+
+The plugin bundles two skills:
+
+| Skill | Scope |
+|-------|-------|
+| [doc-maintenance](skills/doc-maintenance/SKILL.md) | Documentation format, references, and operation-specific maintenance workflows |
+| [memory-cleanup](skills/memory-cleanup/SKILL.md) | Project auto-memory cleanup: permanent-context necessity, semantic deduplication, selective retention, and safe deletion |
+
+`memory-cleanup` is an on-demand method, not an automatic cleanup hook. Ask to clean project auto-memory or trim its permanent index. It distinguishes useful knowledge from information that must remain loaded for unknown tasks. Ordinary memories with no clear use may be discarded without a history archive; explicit, still-valid user constraints remain protected. It reuses doc-maintenance's format and reference requirements, not its entire workflow.
+
+The existing auto-memory exclusions remain unchanged. Manually check Memory links and incoming references before deletion; a clean document-graph report does not establish Memory coverage. Static content contracts do not prove model adherence.
+
 ## Skill: doc-maintenance
 
-The plugin bundles one skill (`skills/doc-maintenance/SKILL.md`) that provides structured documentation workflows:
+`doc-maintenance` provides structured documentation workflows:
 
 - **Pre-flight**: layer validation, naming checks, duplicate detection
 - **Execute**: guided by operation-specific checklists (CREATE / MODIFY / RENAME / ARCHIVE / RESTRUCTURE / DEDUP)
@@ -170,6 +183,7 @@ The skill also carries a writing-standards reference (`references/writing-standa
 ## Tests
 
 ```bash
+bats plugins/doc-gate/tests/memory-cleanup.bats
 bats plugins/doc-gate/tests/doc-entry.bats
 bats plugins/doc-gate/tests/doc-exit.bats
 bats plugins/doc-gate/tests/exclude.bats
@@ -182,6 +196,7 @@ The BM25 unit tests cover reusable body/title indexes, the legacy call interface
 
 | Suite | Coverage |
 |-------|----------|
+| `memory-cleanup.bats` | Source-checkout skill packaging, synchronized versions, preserved hook declarations, and section-scoped Memory cleanup content contracts (not model behavior) |
 | `doc-entry.bats` | Filters, exclusions, injection payload shape, global-CLAUDE.md segment, kill switch, fail-open |
 | `doc-exit.bats` | git-status parsing (incl. rename records in either column), stop_hook_active gating, background_tasks mid-flight skip, non-git repo, exclusion filtering, finding rendering, kill switch, robustness (space in path, deleted file), `--dirty-superset-file` transport end-to-end |
 | `exclude.bats` | Shared `_doc_gate_exclude.sh` predicate — basename and path exclusions (incl. relative & nested paths), governed paths |

@@ -8,7 +8,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 |------|------|------|
 | Plugin | plan-review | 对抗性审阅（Gemini/Claude/Codex）+ `second-opinion.sh` 通用第二意见驱动（插件外可调用） |
 | Plugin | ppt-press（4 skills） | PPT 全生命周期（init/create/deploy/manage） |
-| Plugin | doc-gate（1 skill + 2 hooks + 4 tools） | 文档入口判据注入 + 出口工作树一致性检查 |
+| Plugin | doc-gate（2 skills + 2 hooks + 4 tools） | 文档入口判据注入 + 出口工作树一致性检查 |
 | Plugin | code-search（1 skill） | 代码搜索与符号导航方法论（纯 skill，零 hook） |
 | Plugin | github-collab（1 skill） | 管理者 / 协作者两条 GitHub 协作工作流；纯 skill，零 hook |
 | Plugin | deep-research（1 skill + 4 agents + 1 hook） | 7-Stage 深度研究管线 + 多模型采集引擎 + 引用验证门禁 |
@@ -73,8 +73,10 @@ plugins/
       docs-graph.py              # 链接图谱独立 CLI（7 子命令：check/backlinks/links/orphans/hubs/related/export）
     skills/
       doc-maintenance/SKILL.md   # 文档维护工作流
+      memory-cleanup/SKILL.md    # 项目 auto-memory 清理方法
     tests/                       # BDD 测试套件：入口、出口、排除、BM25 与 auto-memory 行为
       doc-entry.bats             # 入口过滤、注入载荷、全局配置、开关与 fail-open
+      memory-cleanup.bats        # Memory 清理内容与打包合同
       doc-exit.bats              # git 状态传输、生命周期门控、finding、排除与鲁棒性
       exclude.bats               # 共享 Shell 排除谓词与受治理路径覆盖
       test_bm25.py               # 正文/标题索引评分、排序、阈值与兼容性
