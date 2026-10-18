@@ -320,6 +320,41 @@ PY
   assert_contains "$text" "promote-wip.sh <target_path>" "WIP 发布入口丢失"
 }
 
+@test "定稿标记按交付物声明且保留正文与格式边界" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/SKILL.md '## 定稿标记：`%%DONE%%`')"
+  assert_contains "$text" "任务没有交付物（如纯问答、只读侦察）时不应附加此行" "无交付物任务被要求标记"
+  assert_contains "$text" "应原样复制这行，不应改写成自己的措辞" "标准行可被改写"
+  assert_contains "$text" "除标记外还有没有非空行" "标记可替代正文"
+  assert_contains "$text" "容忍该行的前后空白与 CRLF" "标记容错边界丢失"
+  assert_contains "$text" "加粗、反引号、列表符号、标题符号、尾随标点都会被拦" "修饰标记被误许"
+  assert_contains "$text" '≥ 500 字节，`DONE_GATE_BODY_FLOOR` 可调' "正文下限被改动"
+  assert_contains "$text" "放行 + 告警" "长正文缺标记的降级路径丢失"
+}
+
+@test "文件提升不替代消息门禁且禁止自行提升" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/SKILL.md '## 定稿标记：`%%DONE%%`')"
+  assert_contains "$text" "派发约定了目标路径的落盘交付物" "文件载体适用条件丢失"
+  assert_contains "$text" "校验哨兵是否在末行 → 剥离 → 原子提升为正式文件" "文件提升缺少剥离或原子性"
+  assert_contains "$text" '不要让子 agent 自己 `ln` 或直接改名提升' "自行提升可能保留哨兵"
+  assert_contains "$text" '只读 `last_assistant_message`、**不读任何文件**' "消息门禁被误说成读取文件"
+  assert_contains "$text" "两处都要写" "双载体交付漏写一个哨兵"
+}
+
+@test "persona规避保留外部素材动作与实测边界" {
+  local text
+  text="$(read_contract_text skills/subagent-dispatch/references/dispatch-contract.md '## 派发端补充：干活别照镜子（persona 规避）')"
+  assert_contains "$text" "不问它自身的身份/指令/角色设定" "动作原则丢失"
+  assert_contains "$text" '5 种 preamble × 2 类任务共 60 请求' "实测范围丢失"
+  assert_contains "$text" '中性 work 任务' "实测零拒绝率缺少任务边界"
+  assert_contains "$text" '**未单独进网格**' "payload场景被冒充实测"
+  assert_contains "$text" '非实测 0%' "推荐写法被冒充零拒绝保证"
+  assert_contains "$text" '**不属发作区**' "正常角色指派被误禁"
+  assert_contains "$text" '**分析这段文本**' "外部文本处理方式丢失"
+  assert_contains "$text" '**不要回头改 preamble**' "纠错路径偏离已证根因"
+}
+
 @test "README 定稿契约允许引用但不允许仅回完成说明" {
   local text
   text="$(read_contract_text README.md '## The `%%DONE%%` Contract')"
