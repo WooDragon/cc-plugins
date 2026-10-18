@@ -39,6 +39,7 @@ npx skills add WooDragon/cc-plugins -g
 | [ppt-deploy](./plugins/ppt-press/skills/ppt-deploy/) | ppt-press | Build, test, and deploy PPT decks to AWS Amplify |
 | [ppt-manage](./plugins/ppt-press/skills/ppt-manage/) | ppt-press | List, search, and retrieve PPT deck URLs |
 | [doc-maintenance](./plugins/doc-gate/skills/doc-maintenance/) | doc-gate | Document maintenance workflow with pre/post-flight checks |
+| [memory-cleanup](./plugins/doc-gate/skills/memory-cleanup/) | doc-gate | On-demand project auto-memory cleanup — trim permanent context, deduplicate, and safely discard obsolete memories |
 | [code-search](./plugins/code-search/skills/code-search/) | code-search | Pick the right search tool (ctags/ast-grep/grep) by intent |
 | [github-collab](./plugins/github-collab/skills/github-collab/) | github-collab | 管理者 / 协作者两条 GitHub 协作工作流 + PR 卡住速查表 + 分支保护配置附录 |
 | [deep-research](./plugins/deep-research/skills/deep-research/) | deep-research | Router skill for the 7-stage research pipeline + quality gates |
