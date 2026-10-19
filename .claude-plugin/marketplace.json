@@ -41,7 +41,7 @@
     {
       "name": "code-search",
       "description": "Code search & symbol navigation — pick ctags / ast-grep / grep by search symptom (definition / structure / caller)",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": {
         "name": "WooDragon"
       },
@@ -63,7 +63,7 @@
     {
       "name": "pr-review",
       "description": "AI review for open GitHub PRs — grok/claude/copilot backends, grok and claude auto-routed via a unified entry point, both with adversarial multi-round follow-up over a persisted session; copilot optional and async",
-      "version": "1.3.5",
+      "version": "1.3.6",
       "author": {
         "name": "WooDragon"
       },
@@ -85,7 +85,7 @@
     {
       "name": "github-collab",
       "description": "GitHub maintainer/collaborator workflow — how each role works once a repo is set up as maintainer-owns-main, collaborators-PR-only",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "author": {
         "name": "WooDragon"
       },
@@ -96,7 +96,7 @@
     {
       "name": "dispatch-contract",
       "description": "Subagent dispatch contract — four dispatch rules + %%DONE%% finalization gate (SubagentStop) + sync, agent-ownership, capability, and channel guards (PreToolUse) + dispatch-rules injection (SubagentStart)",
-      "version": "1.10.3",
+      "version": "1.10.4",
       "author": {
         "name": "WooDragon"
       },

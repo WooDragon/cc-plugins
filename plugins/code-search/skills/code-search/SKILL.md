@@ -1,14 +1,7 @@
 ---
 name: code-search
 description: |
-  代码搜索与符号导航——按「症状」选对工具（ctags / ast-grep / grep），别一上来就 grep。当需要：
-  - 找某符号的定义 / 跳转到定义（"X 在哪定义"、"这个函数/类/方法在哪"、"find definition"、"jump to definition"）→ ctags
-  - 找符合某 AST 结构形状的代码（import 语句、特定调用形态、React 组件定义、所有 try/catch）→ ast-grep
-  - 找谁调用了 X / caller 调用点 / 纯文本·字符串出现处（"who calls X"、"find references/callers"、"全局搜 X"）→ grep
-  - 追调用链 / 依赖影响面分析、理解陌生代码库前定位相关代码
-  - 大库精确调用图 grep/ctags 扛不住时的升级路径（LSP/SCIP）
-  时调用此 Skill，按决策表选工具、抄命令模板，避免用 grep 找定义（漏重载/跨行签名/注释噪音）、避免用正则凑 AST 结构。
-  Triggers: 代码搜索, 搜代码, 找定义, 符号定位, 跳转到定义, 找 caller, 谁调用, 调用链, AST 结构匹配, 全局搜索, ctags, ast-grep, grep, find definition, find references, who calls, jump to definition, code navigation.
+  代码搜索与符号导航（code search/navigation）：定义定位用 ctags，AST 结构匹配用 ast-grep，调用点／引用及文本搜索用 grep。用于找定义、找 caller、追调用链、定位依赖影响面和陌生代码库相关代码，以及复杂精确导航的 LSP/SCIP 升级。具体工具选择及降级边界按正文决策表执行。
 ---
 
 # 代码搜索

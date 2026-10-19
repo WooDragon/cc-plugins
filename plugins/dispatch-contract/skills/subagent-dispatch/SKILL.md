@@ -1,16 +1,7 @@
 ---
 name: subagent-dispatch
 description: |
-  子 agent 派发契约——派发必要性与证据缺口、四条铁律正反例、卸载场景判断、Explore 任务级别三档、定稿标记机制、Workflow schema 用法。当需要：
-  - 派发 subagent / spawn agent / delegate to agent，需说明工作必要性、证据缺口，或确认 prompt 格式与交付物形态是否合规
-  - dispatch subagent 时不确定「输出即产物」「范围围栏」「渐进产出」「定稿纪律」哪条该套用
-  - 判断某任务该不该卸载（offload）、用哪个模型档位
-  - 派发 Explore 时不确定任务级别该钉 `quick` / `medium` / `very thorough` 哪一档
-  - 处理 background subagent 产物回传通道、活性判定、TaskStop 时机
-  - 需要子 agent 返回强结构化产物（JSON schema 校验）时了解 Workflow agent() 用法
-  - 派发 prompt 触发拒绝，排查是否遇到上游 persona 焊死问题
-  时调用此 Skill。
-  Triggers: 派发 subagent, subagent 调度, dispatch subagent, spawn agent, delegate to agent, Task 派发, 并行派发, 交付物形态, 定稿标记, 输出即产物, 范围围栏, 渐进产出, 定稿纪律, offload, 卸载场景, 卸载判断, Explore 任务级别, Explore quick, Explore medium, Explore very thorough, background subagent, 活性判定, TaskStop, 回传通道, workflow schema, 结构化产物, persona 拒绝, 派发契约, dispatch contract, %%DONE%%.
+  派发 subagent（spawn/delegate/dispatch agent）前的契约：派发必要性、证据缺口、任务范围、prompt 与交付物要求。用于卸载与模型档位选择、Explore 任务级别、定稿标记、后台产物回传与活性/TaskStop 判断、Workflow JSON schema 结构化输出，以及派发 prompt 的 persona 拒绝排查。Team 的授权与生命周期仍遵循 team-ops。
 ---
 
 # 子 agent 派发契约
