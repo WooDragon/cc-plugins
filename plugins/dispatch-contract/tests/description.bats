@@ -65,6 +65,6 @@ assert_contains_all() {
   assert_contains_all "$description" \
     "派发必要性" "证据缺口" "卸载" "模型档位" "Explore" "回传" \
     "活性" "TaskStop" "JSON schema" "persona" "Team"
-  [[ "$description" == *"Workflow JSON schema"* || "$description" == *"Workflow agent()"* ]]
-  [[ "$description" == *"team-ops"* || "$description" == *"Team 的适用范围"* ]]
+  [[ "$description" == *"Workflow JSON schema"* ]]
+  [[ "$description" == *"team-ops"* ]]
 }

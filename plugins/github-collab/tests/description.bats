@@ -64,7 +64,8 @@ assert_contains_all() {
   description="$(metadata '.description')"
   assert_contains_all "$description" \
     "管理者" "协作者" "issue" "响应" "合并" "同仓分支" "fork" \
-    "权限" "分支保护" "CI"
+    "权限" "分支保护" "CI" "AI 评审" "pr-review"
+  [[ "$description" == *"AI 评审调用使用 pr-review"* ]]
   [[ "$description" == *"approve"* || "$description" == *"审批"* ]]
   [[ "$description" == *"BLOCKED/REVIEW_REQUIRED"* || "$description" == *"卡住"* ]]
 }

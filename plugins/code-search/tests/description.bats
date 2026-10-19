@@ -31,6 +31,17 @@ description_bytes() {
   python3 -c 'import sys; print(len(sys.stdin.read().strip().encode("utf-8")))' <<<"$1"
 }
 
+assert_contains_all() {
+  local description="$1" phrase
+  shift
+  for phrase in "$@"; do
+    if [[ "$description" != *"$phrase"* ]]; then
+      printf 'description is missing required route category: %s\n' "$phrase" >&2
+      return 1
+    fi
+  done
+}
+
 search_mapping_contract() {
   python3 - "$1" <<'PY'
 import re
@@ -121,6 +132,7 @@ PY
 @test "description maps definition, AST, and caller/text intents to their tools" {
   local description
   description="$(metadata '.description')"
+  assert_contains_all "$description" "调用链" "影响面" "LSP/SCIP"
   run search_mapping_contract "$description"
   if [ "$status" -ne 0 ]; then
     printf '%s\n' "$output" >&2
