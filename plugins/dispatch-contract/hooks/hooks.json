@@ -1,5 +1,5 @@
 {
-  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop, sync, agent-ownership, capability, and channel guards on PreToolUse, dispatch-rules injection on SubagentStart, auto-compaction reminders on main-session PostToolUse",
+  "description": "Dispatch contract: %%DONE%% finalization gate on SubagentStop, sync, agent-ownership, capability, and channel guards on PreToolUse, dispatch-rules injection on SubagentStart, auto-compaction reminders on main-session PostToolUse, stateless convergence reminders on completed synchronous Agent/Task PostToolUse",
   "hooks": {
     "PreToolUse": [
       {
@@ -26,6 +26,12 @@
         "matcher": "^(Agent|Task|SendMessage|TaskOutput)$",
         "hooks": [
           { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/subagent-compact-reminder.sh\"" }
+        ]
+      },
+      {
+        "matcher": "^(Agent|Task)$",
+        "hooks": [
+          { "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-convergence-reminder.sh\"", "timeout": 5 }
         ]
       }
     ],
