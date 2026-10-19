@@ -6,7 +6,7 @@ Subagent dispatch contract enforcement for Claude Code — a `%%DONE%%` finaliza
 
 Version 1.6.0 makes caller-side `model` ownership explicit. Runtime-owned built-ins must carry a non-empty `model` in an `Agent` or `Task` call. Registered agents must omit `model`; `model: null` is equivalent to omission and preserves the agent frontmatter preset. Any other registered-agent model value is rejected because it overrides that preset. This is a breaking contract for callers that previously supplied a model for a registered agent.
 
-The plugin has eight parts: a **PostToolUse hook** that reminds the main session when a subagent has completed at least three automatic compactions, plus four **PreToolUse hooks** — one blocks dispatch calls omitting `run_in_background:false`, one enforces model ownership, one blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, and one blocks a `name`-carrying dispatch (upgrading a one-shot subagent to a teammate) whose `subagent_type` is not a recognized team-ops role — a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
+The plugin has nine parts: two **PostToolUse hooks** — one reminds the main session when a subagent has completed at least three automatic compactions, and one gives the caller a convergence reminder after a completed synchronous `Agent` or `Task` return — plus four **PreToolUse hooks** — one blocks dispatch calls omitting `run_in_background:false`, one enforces model ownership, one blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, and one blocks a `name`-carrying dispatch (upgrading a one-shot subagent to a teammate) whose `subagent_type` is not a recognized team-ops role — a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
 
 ## Installation
 
@@ -54,6 +54,13 @@ PostToolUse (matcher: ^(Agent|Task|SendMessage|TaskOutput)$)
          Reports each provable subagent with >=3 completed auto compactions.
          Requires python3; missing runtime or unknown sources fail open.
 
+PostToolUse (matcher: ^(Agent|Task)$)
+  │
+  └─ dispatch-convergence-reminder.sh (5s timeout)
+         Gives the caller a convergence reminder on tool_response.status=completed.
+         Requires jq; unknown or malformed input produces no output.
+         Adds context only: no blocking decision, transcript scan, or state files.
+
 SubagentStart (matcher: *)
   │
   └─ dispatch-rules-inject.sh (5s timeout)
@@ -82,10 +89,11 @@ skills/subagent-dispatch  (no hook — loaded by description match)
          contract is reachable at dispatch time rather than only after a block.
 ```
 
-This plugin registers seven hooks: `PreToolUse` (dispatch-sync-guard,
+This plugin registers eight hooks: `PreToolUse` (dispatch-sync-guard,
 dispatch-agent-ownership-guard, dispatch-capability-guard,
 pre-dispatch-channel-guard), `SubagentStart` (dispatch-rules-inject),
-`SubagentStop` (subagent-done-gate), and `PostToolUse` (subagent-compact-reminder).
+`SubagentStop` (subagent-done-gate), and `PostToolUse` (subagent-compact-reminder
+and dispatch-convergence-reminder).
 There is no dispatch-side hook that guesses whether a given task needs a
 `%%DONE%%` deliverable — that judgment is semantic, and a keyword guess would
 misfire often enough to be ignored. The skill closes that gap instead.
@@ -533,6 +541,25 @@ provenance is omitted rather than assigned an unverified count; other provable
 instances remain eligible. The hook reads native JSONL relationships and does
 not guarantee compatibility with future changes to that log format.
 
+## Synchronous-Return Convergence Reminder
+
+`dispatch-convergence-reminder.sh` requires `jq`. After a synchronous `Agent`
+or `Task` return with `tool_response.status: completed`, the hook adds a fixed
+convergence reminder to the caller's context via
+`hookSpecificOutput.additionalContext` on `PostToolUse`.
+Callers with an `agent_id`, including PM, remain eligible. A completed return
+indicates that the tool returned, not that the delegated work passed acceptance.
+
+The hook adds context only; it never blocks a tool or changes its result.
+Launch statuses, unknown structures, malformed input, and missing `jq` produce
+no output. The hook creates no state, scans no transcripts, and calls no model.
+Each matching return receives one reminder; there is no cross-event deduplication.
+
+This reminder does not cover `SendMessage`, `TaskOutput`, background-completion
+notifications, or teammate-launch returns. It does not change TeamOps routing or
+guarantee fewer subsequent dispatches. The automatic compaction reminder remains
+independent of this hook.
+
 ## Running Tests
 
 ```bash
@@ -545,6 +572,7 @@ bats plugins/dispatch-contract/tests/dispatch-channel-guard.bats
 bats plugins/dispatch-contract/tests/gate-composition.bats
 bats plugins/dispatch-contract/tests/skill-contract.bats
 bats plugins/dispatch-contract/tests/subagent-compact-reminder.bats
+bats plugins/dispatch-contract/tests/dispatch-convergence-reminder.bats
 ```
 
 `subagent-done-gate.bats` has 26 test cases covering: core judgment (marker
