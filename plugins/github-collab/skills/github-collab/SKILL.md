@@ -1,13 +1,7 @@
 ---
 name: github-collab
 description: |
-  仓库已配成「main 有分支保护，没有管理者 approve 谁都合不了」的形态之后，两个角色各自怎么干活。当需要：
-  - 管理者视角：怎么和协作者对齐 issue 边界（不管 issue 是你派的还是他自己开的）、协作者的 PR 到了怎么处理（先看 CI 再看代码）、怎么做评审裁决、要求修改和 approve 的区别、怎么合并、自己的 PR 怎么合（作者不能 approve 自己）
-  - 协作者视角：怎么认领 issue、自己开 issue 自己做要注意什么、同仓分支还是 fork、PR 描述该写什么、CI 挂了怎么自己诊断、收到 review 意见怎么逐条响应、PR 显示 `BLOCKED`/`REVIEW_REQUIRED` 合不了是不是权限故障
-  - 摩擦点排查：PR 卡住了，卡在 CI 红 / check 一直 pending / review 未 resolve / 分支落后 main / CODEOWNERS 没匹配到人的哪一环，该找谁解决
-  - 把仓库配成这个形态：个人仓库 collaborator 权限颗粒度、分支保护规则怎么配、`enforce_admins` 死锁陷阱、required status checks 永久 pending 陷阱
-  时调用此 Skill。
-  Triggers: github collaboration, 协作者工作流, 管理者工作流, 分支保护, branch protection, PR 卡住, PR blocked, review required, request changes, dismiss stale reviews, enforce_admins, CODEOWNERS, required status checks, 合并权限, collaborator permission, PR 合不了, 派任务给协作者, 提 PR 给这个仓库, 分派 issue, 自己开 issue, issue 边界, 自认领.
+  GitHub 管理者与协作者工作流：对齐、分派或自认领 issue，选择同仓分支或 fork，提交 PR、响应 review、审批与合并；配置协作者权限、分支保护和 CODEOWNERS，排查 PR BLOCKED/REVIEW_REQUIRED、CI 失败或 pending、未解决 review、分支落后及合并权限问题。适用于已有或准备配置受保护 main 的仓库；AI 评审调用使用 pr-review。
 ---
 
 # GitHub 协作模式：管理者与协作者怎么干活
