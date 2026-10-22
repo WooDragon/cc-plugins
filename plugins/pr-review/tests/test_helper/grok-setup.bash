@@ -1,4 +1,14 @@
 # Shared real-repo fixture for Grok contract and lifecycle scenarios.
+get_mtime() {
+  local timestamp
+  # GNU stat may print filesystem information before rejecting the BSD flags.
+  if timestamp=$(stat -f %m "$1" 2>/dev/null); then
+    printf '%s\n' "$timestamp"
+  else
+    stat -c %Y "$1"
+  fi
+}
+
 setup() {
   export WORK="$BATS_TEST_TMPDIR"
   unset GROK_STUB_RC 2>/dev/null || true

@@ -17,7 +17,7 @@ seed_state() {
 
 assert_state_unchanged() {
   cmp "$WORK/original-state" "$STATE_FILE_42"
-  [ "$(stat -f %m "$STATE_FILE_42")" = "$(stat -f %m "$WORK/original-state")" ]
+  [ "$(get_mtime "$STATE_FILE_42")" = "$(get_mtime "$WORK/original-state")" ]
 }
 
 teardown() {
@@ -57,6 +57,62 @@ finish_barrier() {
   printf 'review body\n%%%%DONE%%%%\n%%%%DONE%%%%\nrequired late result\n' > "$WORK/expected"
   cmp "$WORK/expected" "$WORK/stdout"
   grep -qx 'native background diagnostic' "$WORK/stderr"
+}
+
+@test "mtime: BSD成功只输出时间戳，不调用GNU回退" {
+  stat() {
+    printf '%s\n' "$*" >> "$WORK/stat-calls"
+    [ "$#" -eq 3 ] && [ "$1" = -f ] && [ "$2" = %m ] && [ "$3" = "$STATE_FILE_42" ] || return 64
+    printf '1234567890\n'
+  }
+  run get_mtime "$STATE_FILE_42"
+  [ "$status" -eq 0 ]
+  [ "$output" = 1234567890 ]
+  [ "$(wc -l < "$WORK/stat-calls" | tr -d ' ')" -eq 1 ]
+}
+
+@test "mtime: BSD失败的stdout不污染GNU回退时间戳" {
+  stat() {
+    printf '%s\n' "$*" >> "$WORK/stat-calls"
+    [ "$#" -eq 3 ] && [ "$3" = "$STATE_FILE_42" ] || return 64
+    case "$1 $2" in
+      '-f %m') printf 'filesystem information before failure\n'; return 1 ;;
+      '-c %Y') printf '1234567890\n' ;;
+      *) return 64 ;;
+    esac
+  }
+  run get_mtime "$STATE_FILE_42"
+  [ "$status" -eq 0 ]
+  [ "$output" = 1234567890 ]
+  [ "$(wc -l < "$WORK/stat-calls" | tr -d ' ')" -eq 2 ]
+}
+
+@test "mtime: 原生stat保留失败state时间，成功复核刷新；可用时也验证真实GNU" {
+  local backend gnu_stat=""
+  if command -v gstat >/dev/null 2>&1; then
+    gnu_stat="$(command -v gstat)"
+  elif command stat -c %Y "$WORK/repo/a.txt" >/dev/null 2>&1; then
+    gnu_stat="$(command -v stat)"
+  fi
+  for backend in native ${gnu_stat:+gnu}; do
+    stat() {
+      printf '%s\n' "$*" >> "$WORK/stat-calls"
+      if [[ "$backend" = gnu ]]; then "$gnu_stat" "$@"; else command stat "$@"; fi
+    }
+    seed_state
+    [ "$(get_mtime "$STATE_FILE_42")" = "$(get_mtime "$WORK/original-state")" ]
+    run env GROK_STUB_MODE=fail_arbitrary GROK_STUB_RC=37 bash "$SCRIPT" 42 --followup "复核"
+    [ "$status" -eq 37 ]
+    assert_state_unchanged
+    run bash "$SCRIPT" 42 --followup "复核"
+    [ "$status" -eq 0 ]
+    cmp "$WORK/original-state" "$STATE_FILE_42"
+    [ "$(get_mtime "$STATE_FILE_42")" -gt "$(get_mtime "$WORK/original-state")" ]
+    if [[ "$backend" = gnu ]]; then
+      grep -qx -- "-f %m $STATE_FILE_42" "$WORK/stat-calls"
+      grep -qx -- "-c %Y $STATE_FILE_42" "$WORK/stat-calls"
+    fi
+  done
 }
 
 @test "lifecycle: 首轮默认4.7，env覆盖，CLI覆盖env并持久记录实际模型" {
@@ -135,7 +191,7 @@ finish_barrier() {
   assert_state_unchanged
   finish_barrier 0
   cmp "$WORK/original-state" "$STATE_FILE_42"
-  [ "$(stat -f %m "$STATE_FILE_42")" != "$(stat -f %m "$WORK/original-state")" ]
+  [ "$(get_mtime "$STATE_FILE_42")" != "$(get_mtime "$WORK/original-state")" ]
 }
 
 @test "lifecycle: 首轮后台超时精确透传73，保留两流且不创建state" {
