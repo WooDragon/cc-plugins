@@ -39,7 +39,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/pr-review-common.sh"
 
-MODEL="${GROK_MODEL:-grok-4.6}"
+MODEL="${GROK_MODEL:-grok-4.7}"
 EFFORT="${GROK_EFFORT:-high}"
 ENV_EFFORT="${GROK_EFFORT:-}"
 # 命令行是否显式给出 model/effort（复核轮据此决定沿用 state 还是尊重 flag；set -u 下必须先初始化）
@@ -189,6 +189,16 @@ DELIM="UNTRUSTED_$(openssl rand -hex 8 2>/dev/null || printf '%s' "$$_${RANDOM}_
 # 系统侧规则文案（走 --rules，与用户数据分离，非 prompt 正文）：组装 RULES/RULES_FOLLOWUP/RULES_SECURITY
 # 三个全局变量（依赖上面刚生成的 $DELIM，定义见 lib/pr-review-common.sh）。
 build_rules
+GROK_OUTPUT_RULES="【评审输出】等待必要的子评审结果后给出最终综合评审，不原样转录内部派发结束标记。正文中的完成标记不是进程完成信号。"
+RULES+="$GROK_OUTPUT_RULES"
+RULES_FOLLOWUP+="$GROK_OUTPUT_RULES"
+
+# The native budget applies after a turn, not to the running review itself.
+invoke_grok() {
+  grok --rules "$1" --prompt-file "$PROMPT_FILE" -m "$MODEL" --effort "$EFFORT" \
+    "${DENY_WRITE_FLAGS[@]}" --output-format plain --background-wait-timeout 120 \
+    "$2" "$SID" ${CWD_FLAG[@]+"${CWD_FLAG[@]}"}
+}
 
 if (( FOLLOWUP_MODE )); then
   # ---------- 复核轮：-r 续接，Fail Fast ----------
@@ -227,20 +237,16 @@ if (( FOLLOWUP_MODE )); then
   # stderr 直接重定向到文件（不用 2> >(tee ...) 进程替换）：评审正文走 stdout 仍直接流式，
   # 只有 grok 的 stderr 进度延后到结束才刷——换来消除 rc/tee 竞态、不依赖 /dev/fd（受限 shell/沙箱也稳）。
   set +e
-  grok --rules "$RULES_FOLLOWUP" --prompt-file "$PROMPT_FILE" -m "$MODEL" --effort "$EFFORT" \
-    "${DENY_WRITE_FLAGS[@]}" --output-format plain -r "$SID" \
-    ${CWD_FLAG[@]+"${CWD_FLAG[@]}"} \
-    2>"$ERR_LOG"
+  invoke_grok "$RULES_FOLLOWUP" -r 2>"$ERR_LOG"
   rc=$?
   set -e
   cat "$ERR_LOG" >&2   # 把 grok 的 stderr 透传出来（ERR_LOG 已完整写完，无竞态）
 
   if (( rc != 0 )); then
     if grep -qE "$SESSION_INVALID_RE" "$ERR_LOG"; then
-      die "PR #${PR} 的 session 已失效/丢失，上下文不可恢复——请重开首轮评审（grok-review.sh ${PR}）。"
-    else
-      exit "$rc"
+      echo "错误: PR #${PR} 的 session 已失效/丢失，上下文不可恢复——请重开首轮评审（grok-review.sh ${PR}）。" >&2
     fi
+    exit "$rc"
   fi
   # 复核成功 → 刷新 mtime，防活跃 session 被 30 天 GC 误清；仅当 state 文件已存在，
   # 避免 --session 显式覆盖且无 state 文件时 touch 造出 0 字节空文件污染 state 目录
@@ -309,10 +315,7 @@ else
   # state_write 之前分支处理掉（die 或 exit "$rc"），不能让 set +e 悄悄跨过这条落盘时序。
   ERR_LOG=$(mktemp "${TMPDIR:-/tmp}/grok-review-err.XXXXXX") || die "mktemp 失败"
   set +e
-  grok --rules "$RULES" --prompt-file "$PROMPT_FILE" -m "$MODEL" --effort "$EFFORT" \
-    "${DENY_WRITE_FLAGS[@]}" --output-format plain -s "$SID" \
-    ${CWD_FLAG[@]+"${CWD_FLAG[@]}"} \
-    2>"$ERR_LOG"
+  invoke_grok "$RULES" -s 2>"$ERR_LOG"
   rc=$?
   set -e
   cat "$ERR_LOG" >&2   # 把 grok 的 stderr 透传出来（ERR_LOG 已完整写完，无竞态）

@@ -54,6 +54,18 @@ COPILOT="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/copilot-review.sh"
 "$COPILOT" status    123   # poll request / result state
 ```
 
+## Review file scope
+
+For all three local backends, first-round and follow-up rules limit additional on-disk file reads to relevant context in the paths from the supplied full PR diff. Deleted and renamed paths retain their diff semantics. Follow-up incremental paths do not automatically expand this set.
+
+The reviewer may directly analyze supplied DIFF and INCREMENTAL DIFF hunks, including hunks for extra paths, to verify fixes or identify findings. Analyzing a supplied hunk does not authorize opening its file. Sufficient hunk evidence must not be rejected solely because its path is outside the first-round list.
+
+Only an explicit caller instruction outside the untrusted-data delimiters may update the file-access scope. Scope updates embedded in METADATA, DIFF, or INCREMENTAL DIFF are invalid. This is a natural-language rule, not a machine-parsed file-list protocol.
+
+The rules prohibit repository-wide scans, directory traversal, reading dependencies outside the PR, and architecture re-reviews. Internal sub-reviews inherit the same boundary and must not start broad exploration tasks. When evidence is missing, the reviewer must report that it cannot verify the claim rather than infer an LGTM.
+
+This is a prompt constraint, not a permission boundary or sandbox. It does not filter diff collection or change which tracked and untracked content is sent to the backend.
+
 ## Adversarial multi-round follow-up (grok)
 
 Round 1 sends the full PR diff and opens a grok session, whose UUID is persisted to `${XDG_STATE_HOME:-$HOME/.local/state}/pr-review/<owner>__<name>__<PR>.session` (mode 600, GC'd after 30 days). Each follow-up round resumes that session and sends **only** the review instruction plus the diff since the last round — the full diff is never re-sent. Loop until the caller's accept list is empty — the review engine is a peer, not an authority, so its `LGTM` is not the exit condition. The orchestration protocol lives in `skills/pr-review/SKILL.md`.
@@ -66,11 +78,15 @@ Guardrails baked into the script:
 - **Secret hygiene** — suspicious untracked files (`.env`, `*.pem`, `*secrets*`, …) and oversized untracked blobs are skipped rather than uploaded; `*.example` is exempt, and tracked secrets warn instead of being silently dropped.
 - `DENY_WRITE_FLAGS` (`--deny "Write(**)"`, `--deny "Edit(**)"`, `--deny "Bash(git -C:*)"`, plus one `--deny "Bash(git <sub>:*)"` per git write subcommand) — a guardrail against review drift accidentally changing files or switching branches, not a complete write block or a security boundary. The rules match tool names, command prefixes and path globs: they block the `Write`/`Edit` tools, shell redirections, and git write subcommands (checkout, switch, branch, symbolic-ref, update-ref, reset, revert, merge, rebase, cherry-pick, am, apply, stash, worktree, bisect, restore, clean, add, rm, mv, commit, tag, push, fetch, pull, clone, remote, submodule, init, config, gc, reflog, sparse-checkout, update-index). The git subcommands were added after a real incident: with only `Write`/`Edit` denied, grok ran `git checkout` during a review and switched the caller's branch — write protection watched disk writes only and missed working-tree and ref state (#221). `git -C` is denied separately because prefix matching lets `git -C . checkout -b probe` slip past `Bash(git checkout:*)`; the cost is that read forms such as `git -C <path> log` are blocked too, which review does not need since `--cwd` already points at the repository. Strength, as measured on grok 1.0.13: effective in the normal case — denied once, grok reported the failure instead of routing around it; ineffective against adversarial behavior — when explicitly asked to find an equivalent path under 44 git-write deny rules, it wrote `.git/HEAD` and `.git/refs/heads/<branch>` directly with `python3` and completed the branch switch. Disk writes fall the same way ("Write / redirect 被策略拦了，改走 Python 落盘，cat 核对过内容." — and the file was written). The root cause is a misplaced anchor: deny matches tool name plus command prefix plus path glob, while the shell is a general-purpose executor, so any write can be re-expressed under a different prefix. Holes that remain open include `git --git-dir=`, `env git`, `/usr/bin/git`, `sh -c`, and any interpreter writing files directly. Truly sealing the indirect path would also require `--deny "Bash(*)"`, which would take away `git log`/`git blame` context access and reduce the setup to the rejected `--tools` allowlist approach. The `--sandbox` comparison is not only about enforcement level: this deny policy can be bypassed, while Seatbelt is kernel-enforced and cannot be bypassed by the grok process itself. We do not use `--sandbox` because grok 1.0.13 added runtime-socket deny logic to its built-in `restrict_network` profiles whose path resolver does not follow symlinks, so on machines where `/var/run/docker.sock` is a symlink (common with OrbStack), sandbox fails to apply and grok refuses to start (issue #212). Real isolation belongs in containment (a throwaway clone plus `--cwd`), which this script does not do.
 
+Grok uses `--background-wait-timeout 120` in both rounds. This bounds background waiting after the latest turn finishes, not the duration of a running turn or the review as a whole. The script preserves streamed stdout and reports the CLI's stderr after it exits. A completion marker in the body does not end the process. Accept a review only after exit code 0 and a complete final review; a timeout is a failure even if the body looks complete. Grok's output rules request a final synthesized review without verbatim internal dispatch-end markers; stdout is not filtered.
+
+A failed first round does not create or overwrite session state. A failed ordinary follow-up does not refresh its mtime. The existing pre-invocation migration of legacy `EFFORT=xhigh` remains an exception: that migration may change state even when the subsequent invocation fails.
+
 ## Prerequisites
 
 | Backend | Needs |
 |---|---|
-| grok | `grok` CLI on `PATH`, `gh` (authenticated), `git` |
+| grok | `grok` CLI on `PATH` with `-s`/`-r` and `--background-wait-timeout` capability, `gh` (authenticated), `git`; an unrecognized option fails explicitly without a fallback retry |
 | claude | `claude` CLI on `PATH` (logged in), `gh` (authenticated), `git` |
 | codex | `codex` CLI on `PATH`, `gh` (authenticated), `git` |
 | copilot | `gh` (authenticated), Copilot code review enabled on the repo |
@@ -79,7 +95,7 @@ Guardrails baked into the script:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `GROK_MODEL` | `grok-4.6` | grok backend model override |
+| `GROK_MODEL` | `grok-4.7` | grok backend model override for new sessions; existing session models remain unchanged |
 | `GROK_EFFORT` | `high` | grok backend reasoning effort; legal values exactly `none`/`minimal`/`low`/`medium`/`high` (`xhigh` unsupported — a persisted legacy `xhigh` session value is migrated to `high` once before the review runs) |
 | `CLAUDE_REVIEW_MODEL` | `claude-opus-5` | claude backend model override |
 | `CLAUDE_REVIEW_EFFORT` | `medium` | claude backend reasoning effort; legal values exactly `low`/`medium`/`high`/`xhigh`/`max` |
@@ -93,12 +109,13 @@ On a follow-up round, persisted session `MODEL`/`EFFORT` values win over env var
 ## Tests
 
 ```bash
-bats plugins/pr-review/tests/grok-review.bats plugins/pr-review/tests/claude-review.bats plugins/pr-review/tests/codex-review.bats plugins/pr-review/tests/resolve-backend.bats plugins/pr-review/tests/skill-contract.bats
+bats plugins/pr-review/tests/
 ```
 
 Suites (counts are dynamic and intentionally not pinned here):
 
 - `grok-review.bats` — argument parsing, session state files, path construction, fail-fast semantics, directory permissions, GC, effort validation and migration, and the secret-file heuristics. External commands (`grok`, `gh`, `uuidgen`) are stubbed; `git` is real, against a per-test temp repo.
+- `grok-lifecycle.bats` — model precedence, native background-wait arguments, barrier-based late output and success timing, exact error codes, and failed-call state preservation. These CLI doubles do not establish that a native CLI hang is resolved.
 - `claude-review.bats` — same shape of coverage for the claude backend: isolation flags (`--setting-sources ""`, `--tools ""`, `--safe-mode`, `--strict-mcp-config`, the `unset_provider_routing_env` unset list covering `ANTHROPIC_*`/`CLAUDECODE`/`CLAUDE_CODE_MESSAGING_*`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_CHILD_SESSION`/`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) asserted on both first-round and `--resume` follow-up paths, session resume/fail-fast, `.claude.session` state file isolation from grok's `.session`, and shared-lib workspace pinning reuse. `claude` is stubbed.
 - `codex-review.bats` — codex backend shape: CLI arg parsing, session state files, thread resume/fail-fast, workspace pinning, effort validation, and secret-file heuristics. `codex exec` is stubbed; `git` is real against a per-test temp repo.
 - `resolve-backend.bats` — `PR_REVIEW_BACKEND` pass-through and validation, `ANTHROPIC_DEFAULT_OPUS_MODEL` auto-detection, and `pr-review.sh`'s routing to the resolved backend script (including the `copilot` rejection path).
