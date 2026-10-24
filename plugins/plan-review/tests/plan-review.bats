@@ -85,9 +85,79 @@ teardown() {
 # =============================================================================
 
 # 6. Non-Critical safety valve → allow JSON with ESCALATED
+# NOTE: setup changed by the plan-not-reviewed-at-this-revision safety valve
+# fix — the valve now only escalates a plan revision the last CONCERNS round
+# actually reviewed (see plan-review.sh's REVIEWED_HASH_FILE mechanism), so
+# hitting ATTEMPT>=MAX_ROUNDS with no reviewed hash on file no longer
+# escalates on its own; it falls through to one more real review round
+# first, which is what seeds a matching hash for the second call below.
 @test "counter: non-critical safety valve → allow JSON with ESCALATED" {
   set_counter_value 3 test-session 5
   export REVIEW_MAX_ROUNDS=3
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] one more round needed."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  [ "$(get_counter_value)" -eq 4 ]
+  [ "$(get_total_rounds)" -eq 6 ]
+
+  run_hook
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"ESCALATED"* ]]
+  # Counter file should be deleted (allow path)
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+# write_reviewed_hash <plan> [session]
+#   Seeds REVIEWED_HASH_FILE with plan_hash(plan) so a single run_hook call
+#   lands the non-Critical safety valve on its "this exact revision was
+#   already reviewed" branch instead of the mismatch/review-again branch —
+#   isolates a test on the valve's manifest handling from the separately
+#   covered mismatch mechanic (see the "valve: plan changed..." /
+#   "valve: legacy counter..." tests below). Mirrors create_approve_marker's
+#   own hash computation above.
+write_reviewed_hash() {
+  local plan_content="$1" session="${2:-test-session}"
+  local marker="${REVIEW_COUNTER_DIR}/.review-hash-${session}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$plan_content" | sha256sum | awk '{print $1}' > "$marker"
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$plan_content" | shasum -a 256 | awk '{print $1}' > "$marker"
+  else
+    printf '%s' "$plan_content" | cksum | awk '{print $1}' > "$marker"
+  fi
+}
+
+@test "valve: escalation with agent-row manifest writes dispatch state (v2)" {
+  export REVIEW_MAX_ROUNDS=3
+  local plan
+  plan=$(manifest_v2_plan '| 1 | main  | -        | -       | -     | - | - |
+| 2 | agent | dev-econ | preset  | -     | 1 | - |
+| 3 | agent | Explore  | runtime | haiku | 1 | 2 |')
+  write_reviewed_hash "$plan"
+  set_counter_value 3 test-session 3
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_approve_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"ESCALATED"* ]]
+  [[ "$reason" == *"dispatch-check"* ]]
+  local dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
+  [ -f "$dispatch_file" ]
+  jq -e '.schema_version == 2' "$dispatch_file" >/dev/null
+  jq -e '.allowed_signatures == [{"subagent_type":"dev-econ","model_source":"preset"},{"subagent_type":"Explore","model_source":"runtime","model":"haiku"}]' "$dispatch_file" >/dev/null
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+@test "valve: escalation without manifest writes no dispatch state (v2)" {
+  export REVIEW_MAX_ROUNDS=3
+  write_reviewed_hash "Test plan content"
+  set_counter_value 3 test-session 3
   INPUT=$(build_input)
   run_hook
 
@@ -95,8 +165,198 @@ teardown() {
   local reason
   reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
   [[ "$reason" == *"ESCALATED"* ]]
-  # Counter file should be deleted (allow path)
+  [ ! -f "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+@test "valve: plan changed since last reviewed round is reviewed again (v2)" {
+  export REVIEW_MAX_ROUNDS=3
+  set_counter_value 3 test-session 3
+  printf '%s' "0000" > "${REVIEW_COUNTER_DIR}/.review-hash-test-session"
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] still needs work."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"CONCERNS"* ]]
+  [[ "$reason" == *"补评审"* ]]
+  [[ "$reason" != *"-1"* ]]
+  [[ "$reason" != *"4/3"* ]]
+  [ "$(get_counter_value)" -eq 4 ]
+  [ "$(get_total_rounds)" -eq 4 ]
+  local hash_file="${REVIEW_COUNTER_DIR}/.review-hash-test-session"
+  [ -s "$hash_file" ]
+  [ "$(cat "$hash_file")" != "0000" ]
+
+  run_hook
+  assert_approve_json
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"ESCALATED"* ]]
+  [ ! -f "$hash_file" ]
   [ ! -f "${REVIEW_COUNTER_DIR}/.review-count-test-session" ]
+}
+
+@test "valve: legacy counter without hash file is reviewed once before escalation (v2)" {
+  export REVIEW_MAX_ROUNDS=3
+  set_counter_value 3 test-session 3
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] still needs work."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"CONCERNS"* ]]
+  [[ "$reason" == *"补评审"* ]]
+  [[ "$reason" != *"-1"* ]]
+  [[ "$reason" != *"4/3"* ]]
+  [ "$(get_counter_value)" -eq 4 ]
+  [ "$(get_total_rounds)" -eq 4 ]
+  [ -s "${REVIEW_COUNTER_DIR}/.review-hash-test-session" ]
+
+  run_hook
+  assert_approve_json
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"ESCALATED"* ]]
+}
+
+@test "hash: CONCERNS round records reviewed plan hash (v2)" {
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] needs work."
+  INPUT=$(build_input plan="Plan A")
+  run_hook
+  assert_deny_json
+  local hash_file="${REVIEW_COUNTER_DIR}/.review-hash-test-session"
+  [ -s "$hash_file" ]
+  local hash_a
+  hash_a=$(cat "$hash_file")
+
+  INPUT=$(build_input plan="Plan B")
+  run_hook
+  assert_deny_json
+  [ -s "$hash_file" ]
+  local hash_b
+  hash_b=$(cat "$hash_file")
+  [ "$hash_a" != "$hash_b" ]
+}
+
+@test "hash: ack-round approval clears reviewed hash file (v2)" {
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] needs work."
+  INPUT=$(build_input)
+  run_hook
+  assert_deny_json
+  local hash_file="${REVIEW_COUNTER_DIR}/.review-hash-test-session"
+  [ -s "$hash_file" ]
+
+  create_mock_engine "agy" "<verdict>APPROVE</verdict>
+Looks good now."
+  run_hook
+  assert_ack_approve_json
+
+  run_hook
+  assert_approve_json
+  [ ! -f "$hash_file" ]
+}
+
+@test "valve: REJECT after threshold resets cycle and does not escalate (v2)" {
+  export REVIEW_MAX_ROUNDS=3
+  set_counter_value 3 test-session 3
+  printf '%s' "0000" > "${REVIEW_COUNTER_DIR}/.review-hash-test-session"
+  create_mock_engine "agy" "<verdict>REJECT</verdict>
+[Critical] broken."
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"REJECT"* ]]
+  [ "$(get_counter_value)" -eq 0 ]
+  [ "$(get_total_rounds)" -eq 4 ]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.review-hash-test-session" ]
+
+  run_hook
+  assert_deny_json
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"REJECT"* ]]
+  [[ "$reason" != *"ESCALATED"* ]]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+}
+
+@test "valve: manifest present but dispatch state cannot be written denies (v2)" {
+  export REVIEW_MAX_ROUNDS=3
+  local plan='## Plan
+Use Task( for isolation.
+
+## Dispatch Manifest
+| step | location | subagent_type | model_source | model | depends_on |
+|------|----------|---------------|--------------|-------|------------|
+| 1 | main | - | - | - | - |'
+  write_reviewed_hash "$plan"
+  set_counter_value 3 test-session 3
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"dispatch 状态"* ]]
+  [ ! -f "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+  [ "$(get_counter_value)" -eq 3 ]
+  [ "$(get_total_rounds)" -eq 4 ]
+}
+
+@test "valve: dispatch state landing failure denies (v2)" {
+  export REVIEW_MAX_ROUNDS=3
+  local plan
+  plan=$(manifest_v2_plan '| 1 | main  | -        | -       | -     | - | - |
+| 2 | agent | dev-econ | preset  | -     | 1 | - |
+| 3 | agent | Explore  | runtime | haiku | 1 | 2 |')
+  write_reviewed_hash "$plan"
+  set_counter_value 3 test-session 3
+  mkdir "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
+  INPUT=$(build_input "plan=$plan")
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"dispatch 状态"* ]]
+  [ -d "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
+  [ -z "$(ls -A "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json")" ]
+  ! find "$REVIEW_COUNTER_DIR" -maxdepth 1 -name '.dispatch-test-session.json.*' -print -quit | grep -q .
+  [ "$(get_counter_value)" -eq 3 ]
+  [ "$(get_total_rounds)" -eq 4 ]
+}
+
+@test "hash: unwritable hash path never breaks the hook nor escalates (v2)" {
+  export REVIEW_MAX_ROUNDS=3
+  mkdir "${REVIEW_COUNTER_DIR}/.review-hash-test-session"
+  create_mock_engine "agy" "<verdict>CONCERNS</verdict>
+[Major] needs work."
+  set_counter_value 2 test-session 2
+  INPUT=$(build_input)
+  run_hook
+
+  assert_deny_json
+  local reason
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"CONCERNS"* ]]
+  [ "$(get_counter_value)" -eq 3 ]
+  [ "$(get_total_rounds)" -eq 3 ]
+  ! find "$REVIEW_COUNTER_DIR" -maxdepth 1 -name '.review-hash-test-session.*' -print -quit | grep -q .
+  [ -z "$(ls -A "${REVIEW_COUNTER_DIR}/.review-hash-test-session")" ]
+
+  run_hook
+  assert_deny_json
+  reason=$(echo "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *"CONCERNS"* ]]
+  [[ "$reason" != *"ESCALATED"* ]]
+  [ -z "$(ls -A "${REVIEW_COUNTER_DIR}/.review-hash-test-session")" ]
 }
 
 # 7. Below max rounds → proceeds to review
