@@ -1,0 +1,4 @@
+interface:
+  display_name: "旅行记忆分析师"
+  short_description: "结合旅行原片、必需行程、语音、轨迹与地图证据，生成可恢复的每日索引"
+  default_prompt: "使用 $vlog-daily-index（旅行记忆分析师）为这一天的旅行原片建立可回到文件与时码的每日索引，先检查依赖、配置与恢复状态。"
