@@ -16,6 +16,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 | Plugin | pr-review（1 skill + 5 scripts） | 已开 PR 的 AI 评审：grok/claude/codex 本地同步评审（`pr-review.sh` 统一入口自动路由，均含多轮对抗复评的 session 状态管理）+ Copilot bot 异步评审（可选） |
 | Plugin | dispatch-contract（1 skill + 5 hooks） | 子 agent 派发契约：四条派发铁律 + `%%DONE%%` 定稿门禁（SubagentStop）（判据按正文体量分档）+ background-dispatch 同步守卫 + 派发能力匹配守卫 + 派发通道守卫（均 PreToolUse）+ 派发规则注入（SubagentStart） |
 | Plugin | brain-route（2 skills + 1 hook） | second-brain 跨项目记忆路由：`brain-recall` 召回与写入规约 + `brain-curate` 复核去重流程 + 写本地 memory 条目文件时的路由提醒 hook（软提醒，重试即放行） |
+| Plugin | vlog-daily-index（1 skill + Python tools） | 旅行记忆分析师：Windows Codex 原生 Agent 工作流，结合原片、行程、语音与 GPS/地图证据建立每日索引 |
 
 ## 版本变更铁律
 
@@ -167,6 +168,10 @@ plugins/
       gate-composition.bats      # 门禁组合测试：从 hooks.json 动态发现同 matcher 下全部门禁并逐一验证
       test_helper/
         common-setup.bash        # 测试基础设施
+  vlog-daily-index/              # 旅行记忆分析师（Windows Codex 原生 Agent）
+    .claude-plugin/plugin.json   # 插件元数据（版本与 marketplace 同步）
+    skills/vlog-daily-index/     # 自包含技能、Python 工具、通用引用、合成测试与依赖说明
+    README.md                    # 安装者说明、依赖与宿主限制
   brain-route/                   # second-brain 跨项目记忆路由插件（2 skills + 1 hook）
     .claude-plugin/plugin.json   # 插件元数据（声明 2 个 skill + 1 个 hook）
     hooks/hooks.json             # 本地 memory 写入时的路由提醒 hook 声明
