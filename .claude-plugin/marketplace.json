@@ -114,6 +114,17 @@
       "source": "./plugins/brain-route",
       "category": "development",
       "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "vlog-daily-index",
+      "description": "Travel memory indexing in Windows Codex — native agents, source-linked events, transcripts, itinerary and GPS/map evidence",
+      "version": "0.1.5",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/vlog-daily-index",
+      "category": "productivity",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
     }
   ]
 }
