@@ -6,7 +6,7 @@ Subagent dispatch contract enforcement for Claude Code — a `%%DONE%%` finaliza
 
 Version 1.6.0 makes caller-side `model` ownership explicit. Runtime-owned built-ins must carry a non-empty `model` in an `Agent` or `Task` call. Registered agents must omit `model`; `model: null` is equivalent to omission and preserves the agent frontmatter preset. Any other registered-agent model value is rejected because it overrides that preset. This is a breaking contract for callers that previously supplied a model for a registered agent.
 
-The plugin has nine parts: two **PostToolUse hooks** — one reminds the main session when a subagent has completed at least three automatic compactions, and one gives the caller a convergence reminder after a completed synchronous `Agent` or `Task` return — plus four **PreToolUse hooks** — one blocks dispatch calls omitting `run_in_background:false`, one enforces model ownership, one blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, and one blocks a `name`-carrying dispatch (upgrading a one-shot subagent to a teammate) whose `subagent_type` is not a recognized team-ops role — a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
+The plugin has nine parts: two **PostToolUse hooks** — one reminds the main session when a subagent has completed at least two automatic compactions, and one gives the caller a convergence reminder after a completed synchronous `Agent` or `Task` return — plus four **PreToolUse hooks** — one blocks dispatch calls omitting `run_in_background:false`, one enforces model ownership, one blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, and one blocks a `name`-carrying dispatch (upgrading a one-shot subagent to a teammate) whose `subagent_type` is not a recognized team-ops role — a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
 
 ## Installation
 
@@ -51,7 +51,7 @@ PostToolUse (matcher: ^(Agent|Task|SendMessage|TaskOutput)$)
   │
   └─ subagent-compact-reminder.sh → subagent-compact-reminder.py
          Reminds only the main session after a dispatch tool returns.
-         Reports each provable subagent with >=3 completed auto compactions.
+         Reports each provable subagent with >=2 completed auto compactions.
          Requires python3; missing runtime or unknown sources fail open.
 
 PostToolUse (matcher: ^(Agent|Task)$)
@@ -526,11 +526,19 @@ and boundaries inherited from a parent do not count. Resume preserves the
 instance's accumulated count. A newly created in-process teammate has independent
 history. Named agents, including PM, have no role-based exemption.
 
-For every provable instance with a count of at least three, every check emits
+For every provable instance with a count of at least two, every check emits
 its instance ID and count. The reminder asks the main model to check the current
 deliverable's load while preserving execution continuity for unfinished work.
 The hook creates no state files, reminder markers, cooldowns, or cross-check
 cache. It does not terminate agents or force task splitting or replacement.
+
+The threshold is `REMINDER_THRESHOLD` (currently 2) in
+`hooks/subagent-compact-reminder.py`; the test scenarios derive their counts
+from the same value. `os.O_NONBLOCK` is applied where the platform provides it
+and omitted where it does not (Windows), where it only guards a FIFO hang that
+cannot occur; the regular-file decision is made by `fstat` on every platform,
+so the hook produces its reminder on Windows too instead of failing open on
+every call.
 
 **Timing and limitations:** A synchronous `Agent` call must return before the
 main session can receive this reminder. The hook does not wake the main session
