@@ -11,6 +11,20 @@ from dataclasses import dataclass, field
 
 TOOLS = {"Agent", "Task", "SendMessage", "TaskOutput"}
 
+# Two completed auto compactions mean the instance has already burned its working
+# context once and is rebuilding state from summaries. Warn at two: by the time a
+# third lands, the rebuild-and-reread loop is established and the instance is
+# spending its budget re-deriving what it already knew. Keep in sync with README
+# and the test cases.
+REMINDER_THRESHOLD = 2
+
+# os.O_NONBLOCK does not exist on Windows. Its only job here is to stop a FIFO
+# with no writer from hanging the hook at open(); Windows has no POSIX FIFOs, so
+# omitting the flag loses nothing there. What the flag still buys on POSIX is the
+# open() itself not blocking, so it is kept wherever it exists rather than being
+# replaced by a pre-check everywhere — the POSIX path stays byte-identical.
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
 
 class Unknown(ValueError):
     """The available native provenance cannot establish an exact count."""
@@ -26,7 +40,15 @@ def native_id(value):
 def regular_text(path):
     # Nonblocking open + fstat also handles a file replaced by a FIFO between
     # discovery and open. Adopted transcript symlinks to regular files work.
-    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    #
+    # Where O_NONBLOCK is unavailable (Windows), the open() cannot be made
+    # nonblocking, so the regular-file test moves ahead of it: os.stat follows
+    # the same symlinks and reads only metadata, so it cannot hang. The fstat
+    # below still runs afterwards, which keeps the TOCTOU window the same width
+    # it already was on POSIX rather than widening it.
+    if not _NONBLOCK and not stat.S_ISREG(os.stat(path).st_mode):
+        raise Unknown("not a regular file")
+    descriptor = os.open(path, os.O_RDONLY | _NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise Unknown("not a regular file")
@@ -220,7 +242,7 @@ class Check:
                 count = self.count(agent, paths[0])
             except (OSError, ValueError, UnicodeError, RecursionError):
                 continue
-            if count >= 3:
+            if count >= REMINDER_THRESHOLD:
                 result.append(f"{agent}: {count}")
         return result
 
@@ -252,11 +274,15 @@ def run(payload):
 
 def main():
     try:
-        output = run(json.load(sys.stdin))
+        # Read bytes, not text: sys.stdin decodes with the process locale (GBK on
+        # this platform), and GBK can pair a UTF-8 continuation byte with a
+        # following backslash, swallowing it and leaving invalid JSON behind.
+        # The payload is always UTF-8. json.loads accepts bytes and decodes UTF-8.
+        output = run(json.loads(sys.stdin.buffer.read()))
     except (OSError, ValueError, UnicodeError, RecursionError):
         return
     if output:
-        print(json.dumps(output, ensure_ascii=False))
+        print(json.dumps(output, ensure_ascii=True))
 
 
 if __name__ == "__main__":
