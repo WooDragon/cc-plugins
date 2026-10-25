@@ -34,3 +34,8 @@ effort: high
 不发布。
 
 包内 instructions 与 result_schema 优先；与本文件冲突时以包为准。
+
+你不修改 manifest.json 与 state.sqlite3，不删除任何文件，不递归委派其他 agent。
+必需的输入文件无法读取时报告阻塞，不得伪造内容。
+
+subject_review_targets 非空时，每个 target 的 finding_keys 都必须在 associations 里带上对应 target_id 的 subject_landmarks，否则校验不通过。

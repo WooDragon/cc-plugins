@@ -37,7 +37,7 @@ def parse_events(events, protocol):
     return {'text':text, 'raw_final':final,'events':raw,'precision':protocol.get('precision','chunk')}
 
 class ASRClient:
-    def __init__(self,service,state_root,protocol=None,concurrency=1,total_timeout=900,model=MODEL):
+    def __init__(self,service,protocol=None,concurrency=1,total_timeout=900,model=MODEL):
         if concurrency not in (1,2): raise ValueError('ASR concurrency must be 1 or 2')
         if not isinstance(model,str) or not model.strip(): raise ValueError('ASR model must be nonempty')
         self.model=model

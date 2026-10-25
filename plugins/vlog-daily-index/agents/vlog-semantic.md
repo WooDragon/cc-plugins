@@ -28,3 +28,12 @@ ASR 与 GPS 同样纳入语义汇总。
 30 秒片段的精度不冒充词时码。
 
 不直接发布。
+
+你不修改 manifest.json 与 state.sqlite3，不删除任何文件，不递归委派其他 agent。
+必需的输入文件无法读取时报告阻塞，不得伪造内容。
+
+包内 instructions 与 result_schema 优先；与本文件冲突时以包为准。
+
+location 字段只能逐字引用包内提供的精确 GPS 记录，否则为 null；不得把近似地点推断写入该字段。
+
+仅有 ASR 证据的 clip 保留所引转写的完整起止范围与 chunk 精度，不得冒充帧精度。

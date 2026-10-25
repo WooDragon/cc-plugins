@@ -7,9 +7,10 @@ if deps: sys.path.insert(0,str(Path(deps)))
 from vlog_index.store import State,RunLock,dump,read,digest,cleanup_registered
 from vlog_index import media,analysis,asr,report,store
 
+# codex keeps its v0.1.5 key set; its semantic and geography roles are the same model.
 HOST_MODEL_ROLES={
     'codex':{'vision':'Luna','semantic':'gpt-6.1-sol','semantic_reasoning_effort':'high','final_review':'ROOT_current_flagship','supplement_decision':'ROOT'},
-    'claude-code':{'vision':'vlog-daily-index:vlog-vision','semantic':'vlog-daily-index:vlog-semantic','semantic_reasoning_effort':'high','final_review':'ROOT','supplement_decision':'ROOT'}}
+    'claude-code':{'vision':'vlog-daily-index:vlog-vision','semantic':'vlog-daily-index:vlog-semantic','geography':'vlog-daily-index:vlog-geography','semantic_reasoning_effort':'high','final_review':'ROOT','supplement_decision':'ROOT'}}
 
 def save(m): dump(Path(m['state_dir'])/'manifest.json',m)
 def load(args): return read(Path(args.state)/'manifest.json')
@@ -280,7 +281,7 @@ def _continue_day_parallel(args):
     slots=m['config'].get('media_slots') or [m['hardware']['selected']]
     if not 1<=len(slots)<=4: raise ValueError('Configure one to four verified media slots')
     media.check_slot_devices(slots)
-    client=asr.ASRClient(m['config']['asr_service'],m['state_dir'],protocol,concurrency=1,model=m['config']['asr_model']); client.preflight()
+    client=asr.ASRClient(m['config']['asr_service'],protocol=protocol,concurrency=1,model=m['config']['asr_model']); client.preflight()
     state=State(m['state_dir']); pause=Path(m['state_dir'])/'pause-media.request'; gps_data=read(args.gps) if args.gps else None
     if gps_data: m['gps']={'path':args.gps,'quality':gps_data.get('quality'),'stops':gps_data.get('stops',[]),'gaps':gps_data.get('gaps',[]),'companion_confirmed':True}
     visual=m['config'].get('visual_package_mode')=='block_visual_v1'
@@ -417,7 +418,7 @@ def _continue_day_serial(args):
     from types import SimpleNamespace
     m=load(args); protocol=read(args.protocol); state=State(m['state_dir'])
     analysis.validate_itinerary(m.get('itinerary',{}).get('data'))
-    client=asr.ASRClient(m['config']['asr_service'],m['state_dir'],protocol,concurrency=1,model=m['config']['asr_model']); client.preflight()
+    client=asr.ASRClient(m['config']['asr_service'],protocol=protocol,concurrency=1,model=m['config']['asr_model']); client.preflight()
     pause=Path(m['state_dir'])/'pause-media.request'
     def media_worker(source,job):
         block,_,need_frames,audio_output=job
@@ -568,7 +569,7 @@ def supplement(args):
 def audio(args):
     m=load(args); protocol=read(args.protocol) if args.protocol else None
     analysis.validate_itinerary(m.get('itinerary',{}).get('data'))
-    client=asr.ASRClient(m['config']['asr_service'],store.host_data_root()/'services',protocol,model=m['config']['asr_model'])
+    client=asr.ASRClient(m['config']['asr_service'],protocol=protocol,model=m['config']['asr_model'])
     if args.acknowledge: client.acknowledge_terminal(args.acknowledge); return {'acknowledged':True}
     client.preflight(); state=State(m['state_dir']); processed=0
     try:
@@ -830,7 +831,7 @@ def asr_json_sample(args):
     wav=directory/'sample.wav'; raw=Path(m['state_dir'])/'asr-json-sample.json'
     if not media.valid_audio(wav,chunk['end']-chunk['start']): media.extract_audio(m['config']['ffmpeg'],source,chunk['start'],chunk['end'],wav)
     m['temporary_artifacts'].append(str(wav)); save(m)
-    client=asr.ASRClient(m['config']['asr_service'],m['state_dir'],model=m['config']['asr_model']); client.preflight()
+    client=asr.ASRClient(m['config']['asr_service'],model=m['config']['asr_model']); client.preflight()
     result=client.transcribe(wav,raw,stream=False)
     m['asr_json_sample']={'source_id':source['id'],'chunk':chunk,'model':m['config']['asr_model'],'service':m['config']['asr_service'],'result':result,'wav':str(wav),'complete':True}; save(m)
     return {'raw_output':str(raw),'wav':str(wav),'source_id':source['id'],'complete':True,'adopt_after_stream_verification':True}
@@ -870,7 +871,7 @@ def final_review_package(args):
 
 def render(args):
     m=load(args)
-    client=asr.ASRClient(m['config']['asr_service'],store.host_data_root()/'services',model=m['config']['asr_model'])
+    client=asr.ASRClient(m['config']['asr_service'],model=m['config']['asr_model'])
     m['asr_service_state']=read(client.gate) if client.gate.exists() else {'status':'not_started'}
     for source in m['sources']:
         if source['status']!='ready':

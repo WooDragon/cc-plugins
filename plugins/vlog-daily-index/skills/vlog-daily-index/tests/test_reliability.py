@@ -118,7 +118,7 @@ class Reliability(unittest.TestCase):
                 if request.method == 'GET': return httpx.Response(200, json={'data': [{'id': 'custom/model'}]})
                 self.assertIn(b'custom/model', request.read())
                 return httpx.Response(200, json={'text': 'ok'})
-            client = asr.ASRClient('http://movable.invalid', td, model='custom/model')
+            client = asr.ASRClient('http://movable.invalid', model='custom/model')
             client.client = httpx.Client(transport=httpx.MockTransport(respond))
             client.preflight(); client.transcribe(wav, Path(td) / 'raw.json', stream=False)
             self.assertEqual(len(requests), 2)
@@ -153,7 +153,7 @@ class Reliability(unittest.TestCase):
     def test_asr_client_and_adapters_do_not_require_windows_environment(self):
         environment = dict(os.environ); environment.pop('LOCALAPPDATA', None)
         with patch.dict(os.environ, environment, clear=True):
-            client = asr.ASRClient('http://movable.invalid', 'unused')
+            client = asr.ASRClient('http://movable.invalid')
             self.assertEqual(client.root, Path.home() / '.local/share' / 'VlogIndex' / 'services')
         with patch('os.name', 'posix'):
             self.assertEqual(media.enumerate_adapters(), [])
@@ -162,7 +162,7 @@ class Reliability(unittest.TestCase):
         codex_roles = {'vision': 'Luna', 'semantic': 'gpt-6.1-sol', 'semantic_reasoning_effort': 'high',
                        'final_review': 'ROOT_current_flagship', 'supplement_decision': 'ROOT'}
         claude_roles = {'vision': 'vlog-daily-index:vlog-vision', 'semantic': 'vlog-daily-index:vlog-semantic',
-                        'semantic_reasoning_effort': 'high', 'final_review': 'ROOT', 'supplement_decision': 'ROOT'}
+                        'geography': 'vlog-daily-index:vlog-geography', 'semantic_reasoning_effort': 'high', 'final_review': 'ROOT', 'supplement_decision': 'ROOT'}
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); source = root / 'source'; source.mkdir()
             for name, host, expected in (('default', None, codex_roles), ('claude', 'claude-code', claude_roles)):
@@ -261,7 +261,7 @@ class Reliability(unittest.TestCase):
             incoming = Stream([b'{"text":"one ","is_final":false}\n',
                                b'{"text":"two","is_final":false}\n',
                                b'{"text":"","is_final":true}\n', b'\n'])
-            client = asr.ASRClient('http://test.invalid', td, PROTOCOL)
+            client = asr.ASRClient('http://test.invalid', protocol=PROTOCOL)
             client.client = httpx.Client(transport=httpx.MockTransport(
                 lambda req: httpx.Response(200, headers={'content-type': 'application/x-ndjson'}, stream=incoming)))
             result = client.transcribe(wav, Path(td) / 'raw.json')
@@ -279,7 +279,7 @@ class Reliability(unittest.TestCase):
                 if len(calls) == 1: return httpx.Response(200, json={'text': 'verified sample'})
                 return httpx.Response(200, headers={'content-type': 'application/x-ndjson'},
                                       content=b'{"text":"","is_final":true}\n')
-            client = asr.ASRClient('http://test.invalid', td, PROTOCOL)
+            client = asr.ASRClient('http://test.invalid', protocol=PROTOCOL)
             client.client = httpx.Client(transport=httpx.MockTransport(response))
             self.assertEqual(client.transcribe(wav, Path(td) / 'json.json', stream=False)['text'], 'verified sample')
             self.assertTrue(client.transcribe(wav, Path(td) / 'discovery.json', discover=True)['discovery'])
@@ -289,7 +289,7 @@ class Reliability(unittest.TestCase):
     def test_normalized_service_lock_excludes_another_client(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {'LOCALAPPDATA': td}):
             wav = Path(td) / 'sample.wav'; wav_file(wav, 0.1)
-            client = asr.ASRClient('HTTP://TEST.INVALID:80', td, PROTOCOL)
+            client = asr.ASRClient('HTTP://TEST.INVALID:80', protocol=PROTOCOL)
             with ServiceLock(td, 'http://test.invalid'):
                 with self.assertRaises(RuntimeError): client.transcribe(wav, Path(td) / 'never.json')
             self.assertFalse((Path(td) / 'never.json').exists())
