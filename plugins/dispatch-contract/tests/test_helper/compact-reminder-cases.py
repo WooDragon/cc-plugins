@@ -42,6 +42,13 @@ def call_row(agent, tool="launch", fork=False):
     return row
 
 
+def bash_path():
+    path = shutil.which("bash")
+    if path is None:
+        raise SystemExit("bash not found on PATH; the compact-reminder harness needs one")
+    return path
+
+
 class Fixture:
     def __init__(self, directory):
         self.project = Path(directory)
@@ -67,10 +74,7 @@ class Fixture:
         command = entries[0]["command"].replace("${CLAUDE_PLUGIN_ROOT}", str(ROOT))
         argv = shlex.split(command)
         assert argv[0] == "bash", argv
-        bash = shutil.which("bash")
-        if bash is None:
-            raise SystemExit("bash not found on PATH; the compact-reminder harness needs one")
-        argv[0] = bash
+        argv[0] = bash_path()
         result = subprocess.run(argv,
                                 input=json.dumps(payload or self.payload, ensure_ascii=ensure_ascii),
                                 text=True, encoding="utf-8", capture_output=True, timeout=8, env=env)
@@ -78,6 +82,10 @@ class Fixture:
         assert not result.stderr, result.stderr
         if not result.stdout:
             return ""
+        # The reminder text is Chinese. Emitting it raw makes the wire bytes
+        # locale-encoded on a non-UTF-8 console, which the consumer cannot
+        # decode. Asserting on the bytes keeps this platform-independent.
+        assert result.stdout.isascii(), "hook stdout must be ASCII-escaped JSON"
         out = json.loads(result.stdout)
         assert set(out) == {"hookSpecificOutput"}, out
         specific = out["hookSpecificOutput"]
@@ -251,11 +259,30 @@ def wiring(f):
 
 
 def files(f):
-    if not hasattr(os, "mkfifo"):
-        print(f"scenario group files skipped on {sys.platform}: no os.mkfifo")
-        return False
     f.agent("good", compacts("good", THRESHOLD))
     assert f.run(dict(f.payload, transcript_path=str(f.project / "missing.jsonl"))) == ""
+    for data in ("", "{", "[]", "null", '{"agent_id":"subagent"}'):
+        result = subprocess.run([bash_path(), str(ROOT / "hooks/subagent-compact-reminder.sh")],
+                                input=data, text=True, capture_output=True, timeout=8)
+        assert result.returncode == 0 and not result.stdout, (data, result)
+    # The guard under test is "no python3 -> exit 0 silently". Blanking PATH
+    # also strips the MSYS bin directory bash itself needs to start, so keep
+    # that one directory and prove the interpreter is still absent.
+    path = str(f.project / "no-tools")
+    if sys.platform == "win32":
+        path += os.pathsep + str(Path(bash_path()).parent)
+    env = dict(os.environ, PATH=path)
+    # BASH_ENV is startup code for every non-interactive shell. This host sets
+    # it to a shim that prepends an interpreter directory to PATH, which would
+    # defeat the isolation this check exists to create.
+    env.pop("BASH_ENV", None)
+    probe = subprocess.run([bash_path(), "-c", "command -v python3"], env=env,
+                           capture_output=True, text=True)
+    assert not probe.stdout.strip(), ("PATH still resolves python3", probe.stdout)
+    assert f.run(env=env) == ""
+    if not hasattr(os, "mkfifo"):
+        print(f"scenario group files ran without the FIFO part on {sys.platform}: no os.mkfifo")
+        return True
     fifo = f.project / "fifo.jsonl"
     os.mkfifo(fifo)
     assert f.run(dict(f.payload, transcript_path=str(fifo))) == ""
@@ -267,12 +294,6 @@ def files(f):
     side.unlink()
     side.mkdir()
     f.expect("good", THRESHOLD)
-    for data in ("", "{", "[]", "null", '{"agent_id":"subagent"}'):
-        result = subprocess.run(["bash", str(ROOT / "hooks/subagent-compact-reminder.sh")],
-                                input=data, text=True, capture_output=True, timeout=8)
-        assert result.returncode == 0 and not result.stdout, (data, result)
-    env = dict(os.environ, PATH=str(f.project / "no-tools"))
-    assert f.run(env=env) == ""
     return True
 
 

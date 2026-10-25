@@ -20,9 +20,8 @@ REMINDER_THRESHOLD = 2
 
 # os.O_NONBLOCK does not exist on Windows. Its only job here is to stop a FIFO
 # with no writer from hanging the hook at open(); Windows has no POSIX FIFOs, so
-# omitting the flag loses nothing there. What the flag still buys on POSIX is the
-# open() itself not blocking, so it is kept wherever it exists rather than being
-# replaced by a pre-check everywhere — the POSIX path stays byte-identical.
+# omitting the flag loses nothing there. The fstat after the open is what makes
+# the regular-file decision on every platform, so no platform needs a pre-check.
 _NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
@@ -40,14 +39,6 @@ def native_id(value):
 def regular_text(path):
     # Nonblocking open + fstat also handles a file replaced by a FIFO between
     # discovery and open. Adopted transcript symlinks to regular files work.
-    #
-    # Where O_NONBLOCK is unavailable (Windows), the open() cannot be made
-    # nonblocking, so the regular-file test moves ahead of it: os.stat follows
-    # the same symlinks and reads only metadata, so it cannot hang. The fstat
-    # below still runs afterwards, which keeps the TOCTOU window the same width
-    # it already was on POSIX rather than widening it.
-    if not _NONBLOCK and not stat.S_ISREG(os.stat(path).st_mode):
-        raise Unknown("not a regular file")
     descriptor = os.open(path, os.O_RDONLY | _NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):

@@ -534,10 +534,11 @@ cache. It does not terminate agents or force task splitting or replacement.
 
 The threshold is `REMINDER_THRESHOLD` (currently 2) in
 `hooks/subagent-compact-reminder.py`; the test scenarios derive their counts
-from the same value. The file reader uses `os.O_NONBLOCK` where the platform
-provides it and falls back to a metadata-only regular-file check where it does
-not (Windows), so the hook produces its reminder on Windows too instead of
-failing open on every call.
+from the same value. `os.O_NONBLOCK` is applied where the platform provides it
+and omitted where it does not (Windows), where it only guards a FIFO hang that
+cannot occur; the regular-file decision is made by `fstat` on every platform,
+so the hook produces its reminder on Windows too instead of failing open on
+every call.
 
 **Timing and limitations:** A synchronous `Agent` call must return before the
 main session can receive this reminder. The hook does not wake the main session
