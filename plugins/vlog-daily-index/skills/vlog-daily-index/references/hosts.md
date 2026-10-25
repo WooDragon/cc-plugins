@@ -18,6 +18,7 @@
 1. **并发名额来源**：Codex使用会话实际空闲的子Agent名额，改上限须重启Codex并新建聊天；Claude Code默认同时20个，可由`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`调整。两边`vision-queue --available-workers`都必须传**当前真实空闲数**，不得传配置目标值。
 2. **ROOT的执行位置**：只有主会话能执行`decide-supplement`、`approve-final`、`review-frames`、`naming-review`。子Agent不得代跑这四个命令。
 3. **Agent 写入边界**：Claude Code侧用agent frontmatter的`tools: Read, Write`做工具级白名单，路径级限制由用户/项目权限规则承担；Codex侧由派发prompt与包内`result_path`约束写入边界。两侧子Agent都只写包内`result_path`。
+4. ROOT 在两端都取主会话当前模型；Codex 侧的 'ROOT_current_flagship' 是记录约定，不是独立进程。
 
 ## 安装与调用
 

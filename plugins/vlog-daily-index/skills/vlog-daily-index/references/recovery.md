@@ -18,6 +18,7 @@
 | ROOT发现实质错漏/矛盾 | 记录具体问题、证据、blocking状态及处置；用现有证据纠正或由ROOT决定局部补采，只回算受影响依赖。问题处置后重新审查绑定；有依据未知可保留，不能用格式通过绕过未决冲突。 |
 | 已完成后补充GPS/确认随行 | 用`gps-review-package`仅重关联既有帧与可信时钟/轨迹，不重抽/重看/重转写。语义Agent定向更新并重算受影响geography，render后生成final-review-package，由ROOT再审后approve-final/publish；旧发布版本本地备份，新版须重新回读。 |
 | 提示版本升级后的既有run | `prompt_version`变化不自动重建已成功包：帧集未变时`packages`直接跳过旧包；需更新时显式`packages --refresh`，它会重排该源包并使下游geography/终审批准失效。block模式按`(source_id, block_index)`去重，升级后新块带新版本、旧块保留原版本，属预期混用，不重派已完成块。 |
+| 重跑geography-package | 重跑后`package_id`变化，旧`geography.result.json`会被判stale，须用新包重跑地理阶段再`import-geography`；不手改state或复用旧结果。 |
 | 源或侧车变化 | 暂停；核实来源变化并按新运行重建身份，不覆盖原基线。 |
 | NAS发布中断 | 保留本地三成果和temp，核对组run_id/hash；只重试publish，不重跑ASR或视觉Agent。三文件未成组验证不标成功。 |
 | 目录命名或迁移中断 | [命名约定](naming.md)：保留原计划/journal，同state用同一`naming-apply --plan`恢复，不重新init/手改CSV。冲突或身份不一致停止。迁移完成后核对当前根和索引，再重render/受影响ROOT终审/approve/publish；成功媒体、视觉、ASR不重跑。仅dry-run未移动目录时无需迁移恢复。 |

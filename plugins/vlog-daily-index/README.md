@@ -30,7 +30,7 @@ claude plugin install vlog-daily-index@cc-plugins
 
 需要用户配置 Python 3.12、FFmpeg/ffprobe、兼容的 ASR 服务和模型，以及运行所需的素材、行程和 GPS/地图证据。凭证、服务地址、本机工具路径和硬件配置由使用者在本地提供，不包含在发布源码中。实际依赖、安装和配置步骤见[安装说明](./skills/vlog-daily-index/references/setup.md)。
 
-各宿主的验证边界：Windows 上的 Codex 已端到端验证；Claude Code 已验证插件加载与 agent 解析，完整流水线未在真实素材上跑过。其他宿主未验证。
+各宿主的验证边界：Windows 上的 Codex 已端到端验证；Claude Code 侧只核对了插件清单与 agent frontmatter 结构，插件加载、agent 解析与完整流水线均未实测。其他宿主未验证。
 
 ## 使用与验证
 
