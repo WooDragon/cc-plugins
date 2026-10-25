@@ -4,7 +4,7 @@ import json, time
 from pathlib import Path
 import httpx
 from httpx_sse import EventSource
-from .store import ServiceLock, dump, read, digest
+from .store import ServiceLock, dump, read, digest, host_data_root
 
 MODEL='mlx-community/Qwen3-ASR-1.7B-8bit'
 
@@ -45,8 +45,7 @@ class ASRClient:
         from urllib.parse import urlsplit
         parsed=urlsplit(service.rstrip('/')); port=parsed.port or (443 if parsed.scheme=='https' else 80)
         self.service=f'{parsed.scheme.lower()}://{parsed.hostname.lower()}:{port}{parsed.path.rstrip("/")}'
-        import os
-        self.root=Path(os.environ.get('LOCALAPPDATA',Path.home()/'.local/share'))/'VlogIndex'/'services'; self.protocol=protocol
+        self.root=host_data_root()/'services'; self.protocol=protocol
         self.gate=self.root/('service-'+digest(self.service)[:16]+'.json'); self.total_timeout=total_timeout
         self.client=httpx.Client(timeout=httpx.Timeout(connect=10,write=120,read=180,pool=10),trust_env=False)
     def preflight(self):

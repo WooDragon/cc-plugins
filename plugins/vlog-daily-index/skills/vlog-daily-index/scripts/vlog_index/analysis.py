@@ -6,7 +6,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .store import digest, dump, read, file_hash
 
-SCHEMA_VERSION='1'; PROMPT_VERSION='2'
+SCHEMA_VERSION='1'; PROMPT_VERSION='3'
 VISION_INSTRUCTIONS=('实际打开并查看frames中的全部图片（包括边界上下文），analysed_frame_ids逐一完整对账。每个核心帧必须有可见内容观察和对应evidence_ids，无明显事件也记录；无法读取不得伪称已看完，应报告阻塞。'
     'observations只写可见事实；events/interest_points是候选。模糊细节降低置信，区分观察与推测，不凭文件名、行程或相似画面臆造动作、身份或地点。'
     '严格引用本包source_id、文件内时间和证据ID；GPS仅逐字引用提供的完整记录，拍摄位置不等于远景主体位置。若有转写，仅保留原文及原精度，chunk不是词时码，不做音频事件检测。'
@@ -19,7 +19,7 @@ def invalidate_downstream(manifest,reason):
     if manifest.get('semantic_daily'): manifest['semantic_daily']['invalidated_by']=reason
 
 def record_supplement_decision(manifest,request_id,decision,reviewer,reason):
-    """Record the harness ROOT decision; model proposals never authorize extraction."""
+    """Record the ROOT decision of the host session; model proposals never authorize extraction."""
     if reviewer!='ROOT' or not reason.strip(): raise ValueError('Supplement decisions require ROOT and an evidence-based reason')
     if decision not in ('accept','reject'): raise ValueError('Decision must be accept or reject')
     decisions=manifest.setdefault('supplemental_decisions',{})
@@ -79,7 +79,7 @@ def map_lookup(requests,provider,cache_dir,client=None,retry_failed=False):
     import httpx, math, time
     if provider not in ('photon','osm') or not isinstance(requests,list): raise ValueError('Use photon/osm and a JSON request list')
     cache_dir=Path(cache_dir); cache_dir.mkdir(parents=True,exist_ok=True)
-    owned=client is None; client=client or httpx.Client(timeout=30,trust_env=False,headers={'User-Agent':'vlog-daily-index/0.1.1 (personal media indexing)'})
+    owned=client is None; client=client or httpx.Client(timeout=30,trust_env=False,headers={'User-Agent':'vlog-daily-index/0.2.0 (personal media indexing)'})
     records=[]; called=False
     try:
         for request in requests:
@@ -194,7 +194,7 @@ def require_geography(manifest,daily):
     if not daily: raise ValueError('Final rendering requires a validated daily result and mandatory itinerary/geography stage')
     expected=geography_bindings(manifest,daily); geography=manifest.get('geography',{})
     if geography.get('input_digests')!=expected or geography.get('sha256')!=digest(geography.get('data')) or geography.get('package_id')!=manifest.get('geography_package',{}).get('package_id'):
-        raise ValueError('Geography is missing or stale; attach sourced itinerary and run the dedicated Sol geography review')
+        raise ValueError('Geography is missing or stale; attach sourced itinerary and run the dedicated geography Agent review')
     if geography.get('subject_review_targets_sha256',digest([]))!=digest(manifest.get('subject_review_targets',[])): raise ValueError('Subject review targets changed after geography validation')
     for target in manifest.get('subject_review_targets',[]):
         done={a['finding_key'] for a in geography['data']['associations'] if any(s.get('target_id')==target['target_id'] for s in a.get('subject_landmarks',[]))}
@@ -256,7 +256,7 @@ class DailyResult(BaseModel):
     interest_points:list[Finding]
 
 def validate_daily(value,manifest,validated_results):
-    """The harness supplies semantic merging; deterministic code checks provenance."""
+    """The semantic Agent supplies semantic merging; deterministic code checks provenance."""
     parsed=DailyResult.model_validate(value).model_dump()
     analysed={fid for p in manifest['packages'] if p['status']=='success' for fid in p['core_frame_ids']}
     evidence={f['id']:f for f in manifest.get('frames',[])+manifest.get('supplemental_frames',[]) if f['id'] in analysed}
@@ -304,7 +304,7 @@ def make_packages(source,frames,transcripts,output_dir,gps=None,size=10,visual_m
         payload={'schema_version':SCHEMA_VERSION,'prompt_version':PROMPT_VERSION,'instructions':VISION_INSTRUCTIONS,'source':source_context,'core_frame_ids':[f['id'] for f in core],'frames':context+core,'transcripts':tr,'gps':locations,'interval':{'start':begin,'end':end},'image_warning':'技术预览以各帧preview记录为准；缺少已验证变换时不推断画面质量。','result_schema':Result.model_json_schema()}
         if visual_mode:
             payload['visual_package_mode']=visual_mode
-            payload['transcript_policy']='Pure visible-content observations only; complete independent ASR is supplied to Sol in the daily package. Never infer speech or audio events.'
+            payload['transcript_policy']='Pure visible-content observations only; complete independent ASR is supplied to the semantic Agent in the daily package. Never infer speech or audio events.'
         payload['package_id']=digest(payload)[:24]
         payload['result_path']=str(output_dir/(payload['package_id']+'.result.json'))
         path=output_dir/(payload['package_id']+'.package.json'); dump(path,payload)

@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import httpx
-from vlog_index import analysis, asr, media, report
+from vlog_index import analysis, asr, media, report, store
 from vlog_index.store import State, ServiceLock, digest, dump, read, cleanup_registered
 from fixture_helpers import final_context, root_review
 
@@ -142,6 +142,38 @@ class Reliability(unittest.TestCase):
                 self.assertEqual(manifest['config']['date'], args.date)
                 self.assertEqual(manifest['config']['ffmpeg'], 'custom-ffmpeg')
                 self.assertEqual(manifest['config']['preview_luts']['ZVE1:SLOG3CINE'], str((configuration / 'preview.cube').resolve()))
+
+    def test_host_data_root_prefers_localappdata_then_home_fallback(self):
+        with patch.dict(os.environ, {'LOCALAPPDATA': 'synthetic-root'}):
+            self.assertEqual(store.host_data_root(), Path('synthetic-root') / 'VlogIndex')
+        environment = dict(os.environ); environment.pop('LOCALAPPDATA', None)
+        with patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(store.host_data_root(), Path.home() / '.local/share' / 'VlogIndex')
+
+    def test_asr_client_and_adapters_do_not_require_windows_environment(self):
+        environment = dict(os.environ); environment.pop('LOCALAPPDATA', None)
+        with patch.dict(os.environ, environment, clear=True):
+            client = asr.ASRClient('http://movable.invalid', 'unused')
+            self.assertEqual(client.root, Path.home() / '.local/share' / 'VlogIndex' / 'services')
+        with patch('os.name', 'posix'):
+            self.assertEqual(media.enumerate_adapters(), [])
+
+    def test_init_host_selects_model_roles_and_default_stays_codex(self):
+        codex_roles = {'vision': 'Luna', 'semantic': 'gpt-6.1-sol', 'semantic_reasoning_effort': 'high',
+                       'final_review': 'ROOT_current_flagship', 'supplement_decision': 'ROOT'}
+        claude_roles = {'vision': 'vlog-daily-index:vlog-vision', 'semantic': 'vlog-daily-index:vlog-semantic',
+                        'semantic_reasoning_effort': 'high', 'final_review': 'ROOT', 'supplement_decision': 'ROOT'}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); source = root / 'source'; source.mkdir()
+            for name, host, expected in (('default', None, codex_roles), ('claude', 'claude-code', claude_roles)):
+                args = argparse.Namespace(source=str(source), state=str(root / name), temp=str(root / 'temporary'),
+                    run_id=name, date='2030-02-03', ffmpeg='ffmpeg', ffprobe='ffprobe',
+                    service='http://movable.invalid', vision_concurrency=3)
+                if host: args.host = host
+                cli.init(args)
+                config = read(Path(args.state) / 'manifest.json')['config']
+                self.assertEqual(config['model_roles'], expected)
+                self.assertEqual(config['host'], host or 'codex')
 
     def test_root_review_is_required_and_bound_to_unchanged_final_files(self):
         with tempfile.TemporaryDirectory() as td:

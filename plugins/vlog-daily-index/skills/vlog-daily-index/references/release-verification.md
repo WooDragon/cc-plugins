@@ -20,7 +20,7 @@ python tools/verify_release.py --archive SKILL_ZIP --output LOCAL_VERIFICATION -
 
 ## 能力与限制
 
-- 已验证运行环境为Windows、Python 3.12及[安装说明](setup.md)指定FFmpeg组合；其他平台和其他Agent宿主未实测。语义阶段要求Codex原生Agent工具及相应模型可用，Python工具不会自动调用模型。
+- 已验证运行环境为Windows、Python 3.12及[安装说明](setup.md)指定FFmpeg组合；其他平台和其他Agent宿主未实测。Windows + Codex已端到端验证。Claude Code侧已验证插件加载与agent解析，完整流水线未在真实素材上跑过。语义阶段要求宿主原生Agent工具及相应模型可用，Python工具不会自动调用模型。
 - 均匀采样可能漏掉采样间短瞬间；完整时间轴覆盖不等于逐帧观看。短ASR片段保持chunk精度，未经验证不得冒充词级时码。
 - ASR服务协议须在目标服务完整小样核实；未知状态不能凭等待或服务可访问解除。OS锁仅协调同机同用户客户端，不提供全网络互斥。
 - 相机时钟/倍率未核实、GPS缺口或主体身份缺证据时需保留未知；记录者/相机位置不等于远景目标位置。地图空结果/失败不冒充成功。

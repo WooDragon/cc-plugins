@@ -2,7 +2,19 @@
 
 本包为源码Skill，不携带Python、FFmpeg或模型权重，不自动全局安装。将整个`vlog-daily-index`文件夹解压到选择的Skill位置；也可以先在工作区显式按路径调用。源码和文档可在同步目录，活跃state/temp必须在本地非同步目录。
 
-语义工作流依赖Codex原生Agent工具、可用的Luna/GPT-6.1 Sol及ROOT审查能力；模型明确指定时遵从用户选择。Python只执行确定性工具，不自动提供模型或模拟Agent。已验证宿主是Windows上的Codex，不能宣称其他Agent宿主自动兼容。
+语义工作流依赖宿主原生Agent工具、可用的视觉Agent/语义Agent/地理Agent及ROOT审查能力，各角色的宿主绑定见[宿主说明](hosts.md)；模型明确指定时遵从用户选择。Python只执行确定性工具，不自动提供模型或模拟Agent。支持Codex与Claude Code两个宿主，各自的验证范围见[发布与验证记录](release-verification.md)；其他Agent宿主未验证，不能宣称自动兼容。
+
+## Claude Code 安装
+
+与下文Windows安装并列，不替换。Claude Code通过插件提供Skill与三个子Agent：
+
+```bash
+claude plugin install vlog-daily-index@cc-plugins
+```
+
+安装后`vlog-daily-index:vlog-vision`、`vlog-daily-index:vlog-semantic`、`vlog-daily-index:vlog-geography`随插件可用，用`subagent_type`调用。Python、FFmpeg、`requirements.lock`与ASR服务的准备同下文，不因宿主而变。子Agent并发名额与写入边界差异见[宿主说明](hosts.md)。
+
+运行 `init` 时传 `--host claude-code`，使 manifest 的 `model_roles` 与 `host` 反映实际派发的子 Agent。
 
 ## 固定依赖
 
@@ -45,11 +57,11 @@ $env:VLOG_TEST_FFPROBE = 'C:\Tools\ffmpeg\bin\ffprobe.exe'
 
 `example.invalid`不可运行，仅示意可迁移配置。先用`init --help`确认参数；设备角色/时钟用`configure-source --source-id ID --role camera --capture-time ISO_WITH_OFFSET --normal-speed --reason EVIDENCE`固定入口按证据设置。未知时间/速率用对应未验证标志，不手改manifest或源ID/帧。ASR模型通过`--asr-model`配置，preflight确认服务实际列出该模型。
 
-新run的6是动态Luna上限，少包少开，实际还受harness真实名额约束；并非启动6个常驻Agent。媒体未配置时保守单路；用独立本地`hardware-benchmark`报告及`configure-concurrency`配置已验证1–4槽位与ready/空间阈值，不能按显卡型号猜或跨机器复制设备索引。完整命令与恢复边界见[并发约定](concurrency.md)。已存在state保留旧模式/缓存，不重新init以启用新纯视觉模式。
+新run的6是动态视觉Agent上限，少包少开，实际还受宿主真实名额约束；并非启动6个常驻Agent。媒体未配置时保守单路；用独立本地`hardware-benchmark`报告及`configure-concurrency`配置已验证1–4槽位与ready/空间阈值，不能按显卡型号猜或跨机器复制设备索引。完整命令与恢复边界见[并发约定](concurrency.md)。已存在state保留旧模式/缓存，不重新init以启用新纯视觉模式。
 
-固定工具可将已验证本机profile保存至`%LOCALAPPDATA%/VlogIndex/hardware-profile.json`，新run核对设备后自动发现；不用把某项目报告路径写进Skill，profile也不进ZIP。若另外把宿主子Agent上限改为8，须重启Codex并新建聊天生效；这与Skill文件安装分开，旧会话仍按真实可用名额运行。
+固定工具可将已验证本机profile保存至`%LOCALAPPDATA%/VlogIndex/hardware-profile.json`，新run核对设备后自动发现；不用把某项目报告路径写进Skill，profile也不进ZIP。若另外把宿主子Agent上限改为8，在Codex侧须重启Codex并新建聊天生效（Claude Code侧对应入口是环境变量`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`）；这与Skill文件安装分开，旧会话仍按真实可用名额运行。
 
-初次采样前按[预览规则](preview.md)配置设备+可信DIT模式对应的本地官方LUT，普通NO不套。行程与地图证据获取、attach入口、专门Sol阶段读[geography.md](geography.md)；已有run升级复用现有帧/ASR/包，不重init。没有必需行程或地理阶段未完成，不能直接render完整报告后发布。
+初次采样前按[预览规则](preview.md)配置设备+可信DIT模式对应的本地官方LUT，普通NO不套。行程与地图证据获取、attach入口、地理Agent阶段读[geography.md](geography.md)；已有run升级复用现有帧/ASR/包，不重init。没有必需行程或地理阶段未完成，不能直接render完整报告后发布。
 
 先选短相机/短无人机/长片跨块各验证一次；硬件检查必须真实输出可读图片。正常访问不到NAS时按执行环境权限流程解决，不复制整天原片来绕过。使用GPS前读[gps.md](gps.md)；生产顺序和任务包读[interfaces.md](interfaces.md)。
 

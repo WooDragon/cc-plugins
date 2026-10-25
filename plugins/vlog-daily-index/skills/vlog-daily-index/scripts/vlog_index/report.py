@@ -51,7 +51,7 @@ def render(manifest,results,output_dir,daily=None):
     index['source_failures']=cov['failed_sources']; index['sampling_adjustments']=manifest.get('plan_adjustments',[])
     index['evidence_frames']=[{k:f.get(k) for k in ('id','source_id','planned_time','time','pts','precision')} for f in manifest.get('frames',[])+manifest.get('supplemental_frames',[])]
     index['validated_records']=results
-    index['validated_records_note']='原始视觉候选审计记录：仅表示覆盖和引用已校验，语义可能经ROOT纠正；最终事件、兴趣点与日摘要以Sol daily及ROOT复核决定为准。'
+    index['validated_records_note']='原始视觉候选审计记录：仅表示覆盖和引用已校验，语义可能经ROOT纠正；最终事件、兴趣点与日摘要以语义Agent日包及ROOT复核决定为准。'
     index['root_review_decisions']=manifest.get('root_review_decisions',[])
     index['path_rebindings']=manifest.get('path_rebindings',[])
     index['itinerary']=manifest['itinerary']['data']; index['map_evidence']=manifest['map_evidence']['records']

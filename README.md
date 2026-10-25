@@ -29,7 +29,7 @@ npx skills add WooDragon/cc-plugins -g
 | [deep-research](./plugins/deep-research/) | Deep research framework — 7-Stage pipeline + role-specialized subagents + multi-model harvest & citation-verification gate |
 | [pr-review](./plugins/pr-review/) | AI review for open GitHub PRs — grok CLI local synchronous review (default, multi-round follow-up) + Copilot bot asynchronous review (optional) |
 | [dispatch-contract](./plugins/dispatch-contract/) | Subagent dispatch contract — four dispatch rules + `%%DONE%%` finalization gate (SubagentStop) |
-| [vlog-daily-index](./plugins/vlog-daily-index/) | Travel memory indexing for Windows Codex with native agents, transcripts and GPS/map evidence |
+| [vlog-daily-index](./plugins/vlog-daily-index/) | Travel memory indexing for Codex and Claude Code with native agents, transcripts and GPS/map evidence |
 
 ## Skills
 
@@ -46,7 +46,7 @@ npx skills add WooDragon/cc-plugins -g
 | [deep-research](./plugins/deep-research/skills/deep-research/) | deep-research | Router skill for the 7-stage research pipeline + quality gates |
 | [pr-review](./plugins/pr-review/skills/pr-review/) | pr-review | Review an open PR by number — grok (default) or Copilot bot backend |
 | [subagent-dispatch](./plugins/dispatch-contract/skills/subagent-dispatch/) | dispatch-contract | Four dispatch rules + `%%DONE%%` finalization contract for subagent delegation |
-| [vlog-daily-index](./plugins/vlog-daily-index/skills/vlog-daily-index/) | vlog-daily-index | 旅行记忆分析师：原片、行程、语音与地理证据的每日索引（Windows Codex 原生 Agent） |
+| [vlog-daily-index](./plugins/vlog-daily-index/skills/vlog-daily-index/) | vlog-daily-index | 旅行记忆分析师：原片、行程、语音与地理证据的每日索引（Codex and Claude Code 原生 Agent） |
 
 ## Basic Usage
 
@@ -91,4 +91,4 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/create-research-project.sh" "研究主题" -
 export ALLOW_UNMARKED_FINAL=1  # escape hatch if needed
 ```
 
-**vlog-daily-index** — use Windows Codex with native Agent tools and the required models; ask to build a daily travel-memory index from original clips. Configure FFmpeg/ffprobe, ASR and itinerary/GPS evidence first. See the [plugin README](./plugins/vlog-daily-index/) for setup and host limitations.
+**vlog-daily-index** — use Codex or Claude Code with native Agent tools and the required models; ask to build a daily travel-memory index from original clips. Configure FFmpeg/ffprobe, ASR and itinerary/GPS evidence first. See the [plugin README](./plugins/vlog-daily-index/) for setup and host limitations.
