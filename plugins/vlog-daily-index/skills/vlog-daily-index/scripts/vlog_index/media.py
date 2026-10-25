@@ -2,7 +2,7 @@
 from __future__ import annotations
 import ctypes, datetime as dt, json, math, os, re, subprocess, time, wave, xml.etree.ElementTree as ET
 from pathlib import Path
-from .store import digest, file_hash
+from .store import digest, file_hash, host_data_root
 
 class SamplingPlanError(RuntimeError): pass
 
@@ -111,6 +111,7 @@ def probe(path, ffprobe, source_root):
 
 def enumerate_adapters():
     """DXGI order is the exact numeric device order consumed by D3D11VA."""
+    if os.name!='nt': return []
     from ctypes import wintypes as w
     class GUID(ctypes.Structure): _fields_=[('a',w.DWORD),('b',w.WORD),('c',w.WORD),('d',ctypes.c_ubyte*8)]
     class DESC(ctypes.Structure): _fields_=[('Description',w.WCHAR*128),('VendorId',w.UINT),('DeviceId',w.UINT),('SubSysId',w.UINT),('Revision',w.UINT),('DedicatedVideoMemory',ctypes.c_size_t),('DedicatedSystemMemory',ctypes.c_size_t),('SharedSystemMemory',ctypes.c_size_t),('LuidLow',w.DWORD),('LuidHigh',w.LONG),('Flags',w.UINT)]
@@ -153,7 +154,7 @@ def check_slot_devices(slots):
             raise ValueError('Physical GPU identity changed; run the hardware benchmark before resuming multiple media slots')
 
 def machine_profile_path():
-    return Path(os.environ.get('LOCALAPPDATA',Path.home()/'.local/share'))/'VlogIndex'/'hardware-profile.json'
+    return host_data_root()/'hardware-profile.json'
 
 def verify_image(path):
     from PIL import Image
@@ -268,6 +269,7 @@ def hardware_benchmark(ffmpeg,ffprobe,output_dir,sources=None,starts=None,second
     if len(set(profile_counts))!=len(profile_counts) or any(n not in (1,2,3,4) for n in profile_counts): raise ValueError('Benchmark profiles must be unique slot counts 1..4')
     if select_first_only and compare_filter_order: raise ValueError('Select-first-only cannot also compare the old filter order')
     adapters=enumerate_adapters()
+    if not adapters: raise RuntimeError('Hardware benchmark only supports Windows + Intel QSV devices; no DXGI adapters were enumerated on this host')
     arc=next((a for a in adapters if a['vendor_id']==0x8086 and 'A380' in a['name']),None)
     igpu=next((a for a in adapters if a['vendor_id']==0x8086 and any(n in a['name'].upper() for n in ('UHD','IRIS'))),None)
     if not arc or not igpu or arc['index']==igpu['index']: raise ValueError('Cannot distinctly identify A380 and integrated Intel device')

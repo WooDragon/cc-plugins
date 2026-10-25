@@ -1,4 +1,4 @@
-"""Small explicit CLI; the Codex harness owns Luna dispatch, not this program."""
+"""Small explicit CLI; the host session (ROOT) owns vision Agent dispatch, not this program."""
 from __future__ import annotations
 import argparse, datetime as dt, json, os, platform, sys, time
 from pathlib import Path
@@ -6,6 +6,11 @@ deps=os.environ.get('VLOG_INDEX_DEPS')
 if deps: sys.path.insert(0,str(Path(deps)))
 from vlog_index.store import State,RunLock,dump,read,digest,cleanup_registered
 from vlog_index import media,analysis,asr,report,store
+
+# codex keeps its v0.1.5 key set; its semantic and geography roles are the same model.
+HOST_MODEL_ROLES={
+    'codex':{'vision':'Luna','semantic':'gpt-6.1-sol','semantic_reasoning_effort':'high','final_review':'ROOT_current_flagship','supplement_decision':'ROOT'},
+    'claude-code':{'vision':'vlog-daily-index:vlog-vision','semantic':'vlog-daily-index:vlog-semantic','geography':'vlog-daily-index:vlog-geography','semantic_reasoning_effort':'high','final_review':'ROOT','supplement_decision':'ROOT'}}
 
 def save(m): dump(Path(m['state_dir'])/'manifest.json',m)
 def load(args): return read(Path(args.state)/'manifest.json')
@@ -30,7 +35,7 @@ def init(args):
         root.mkdir(parents=True,exist_ok=True)
     files=sorted(p for p in source.rglob('*') if p.is_file() and p.suffix.lower() in ('.mp4','.mov','.mkv','.mts'))
     m={'run_id':run_id,'state_dir':str(state),'temp_dir':str(temp),'status':'running','temporary_artifacts':[],'frames':[],'packages':[],'transcription':{},'config':{'source_root':str(source),'date':args.date,'timezone':'Asia/Shanghai','ffmpeg':args.ffmpeg,'ffprobe':args.ffprobe,'asr_service':args.service,'asr_model':asr.MODEL,'asr_concurrency':1,'vision_concurrency':args.vision_concurrency,'sample_interval':10,'schema_version':analysis.SCHEMA_VERSION,'prompt_version':analysis.PROMPT_VERSION},'sources':[],'versions':{'python':platform.python_version()}}
-    m['config']['model_roles']={'vision':'Luna','semantic':'gpt-6.1-sol','semantic_reasoning_effort':'high','final_review':'ROOT_current_flagship','supplement_decision':'ROOT'}
+    host=getattr(args,'host','codex'); m['config']['host']=host; m['config']['model_roles']=dict(HOST_MODEL_ROLES[host])
     m['config'].update(visual_package_mode='block_visual_v1',extraction_pipeline='select_first_v3',ready_package_limit=24,temp_limit_bytes=256*1024**3,min_free_bytes=5*1024**3)
     m['config']['asr_model']=getattr(args,'asr_model',asr.MODEL)
     if getattr(args,'preview_lut_map',None):
@@ -90,7 +95,7 @@ def configure_concurrency(args):
     save(m); return {'media_slots':slots,'vision_upper_bound':args.vision_concurrency,'visual_package_mode':m['config'].get('visual_package_mode','legacy'),'asr_concurrency':1}
 
 def vision_queue(args):
-    """Dispatch ledger uses its own lock: long media runs never lock out the harness."""
+    """Dispatch ledger uses its own lock: long media runs never lock out the host session."""
     root=Path(args.state)/'vision-dispatch'
     if args.available_workers<0 or args.reserve_sol<0: raise ValueError('Actual free workers and reserved workers must be nonnegative')
     with RunLock(root):
@@ -276,7 +281,7 @@ def _continue_day_parallel(args):
     slots=m['config'].get('media_slots') or [m['hardware']['selected']]
     if not 1<=len(slots)<=4: raise ValueError('Configure one to four verified media slots')
     media.check_slot_devices(slots)
-    client=asr.ASRClient(m['config']['asr_service'],m['state_dir'],protocol,concurrency=1,model=m['config']['asr_model']); client.preflight()
+    client=asr.ASRClient(m['config']['asr_service'],protocol=protocol,concurrency=1,model=m['config']['asr_model']); client.preflight()
     state=State(m['state_dir']); pause=Path(m['state_dir'])/'pause-media.request'; gps_data=read(args.gps) if args.gps else None
     if gps_data: m['gps']={'path':args.gps,'quality':gps_data.get('quality'),'stops':gps_data.get('stops',[]),'gaps':gps_data.get('gaps',[]),'companion_confirmed':True}
     visual=m['config'].get('visual_package_mode')=='block_visual_v1'
@@ -413,7 +418,7 @@ def _continue_day_serial(args):
     from types import SimpleNamespace
     m=load(args); protocol=read(args.protocol); state=State(m['state_dir'])
     analysis.validate_itinerary(m.get('itinerary',{}).get('data'))
-    client=asr.ASRClient(m['config']['asr_service'],m['state_dir'],protocol,concurrency=1,model=m['config']['asr_model']); client.preflight()
+    client=asr.ASRClient(m['config']['asr_service'],protocol=protocol,concurrency=1,model=m['config']['asr_model']); client.preflight()
     pause=Path(m['state_dir'])/'pause-media.request'
     def media_worker(source,job):
         block,_,need_frames,audio_output=job
@@ -564,7 +569,7 @@ def supplement(args):
 def audio(args):
     m=load(args); protocol=read(args.protocol) if args.protocol else None
     analysis.validate_itinerary(m.get('itinerary',{}).get('data'))
-    client=asr.ASRClient(m['config']['asr_service'],Path(os.environ['LOCALAPPDATA'])/'VlogIndex'/'services',protocol,model=m['config']['asr_model'])
+    client=asr.ASRClient(m['config']['asr_service'],protocol=protocol,model=m['config']['asr_model'])
     if args.acknowledge: client.acknowledge_terminal(args.acknowledge); return {'acknowledged':True}
     client.preflight(); state=State(m['state_dir']); processed=0
     try:
@@ -729,7 +734,7 @@ def geography_package(args):
             distance=6371000*math.hypot(math.radians(query['latitude']-point['latitude']),math.radians(query['longitude']-point['longitude'])*math.cos(math.radians(query['latitude'])))
             if distance<=1000: record['related_gps_ids'].append(point['id'])
     path=state/'geography.package.json'; result_path=state/'geography.result.json'
-    payload={'run_id':m['run_id'],'revision':m.get('revision',1),'input_digests':bindings,'daily':daily,'findings':findings,'itinerary':m['itinerary']['data'],'map_evidence':maps,'gps_records':gps_records,'gps_coverage':association,'sources':[{k:s.get(k) for k in ('id','relative_path','duration','status')} for s in m['sources']],'transcriptions':m['transcription'],'result_schema':analysis.GeographyResult.model_json_schema(),'result_path':str(result_path),'deterministic_corrections':corrections,'instructions':'专门GPT-6.1 Sol high按时间/GPS确定记录者或相机坐标，结合已缓存的地图实际查询与有来源行程对全部事件与兴趣点做地点关联。保留原事件/兴趣点语义，不重写daily，不重抽图/ASR。每finding_key恰好一项，不确定也unresolved。不得将相机坐标当远景山峰坐标；地图返回名称/历史计划路线都是证据或候选，不能单独证明实际到访。resolved地图引用必须与本finding的GPS或明确行程项相连；没有该链条使用approximate/unresolved。itinerary_refs引用entry.id，gps_refs引用gps_records.id，map_evidence_ids引用map_evidence.id；evidence_ids只引用本finding已有clips证据。近似关联需说明依据、置信度和替代候选。SRT(0,0)占位已排除，媒体预览按帧内preview标记判断，未记录技术转换不能声称已归一化。输出完整GeographyResult供ROOT终审，不发布。'}
+    payload={'run_id':m['run_id'],'revision':m.get('revision',1),'input_digests':bindings,'daily':daily,'findings':findings,'itinerary':m['itinerary']['data'],'map_evidence':maps,'gps_records':gps_records,'gps_coverage':association,'sources':[{k:s.get(k) for k in ('id','relative_path','duration','status')} for s in m['sources']],'transcriptions':m['transcription'],'result_schema':analysis.GeographyResult.model_json_schema(),'result_path':str(result_path),'deterministic_corrections':corrections,'instructions':'专门地理Agent按时间/GPS确定记录者或相机坐标，结合已缓存的地图实际查询与有来源行程对全部事件与兴趣点做地点关联。保留原事件/兴趣点语义，不重写daily，不重抽图/ASR。每finding_key恰好一项，不确定也unresolved。不得将相机坐标当远景山峰坐标；地图返回名称/历史计划路线都是证据或候选，不能单独证明实际到访。resolved地图引用必须与本finding的GPS或明确行程项相连；没有该链条使用approximate/unresolved。itinerary_refs引用entry.id，gps_refs引用gps_records.id，map_evidence_ids引用map_evidence.id；evidence_ids只引用本finding已有clips证据。近似关联需说明依据、置信度和替代候选。SRT(0,0)占位已排除，媒体预览按帧内preview标记判断，未记录技术转换不能声称已归一化。输出完整GeographyResult供ROOT终审，不发布。'}
     if getattr(args,'research_evidence',None): payload['research_evidence']=read(args.research_evidence)
     payload['subject_review_targets']=m.get('subject_review_targets',[])
     payload['map_linkage_note']='related_gps_ids只表示查询坐标与原GPS证据相距不超过1公里，便于排除串区域引用，不代表地图POI身份已确认。跨来源兴趣点须用clip_associations逐源分区；部分GPS不能扩展给未定位片段。'
@@ -783,7 +788,7 @@ def subject_targets(args):
     m=load(args); state=Path(m['state_dir']); daily=read(state/'daily.validated.json')
     keys={analysis.finding_key(category,n,item) for category,items in (('event',daily['events']),('interest_point',daily['interest_points'])) for n,item in enumerate(items,1)}
     if args.template:
-        dump(args.template,{'targets':[],'available_finding_keys':sorted(keys),'instructions':'List important visible landmark targets as {target_id,subject,finding_keys:[...]} for dedicated Sol analysis; identity may remain unresolved.'})
+        dump(args.template,{'targets':[],'available_finding_keys':sorted(keys),'instructions':'List important visible landmark targets as {target_id,subject,finding_keys:[...]} for dedicated geography Agent analysis; identity may remain unresolved.'})
         return {'template':str(args.template)}
     if not args.targets: raise ValueError('Provide --targets or --template')
     data=read(args.targets); targets=data.get('targets',[]) if isinstance(data,dict) else data
@@ -826,7 +831,7 @@ def asr_json_sample(args):
     wav=directory/'sample.wav'; raw=Path(m['state_dir'])/'asr-json-sample.json'
     if not media.valid_audio(wav,chunk['end']-chunk['start']): media.extract_audio(m['config']['ffmpeg'],source,chunk['start'],chunk['end'],wav)
     m['temporary_artifacts'].append(str(wav)); save(m)
-    client=asr.ASRClient(m['config']['asr_service'],m['state_dir'],model=m['config']['asr_model']); client.preflight()
+    client=asr.ASRClient(m['config']['asr_service'],model=m['config']['asr_model']); client.preflight()
     result=client.transcribe(wav,raw,stream=False)
     m['asr_json_sample']={'source_id':source['id'],'chunk':chunk,'model':m['config']['asr_model'],'service':m['config']['asr_service'],'result':result,'wav':str(wav),'complete':True}; save(m)
     return {'raw_output':str(raw),'wav':str(wav),'source_id':source['id'],'complete':True,'adopt_after_stream_verification':True}
@@ -866,7 +871,7 @@ def final_review_package(args):
 
 def render(args):
     m=load(args)
-    client=asr.ASRClient(m['config']['asr_service'],Path(os.environ['LOCALAPPDATA'])/'VlogIndex'/'services',model=m['config']['asr_model'])
+    client=asr.ASRClient(m['config']['asr_service'],model=m['config']['asr_model'])
     m['asr_service_state']=read(client.gate) if client.gate.exists() else {'status':'not_started'}
     for source in m['sources']:
         if source['status']!='ready':
@@ -907,7 +912,7 @@ def naming_apply(args):
 
 def main():
     parser=argparse.ArgumentParser(); sub=parser.add_subparsers(dest='action',required=True)
-    p=sub.add_parser('init'); p.add_argument('--source',required=True); p.add_argument('--state',required=True); p.add_argument('--temp',default=str(Path(os.environ.get('TEMP','/tmp'))/'vlog-index')); p.add_argument('--run-id'); p.add_argument('--date'); p.add_argument('--ffmpeg',required=True); p.add_argument('--ffprobe',required=True); p.add_argument('--service',required=True); p.add_argument('--vision-concurrency',type=int,default=6,help='Dynamic harness vision upper bound; actual free host capacity still applies')
+    p=sub.add_parser('init'); p.add_argument('--source',required=True); p.add_argument('--state',required=True); p.add_argument('--temp',default=str(Path(os.environ.get('TEMP','/tmp'))/'vlog-index')); p.add_argument('--run-id'); p.add_argument('--date'); p.add_argument('--ffmpeg',required=True); p.add_argument('--ffprobe',required=True); p.add_argument('--service',required=True); p.add_argument('--host',choices=tuple(HOST_MODEL_ROLES),default='codex',help='Host runtime that dispatches the Agents; selects model_roles'); p.add_argument('--vision-concurrency',type=int,default=6,help='Dynamic host vision upper bound; actual free host capacity still applies')
     p.add_argument('--asr-model',default=asr.MODEL,help='Exact service model id; also part of the ASR cache key'); p.add_argument('--preview-lut-map',help='JSON mapping device:Log-token to explicitly matched local .cube files')
     funcs={'init':init,'hardware':hardware,'prepare':prepare,'packages':packages,'import-results':import_results,'continue-day':continue_day,'decide-supplement':decide_supplement,'supplement':supplement,'audio':audio,'daily-package':daily_package,'gps-review-package':gps_review_package,'attach-itinerary':attach_itinerary,'geography-package':geography_package,'import-geography':import_geography,'review-frames':review_frames,'render':render,'approve-final':approve_final,'publish':publish,'cleanup':cleanup,'status':lambda a:report.coverage(load(a))}
     funcs.update({'map-lookup':map_lookup,'subject-targets':subject_targets,'gps-build':gps_build,'configure-source':configure_source,'asr-json-sample':asr_json_sample,'adopt-json-sample':adopt_json_sample})
@@ -921,7 +926,7 @@ def main():
         p=sub.add_parser(name); p.add_argument('--state',required=True); p.add_argument('--source-id',action='append')
         if name=='prepare': p.add_argument('--blocks',type=int,help='Process a bounded batch; full remaining plan stays pending')
         if name=='packages': p.add_argument('--gps'); p.add_argument('--garmin-companion',action='append',help='Explicit source id whose camera accompanies the Garmin recorder'); p.add_argument('--refresh',action='store_true',help='Explicitly rebuild legacy prompt packages; downstream semantic approvals become stale')
-        if name=='render': p.add_argument('--daily',help='GPT-6.1 Sol merged daily JSON; citations are checked before rendering')
+        if name=='render': p.add_argument('--daily',help='Semantic Agent merged daily JSON; citations are checked before rendering')
         if name=='decide-supplement':
             p.add_argument('--request-id',required=True); p.add_argument('--decision',choices=('accept','reject'),required=True); p.add_argument('--reviewer',choices=('ROOT',),required=True); p.add_argument('--reason',required=True)
         if name=='supplement': p.add_argument('--list-requests',action='store_true',help='Show candidate ids and ROOT decisions without extracting')
@@ -930,7 +935,7 @@ def main():
         if name=='continue-day': p.add_argument('--protocol',required=True); p.add_argument('--gps'); p.add_argument('--garmin-companion',action='append')
         if name=='gps-review-package': p.add_argument('--gps',required=True); p.add_argument('--reason',required=True,help='Evidence confirming the supplied Garmin track accompanies this trip')
         if name=='attach-itinerary': p.add_argument('--itinerary',required=True); p.add_argument('--map-evidence')
-        if name=='geography-package': p.add_argument('--daily',required=True); p.add_argument('--research-evidence',help='Sourced research notes; candidates remain subject to dedicated Sol review')
+        if name=='geography-package': p.add_argument('--daily',required=True); p.add_argument('--research-evidence',help='Sourced research notes; candidates remain subject to dedicated geography Agent review')
         if name=='import-geography': p.add_argument('--result',required=True)
         if name=='review-frames': p.add_argument('--frame-id',action='append',required=True); p.add_argument('--reviewer',choices=('ROOT',),required=True); p.add_argument('--reason',required=True)
         if name=='map-lookup': p.add_argument('--requests',required=True); p.add_argument('--provider',choices=('photon','osm'),required=True); p.add_argument('--output',required=True); p.add_argument('--retry-failed',action='store_true')

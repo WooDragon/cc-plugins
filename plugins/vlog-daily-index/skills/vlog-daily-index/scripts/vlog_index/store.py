@@ -3,6 +3,9 @@ from __future__ import annotations
 import csv, datetime, hashlib, io, json, os, re, sqlite3, time
 from pathlib import Path
 
+def host_data_root():
+    return Path(os.environ.get('LOCALAPPDATA',Path.home()/'.local/share'))/'VlogIndex'
+
 def dump(path, value):
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + '.tmp')
@@ -41,7 +44,7 @@ class ServiceLock:
         from urllib.parse import urlsplit
         parsed=urlsplit(service.rstrip('/'))
         normalized=f'{parsed.scheme.lower()}://{parsed.hostname.lower()}:{parsed.port or (443 if parsed.scheme=="https" else 80)}{parsed.path.rstrip("/")}'
-        global_root=Path(os.environ.get('LOCALAPPDATA',Path.home()/'.local/share'))/'VlogIndex'/'services'
+        global_root=host_data_root()/'services'
         self.path=global_root/('service-'+digest(normalized)[:16]+'.lock')
     def __enter__(self):
         self.path.parent.mkdir(parents=True,exist_ok=True)

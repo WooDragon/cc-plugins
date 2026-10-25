@@ -25,9 +25,9 @@ class CoreBoundaries(unittest.TestCase):
                 calls.append(req)
                 return httpx.Response(200,headers={'content-type':'application/x-ndjson'},content=b'{"type":"delta","text":"partial"}\n')
             protocol={'final_event':'done','text_field':'text'}
-            client=asr.ASRClient('http://example.test:80',td,protocol); client.client=httpx.Client(transport=httpx.MockTransport(request))
+            client=asr.ASRClient('http://example.test:80',protocol=protocol); client.client=httpx.Client(transport=httpx.MockTransport(request))
             with self.assertRaises(asr.UnknownServerState): client.transcribe(wav,Path(td)/'raw.json')
-            other=asr.ASRClient('HTTP://EXAMPLE.TEST',td+'other',protocol); other.client=httpx.Client(transport=httpx.MockTransport(request))
+            other=asr.ASRClient('HTTP://EXAMPLE.TEST',protocol=protocol); other.client=httpx.Client(transport=httpx.MockTransport(request))
             with self.assertRaises(asr.UnknownServerState): other.transcribe(wav,Path(td)/'other.json')
             self.assertEqual(len(calls),1)
             self.assertEqual(read(client.gate)['status'],'unknown')
