@@ -6,15 +6,15 @@
 |---|---|---|
 | 1. 必需背景 | harness聊天列表/读取、Notion search/fetch；`init`、`attach-itinerary` | 查找行程、保留出处/计划实际冲突；明确素材/GPS/可信DIT，未找到先讨论 |
 | 2. 输入校准 | `configure-source`、`gps-build`、`hardware` | 有证据设置角色、带时区capture_time、正常速标志；配置显式LUT map |
-| 并发验证与配置 | `hardware-benchmark`、`configure-concurrency` | 独立本地小样验证设备槽位，按实际证据配置1–4媒体路、Luna上限6及ready/空间高水位；不从利用率推定速度，详见[并发约定](concurrency.md) |
+| 并发验证与配置 | `hardware-benchmark`、`configure-concurrency` | 独立本地小样验证设备槽位，按实际证据配置1–4媒体路、视觉 Agent上限6及ready/空间高水位；不从利用率推定速度，详见[并发约定](concurrency.md) |
 | 3. 协议验证 | `asr-json-sample`、`audio --discover`、`audio --acknowledge`、`adopt-json-sample` | 检查完整JSON与NDJSON终止记录，填已验证protocol JSON；unknown恢复须外部结束证据 |
 | 4. 媒体/音频 | `continue-day`、`packages`；旧`prepare --blocks`/`audio`用于有界诊断 | 正常并发流水线用continue-day确定性抽样/匹配Log预览/单ASR及背压，prepare不冒充多设备调度器，harness控制vision slots |
-| 5. 视觉 | `vision-queue`、`import-results`、`retry-visual`及包内schema/result_path | 新run稳定块ready即按真实空闲弹性claim/派发，最多6 Luna；脚本不spawn，Luna实际读取全图，事件/兴趣点仅候选，Sol后续带完整转写；invalid只显式归档纠正一次 |
+| 5. 视觉 | `vision-queue`、`import-results`、`retry-visual`及包内schema/result_path | 新run稳定块ready即按真实空闲弹性claim/派发，最多6视觉 Agent；领取须当前原生能力快照并生成[路由合同](vision-routing.md)，ROOT按合同真实派发；脚本不spawn，视觉 Agent实际读取全图，事件/兴趣点仅候选，Sol后续带完整转写；invalid只显式归档纠正一次 |
 | 6. 语义 | `daily-package`导出完整包/schema/result_path | Sol high跨文件汇总事件/兴趣点/主要主体，保留源时码和原话归属 |
 | 7. 地图 | `map-lookup --requests FILE --provider photon\|osm --output FILE` | Agent按事件对应可信GPS选择查询点/对象；工具保存实际响应和缓存，不编造地图成功 |
 | 8. 专项主体 | `subject-targets --template FILE`、`subject-targets --targets FILE` | Sol标需核验的主要地标/自然主体并填目标JSON；不能用空targets绕过明显主体 |
 | 9. 地理 | `geography-package --daily FILE [--research-evidence FILE]`、`import-geography --result FILE` | 专门Sol high填自动生成geography.template.json；引用现有帧、GPS、路线、地图，给近似/候选/未知与主体核验 |
-| 10. 局部证据 | `review-frames --frame-id ID --reviewer ROOT --reason ...`；`supplement --list-requests`、`decide-supplement`、`supplement` | ROOT决定已有时码取回或一轮补采；已有证据取回不改计划/原包身份；Luna/Sol仅回流受影响依赖 |
+| 10. 局部证据 | `review-frames --frame-id ID --reviewer ROOT --reason ...`；`supplement --list-requests`、`decide-supplement`、`supplement` | ROOT决定已有时码取回或一轮补采；已有证据取回不改计划/原包身份；视觉 Agent/Sol仅回流受影响依赖 |
 | 11. 完整输出 | `attach-review-context --context FILE`、`render --daily FILE` | 记录路线/停留/矛盾/覆盖说明，生成实际待审三成果 |
 | 12. 实质终审 | `final-review-package`、`approve-final --review-result FILE --reviewer ROOT --reason ...` | ROOT阅读审查JSON/preview，填写模板全部维度与问题处置，未决blocking为0才批准 |
 | 13. 发布恢复 | `publish`、`cleanup`、`status` | 回读一致才清登记temp；同state恢复，原片只读，无额外用户确认 |

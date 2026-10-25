@@ -1,11 +1,11 @@
-"""Small explicit CLI; the Codex harness owns Luna dispatch, not this program."""
+"""Small explicit CLI; the native harness owns visual dispatch, not this program."""
 from __future__ import annotations
 import argparse, datetime as dt, json, os, platform, sys, time
 from pathlib import Path
 deps=os.environ.get('VLOG_INDEX_DEPS')
 if deps: sys.path.insert(0,str(Path(deps)))
 from vlog_index.store import State,RunLock,dump,read,digest,cleanup_registered
-from vlog_index import media,analysis,asr,report,store
+from vlog_index import media,analysis,asr,report,store,vision
 
 def save(m): dump(Path(m['state_dir'])/'manifest.json',m)
 def load(args): return read(Path(args.state)/'manifest.json')
@@ -30,7 +30,7 @@ def init(args):
         root.mkdir(parents=True,exist_ok=True)
     files=sorted(p for p in source.rglob('*') if p.is_file() and p.suffix.lower() in ('.mp4','.mov','.mkv','.mts'))
     m={'run_id':run_id,'state_dir':str(state),'temp_dir':str(temp),'status':'running','temporary_artifacts':[],'frames':[],'packages':[],'transcription':{},'config':{'source_root':str(source),'date':args.date,'timezone':'Asia/Shanghai','ffmpeg':args.ffmpeg,'ffprobe':args.ffprobe,'asr_service':args.service,'asr_model':asr.MODEL,'asr_concurrency':1,'vision_concurrency':args.vision_concurrency,'sample_interval':10,'schema_version':analysis.SCHEMA_VERSION,'prompt_version':analysis.PROMPT_VERSION},'sources':[],'versions':{'python':platform.python_version()}}
-    m['config']['model_roles']={'vision':'Luna','semantic':'gpt-6.1-sol','semantic_reasoning_effort':'high','final_review':'ROOT_current_flagship','supplement_decision':'ROOT'}
+    m['config']['model_roles']={'vision':'current_session_native_capabilities','vision_allowed_families':list(vision.FAMILIES),'vision_luna_reasoning_effort':'medium','semantic':'gpt-6.1-sol','semantic_reasoning_effort':'high','final_review':'ROOT_current_flagship','supplement_decision':'ROOT'}
     m['config'].update(visual_package_mode='block_visual_v1',extraction_pipeline='select_first_v3',ready_package_limit=24,temp_limit_bytes=256*1024**3,min_free_bytes=5*1024**3)
     m['config']['asr_model']=getattr(args,'asr_model',asr.MODEL)
     if getattr(args,'preview_lut_map',None):
@@ -91,6 +91,11 @@ def configure_concurrency(args):
 
 def vision_queue(args):
     """Dispatch ledger uses its own lock: long media runs never lock out the harness."""
+    workers=getattr(args,'claim_worker',[]) or []
+    capability_path=getattr(args,'native_capabilities',None)
+    model=getattr(args,'model',None); effort=getattr(args,'reasoning_effort',None)
+    # Fail before locking, releasing or writing claims. No host-name guesses.
+    contract=vision.dispatch_contract(read(capability_path) if capability_path else None,model,effort) if workers or capability_path or model is not None or effort is not None else None
     root=Path(args.state)/'vision-dispatch'
     if args.available_workers<0 or args.reserve_sol<0: raise ValueError('Actual free workers and reserved workers must be nonnegative')
     with RunLock(root):
@@ -102,16 +107,19 @@ def vision_queue(args):
         claimed=sum(p['id'] in claims for p in waiting)
         available=max(0,args.available_workers-args.reserve_sol)
         recommended=min(max(0,min(6,m['config'].get('vision_concurrency',2))-claimed),available,len(ready))
-        workers=getattr(args,'claim_worker',[]) or []
         if len(workers)!=len(set(workers)) or len(workers)>recommended: raise ValueError('Claims exceed actual free host capacity or contain duplicate workers')
         assigned=[]
         for worker,package in zip(workers,ready):
             if any(c['worker']==worker and c['package_id'] in {p['id'] for p in waiting} for c in claims.values()): raise ValueError('Worker already owns an unfinished package')
-            record={'worker':worker,'package_id':package['id'],'at':dt.datetime.now(dt.timezone.utc).isoformat()}
-            claims[package['id']]=record; assigned.append({**package,'claim':record})
+            record={'worker':worker,'package_id':package['id'],'at':dt.datetime.now(dt.timezone.utc).isoformat(),
+                    'requested_model':contract['requested_model'],'requested_reasoning_effort':contract['requested_reasoning_effort'],
+                    'dispatch_contract':contract}
+            claims[package['id']]=record; assigned.append({**package,'claim':record,'dispatch_contract':contract})
         if workers or getattr(args,'release',None): dump(path,claims)
         return {'ready_count':len(waiting),'awaiting_validation_count':len(awaiting_validation),'claimed_count':claimed+len(assigned),'unassigned_count':len(ready)-len(assigned),'recommended_vision_workers':recommended,
                 'host_available_workers':args.available_workers,'reserved_for_sol':args.reserve_sol,'assigned':assigned,
+                'vision_route_policy':{'allowed_families':list(vision.FAMILIES),'luna_reasoning_effort':'medium','default':'current_session_native_capabilities'},
+                'selected_vision_route':contract,
                 'unassigned_packages':[p for p in ready if p['id'] not in claims],'claims_path':str(path)}
 
 def media_pressure(m):
@@ -947,6 +955,9 @@ def main():
             p.add_argument('--media-slots',type=int,required=True); p.add_argument('--hardware-report'); p.add_argument('--vision-concurrency',type=int,default=6); p.add_argument('--ready-package-limit',type=int,default=24); p.add_argument('--temp-limit-gib',type=float,default=256); p.add_argument('--min-free-gib',type=float,default=5)
         if name=='vision-queue':
             p.add_argument('--available-workers',type=int,required=True); p.add_argument('--reserve-sol',type=int,default=1); p.add_argument('--claim-worker',action='append'); p.add_argument('--release',action='append')
+            p.add_argument('--native-capabilities',help='Current session native tool/image capability snapshot JSON; required for new claims')
+            p.add_argument('--model',help='Explicit advertised Luna/Haiku/DeepSeek model ID; otherwise session preference/order')
+            p.add_argument('--reasoning-effort',help='Explicit supported effort; Luna is always medium, other models may omit it')
         if name=='retry-visual': p.add_argument('--package-id',required=True); p.add_argument('--reason',required=True)
         if name in ('naming-review','naming-apply'): p.add_argument('--plan',required=True)
         if name=='naming-review': p.add_argument('--reviewer',choices=('ROOT',),required=True); p.add_argument('--reason',required=True)

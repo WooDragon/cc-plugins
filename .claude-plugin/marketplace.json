@@ -118,7 +118,7 @@
     {
       "name": "vlog-daily-index",
       "description": "Travel memory indexing in Windows Codex — native agents, source-linked events, transcripts, itinerary and GPS/map evidence",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "author": {
         "name": "WooDragon"
       },

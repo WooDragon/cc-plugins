@@ -1,10 +1,10 @@
 # 运行与任务包接口
 
-本地状态manifest.json + state.sqlite3由协调器单写，不要同时运行两个修改同一主状态的命令。媒体多路仅使用已验证设备槽位，ASR固定1请求；Luna可与本地处理并行，但不得改manifest/SQLite。独立视觉领取小状态允许与长媒体命令并行，详见[并发约定](concurrency.md)。
+本地状态manifest.json + state.sqlite3由协调器单写，不要同时运行两个修改同一主状态的命令。媒体多路仅使用已验证设备槽位，ASR固定1请求；视觉 Agent可与本地处理并行，但不得改manifest/SQLite。独立视觉领取小状态允许与长媒体命令并行，详见[并发约定](concurrency.md)。
 
-`config.vision_concurrency`是Luna上限，最高6；由harness结合ready积压与当前真实空闲名额消费，不建立额外后台调度器。少包少开，实际为`min(配置上限, 真实空闲名额扣除所需Sol名额, ready包数)`；已有claim计入正在运行数量，不能重复领取或保持6空转。它独立于媒体槽位与`asr_concurrency=1`。本地配置的8子Agent目标不等于当前会话可用8槽。同包只分派一个worker，每包写自己的result_path，主控统一导入；排队背压不减少采样/视觉覆盖，Luna不得调用ASR。
+`config.vision_concurrency`是视觉 Agent上限，最高6；由harness结合ready积压与当前真实空闲名额消费，不建立额外后台调度器。少包少开，实际为`min(配置上限, 真实空闲名额扣除所需Sol名额, ready包数)`；已有claim计入正在运行数量，不能重复领取或保持6空转。它独立于媒体槽位与`asr_concurrency=1`。本地配置的8子Agent目标不等于当前会话可用8槽。同包只分派一个worker，每包写自己的result_path，主控统一导入；排队背压不减少采样/视觉覆盖，视觉 Agent不得调用ASR。
 
-模型职责由harness执行：Luna仅负责逐帧可见内容及证据记录，其events/interest_points是候选；GPT-6.1 Sol以high推理汇总跨帧、跨文件、ASR与GPS；ROOT当前旗舰做最终质量审查，且仅ROOT依据较强错漏证据决定定向补采。`config.model_roles` 记录这项约定。复用已有结果，不全量重审；模型补抽请求不自动触发提取。最终审查通过后才能发布和清理。
+模型职责由harness执行：纯视觉按[能力驱动的路由合同](vision-routing.md)允许 Luna/Haiku/DeepSeek，新 claim 需当前原生能力快照；Luna 仅 medium，其他模型不虚构档位，禁止静默 Sol/旗舰回退。视觉 Agent仅负责逐帧可见内容及证据记录，其events/interest_points是候选；GPT-6.1 Sol以high推理汇总跨帧、跨文件、ASR与GPS；ROOT当前旗舰做最终质量审查，且仅ROOT依据较强错漏证据决定定向补采。`config.model_roles` 记录这项约定。复用已有结果，不全量重审；模型补抽请求不自动触发提取。最终审查通过后才能发布和清理。
 
 Python 3.12；`requirements.lock` 是固定版本依赖。FFmpeg 记录真实来源/版本/哈希，路径通过 init 参数提供，运行中不下载更新。全部 paths 可含中文与空格，调用进程使用参数数组。
 
@@ -60,7 +60,7 @@ ASR协议JSON的终止条件必须来自真实完整响应：可以是`terminal_
 
 已审过的语义/地理证据之后，用`naming-plan --config FILE --library-root ROOT --index CSV`保存dry-run计划；配置含`date/main_region/themes/reviewer/reason`，主题2–3个，区域为当前用户/行程确认的固定前缀。`naming-review --plan FILE --reviewer ROOT --reason ...`绑定计划；用户已授权实际改名时才`naming-apply --plan FILE`。不新增逐次用户确认。支持边界、当前路径与历史证据区别、迁移后重渲染/终审及原计划恢复见[命名约定](naming.md)。本轮仅更新规则时不调用apply。
 
-原`location`字段只能逐字引用提供的精确GPS记录或null；不要把有依据的近似地区/景点推断塞入该字段。v0.1.1另有必需的[行程与专门地点关联](geography.md)阶段，用独立`geography`表达有来源的近似判断、置信度与替代候选。无证据不猜具体山名；原始转写保留原话与重叠边界，禁止Luna改写转写JSON。
+原`location`字段只能逐字引用提供的精确GPS记录或null；不要把有依据的近似地区/景点推断塞入该字段。v0.1.1另有必需的[行程与专门地点关联](geography.md)阶段，用独立`geography`表达有来源的近似判断、置信度与替代候选。无证据不猜具体山名；原始转写保留原话与重叠边界，禁止视觉 Agent改写转写JSON。
 
 只有ASR证据的clip不能使用视频帧精度，粗chunk必须保留所引转写的完整起止范围与chunk精度；服务端确实验证过的service_segment按其原小区间引用。混合真实画面证据不因此禁用已观测的帧时间。正常首次`geography-package`会从当前GPS/已验证帧位置构建关联与停留覆盖，不开启新revision；`gps-review-package`仅用于已完成后的定向修订。
 

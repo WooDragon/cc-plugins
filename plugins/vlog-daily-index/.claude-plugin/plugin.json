@@ -1,7 +1,7 @@
 {
   "name": "vlog-daily-index",
   "description": "旅行记忆分析师：在 Codex 中结合旅行原片、行程、语音、GPS 与地图证据建立可回到文件和时码的每日索引",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "author": {
     "name": "WooDragon"
   },

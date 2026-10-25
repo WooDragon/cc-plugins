@@ -4,7 +4,7 @@
 
 ## 安装
 
-此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.1.5`。
+此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.1.6`。
 
 ```bash
 npx skills add WooDragon/cc-plugins -g
@@ -14,7 +14,7 @@ npx skills add WooDragon/cc-plugins -g
 
 ## 宿主与依赖
 
-语义工作流需要 Codex 提供真实原生子 Agent 工具和所需模型：Luna 读取视觉证据，Sol 汇总语义与地理证据，ROOT 审查并验收；用户明确指定模型时按用户选择执行。Python 工具只处理确定性工作，不能替代或模拟这些 Agent。
+语义工作流需要 Codex 提供真实原生子 Agent 工具和所需模型：当前主 session 原生能力允许的 Luna、Haiku 或 DeepSeek 读取视觉证据（Luna 仅 medium），Sol 汇总语义与地理证据，ROOT 审查并验收；纯视觉新领取必须提供当前 session 的原生工具/图像能力快照，默认按显式偏好或声明顺序选择，不能静默改派 Sol/旗舰。详见[路由合同](./skills/vlog-daily-index/references/vision-routing.md)；快照与请求不证明实际运行模型。Python 工具只处理确定性工作，不能替代或模拟这些 Agent。
 
 需要用户配置 Python 3.12、FFmpeg/ffprobe、兼容的 ASR 服务和模型，以及运行所需的素材、行程和 GPS/地图证据。凭证、服务地址、本机工具路径和硬件配置由使用者在本地提供，不包含在发布源码中。实际依赖、安装和配置步骤见[安装说明](./skills/vlog-daily-index/references/setup.md)。
 
