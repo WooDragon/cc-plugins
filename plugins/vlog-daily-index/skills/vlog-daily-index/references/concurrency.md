@@ -17,7 +17,7 @@ hardware-benchmark --state INDEPENDENT_LOCAL_STATE --ffmpeg FFMPEG --ffprobe FFP
 hardware-benchmark --state INDEPENDENT_LOCAL_STATE --ffmpeg FFMPEG --ffprobe FFPROBE --output EXISTING_BENCHMARK_DIR --summarize-only --save-profile
 configure-concurrency --state RUN_STATE --hardware-report HARDWARE_REPORT_JSON --media-slots N --vision-concurrency 6 --ready-package-limit 24 --temp-limit-gib 256 --min-free-gib 5
 vision-queue --state RUN_STATE --available-workers ACTUAL_FREE --reserve-sol 1
-vision-queue --state RUN_STATE --available-workers ACTUAL_FREE --reserve-sol 1 --claim-worker UNIQUE_WORKER
+vision-queue --state RUN_STATE --available-workers ACTUAL_FREE --reserve-sol 1 --claim-worker UNIQUE_WORKER --native-capabilities CURRENT_SESSION_CAPABILITIES_JSON
 vision-queue --state RUN_STATE --available-workers ACTUAL_FREE --reserve-sol 1 --release PACKAGE_ID
 retry-visual --state RUN_STATE --package-id INVALID_PACKAGE_ID --reason ROOT_CORRECTION_EVIDENCE
 continue-day --state RUN_STATE --protocol VERIFIED_PROTOCOL_JSON --gps GPS_JSON
@@ -31,7 +31,7 @@ continue-day --state RUN_STATE --protocol VERIFIED_PROTOCOL_JSON --gps GPS_JSON
 
 日常有界并发入口为`continue-day`。旧`prepare`仍是串行诊断/手动有界批次，使用`--blocks`时保留剩余计划，不能把它描述为新的多设备队列调度器，也不要用它绕过正常流水线的背压。
 
-`vision-queue`读取manifest，但只写`state/vision-dispatch/claims.json`并用独立小锁；它可与持主RunLock的`continue-day`并行。`--available-workers`必须来自当前宿主真实空闲名额，`--reserve-sol`从空闲中预留，不能用全局目标8代替。`recommended_vision_workers`表示可新增的视觉Agent数量，已领取且未完成的包计入总上限6。`--claim-worker`可重复，但worker标识唯一且每个只能持一个未完包；成功领取后主控按返回包实际派发。结果文件已到但尚未导入时计入`awaiting_validation_count`，由协调器验证，不重新派模型。派发失败或已确认worker结束才显式release，未收到结果不能靠时间经过自动释放重派。
+`vision-queue`读取manifest，但只写`state/vision-dispatch/claims.json`并用独立小锁；它可与持主RunLock的`continue-day`并行。`--available-workers`必须来自当前宿主真实空闲名额，`--reserve-sol`从空闲中预留，不能用全局目标8代替。`recommended_vision_workers`表示可新增的视觉Agent数量，已领取且未完成的包计入总上限6。`--claim-worker`可重复，但worker标识唯一且每个只能持一个未完包；成功领取后主控按返回包实际派发。新领取必须同时传`--native-capabilities`，路由规则见[纯视觉路由](vision-routing.md)；缺快照或路由不合格时在释放和写claim之前拒绝。结果文件已到但尚未导入时计入`awaiting_validation_count`，由协调器验证，不重新派模型。派发失败或已确认worker结束才显式release，未收到结果不能靠时间经过自动释放重派。
 
 导入失败的包保存`invalid`，后台不会反复校验同一失败文件。协调器安全暂停或批次返回后，使用`retry-visual`按ROOT具体错误依据归档旧invalid结果、清旧claim、重排一次纠正；第二次仍失败留ROOT处置，不无限重派。若worker已改写为新结果，先`import-results --refresh`显式验证，retry不会删掉它。
 

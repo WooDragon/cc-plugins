@@ -14,6 +14,8 @@ description: "旅行记忆分析师：读取一天旅行原视频，检索必需
 
 Python负责确定性媒体/GPS/转写/引用校验；视觉Agent记录逐帧可见内容与证据，事件和兴趣点仅为候选；语义Agent（high）负责跨帧、跨文件及ASR/GPS语义汇总；ROOT当前旗舰负责最终质量审查，且只有ROOT根据较强的错漏证据决定定向补采。复用已有有效结果，不全量重审。脚本不调用隐藏模型接口，也不另建调度服务。
 
+纯视觉逐帧识图允许 Luna、Haiku、DeepSeek，路由由当前session的原生工具能力快照与本run声明的视觉角色共同决定：Codex按模型名派发并固定Luna medium，Claude Code按`subagent_type`派发并由agent frontmatter承载模型与档位。新claim必须传`--native-capabilities CURRENT_SESSION_CAPABILITIES_JSON`，ROOT按返回`dispatch_contract`真实派发；不静默改派Sol/旗舰、不按宿主名猜模型。领取前读[纯视觉路由](references/vision-routing.md)。
+
 输入：素材目录（递归）、归档日期、FIT目录、ASR服务和模型、必需行程，以及可选设备映射/时间校正/官方预览LUT映射。先从本项目已有聊天与Notion检索行程并保留来源；确实找不到或有重要冲突才与用户讨论，不能静默省略。未确认设备角色不提交音频；无人机始终跳过音频，DJI运动相机仍转写。时间不明或慢放速率未核实只给文件内时间，精确位置必须满足[GPS约定](references/gps.md)；有依据的大概区域/景点推断另存[地点关联](references/geography.md)，区分相机/记录者与远景主体。
 
 版本见`VERSION`，验收边界见[发布与验证记录](references/release-verification.md)。开始运行先读[固定工具与职责表](references/tooling.md)：每步使用已落地CLI或宿主/连接器工具，不临时手搓媒体、地图、状态或结果转换脚本；Agent填模板做语义判断。首次部署读[安装](references/setup.md)，维护/排错读[架构](references/architecture.md)、[恢复](references/recovery.md)。入口`scripts/vlog_daily_index.py`，各命令`--help`；固定依赖见`requirements.lock`，运行中不升级。显式传FFmpeg/ffprobe并记录来源/版本/hash。活跃state本地非同步，派生媒体本地temp；原片和既有SRT/XML/FIT只读。

@@ -5,7 +5,7 @@ from pathlib import Path
 deps=os.environ.get('VLOG_INDEX_DEPS')
 if deps: sys.path.insert(0,str(Path(deps)))
 from vlog_index.store import State,RunLock,dump,read,digest,cleanup_registered
-from vlog_index import media,analysis,asr,report,store
+from vlog_index import media,analysis,asr,report,store,vision
 
 # codex keeps its v0.1.5 key set; its semantic and geography roles are the same model.
 HOST_MODEL_ROLES={
@@ -14,6 +14,7 @@ HOST_MODEL_ROLES={
 
 def save(m): dump(Path(m['state_dir'])/'manifest.json',m)
 def load(args): return read(Path(args.state)/'manifest.json')
+def vision_role(m): return (m.get('config',{}).get('model_roles') or {}).get('vision')
 
 def extraction_options(m,frame=None):
     pipeline=frame.get('extraction_pipeline') if frame is not None else m['config'].get('extraction_pipeline')
@@ -97,9 +98,16 @@ def configure_concurrency(args):
 def vision_queue(args):
     """Dispatch ledger uses its own lock: long media runs never lock out the host session."""
     root=Path(args.state)/'vision-dispatch'
+    workers=getattr(args,'claim_worker',[]) or []
+    capability_path=getattr(args,'native_capabilities',None)
+    model=getattr(args,'model',None); effort=getattr(args,'reasoning_effort',None)
     if args.available_workers<0 or args.reserve_sol<0: raise ValueError('Actual free workers and reserved workers must be nonnegative')
     with RunLock(root):
         m=load(args); path=root/'claims.json'; claims=read(path) if path.exists() else {}
+        # Resolve before the releases and any claim write: a bad route mutates nothing.
+        # Reading the queue or releasing a finished worker needs no capability snapshot.
+        wants_route=bool(workers or capability_path or model is not None or effort is not None)
+        contract=vision.dispatch_contract(read(capability_path) if capability_path else None,model,effort,vision_role(m)) if wants_route else None
         for pid in getattr(args,'release',[]) or []: claims.pop(pid,None)
         waiting=[p for p in m['packages'] if p['status']=='waiting_ai']
         awaiting_validation=[p for p in waiting if p.get('result_path') and Path(p['result_path']).exists()]
@@ -107,16 +115,20 @@ def vision_queue(args):
         claimed=sum(p['id'] in claims for p in waiting)
         available=max(0,args.available_workers-args.reserve_sol)
         recommended=min(max(0,min(6,m['config'].get('vision_concurrency',2))-claimed),available,len(ready))
-        workers=getattr(args,'claim_worker',[]) or []
         if len(workers)!=len(set(workers)) or len(workers)>recommended: raise ValueError('Claims exceed actual free host capacity or contain duplicate workers')
         assigned=[]
         for worker,package in zip(workers,ready):
             if any(c['worker']==worker and c['package_id'] in {p['id'] for p in waiting} for c in claims.values()): raise ValueError('Worker already owns an unfinished package')
-            record={'worker':worker,'package_id':package['id'],'at':dt.datetime.now(dt.timezone.utc).isoformat()}
-            claims[package['id']]=record; assigned.append({**package,'claim':record})
+            record={'worker':worker,'package_id':package['id'],'at':dt.datetime.now(dt.timezone.utc).isoformat(),
+                    'requested_model':contract['requested_model'],'requested_reasoning_effort':contract['requested_reasoning_effort'],
+                    'dispatch_contract':contract}
+            claims[package['id']]=record; assigned.append({**package,'claim':record,'dispatch_contract':contract})
         if workers or getattr(args,'release',None): dump(path,claims)
         return {'ready_count':len(waiting),'awaiting_validation_count':len(awaiting_validation),'claimed_count':claimed+len(assigned),'unassigned_count':len(ready)-len(assigned),'recommended_vision_workers':recommended,
                 'host_available_workers':args.available_workers,'reserved_for_sol':args.reserve_sol,'assigned':assigned,
+                'vision_route_policy':{'allowed_families':list(vision.FAMILIES),'luna_reasoning_effort':vision.LUNA_EFFORT,
+                                       'declared_vision_role':vision_role(m),'default':'current_session_native_capabilities'},
+                'selected_vision_route':contract,
                 'unassigned_packages':[p for p in ready if p['id'] not in claims],'claims_path':str(path)}
 
 def media_pressure(m):
@@ -952,6 +964,9 @@ def main():
             p.add_argument('--media-slots',type=int,required=True); p.add_argument('--hardware-report'); p.add_argument('--vision-concurrency',type=int,default=6); p.add_argument('--ready-package-limit',type=int,default=24); p.add_argument('--temp-limit-gib',type=float,default=256); p.add_argument('--min-free-gib',type=float,default=5)
         if name=='vision-queue':
             p.add_argument('--available-workers',type=int,required=True); p.add_argument('--reserve-sol',type=int,default=1); p.add_argument('--claim-worker',action='append'); p.add_argument('--release',action='append')
+            p.add_argument('--native-capabilities',help='Current session native tool/image capability snapshot JSON; required for new claims')
+            p.add_argument('--model',help='Explicit advertised visual model ID or declared vision agent; otherwise session preference/declared role/order')
+            p.add_argument('--reasoning-effort',help='Explicit supported effort; Luna is always medium and agent routes take effort from frontmatter')
         if name=='retry-visual': p.add_argument('--package-id',required=True); p.add_argument('--reason',required=True)
         if name in ('naming-review','naming-apply'): p.add_argument('--plan',required=True)
         if name=='naming-review': p.add_argument('--reviewer',choices=('ROOT',),required=True); p.add_argument('--reason',required=True)
