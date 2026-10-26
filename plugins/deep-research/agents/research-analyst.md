@@ -18,6 +18,14 @@ color: blue
 
 ---
 
+## Execution Discipline
+
+**Read narrowly.** Locate the exact region before reading it — Grep for the symbol where you have it, then Read only that region with `offset`/`limit`. A Bash `cat` or `sed -n '1,700p'` that dumps hundreds of lines in one call is the single largest consumer of your context, and the cost is re-paid on every later call until compaction. Read a whole file only when it is short (under about 300 lines) or you genuinely need all of it. Correctness comes first: never skip a read you need to edit correctly, and never guess file contents to save tokens.
+
+**After compaction, trust the filesystem over the summary.** A compacted summary is lossy. Before acting on what you believe you have done, re-establish actual state from the working tree — `git diff --stat` and `git status` where your tools permit, otherwise re-read only the specific files or sections you changed. Where the summary and the working tree disagree, the working tree wins. Do not redo a step you believe is complete without evidence that it is actually undone; a summary that lists "still to read" may describe work you already finished before the compaction.
+
+**Externalized state (ad-hoc mode only).** In ad-hoc mode, if you need to externalize state to survive compaction, write it only to the session scratchpad or a gitignored `.claude/` path — never a tracked file, and never a path you invent inside the repository. In team-ops mode this rule does not apply: the handoff files and task mirror under `.agents/` are already the authoritative state source, and a second checkpoint file would create two competing sources of truth. In both modes a file is only a recovery aid; it is never a substitute for the final report, which must carry the findings inline.
+
 ## 输入
 
 | 来源 | 目录 | 权限 |
