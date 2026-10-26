@@ -22,6 +22,8 @@ claude plugin install vlog-daily-index@cc-plugins
 
 三个子Agent（`vlog-daily-index:vlog-vision`、`vlog-daily-index:vlog-semantic`、`vlog-daily-index:vlog-geography`）随插件提供。宿主差异见[宿主说明](./skills/vlog-daily-index/references/hosts.md)。
 
+每个子Agent 定义正文都带一节 `## Execution Discipline`（窄读，以及压缩后以工作树为准恢复）。它放在 agent 正文而不是预加载 skill 里，是因为 agent 正文进入 system prompt、每次请求原样重发，不受压缩影响；`skills:` 预加载走 user 角色消息，压缩后不保留。
+
 使用时请求“用旅行记忆分析师为这一天的旅行原片建立每日索引”。
 
 ## 宿主与依赖
