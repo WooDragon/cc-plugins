@@ -16,6 +16,10 @@ claude plugin install vlog-daily-index@cc-plugins
 
 运行 `init` 时传 `--host claude-code`，使 manifest 的 `model_roles` 与 `host` 反映实际派发的子 Agent。
 
+## 可选检索依赖
+
+只检索现有DIT与已发布分析时安装`requirements-query.txt`即可，无需下面的分析依赖、FFmpeg或ASR。入口为`scripts/query_index.py`，配置/刷新/只读SQL视图见[检索模式](query.md)。DuckDB不加入`requirements.lock`的分析必需依赖。
+
 ## 固定依赖
 
 验证基线：CPython 3.12；`requirements.lock`固定运行依赖及其传递依赖，不包含pytest等非运行工具，也不是带wheel哈希的可重现构建锁。安装时按锁文件，运行期间不升级。依赖从配置的可信Python包源安装；本包未附wheelhouse，离线环境须预先在有网的同平台Python 3.12机器上下载匹配wheels。跨平台依赖解析与二进制兼容性未实测。

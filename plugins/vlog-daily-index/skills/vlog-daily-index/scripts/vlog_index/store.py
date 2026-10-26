@@ -24,6 +24,37 @@ def file_hash(path):
         for data in iter(lambda:f.read(1048576), b''): h.update(data)
     return h.hexdigest()
 
+PUBLICATION_NAMES=('AI_音频转写.json','AI_事件与兴趣点.json','AI_每日索引.md')
+
+def publication_snapshot(directory):
+    """Read and validate one publication's bytes, with Markdown as commit marker.
+
+    No analysis dependencies or media reads. Consumers use these exact parsed bytes,
+    rather than validating a file and then reopening a possibly different revision.
+    """
+    directory=Path(directory)
+    marker=(directory/PUBLICATION_NAMES[2]).read_bytes()
+    raw=[(directory/name).read_bytes() for name in PUBLICATION_NAMES[:2]]+[marker]
+    if (directory/PUBLICATION_NAMES[2]).read_bytes()!=marker:
+        raise ValueError('publication changed during read')
+    transcript,index=[json.loads(value.decode('utf-8-sig')) for value in raw[:2]]
+    md=marker.decode('utf-8-sig'); hashes={name:hashlib.sha256(value).hexdigest() for name,value in zip(PUBLICATION_NAMES,raw)}
+    for value in (transcript,index):
+        if not isinstance(value,dict) or value.get('generator')!='vlog-daily-index' or value.get('schema_version')!='1':
+            raise ValueError('unsupported publication generator/schema')
+        revision=value.get('revision',1)
+        if type(revision) is not int or not 1<=revision<=2147483647:
+            raise ValueError('unsupported publication revision')
+    if not isinstance(index.get('run_id'),str) or not index['run_id'] or transcript.get('run_id')!=index['run_id'] or f'run_id:{index["run_id"]}' not in md:
+        raise ValueError('publication run identities mismatch')
+    if transcript.get('revision',1)!=index.get('revision',1) or ('revision' in index and f'revision:{index["revision"]}' not in md):
+        raise ValueError('publication revisions mismatch')
+    for key in ('itinerary_sha256','geography_sha256'):
+        if transcript.get(key)!=index.get(key): raise ValueError('publication context digests mismatch')
+    if index.get('transcript_sha256')!=hashes[PUBLICATION_NAMES[0]] or hashes[PUBLICATION_NAMES[1]] not in md:
+        raise ValueError('publication dependency hashes mismatch')
+    return {'index':index,'transcript':transcript,'hashes':hashes,'digest':digest(hashes)}
+
 class State:
     def __init__(self, root):
         self.root = Path(root).resolve(); self.root.mkdir(parents=True, exist_ok=True)

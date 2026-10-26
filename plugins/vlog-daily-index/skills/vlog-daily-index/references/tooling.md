@@ -1,5 +1,7 @@
 # 固定工具、Agent职责与配置边界
 
+仅检索现有索引时先读[检索模式](query.md)，使用独立`query_index.py refresh/search/status`，不执行下表分析步骤。
+
 普通运行使用包内CLI和宿主/连接器现有工具，不临时手写媒体、地图、状态迁移、结果转换或验收脚本。以下命令均由`scripts/vlog_daily_index.py`提供，除init显式路径外均使用同一`--state STATE`；具体参数用对应`--help`。数据JSON是有来源的配置或Agent结果，不是可执行代码。
 
 | 依赖顺序 | 固定入口与产物 | Agent或配置职责 |

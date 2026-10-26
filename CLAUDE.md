@@ -17,6 +17,7 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 | Plugin | dispatch-contract（1 skill + 5 hooks） | 子 agent 派发契约：四条派发铁律 + `%%DONE%%` 定稿门禁（SubagentStop）（判据按正文体量分档）+ background-dispatch 同步守卫 + 派发能力匹配守卫 + 派发通道守卫（均 PreToolUse）+ 派发规则注入（SubagentStart） |
 | Plugin | brain-route（2 skills + 1 hook） | second-brain 跨项目记忆路由：`brain-recall` 召回与写入规约 + `brain-curate` 复核去重流程 + 写本地 memory 条目文件时的路由提醒 hook（软提醒，重试即放行） |
 | Plugin | vlog-daily-index（1 skill + 3 agents + Python tools） | 旅行记忆分析师：Codex / Claude Code 双宿主原生 Agent 工作流，结合原片、行程、语音与 GPS/地图证据建立每日索引 |
+| Plugin | dit-media（1 skill + Python tools） | 素材归档与 DIT：复制校验回执、同卷归位、十字段近源 CSV 与按需修复 |
 
 ## 版本变更铁律
 
@@ -173,6 +174,10 @@ plugins/
     skills/vlog-daily-index/     # 自包含技能、Python 工具、通用引用、合成测试与依赖说明
     agents/                      # Claude Code 原生 subagent（vision / semantic / geography）
     README.md                    # 安装者说明、依赖与宿主限制
+  dit-media/                     # 相机素材归档与 DIT
+    .claude-plugin/plugin.json   # 插件元数据（版本与 marketplace 同步）
+    skills/dit-media/            # 归档技能、标准库工具、合成测试、通用参考与 FastCopy 配置
+    README.md                    # 安装者说明与索引兼容边界
   brain-route/                   # second-brain 跨项目记忆路由插件（2 skills + 1 hook）
     .claude-plugin/plugin.json   # 插件元数据（声明 2 个 skill + 1 个 hook）
     hooks/hooks.json             # 本地 memory 写入时的路由提醒 hook 声明
@@ -270,9 +275,16 @@ Claude Code auto-memory 子树使用根路径上下文精确排除；行为边�
 | 执行 | 脚本自动执行 | AI 读取并遵循 |
 | 安装 | `claude plugin install` | `npx skills add` |
 
+### 素材归档与查询
+
+`dit-media` 沿用使用者已有归档规范，以成熟复制工具完成传输和校验，维护十字段近源 CSV；不自动清卡或迁移索引。`vlog-daily-index` 可选 DuckDB 查询读取明确指定的每日索引、转写及 DIT CSV，刷新后提供可回到源产物、原片路径与时码的检索。安装与命令分别见两个插件 README。
+
 ## 历史记录
 
 开发踩坑记录已归档至 GitHub Issues：
+
+- [#275 原生视觉宿主角色兼容修复](https://github.com/WooDragon/cc-plugins/issues/275)
+- [#276 可选 DuckDB 查询与 DIT 配合](https://github.com/WooDragon/cc-plugins/issues/276)
 
 - [#8 初期插件开发陷阱](https://github.com/WooDragon/cc-plugins/issues/8) — Marketplace 命名、hooks 重复加载、版本双写、KV Cache 原则
 - [#9 Hook 可靠性与诊断改进 (v1.0.12~v1.0.15)](https://github.com/WooDragon/cc-plugins/issues/9) — Compaction 绕过、入口诊断日志、set-e 静默退出、进程残留

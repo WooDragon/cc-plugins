@@ -129,11 +129,22 @@
     {
       "name": "vlog-daily-index",
       "description": "Travel memory indexing for Codex and Claude Code — native agents, source-linked events, transcripts, itinerary and GPS/map evidence",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "author": {
         "name": "WooDragon"
       },
       "source": "./plugins/vlog-daily-index",
+      "category": "productivity",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "dit-media",
+      "description": "Camera media archiving and DIT — verified transfer receipts, same-volume relocation and source-adjacent ten-column CSV indexes",
+      "version": "0.1.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/dit-media",
       "category": "productivity",
       "homepage": "https://github.com/WooDragon/cc-plugins"
     }
