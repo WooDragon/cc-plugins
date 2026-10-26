@@ -4,6 +4,7 @@
 mode="${FAKE_AGY_MODE:-ok}"
 case "$mode" in
   ok) printf 'Fake Result | fake key info | https://example.com/agy-result\n' ;;
+  literal-marker) printf 'SEARCH_FAILED troubleshooting | normal result | https://example.com/SEARCH_FAILED\n' ;;
   empty) : ;;
   search-failed) printf 'SEARCH_FAILED\n' ;;
   exit-nonzero) printf 'boom\n' >&2; exit 7 ;;

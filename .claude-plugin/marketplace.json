@@ -118,7 +118,7 @@
     {
       "name": "web-search",
       "description": "Web search escalation ladder — agy/grok CLIs, host WebSearch, DuckDuckGo fallback, with capability probing so missing CLIs are skipped instead of burning retries",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": {
         "name": "WooDragon"
       },

@@ -10,29 +10,20 @@
 SEARCH="$BATS_TEST_DIRNAME/../skills/web-search/scripts/search.sh"
 FIXTURES="$BATS_TEST_DIRNAME/fixtures"
 
+load test_helper/common-setup
+
 setup() {
-  SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/search-test.XXXXXX")"
-  mkdir -p "$SANDBOX/bin"
+  setup_sandbox
   AGY_CALLS="$SANDBOX/agy.calls"
   GROK_CALLS="$SANDBOX/grok.calls"
   : >"$AGY_CALLS"
   : >"$GROK_CALLS"
-
-  # Resolve a real Python 3 before the sandbox PATH replaces the host one.
-  # The DuckDuckGo level needs it; tests that assert the DDG level is absent
-  # simply leave it unlinked.
-  REAL_PYTHON="$(command -v python3 || true)"
-
-  PATH="$SANDBOX/bin:/usr/bin:/bin"
-  export PATH
-  unset BASH_ENV
-  unset AGY_BIN GROK_BIN TIMEOUT_BIN PYTHON_BIN CURL_BIN CURL_CMD
-  export HOME="$SANDBOX"
-  # Keep timeouts short so a regression cannot stall the suite.
   export WEB_SEARCH_TIMEOUT=10
 }
 
 teardown() {
+  export PATH="$ORIGINAL_PATH"
+  hash -r
   rm -rf "$SANDBOX"
 }
 
@@ -379,6 +370,135 @@ install_real_python() {
     *"example.com"*) printf 'community mode leaked a fallback result: %s\n' "$output" >&2; return 1 ;;
     *) ;;
   esac
+}
+
+@test "re-entry bypasses installed agy and grok entirely" {
+  install_counting_shim agy fake-agy "$AGY_CALLS"
+  install_counting_shim grok fake-grok "$GROK_CALLS"
+  install_fake_curl 200 ddg-results.html
+  install_real_python
+  export WEB_SEARCH_BUILTIN_UNAVAILABLE=1
+  run bash "$SEARCH" "some query"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *https://example.com/one* ]]
+  [ "$(call_count "$AGY_CALLS")" = 0 ]
+  [ "$(call_count "$GROK_CALLS")" = 0 ]
+}
+
+@test "community remains independent of the general re-entry flag" {
+  install_counting_shim agy fake-agy "$AGY_CALLS"
+  install_counting_shim grok fake-grok "$GROK_CALLS"
+  export WEB_SEARCH_BUILTIN_UNAVAILABLE=1
+  run bash "$SEARCH" topic --community
+  [ "$status" -eq 0 ]
+  [ "$(call_count "$GROK_CALLS")" = 1 ]
+  [ "$(call_count "$AGY_CALLS")" = 0 ]
+}
+
+@test "failure marker substrings in normal agy results do not trigger fallback" {
+  install_counting_shim agy fake-agy "$AGY_CALLS"
+  export FAKE_AGY_MODE=literal-marker
+  run bash "$SEARCH" query
+  [ "$status" -eq 0 ]
+  [[ "$output" == *https://example.com/SEARCH_FAILED* ]]
+  [ "$(call_count "$AGY_CALLS")" = 1 ]
+}
+
+@test "failure marker is an exact line for agy and both grok modes" {
+  run bash -c '. "$1"; level_failed 0 "A SEARCH_FAILED B" && exit 9; level_failed 0 "SEARCH_FAILED extra" && exit 9; level_failed 0 "$(printf "result\\nSEARCH_FAILED\\nresult")"' _ "$SEARCH"
+  [ "$status" -eq 0 ]
+}
+
+@test "double dash preserves option-looking queries as literals" {
+  install_counting_shim agy fake-agy "$AGY_CALLS"
+  install_counting_shim grok fake-grok "$GROK_CALLS"
+  for query in --community --help -h; do
+    run bash "$SEARCH" -- "$query"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *agy-result* ]]
+  done
+  [ "$(call_count "$AGY_CALLS")" = 3 ]
+  [ "$(call_count "$GROK_CALLS")" = 0 ]
+}
+
+@test "DDG associates optional snippets and preserves encoded URLs and literal markers" {
+  install_fake_curl 200 ddg-structured.html
+  install_real_python
+  export WEB_SEARCH_BUILTIN_UNAVAILABLE=1
+  run bash -c 'bash "$1" query 2>"$2"' _ "$SEARCH" "$SANDBOX/stderr"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '%s\n' 'First SEARCH_FAILED title & more |  | https://example.com/a%2Fb?q=x%2By&n=1' 'Second result | Second snippet only & complete | https://example.org/direct%2Fpath?q=a%2Bb&n=2')" ]
+}
+
+@test "explicit curl path with spaces is both probed and executed without host curl" {
+  install_fake_curl 200 ddg-results.html
+  install_real_python
+  mkdir -p "$SANDBOX/with spaces"
+  cp "$SANDBOX/bin/curl" "$SANDBOX/with spaces/curl.exe"
+  rm "$SANDBOX/bin/curl"
+  export CURL_CMD="$SANDBOX/with spaces/curl.exe" WEB_SEARCH_BUILTIN_UNAVAILABLE=1
+  run bash "$SEARCH" query
+  [ "$status" -eq 0 ]
+  [[ "$output" == *https://example.com/one* ]]
+}
+
+@test "an explicit curl without urlencode is rejected even when PATH curl has it" {
+  install_fake_curl 200 ddg-results.html
+  install_real_python
+  printf '#!/usr/bin/env bash\nprintf "no options\\n"\n' >"$SANDBOX/no-urlencode"
+  chmod +x "$SANDBOX/no-urlencode"
+  export CURL_CMD="$SANDBOX/no-urlencode" WEB_SEARCH_BUILTIN_UNAVAILABLE=1
+  run bash "$SEARCH" query
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"[skip] duckduckgo:"* ]]
+}
+
+@test "DDG has curl request timeout even without GNU timeout and warns only on stderr" {
+  install_sequenced_curl 200 "$FIXTURES"
+  install_real_python
+  export WEB_SEARCH_BUILTIN_UNAVAILABLE=1
+  run bash -c 'bash "$1" query 2>"$2"' _ "$SEARCH" "$SANDBOX/stderr"
+  [ "$status" -eq 0 ]
+  [[ "$(ddg_args)" == *"--max-time 10"* ]]
+  [[ "$output" != *"[warn]"* ]]
+  grep -qF '[warn]' "$SANDBOX/stderr"
+}
+
+@test "GNU timeout includes a finite kill-after grace" {
+  # Neither a real timeout nor a command-not-found may satisfy this assertion.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*"\n' >"$SANDBOX/timeout"
+  chmod +x "$SANDBOX/timeout"
+  run bash -c '. "$1"; TIMEOUT_BIN="$2"; run_with_timeout 7 true' _ "$SEARCH" "$SANDBOX/timeout"
+  [ "$status" -eq 0 ]
+  [ "$output" = '--kill-after=5 7 true' ]
+}
+
+@test "both Grok modes use only locally confirmed tools and matching prompts" {
+  install_counting_shim grok fake-grok "$GROK_CALLS"
+  export FAKE_GROK_ARGS_LOG="$SANDBOX/grok.args"
+  for mode in general community; do
+    if [ "$mode" = general ]; then
+      run bash "$SEARCH" query
+    else
+      run bash "$SEARCH" query --community
+    fi
+    [ "$status" -eq 0 ]
+    grep -qxF 'web_search,web_fetch' "$FAKE_GROK_ARGS_LOG"
+    grep -qF -- '--no-subagents' "$FAKE_GROK_ARGS_LOG"
+    grep -qF -- '--no-memory' "$FAKE_GROK_ARGS_LOG"
+    if grep -Eq 'open_page|x_keyword_search|x_semantic_search|x_thread_fetch' "$FAKE_GROK_ARGS_LOG"; then
+      return 1
+    fi
+  done
+}
+
+@test "000 is retried only once" {
+  install_sequenced_curl '000 000' "$FIXTURES"
+  install_real_python
+  export WEB_SEARCH_BUILTIN_UNAVAILABLE=1
+  run bash "$SEARCH" query
+  [ "$status" -eq 1 ]
+  [ "$(curl_count)" = 2 ]
 }
 
 @test "a missing query is a usage error, not a search" {

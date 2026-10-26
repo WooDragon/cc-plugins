@@ -10,23 +10,15 @@ PROBE="$BATS_TEST_DIRNAME/../skills/web-search/scripts/probe.sh"
 FIXTURES="$BATS_TEST_DIRNAME/fixtures"
 EXPECTED_KEYS="PLATFORM AGY_BIN GROK_BIN TIMEOUT_BIN PYTHON_BIN CURL_BIN CURL_DATA_URLENCODE DDG_READY"
 
-setup() {
-  SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/probe-test.XXXXXX")"
-  mkdir -p "$SANDBOX/bin"
+load test_helper/common-setup
 
-  # /usr/bin:/bin carries the MSYS coreutils the probe and the tests need, and
-  # on this platform contains neither agy, grok, python, nor curl. Sandbox
-  # fixtures shadow it through PATH order.
-  PATH="$SANDBOX/bin:/usr/bin:/bin"
-  export PATH
-  # A startup hook in the host shell can rewrite PATH for every non-interactive
-  # bash, which would reintroduce a real python/curl into the sandbox.
-  unset BASH_ENV
-  unset AGY_BIN GROK_BIN TIMEOUT_BIN PYTHON_BIN CURL_BIN
-  export HOME="$SANDBOX"
+setup() {
+  setup_sandbox
 }
 
 teardown() {
+  export PATH="$ORIGINAL_PATH"
+  hash -r
   rm -rf "$SANDBOX"
 }
 
@@ -164,6 +156,25 @@ EOF
 
   line_count="$(printf '%s\n' "$output" | wc -l)"
   [ "$line_count" -eq 8 ]
+}
+
+@test "MINGW and MSYS kernels map to Windows without host capability leaks" {
+  rm "$SANDBOX/bin/uname"
+  for kernel in MINGW64_NT-10.0 MSYS_NT-10.0; do
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "%s"\n' "$kernel" >"$SANDBOX/bin/uname"
+    chmod +x "$SANDBOX/bin/uname"
+    run bash "$PROBE"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | matrix_value PLATFORM)" = windows ]
+    [ "$(printf '%s\n' "$output" | matrix_value DDG_READY)" = 0 ]
+  done
+}
+
+@test "sandbox bash is the selected target interpreter" {
+  run bash -c 'printf "%s\n" "$BASH_VERSION"'
+  [ "$status" -eq 0 ]
+  expected="$("${WEB_SEARCH_TEST_BASH:-$BASH}" -c 'printf "%s\n" "$BASH_VERSION"')"
+  [ "$output" = "$expected" ]
 }
 
 @test "PLATFORM reports a known value" {

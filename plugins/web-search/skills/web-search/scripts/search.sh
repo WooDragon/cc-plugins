@@ -62,8 +62,17 @@ load_capabilities() {
 
   # Honour an explicit CURL_CMD override; otherwise use the probed binary so
   # the command that was checked for --data-urlencode is the one that runs.
-  if [ -z "$CURL_CMD" ]; then
-    CURL_CMD="$CURL_BIN"
+  if [ -n "$CURL_CMD" ]; then
+    CURL_BIN="$(probe_bin "$CURL_CMD")"
+    CURL_DATA_URLENCODE="$(probe_curl_urlencode "$CURL_BIN")"
+    DDG_READY=0
+    if [ -n "$CURL_BIN" ] && [ -n "$PYTHON_BIN" ] && [ "$CURL_DATA_URLENCODE" = 1 ]; then
+      DDG_READY=1
+    fi
+  fi
+  CURL_CMD="$CURL_BIN"
+  if [ -z "$TIMEOUT_BIN" ]; then
+    printf '[warn] GNU timeout unavailable: no CLI hard deadline; curl uses --max-time.\n' >&2
   fi
 }
 
@@ -73,7 +82,7 @@ run_with_timeout() {
   local seconds="$1"
   shift
   if [ -n "$TIMEOUT_BIN" ]; then
-    "$TIMEOUT_BIN" "$seconds" "$@"
+    "$TIMEOUT_BIN" --kill-after=5 "$seconds" "$@"
   else
     "$@"
   fi
@@ -104,12 +113,12 @@ EOF
 }
 
 GROK_SYSTEM_PROMPT="$(cat <<'EOF'
-You are a web search tool. You have NO shell and NO access to any external CLI (agy, gemini, codex). Never attempt to run terminal commands or invoke other CLIs. Use only your built-in web_search and open_page tools. Return 5-10 results, one per line: Title | key info (1-2 sentences) | full URL. Dedupe by domain. No summary, no analysis. Exclude these content farms entirely: CSDN, 百度云, 腾讯云, 华为云, 阿里云, 火山引擎, 稀土掘金. If search yields nothing, output exactly SEARCH_FAILED.
+You are a web search tool. You have NO shell and NO access to any external CLI (agy, gemini, codex). Never attempt to run terminal commands or invoke other CLIs. Use only your built-in web_search and web_fetch tools. Return 5-10 results, one per line: Title | key info (1-2 sentences) | full URL. Dedupe by domain. No summary, no analysis. Exclude these content farms entirely: CSDN, 百度云, 腾讯云, 华为云, 阿里云, 火山引擎, 稀土掘金. If search yields nothing, output exactly SEARCH_FAILED.
 EOF
 )"
 
 GROK_COMMUNITY_SYSTEM_PROMPT="$(cat <<'EOF'
-You are an X/Twitter community research tool. You have NO shell and NO access to any external CLI. Never attempt to run terminal commands. Search ONLY for posts on X (x.com/twitter.com). Every result MUST be an actual X post with a real x.com/<handle>/status/<id> URL. Do NOT return blogs, news articles, Reddit, HN, or any non-X source. Use x_keyword_search / x_semantic_search when they work; if they return nothing, fall back to web_search restricted to site:x.com. Output one post per line: @handle | key point (1-2 sentences) | full x.com URL. If you cannot find real X posts, output exactly SEARCH_FAILED.
+You are an X/Twitter community research tool. You have NO shell and NO access to any external CLI. Never attempt to run terminal commands. Search ONLY for posts on X (x.com/twitter.com). Every result MUST be an actual X post with a real x.com/<handle>/status/<id> URL. Do NOT return blogs, news articles, Reddit, HN, or any non-X source. Use only web_search restricted to site:x.com and web_fetch to check post URLs. Output one post per line: @handle | key point (1-2 sentences) | full x.com URL. If you cannot find real X posts, output exactly SEARCH_FAILED.
 EOF
 )"
 
@@ -127,7 +136,7 @@ if ! declare -F invoke_grok >/dev/null 2>&1; then
       --system-prompt-override "$GROK_SYSTEM_PROMPT" \
       -p "$1" \
       --effort low --output-format plain \
-      --tools web_search,open_page \
+      --tools web_search,web_fetch \
       --no-subagents --no-memory --max-turns 8 2>&1
   }
 fi
@@ -139,7 +148,7 @@ if ! declare -F invoke_grok_community >/dev/null 2>&1; then
       --system-prompt-override "$GROK_COMMUNITY_SYSTEM_PROMPT" \
       -p "搜索 X 上关于 $1 的近期真实讨论帖。找到几条返回几条，不要为凑数编造；一条真实的都没有则只输出 SEARCH_FAILED" \
       --effort low --output-format plain \
-      --tools x_keyword_search,x_semantic_search,x_thread_fetch,web_search,open_page \
+      --tools web_search,web_fetch \
       --no-subagents --no-memory --max-turns 10 2>&1
   }
 fi
@@ -150,7 +159,7 @@ level_failed() {
   local code="$1" output="$2"
   [ "$code" -ne 0 ] && return 0
   [ -z "$output" ] && return 0
-  printf '%s' "$output" | grep -q 'SEARCH_FAILED' && return 0
+  printf '%s\n' "$output" | grep -qxF 'SEARCH_FAILED' && return 0
   return 1
 }
 
@@ -194,30 +203,87 @@ run_community_level() {
 }
 
 ddg_parse_and_report() {
-  # Reads the HTML body on stdin. Always prints either result rows or a
-  # SEARCH_FAILED marker; the caller distinguishes the two.
+  # Result containers own their optional snippets. Failure is an exit status,
+  # never a word scanned from otherwise valid result text.
   "$PYTHON_BIN" -c '
-import sys, re, urllib.parse, html as H
+import sys
+from html.parser import HTMLParser
+from urllib.parse import urlsplit, parse_qs
 
-page = sys.stdin.read()
-hrefs = re.findall(r"class=\"result__a\"[^>]*href=\"([^\"]+)\"", page)
-titles = re.findall(r"class=\"result__a\"[^>]*>(.*?)</a>", page, re.S)
-snippets = re.findall(r"class=\"result__snippet\"[^>]*>(.*?)</a>", page, re.S)
-strip = lambda s: H.unescape(re.sub(r"<[^>]+>", "", s)).strip()
 
-rows = 0
-for index, (href, title) in enumerate(zip(hrefs, titles)):
-    real_url = urllib.parse.unquote(
-        urllib.parse.parse_qs(urllib.parse.urlparse(href).query).get("uddg", [href])[0])
-    snippet = strip(snippets[index]) if index < len(snippets) else ""
-    print("%s | %s | %s" % (strip(title), snippet, real_url))
-    rows += 1
+def clean(text):
+    return " ".join(text.split())
 
-if rows == 0:
-    if "result__a" not in page and "anomaly" in page:
-        print("SEARCH_FAILED (CAPTCHA)")
-    else:
-        print("SEARCH_FAILED")
+
+def result_url(href):
+    try:
+        parsed = urlsplit(href)
+        # Decode only the DDG redirect layer. Direct URLs keep their encoding.
+        if parsed.hostname in ("duckduckgo.com", "www.duckduckgo.com") and parsed.path == "/l/":
+            href = parse_qs(parsed.query).get("uddg", [""])[0]
+        parsed = urlsplit(href)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            return clean(href)
+    except ValueError:
+        pass
+    return ""
+
+
+class Results(HTMLParser):
+    void_tags = set("area base br col embed hr img input link meta param source track wbr".split())
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+        self.row = None
+        self.row_depth = 0
+        self.field = None
+        self.field_depth = 0
+        self.rows = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        classes = attrs.get("class", "").split()
+        if tag not in self.void_tags:
+            self.stack.append(tag)
+        if "result" in classes and self.row is None:
+            self.row = {"href": "", "title": [], "snippet": []}
+            self.row_depth = len(self.stack)
+        if self.row is None:
+            return
+        if tag == "a" and "result__a" in classes:
+            self.row["href"] = attrs.get("href", "")
+            self.field = "title"
+            self.field_depth = len(self.stack)
+        elif "result__snippet" in classes:
+            self.field = "snippet"
+            self.field_depth = len(self.stack)
+
+    def handle_data(self, data):
+        if self.row is not None and self.field:
+            self.row[self.field].append(data)
+
+    def handle_endtag(self, tag):
+        if tag not in self.stack:
+            return
+        depth = len(self.stack) - self.stack[::-1].index(tag) - 1
+        self.stack = self.stack[:depth]
+        if self.field and depth < self.field_depth:
+            self.field = None
+        if self.row is not None and depth < self.row_depth:
+            url = result_url(self.row["href"])
+            title = clean("".join(self.row["title"]))
+            if url and title:
+                self.rows.append((title, clean("".join(self.row["snippet"])), url))
+            self.row = None
+
+
+parser = Results()
+parser.feed(sys.stdin.read())
+parser.close()
+for row in parser.rows:
+    print("%s | %s | %s" % row)
+sys.exit(0 if parser.rows else 1)
 '
 }
 
@@ -233,8 +299,7 @@ run_ddg_level() {
 
   while [ "$attempt" -le "$max_attempts" ]; do
     http_code="$(
-      # shellcheck disable=SC2086
-      run_with_timeout "$timeout_s" $CURL_CMD -sS -o "$body" -w '%{http_code}' \
+      run_with_timeout "$timeout_s" "$CURL_CMD" --max-time "$timeout_s" -sS -o "$body" -w '%{http_code}' \
         -A "$DDG_USER_AGENT" \
         -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
         -H "Accept-Language: en-US,en;q=0.9" \
@@ -245,8 +310,7 @@ run_ddg_level() {
     )" || http_code="000"
 
     if [ "$http_code" = "200" ]; then
-      parsed="$(ddg_parse_and_report <"$body")"
-      if [ -n "$parsed" ] && ! printf '%s' "$parsed" | grep -q 'SEARCH_FAILED'; then
+      if parsed="$(ddg_parse_and_report <"$body")" && [ -n "$parsed" ]; then
         rm -f "$body"
         printf '%s\n' "$parsed"
         return 0
@@ -292,18 +356,18 @@ usage() {
 }
 
 main() {
-  local query="" community=0 arg
+  local query="" community=0 options=1 arg
   for arg in "$@"; do
-    case "$arg" in
-      --community) community=1 ;;
-      -h|--help) usage; exit 0 ;;
-      --) ;;
-      *)
-        if [ -z "$query" ]; then
-          query="$arg"
-        fi
-        ;;
-    esac
+    if [ "$options" -eq 1 ]; then
+      case "$arg" in
+        --community) community=1; continue ;;
+        -h|--help) usage; exit 0 ;;
+        --) options=0; continue ;;
+      esac
+    fi
+    if [ -z "$query" ]; then
+      query="$arg"
+    fi
   done
 
   if [ -z "$query" ]; then
@@ -324,19 +388,19 @@ main() {
     exit 1
   fi
 
-  if [ -n "$AGY_BIN" ]; then
-    run_agy_level "$query" && exit 0
-  else
-    skip_level agy "binary not found"
-  fi
-
-  if [ -n "$GROK_BIN" ]; then
-    run_grok_level "$query" && exit 0
-  else
-    skip_level grok "binary not found"
-  fi
-
   if [ "${WEB_SEARCH_BUILTIN_UNAVAILABLE:-0}" != "1" ]; then
+    if [ -n "$AGY_BIN" ]; then
+      run_agy_level "$query" && exit 0
+    else
+      skip_level agy "binary not found"
+    fi
+
+    if [ -n "$GROK_BIN" ]; then
+      run_grok_level "$query" && exit 0
+    else
+      skip_level grok "binary not found"
+    fi
+
     printf '[handoff] builtin-websearch\n' >&2
     exit 3
   fi

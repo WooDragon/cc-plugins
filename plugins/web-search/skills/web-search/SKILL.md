@@ -49,17 +49,19 @@ SEARCH="${CLAUDE_PLUGIN_ROOT}/skills/web-search/scripts/search.sh"
 | `1` | 全链失败（各级都不可用或都失败） | 按无结果处理，不要盲目重试 |
 | `3` | 需调用方执行内置 WebSearch | 自行跑 WebSearch 工具；失败时带 `WEB_SEARCH_BUILTIN_UNAVAILABLE=1` 重入脚本，续跑 DDG 兜底 |
 
+带 `WEB_SEARCH_BUILTIN_UNAVAILABLE=1` 重入通用档时，脚本直接执行 DDG，不再调用 agy/grok。社区档独立，不受此标志影响。查询以 `--` 开头时，应使用 `search.sh -- "<query>"`，`--` 后不再识别选项。
+
 `3` 是 handoff 不是失败：内置 WebSearch 是 Claude Code 的宿主工具，bash 脚本调不到，只能交给调用方。**漏掉重入**会让第 4 级 DDG 永远不可达。
 
 ---
 
 ## 通用 web 搜索：四级降级链
 
-降级路径：**agy → grok → 内置 WebSearch → DuckDuckGo html**。每级失败（退出码非零 ∨ 输出为空 ∨ 输出含 `SEARCH_FAILED`）才进入下一级。内容农场屏蔽名单（见下方独立章节）适用于所有级别，不在每级重复。
+降级路径：**agy → grok → 内置 WebSearch → DuckDuckGo html**。每级失败（退出码非零 ∨ 输出为空 ∨ 输出存在整行精确等于 `SEARCH_FAILED`）才进入下一级。内容农场屏蔽名单（见下方独立章节）适用于所有级别，不在每级重复。
 
 **探测不到的级别整级跳过**：脚本先跑探测器拿能力矩阵，未安装的 CLI 直接打印 `[skip] <级名>: <原因>` 到 stderr 并进入下一级，**不调用、不重试**。这是为了避免为空转烧时间——缺失的二进制不存在"失败重试"的语义。各级具体差异见下方「探测语义」。
 
-**外层 Task timeout 按预期走到哪级设**（各级实测耗时之和，别用单级的数字掐全链）：只跑 agy ≥120s；预期可能降级到 grok ≥400s（agy 3 次重试 + grok 一轮）；要留全链兜底 ≥600s。设太短会在 agy 重试中途被外层掐死，表现为"假失败"。
+**外层 Task timeout 应覆盖累计预算**：默认 agy 最坏约 399s（3 × 130s + 3s + 6s）；加 grok 约 599s；DDG 独立重入约 53s（2 × 25s + 3s）。调用方还应预留每次 GNU timeout 的 5s 终止宽限与调度余量。宿主 WebSearch 的预算单独计算。没有 GNU timeout 时，agy/grok 直接执行，脚本不承诺 CLI 硬截止时间，并将告警输出到 stderr；DDG 仍由 curl `--max-time` 限制单次请求。
 
 ### 第 1 级 · agy（主力）
 
@@ -67,7 +69,7 @@ SEARCH="${CLAUDE_PLUGIN_ROOT}/skills/web-search/scripts/search.sh"
 
 **重试策略**：同一查询最多调用 3 次（1 次初试 + 2 次重试），退避间隔 3s / 6s（避让 429 限流）。3 次全部失败才降级 grok。
 
-**失败判定**：退出码非零 ∨ 输出为空 ∨ 输出含 `SEARCH_FAILED` ∨ 超时。
+**失败判定**：退出码非零 ∨ 输出为空 ∨ 输出存在整行精确等于 `SEARCH_FAILED` ∨ 超时。
 
 **陷阱警告**：agy 429 重试失败时，退出码**可能仍为 0**，必须同时检查输出内容，不能只看退出码。
 
@@ -75,7 +77,7 @@ SEARCH="${CLAUDE_PLUGIN_ROOT}/skills/web-search/scripts/search.sh"
 
 ### 第 2 级 · grok（agy 全部失败后降级）
 
-`--effort low --output-format plain --tools web_search,open_page --no-subagents --no-memory --max-turns 8`，超时 200s。规则写在 `--system-prompt-override` 里。
+`--effort low --output-format plain --tools web_search,web_fetch --no-subagents --no-memory --max-turns 8`，超时 200s。规则写在 `--system-prompt-override` 里。
 
 **关键约束（每条都是实测结论，删改有代价）：**
 
@@ -84,7 +86,7 @@ SEARCH="${CLAUDE_PLUGIN_ROOT}/skills/web-search/scripts/search.sh"
 - **system-prompt 里那句 "NO shell / Never attempt" 是功能性约束，不是客套话**：删掉它 grok 会去调本机 agy，把已耗尽的 agy 配额再烧一轮并拖到超时。`--tools` / `--disallowed-tools` / `--sandbox` 三者都拦不住这件事，system-prompt 声明是唯一有效手段。
 - **`--no-subagents` + `--max-turns 8` 是防超时的关键**：不限制时 grok 会起 subagent 多路降级并拖到超时。
 
-**失败判定**（与 agy 同款）：退出码非零 ∨ 输出为空 ∨ 输出含 `SEARCH_FAILED`。grok 失败时退出码仍可能为 0，必须同时检查输出内容。
+**失败判定**（与 agy 同款）：退出码非零 ∨ 输出为空 ∨ 输出存在整行精确等于 `SEARCH_FAILED`。grok 失败时退出码仍可能为 0，必须同时检查输出内容。
 
 **格式遵守度有限**：要求单行列表，grok 有时给散文或 JSON 结构体。这是可接受的——grok 是 fallback，此时优先保住"有真实 URL 的可用结果"，不为格式加重试。
 
@@ -96,7 +98,7 @@ grok 失败后，脚本以 `exit 3` 交还调用方，由 subagent 在 tool-use 
 
 ### 第 4 级 · DuckDuckGo html 端点（最末级兜底）
 
-curl 以 `--data-urlencode` 拼查询，解析 `result__a` / `result__snippet`，从 `uddg=` 参数取真实 URL（不跟随跳转）。
+curl 以 `--data-urlencode` 拼查询，并以 `--max-time` 限制单次请求。Python 标准库 HTMLParser 按结果容器关联 `result__a` 与可选的 `result__snippet`，不依赖属性顺序。解析器先解码 HTML entity，再从 DDG 跳转包装的 `uddg=` 参数取真实 URL，仅解码包装层。直接 URL 保留原编码；解析器仅输出 http/https，并将字段换行归一化。解析失败通过退出状态报告，不扫描结果正文中的 `SEARCH_FAILED`。
 
 **请求头必须成套，UA 主因：**
 
@@ -121,8 +123,8 @@ curl 以 `--data-urlencode` 拼查询，解析 `result__a` / `result__snippet`�
 **其他约束：**
 
 - **脆性提示**：`result__a` / `result__snippet` 是 DuckDuckGo 的非官方 HTML class 名，DDG 改版即失效。若解析失效应直接删除本级而非修补。
-- **本机 `ddgr` / `ddgs` / `duckduckgo_search` 均未安装，不要为此安装任何包**——纯 curl + urldecode 即可。
-- DDG 这级返回的结果**不经内容农场过滤**（curl + 正则不具备判定能力），调用方须按下方屏蔽名单自行丢弃命中项。
+- **本机 `ddgr` / `ddgs` / `duckduckgo_search` 均未安装，不要为此安装任何包**——现有 curl + Python 标准库即可。
+- DDG 这级返回的结果**不经内容农场过滤**（HTML 解析器不判定来源质量），调用方须按下方屏蔽名单自行丢弃命中项。
 
 ---
 
@@ -136,7 +138,7 @@ curl 以 `--data-urlencode` 拼查询，解析 `result__a` / `result__snippet`�
 
 **关键约束（每条都是实测结论，删改有代价）：**
 
-- **工具集必须给全**（3 个 X 检索工具 + `web_search` + `open_page`，共 5 个；grok 另有 `x_user_search` 是按用户查档不是按话题检索，本档不需要）。**收窄工具集反而更差**——只给单个 X 工具时 grok 会绕开它去调本机 agy 并耗尽 max-turns。
+- **工具白名单**：普通档与社区档都使用 `web_search,web_fetch`。社区档的 prompt 限定 `site:x.com` 与真实帖子 URL。`open_page` 不是 CLI 工具名；本机 CLI 同样不接受 `x_keyword_search`、`x_semantic_search`、`x_thread_fetch`，不应将这些名字传给 `--tools` 或写入工具使用指令。保留禁止 shell 的 prompt、`--no-subagents` 与 turn 限制；白名单不构成安全沙箱保证。
 - **质量边界（重要）**：返回的 x.com URL 经实测真实可核对，**但帖子要点可能是从搜索片段归纳的二手信息，不等于读过原帖**。因为本机 grok 订阅疑似无 X 原生检索数据权限，本档实际走 `web_search` 检索 site:x.com，拿不到原帖正文。因此：**URL 可直接引用；要点若要作为结论依据，须先用 WebFetch 抓原帖核实**。
 - 社区调研同样受搜索隔离原则约束，必须通过 subagent 隔离执行。
 
@@ -204,7 +206,7 @@ curl 以 `--data-urlencode` 拼查询，解析 `result__a` / `result__snippet`�
 - **Python 坏桩**：Windows 的 `WindowsApps\python.exe` 是应用商店重定向桩，`command -v` 能找到、执行无输出、退出码还可能是 `0`（本机实测为 49）。只判退出码会把桩当可用，故必须实跑 `--version` 并校验输出以 `Python 3` 开头。
 - **二进制存在性**：`command -v` 之后再用 `-x` 二次确认，避免 PATH 中不可执行条目被误认。
 - **curl 老版本**：`--help all` 是新版才有的 flag，老版 curl 会拒绝；此时退到 `curl --help` 再查 `--data-urlencode`。
-- **没有 timeout 时的行为**：`TIMEOUT_BIN` 为空表示调用方直接执行、不做超时保护，**不是**"无法搜索"。
+- **没有 timeout 时的行为**：`TIMEOUT_BIN` 为空时，agy/grok 直接执行，无 CLI 硬截止时间；脚本向 stderr 告警。DDG 使用 curl 自带 `--max-time`。GNU timeout 可用时，脚本另加 `--kill-after=5` 的有限终止宽限。
 
 ### 平台能力矩阵
 
@@ -217,4 +219,4 @@ curl 以 `--data-urlencode` 拼查询，解析 `result__a` / `result__snippet`�
 
 社区调研档在无 grok 的平台上**直接报不可用**，不落到四级链——四级链里没有一级能做 X 检索，降级只会拿到错误类型的结果。
 
-测试相关：脚本的所有 agy / grok / curl 调用都经由可覆盖函数（`invoke_agy` / `invoke_grok` / `invoke_grok_community` / `CURL_CMD`），测试用假命令替换即可，不需要真的安装任何 CLI。
+测试相关：脚本的所有 agy / grok / curl 调用都经由可覆盖函数（`invoke_agy` / `invoke_grok` / `invoke_grok_community` / `CURL_CMD`），`CURL_CMD` 仅接受单一可执行路径（含空格时仍作为一个路径），不接受命令拼接或 eval；显式 override 的探测和运行使用同一对象。测试用假命令替换即可，不需要真的安装任何 CLI。

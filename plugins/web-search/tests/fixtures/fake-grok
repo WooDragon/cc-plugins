@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Fixture: a fake grok. Prints a fixed result line.
+if [ -n "${FAKE_GROK_ARGS_LOG:-}" ]; then
+  printf '%s\n' "$@" >"$FAKE_GROK_ARGS_LOG"
+fi
 mode="${FAKE_GROK_MODE:-ok}"
 case "$mode" in
   ok) printf 'Grok Result | grok key info | https://example.com/grok-result\n' ;;

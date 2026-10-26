@@ -1,7 +1,7 @@
 {
   "name": "web-search",
   "description": "Web search with probe-gated fallback — skips missing CLI levels instead of burning timeouts, then escalates agy → grok → builtin WebSearch → DuckDuckGo",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": { "name": "WooDragon" },
   "skills": ["./skills/web-search"]
 }
