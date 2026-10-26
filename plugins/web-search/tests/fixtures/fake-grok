@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fixture: a fake grok. Prints a fixed result line.
+mode="${FAKE_GROK_MODE:-ok}"
+case "$mode" in
+  ok) printf 'Grok Result | grok key info | https://example.com/grok-result\n' ;;
+  empty) : ;;
+  search-failed) printf 'SEARCH_FAILED\n' ;;
+  exit-nonzero) printf 'grok boom\n' >&2; exit 9 ;;
+esac
+exit 0

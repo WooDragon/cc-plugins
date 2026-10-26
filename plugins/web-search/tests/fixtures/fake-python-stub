@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Fixture: WindowsApps python.exe style stub. Resolves on PATH, runs, prints
+# nothing, exits 0. The probe must reject it despite the clean exit status.
+exit 0
