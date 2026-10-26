@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fixture: imitates Windows timeout.exe. Same name, unrelated semantics, and
+# no coreutils banner - the probe must reject it.
+if [ "${1:-}" = "--version" ]; then
+  printf 'timeout - waits for a keypress (Windows)\n'
+  exit 0
+fi
+# Pass-through so a caller that wrongly accepted this fixture still runs.
+shift
+exec "$@"

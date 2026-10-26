@@ -29,6 +29,7 @@ npx skills add WooDragon/cc-plugins -g
 | [deep-research](./plugins/deep-research/) | Deep research framework — 7-Stage pipeline + role-specialized subagents + multi-model harvest & citation-verification gate |
 | [pr-review](./plugins/pr-review/) | AI review for open GitHub PRs — grok CLI local synchronous review (default, multi-round follow-up) + Copilot bot asynchronous review (optional) |
 | [dispatch-contract](./plugins/dispatch-contract/) | Subagent dispatch contract — four dispatch rules + `%%DONE%%` finalization gate (SubagentStop) |
+| [web-search](./plugins/web-search/) | Web search escalation ladder — agy/grok CLIs → host WebSearch → DuckDuckGo, with capability probing that skips missing CLIs instead of wasting retries |
 | [vlog-daily-index](./plugins/vlog-daily-index/) | Travel memory indexing for Codex and Claude Code with native agents, transcripts and GPS/map evidence |
 
 ## Skills
@@ -47,6 +48,7 @@ npx skills add WooDragon/cc-plugins -g
 | [pr-review](./plugins/pr-review/skills/pr-review/) | pr-review | Review an open PR by number — grok (default) or Copilot bot backend |
 | [subagent-dispatch](./plugins/dispatch-contract/skills/subagent-dispatch/) | dispatch-contract | Four dispatch rules + `%%DONE%%` finalization contract for subagent delegation |
 | [vlog-daily-index](./plugins/vlog-daily-index/skills/vlog-daily-index/) | vlog-daily-index | 旅行记忆分析师：原片、行程、语音与地理证据的每日索引（Codex and Claude Code 原生 Agent） |
+| [web-search](./plugins/web-search/skills/web-search/) | web-search | Search isolation red line, four-level escalation ladder, community research track, content-farm blocklist, and result verification rules |
 
 ## Basic Usage
 

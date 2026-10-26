@@ -116,6 +116,17 @@
       "homepage": "https://github.com/WooDragon/cc-plugins"
     },
     {
+      "name": "web-search",
+      "description": "Web search escalation ladder — agy/grok CLIs, host WebSearch, DuckDuckGo fallback, with capability probing so missing CLIs are skipped instead of burning retries",
+      "version": "1.0.1",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/web-search",
+      "category": "research",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
       "name": "vlog-daily-index",
       "description": "Travel memory indexing for Codex and Claude Code — native agents, source-linked events, transcripts, itinerary and GPS/map evidence",
       "version": "0.2.0",

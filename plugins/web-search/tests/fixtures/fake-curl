@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Fixture: a curl stand-in.
+#
+# Answers `--help all` with a listing that advertises --data-urlencode.
+# Otherwise records the arguments it received (FAKE_CURL_ARGS_LOG) and serves a
+# response.
+#
+# Response selection, in order:
+#   FAKE_CURL_SEQUENCE  space-separated codes served one per call, last one
+#                       repeating (e.g. "202 200"). Requires FAKE_CURL_COUNTER.
+#   FAKE_CURL_CODE      single code for every call.
+# Body comes from FAKE_CURL_BODY (further calls reuse the same body).
+
+for arg in "$@"; do
+  if [ "$arg" = "--help" ]; then
+    printf 'Usage: curl [options...]\n    --data-urlencode <data>  URL encode and POST data\n'
+    exit 0
+  fi
+done
+
+if [ -n "${FAKE_CURL_ARGS_LOG:-}" ]; then
+  printf '%s\n' "$*" >>"$FAKE_CURL_ARGS_LOG"
+fi
+
+out=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+code="${FAKE_CURL_CODE:-200}"
+if [ -n "${FAKE_CURL_SEQUENCE:-}" ] && [ -n "${FAKE_CURL_COUNTER:-}" ]; then
+  calls=0
+  [ -f "$FAKE_CURL_COUNTER" ] && calls="$(cat "$FAKE_CURL_COUNTER")"
+  calls=$((calls + 1))
+  printf '%s\n' "$calls" >"$FAKE_CURL_COUNTER"
+  index=$((calls - 1))
+  last=""
+  for candidate in $FAKE_CURL_SEQUENCE; do
+    last="$candidate"
+    if [ "$index" -le 0 ]; then
+      code="$candidate"
+      break
+    fi
+    index=$((index - 1))
+  done
+  # Past the end of the sequence, keep serving the final entry.
+  [ "$calls" -gt "$(printf '%s\n' $FAKE_CURL_SEQUENCE | wc -l | tr -d '[:space:]')" ] && code="$last"
+fi
+
+[ -n "$out" ] && [ -n "${FAKE_CURL_BODY:-}" ] && cat "$FAKE_CURL_BODY" >"$out"
+printf '%s' "$code"
+exit 0
