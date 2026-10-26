@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt, json, os, re, shutil, copy
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from .store import dump,read,file_hash,digest
+from .store import dump,read,file_hash,digest,publication_snapshot
 from .media import unchanged
 from . import analysis
 
@@ -133,13 +133,7 @@ def render(manifest,results,output_dir,daily=None):
     return {'status':status,'coverage':cov,'hashes':{n:file_hash(output/n) for n in NAMES}}
 
 def validate_group(directory):
-    directory=Path(directory); transcript=read(directory/NAMES[0]); index=read(directory/NAMES[1]); md=(directory/NAMES[2]).read_text(encoding='utf-8')
-    if transcript.get('generator')!=TOOL or index.get('generator')!=TOOL or transcript['run_id']!=index['run_id'] or f'run_id:{index["run_id"]}' not in md: raise ValueError('publication run identities mismatch')
-    if transcript.get('revision',1)!=index.get('revision',1) or ('revision' in index and f'revision:{index["revision"]}' not in md): raise ValueError('publication revisions mismatch')
-    for key in ('itinerary_sha256','geography_sha256'):
-        if transcript.get(key)!=index.get(key): raise ValueError('publication context digests mismatch')
-    if index['transcript_sha256']!=file_hash(directory/NAMES[0]) or file_hash(directory/NAMES[1]) not in md: raise ValueError('publication dependency hashes mismatch')
-    return index
+    return publication_snapshot(directory)['index']
 
 def approve_final(manifest,output_dir,reviewer,reason,review_result=None):
     """Bind a human-authorized ROOT quality review to the exact three file hashes."""

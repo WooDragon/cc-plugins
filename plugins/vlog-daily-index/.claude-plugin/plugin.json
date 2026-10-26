@@ -1,7 +1,7 @@
 {
   "name": "vlog-daily-index",
   "description": "旅行记忆分析师：结合旅行原片、行程、语音、GPS 与地图证据建立可回到文件和时码的每日索引（Codex / Claude Code 双宿主）",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "author": {
     "name": "WooDragon"
   },
