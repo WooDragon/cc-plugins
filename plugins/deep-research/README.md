@@ -15,7 +15,7 @@ claude plugin install deep-research@cc-plugins
 
 The methodology (skill + subagents) works out of the box. The **multi-model harvest engine** (`scripts/harvest.py`) needs external credentials — without them the framework still runs via the legacy manual search chain (see the skill's `references/context-economics.md`).
 
-Each of the four bundled subagent definitions carries an `## Execution Discipline` section in its own body — read narrowly, and after a compaction trust the working tree over the summary. It lives in the agent definition rather than a preloaded skill because an agent body becomes part of the system prompt, which is re-sent verbatim on every request and is unaffected by compaction; a `skills:` preload arrives as a user-role message and does not survive one.
+The four bundled subagent definitions carry no reading-discipline text of their own. That discipline lives in the user's global `~/.claude/CLAUDE.md`, which every subagent loads and which is re-injected after auto-compaction; keeping a copy in each agent body would duplicate it in every request's system prompt.
 
 | Dependency | Needed for | How |
 |------------|-----------|-----|
