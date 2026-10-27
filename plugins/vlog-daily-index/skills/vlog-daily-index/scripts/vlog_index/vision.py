@@ -166,3 +166,16 @@ def dispatch_contract(capabilities, model=None, reasoning_effort=None, vision_ro
             'native_spawn_parameters': native, 'selection_reason': reason,
             'capability_snapshot': copy.deepcopy(capabilities),
             'capability_verification': 'harness_supplied_snapshot', 'runtime_verification': 'unverified'}
+
+
+def shot_dispatch_contract(capabilities):
+    """Independent max request; never repurpose the medium/agent-owned static route."""
+    source, parameters, models = _snapshot(capabilities)
+    target = next((m for m in models if m['id']=='gpt-6-luna'),None)
+    if not target or target.get('family')!='luna' or target.get('native_model')!='gpt-6-luna' or target.get('image_input') is not True:
+        raise ValueError('Shot review needs an explicitly advertised image-capable gpt-6-luna model; no agent/provider fallback')
+    if 'gpt-6-luna' not in parameters.get('model',[]) or 'max' not in parameters.get('reasoning_effort',[]) or 'max' not in target.get('reasoning_efforts',[]):
+        raise ValueError('Native tool cannot explicitly request Luna max; shot review is blocked')
+    native={'model':'gpt-6-luna','reasoning_effort':'max'}
+    if 'none' in parameters.get('fork_turns',[]):native['fork_turns']='none'
+    return {'schema':'native_shot_dispatch_v1','stage':'shot_review','route':'model','requested_model':'gpt-6-luna','requested_reasoning_effort':'max','native_tool':source['tool'],'native_spawn_parameters':native,'capability_snapshot':copy.deepcopy(capabilities),'capability_verification':'harness_supplied_snapshot','runtime_verification':'unverified'}

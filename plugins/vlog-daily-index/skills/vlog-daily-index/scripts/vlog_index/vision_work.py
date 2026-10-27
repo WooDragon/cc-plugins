@@ -78,7 +78,7 @@ def package_info(m, p):
 def ordered_ready(m, claims, directory=None, source_id=None):
     rank = {s['id']: i for i, s in enumerate(m['sources'])}
     ready = [package_info(m, p) for p in m['packages']
-             if p['status'] == 'waiting_ai' and p['id'] not in claims
+             if p['status'] == 'waiting_ai' and not p.get('shot_review') and p['id'] not in claims
              and not Path(p['result_path']).exists()]
     ready.sort(key=lambda p: (p['source_id'] != source_id,
         p['archive_directory'] != directory, rank.get(p['source_id'], len(rank)),

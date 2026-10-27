@@ -62,3 +62,7 @@ python scripts/query_index.py status --db LOCAL_CACHE.duckdb
 | `transcriptions` | 原始转写segment | text、original_path、start_s、end_s、precision、evidence、data、stale |
 
 `dit_data/source_data/data/geography/evidence`是原结构的JSON文本，可在DuckDB中解析；CLI将命中结果的evidence/geography解码为JSON。`snapshots`记录每个输入的最后成功读取及错误。不要修改缓存表或依赖内部行号作为永久素材ID。未知缓存schema需使用新数据库重建；不自动迁移缓存。直接查询API见[DuckDB Python DB API](https://duckdb.org/docs/stable/clients/python/dbapi)。
+
+## 选镜与动态复看
+
+search结果包含可靠source_id与原original_path；标题或AI别名不作为媒体文件名。`--kind visual_change`查已发布的可见变化/运镜推断及采样证据；needs_playback表示播放原片，不重新分析。需新选段时把search的原JSON交[镜头复看](shot-review.md)的plan入口，程序核源与源秒、缓存及预算；普通query不自动密采。

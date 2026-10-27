@@ -6,11 +6,11 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .store import digest, dump, read, file_hash
 
-SCHEMA_VERSION='1'; PROMPT_VERSION='3'
+SCHEMA_VERSION='1'; PROMPT_VERSION='4'
 VISION_INSTRUCTIONS=('实际打开并查看frames中的全部图片（包括边界上下文），analysed_frame_ids逐一完整对账。每个核心帧必须有可见内容观察和对应evidence_ids，无明显事件也记录；无法读取不得伪称已看完，应报告阻塞。'
     'observations只写可见事实；events/interest_points是候选。模糊细节降低置信，区分观察与推测，不凭文件名、行程或相似画面臆造动作、身份或地点。'
     '严格引用本包source_id、文件内时间和证据ID；GPS仅逐字引用提供的完整记录，拍摄位置不等于远景主体位置。若有转写，仅保留原文及原精度，chunk不是词时码，不做音频事件检测。'
-    '补采只提候选区间及证据理由，不自行执行。按result_schema将完整JSON写入本包result_path，不能省略帧或伪造证据；不递归委派、不调用ASR、不操作状态库、不发布或删除文件。')
+    '仅当已有同source帧显示人物/构图/明暗/遮挡变化且具体过程或剪辑问题尚不明时，提出purpose=dynamic的supplemental_requests，附question、reason、2+本包帧evidence_ids及完整源秒区间。无人机/有人/有云、普通持续水纹或常规运动本身不触发；仅选会影响选镜的关键变化与具体问题；不要求此处完成动态分析。地理/遮挡等原补采候选仍可提出。补采只提候选区间及证据理由，不自行执行。按result_schema将完整JSON写入本包result_path，不能省略帧或伪造证据；不递归委派、不调用ASR、不操作状态库、不发布或删除文件。')
 
 def invalidate_downstream(manifest,reason):
     manifest['published_verified']=False
@@ -254,10 +254,17 @@ class DailyResult(BaseModel):
     summary_evidence_ids:list[str]=Field(min_length=1)
     events:list[Finding]
     interest_points:list[Finding]
+    visual_changes:list[dict]|None=None
 
 def validate_daily(value,manifest,validated_results):
     """The semantic Agent supplies semantic merging; deterministic code checks provenance."""
     parsed=DailyResult.model_validate(value).model_dump()
+    if 'visual_changes' not in value:parsed.pop('visual_changes',None)
+    if manifest.get('shot_records'):
+        if 'visual_changes' not in value or value['visual_changes'] is None:raise ValueError('Daily result must explicitly assess validated shot changes')
+        from .shot_supplement import validate_daily_changes
+        validate_daily_changes(manifest,parsed['visual_changes'])
+    elif parsed.get('visual_changes'):raise ValueError('No validated shot evidence for daily visual changes')
     analysed={fid for p in manifest['packages'] if p['status']=='success' for fid in p['core_frame_ids']}
     evidence={f['id']:f for f in manifest.get('frames',[])+manifest.get('supplemental_frames',[]) if f['id'] in analysed}
     frame_ids=set(evidence)
@@ -311,6 +318,17 @@ def make_packages(source,frames,transcripts,output_dir,gps=None,size=10,visual_m
         packages.append({'id':payload['package_id'],'path':str(path),'result_path':payload['result_path'],'status':'waiting_ai','core_frame_ids':payload['core_frame_ids']})
     return packages
 
+def validate_dynamic_request(package,request):
+    """Shared eligibility gate; batch policy never trusts pending-dict truthiness."""
+    import math
+    sid=package['source']['id'];a=request.get('start');b=request.get('end');ids=request.get('evidence_ids')
+    if request.get('source_id')!=sid or any(not isinstance(request.get(k),str) or not request[k].strip() for k in ('question','reason')):raise ValueError('Dynamic candidate requires a concrete nonblank question/reason and original source')
+    if any(type(t) not in (int,float) or not math.isfinite(t) for t in (a,b)) or not 0<=a<b<=package['source']['duration']:raise ValueError('Dynamic candidate requires a finite original source interval')
+    frames={f['id']:f for f in package['frames']}
+    if not isinstance(ids,list) or len(ids)<2 or any(not isinstance(fid,str) or not fid.strip() for fid in ids) or len(ids)!=len(set(ids)):raise ValueError('Dynamic candidate requires 2+ distinct frame IDs')
+    if any(fid not in frames or frames[fid].get('source_id')!=sid or not a-0.25<=frames[fid]['time']<=b+0.25 for fid in ids):raise ValueError('Dynamic candidate frame anchors must belong to the original source and interval')
+    return request
+
 def validate_result(package,result):
     parsed=Result.model_validate(result); data=parsed.model_dump()
     if data['package_id']!=package['package_id']: raise ValueError('package id mismatch')
@@ -335,7 +353,8 @@ def validate_result(package,result):
             permitted=package.get('gps') or []
             if finding['location'] not in permitted: raise ValueError('location must exactly cite a provided location record; visual guesses prohibited')
     for req in data['supplemental_requests']:
-        if req.get('source_id')!=sid or not 0<=req.get('start',-1)<=req.get('end',-1)<=duration or not req.get('reason'): raise ValueError('invalid supplemental interval')
+        if req.get('purpose')=='dynamic':validate_dynamic_request(package,req)
+        elif req.get('source_id')!=sid or not 0<=req.get('start',-1)<=req.get('end',-1)<=duration or not req.get('reason'):raise ValueError('invalid supplemental interval')
     return data
 
 def merge_intervals(requests,duration,before=15,after=30):
