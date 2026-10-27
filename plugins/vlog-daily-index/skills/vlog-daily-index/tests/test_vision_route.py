@@ -103,21 +103,43 @@ class VisionRoute(unittest.TestCase):
 
     def test_declared_role_never_silently_falls_back_to_another_route_or_family(self):
         with tempfile.TemporaryDirectory() as td:
-            # Claude Code: the declared agent is missing or cannot read images; a model exists beside it.
-            for models in ([{'id': 'vlog-daily-index:vlog-vision', 'image_input': False},
-                            {'id': 'claude-haiku-4-5', 'family': 'haiku', 'native_model': 'haiku', 'image_input': True}],
-                           [{'id': 'claude-haiku-4-5', 'family': 'haiku', 'native_model': 'haiku', 'image_input': True}]):
+            # Claude Code: the declared agent cannot read images, or is missing; a model exists beside it.
+            haiku = {'id': 'claude-haiku-4-5', 'family': 'haiku', 'native_model': 'haiku', 'image_input': True}
+            for models, error in (([{'id': 'vlog-daily-index:vlog-vision', 'image_input': False}, haiku], 'not eligible'),
+                                  ([haiku], 'not advertised')):
                 snap = store.read(snapshot(Path(td), models,
                     {'model': ['haiku'], 'subagent_type': ['vlog-daily-index:vlog-vision']}))
-                with self.subTest(models=models), self.assertRaises(ValueError):
+                with self.subTest(models=models), self.assertRaisesRegex(ValueError, error):
                     dispatch_contract(snap, vision_role='vlog-daily-index:vlog-vision')
             # Codex: Luna is advertised without medium, so the declared role fails instead of drifting.
             snap = store.read(snapshot(Path(td), [
                 {'id': 'deepseek-flash', 'family': 'deepseek', 'native_model': 'deepseek-flash', 'image_input': True},
                 {'id': 'gpt-6-luna', 'family': 'luna', 'native_model': 'gpt-6-luna', 'image_input': True}],
                 {'model': ['deepseek-flash', 'gpt-6-luna']}))
-            with self.assertRaises(ValueError): dispatch_contract(snap, vision_role='Luna')
+            with self.assertRaisesRegex(ValueError, 'not eligible'): dispatch_contract(snap, vision_role='Luna')
             self.assertEqual(dispatch_contract(snap)['requested_model'], 'deepseek-flash')
+
+    def test_session_preference_never_outranks_the_declared_vision_role(self):
+        with tempfile.TemporaryDirectory() as td:
+            # Codex: the declared Luna role wins over a session default that names DeepSeek.
+            snap = store.read(snapshot(Path(td), [
+                {'id': 'deepseek-flash', 'family': 'deepseek', 'native_model': 'deepseek-flash', 'image_input': True},
+                {'id': 'gpt-6-luna', 'family': 'luna', 'native_model': 'gpt-6-luna', 'image_input': True,
+                 'reasoning_efforts': ['medium']}],
+                {'model': ['deepseek-flash', 'gpt-6-luna'], 'reasoning_effort': ['medium']}, preferred='deepseek-flash'))
+            contract = dispatch_contract(snap, vision_role='Luna')
+            self.assertEqual((contract['requested_model'], contract['selection_reason']), ('gpt-6-luna', 'declared_vision_role'))
+            self.assertEqual(dispatch_contract(snap)['selection_reason'], 'session_preferred_model')
+            # Claude Code: the declared agent keeps its subagent_type even when the session prefers a Haiku model.
+            role = 'vlog-daily-index:vlog-vision'
+            snap = store.read(snapshot(Path(td), [
+                {'id': 'claude-haiku-4-5', 'family': 'haiku', 'native_model': 'haiku', 'image_input': True},
+                {'id': role, 'image_input': True}],
+                {'model': ['haiku'], 'subagent_type': [role]}, preferred='claude-haiku-4-5', tool='Agent'))
+            self.assertEqual(dispatch_contract(snap, vision_role=role)['native_spawn_parameters'], {'subagent_type': role})
+            # An ineligible declared role still fails instead of falling back to the session preference.
+            snap['models'][1]['image_input'] = False
+            with self.assertRaisesRegex(ValueError, 'not eligible'): dispatch_contract(snap, vision_role=role)
 
     def test_family_mapped_role_literal_cannot_be_dispatched_as_an_agent(self):
         with tempfile.TemporaryDirectory() as td:

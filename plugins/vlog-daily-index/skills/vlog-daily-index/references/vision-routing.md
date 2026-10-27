@@ -1,6 +1,6 @@
 # 纯视觉原生路由
 
-纯视觉逐帧识图的代码白名单为 Luna、Haiku、DeepSeek 三个模型家族；日级语义与专门地理继续 `gpt-6.1-sol / high`，ROOT 终审。纯视觉例外优先于通用编排的视觉审查默认。禁止静默改派 Sol/旗舰、隐藏 API 调模型或用宿主名称猜可用模型。
+纯视觉逐帧识图走 `model` 路由时，代码白名单为 Luna、Haiku、DeepSeek 三个模型家族；走 `agent` 路由时，合同只记录 agent 类型，实际模型与档位由该 agent 的 frontmatter 决定，不受此白名单约束。日级语义与专门地理继续 `gpt-6.1-sol / high`，ROOT 终审。纯视觉例外优先于通用编排的视觉审查默认。禁止静默改派 Sol/旗舰、隐藏 API 调模型或用宿主名称猜可用模型。
 
 ## 两条路由，一个声明来源
 
@@ -17,7 +17,7 @@
 
 ## 快照
 
-每次主 session 派新包前，根据**当前真实原生工具**的模型枚举、模型级推理支持及子 Agent 图像读取能力，保存本地 `native_vision_capabilities_v1` JSON。来源必须注明当前 session 标识、工具名和可核对的能力证据；不要从旧 run、其他宿主、产品宣传或模型自报补造支持。`parameters` 只填该工具实际可传的参数与取值（允许键：`model`、`reasoning_effort`、`fork_turns`、`subagent_type`）；`models` 按主 session 的声明顺序列出。公开仓库不保存实际会话快照。
+每次主 session 派新包前，根据**当前真实原生工具**的模型枚举、模型级推理支持及子 Agent 图像读取能力，保存本地 `native_vision_capabilities_v1` JSON。来源必须注明当前 session 标识、工具名和可核对的能力证据；不要从旧 run、其他宿主、产品宣传或模型自报补造支持。`parameters` 只填该工具实际可传的参数与取值（允许键：`model`、`reasoning_effort`、`fork_turns`、`subagent_type`）；`models` 按主 session 的声明顺序列出。可选的 `preferred_model` 记录原生工具或会话的默认模型偏好，只在本 run 未声明视觉角色时生效；用户当前的明确选择不写进快照，走显式 `--model`。公开仓库不保存实际会话快照。
 
 ### Codex（模型路由）
 
@@ -49,7 +49,7 @@
 
 ### Claude Code（agent 路由）
 
-`subagent_type` 是唯一可派发参数；`models` 里的条目就是可派发的 agent 类型，不写 `native_model`/`reasoning_efforts`（写了会被拒，因为那等于和 frontmatter 争夺控制权）。
+agent 路由只派发 `subagent_type`；`models` 里的 agent 条目就是可派发的 agent 类型，不写 `native_model`/`reasoning_efforts`（写了会被拒，因为那等于和 frontmatter 争夺控制权）。
 
 ```json
 {
@@ -69,16 +69,18 @@
 }
 ```
 
+`Agent` 工具另有可选的 `model` 参数。若快照同时声明了它和一个 Haiku 模型条目，且用户显式 `--model` 选中该模型，合同走 `model` 路由，只输出 `{'model': ...}`、不带 `subagent_type`：派发的是通用 agent，`vlog-vision` frontmatter 的 `tools: Read, Write` 白名单不再适用，ROOT 须在派发 prompt 中限定只读图片、只写包内 `result_path`。未显式 `--model` 时，声明的视觉角色始终走 `agent` 路由。
+
 以上仅演示两种工具形状；替换会话证据后使用，不把示例当探测结果。当前原生模型枚举仅有 OpenAI 型号时，不能凭配置增加 Haiku/DeepSeek。
 
 ## 选择顺序
 
-1. 显式 `--model`
-2. 快照 `preferred_model`
-3. 声明的视觉角色
+1. 显式 `--model`（用户当前的明确选择，记为 `explicit_model`）
+2. 声明的视觉角色
+3. 快照 `preferred_model`（仅限未声明视觉角色的 run）
 4. `models` 中首个合格项
 
-不暗设提供商质量排名。第 1、2、3 步指定的目标不可用时**失败**，不换另一个模型：显式请求不合格就报错；本 run 声明了视觉角色而该角色不合格（agent 无图像能力、agent 不在快照中、Luna 缺 medium）同样报错，不退到别的家族或另一条路由。只有第 4 步——**声明角色为空的 run**——才按广告顺序取首个合格项。
+不暗设提供商质量排名。第 1、2、3 步指定的目标不可用时**失败**，不换另一个模型：显式请求不合格就报错；本 run 声明了视觉角色而该角色不合格（agent 无图像能力、Luna 缺 medium）或不在快照中，同样报错，不退到别的家族、另一条路由或 `preferred_model`。`preferred_model` 只是会话默认，不能压过本 run 的声明角色；用户要换模型只能显式 `--model`。只有第 4 步——**既无声明角色、也无 `preferred_model` 的 run**——才按广告顺序取首个合格项。
 
 `Luna` 是家族映射字面量，不是 agent 名：即使快照的 `subagent_type` 里出现 `Luna`，也不会走 agent 路由，因此不能借 agent 通道绕过 Luna 的 medium 约束。反向同理，agent 名不能通过 `model` 参数派发。
 

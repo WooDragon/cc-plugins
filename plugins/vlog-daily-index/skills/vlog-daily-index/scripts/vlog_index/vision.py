@@ -109,9 +109,10 @@ def _snapshot(capabilities):
 def dispatch_contract(capabilities, model=None, reasoning_effort=None, vision_role=None):
     """The harness supplies tool evidence, not an independently verified receipt.
 
-    Default selection follows the explicit model, the session preference, the run's
-    declared vision role, then the advertised order. Explicit requests fail closed
-    instead of selecting another provider, model or route.
+    Selection follows the explicit model, the run's declared vision role, the session
+    preference (only when no role is declared), then the advertised order. Explicit
+    requests and declared roles fail closed instead of selecting another provider,
+    model or route.
     """
     source, parameters, models = _snapshot(capabilities)
     eligible, rejected = [], []
@@ -119,21 +120,25 @@ def dispatch_contract(capabilities, model=None, reasoning_effort=None, vision_ro
         reason = _reason(item, parameters, vision_role)
         if reason: rejected.append({'model': item['id'], 'reason': reason})
         else: eligible.append(item)
+    preferred = capabilities.get('preferred_model')
     if not eligible:
         raise ValueError('No eligible native visual route for ' +
-                         str(model or capabilities.get('preferred_model') or 'advertised models') + ': ' + str(rejected))
-    preferred = capabilities.get('preferred_model')
-    requested = model if model is not None else preferred
+                         str(model or vision_role or preferred or 'advertised models') + ': ' + str(rejected))
+    # preferred_model is a session default, not a user choice, so a declared role outranks it.
+    requested = model if model is not None else (preferred if vision_role is None else None)
     if requested is not None:
         selected = next((item for item in eligible if item['id'] == requested), None)
         if selected is None: raise ValueError('Requested native visual route is not eligible: ' + str(requested) + ': ' + str(rejected))
+    elif vision_role is None:
+        selected = eligible[0]
     else:
-        selected = next((item for item in eligible if _declared(item, vision_role)), None)
         # A declared role that cannot serve pure visual claims fails instead of silently
         # dispatching a different model or agent than the run asked for.
-        if selected is None and vision_role is not None:
+        if not any(_declared(item, vision_role) for item in models):
+            raise ValueError('Declared vision role is not advertised in the native capability snapshot: ' + str(vision_role))
+        selected = next((item for item in eligible if _declared(item, vision_role)), None)
+        if selected is None:
             raise ValueError('Declared vision role is not eligible for pure visual claims: ' + str(vision_role) + ': ' + str(rejected))
-        if selected is None: selected = eligible[0]
     family = _family(selected['id'])
     effort = None
     if family is None:
@@ -151,8 +156,8 @@ def dispatch_contract(capabilities, model=None, reasoning_effort=None, vision_ro
         if effort is not None: native['reasoning_effort'] = effort
     if 'none' in parameters.get('fork_turns', []): native['fork_turns'] = 'none'
     if model is not None: reason = 'explicit_model'
-    elif preferred is not None: reason = 'session_preferred_model'
-    elif _declared(selected, vision_role): reason = 'declared_vision_role'
+    elif requested is not None: reason = 'session_preferred_model'
+    elif vision_role is not None: reason = 'declared_vision_role'
     else: reason = 'first_eligible_advertised_model'
     return {'schema': 'native_vision_dispatch_v2', 'stage': 'pure_visual',
             'route': 'agent' if family is None else 'model',

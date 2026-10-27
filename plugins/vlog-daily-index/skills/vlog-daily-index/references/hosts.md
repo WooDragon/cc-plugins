@@ -16,7 +16,7 @@
 ## 宿主差异
 
 1. **并发名额来源**：Codex使用会话实际空闲的子Agent名额，改上限须重启Codex并新建聊天；Claude Code默认同时20个，可由`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`调整。两边`vision-queue --available-workers`都必须传**当前真实空闲数**，不得传配置目标值。
-2. **视觉派发参数来源**：Codex按模型名派发，合同输出`model`与`reasoning_effort`；Claude Code按`subagent_type`派发，合同只输出`subagent_type`，模型与档位由agent frontmatter承载。两条路由共用同一套能力快照校验，由本run的`config.model_roles.vision`与本快照内容决定，代码不按宿主名分支，详见[纯视觉路由](vision-routing.md)。
+2. **视觉派发参数来源**：Codex按模型名派发，合同输出`model`与`reasoning_effort`；Claude Code按`subagent_type`派发，合同只输出`subagent_type`，模型与档位由agent frontmatter承载。例外：Claude Code快照同时声明`Agent`的`model`参数与Haiku条目、且用户显式`--model`选中它时，合同只输出`model`，派发的是通用agent，第4条的frontmatter工具白名单不适用，ROOT须在派发prompt中限定只读图片、只写包内`result_path`。两条路由共用同一套能力快照校验，由本run的`config.model_roles.vision`与本快照内容决定，代码不按宿主名分支，详见[纯视觉路由](vision-routing.md)。
 3. **ROOT的执行位置**：只有主会话能执行`decide-supplement`、`approve-final`、`review-frames`、`naming-review`。子Agent不得代跑这四个命令。
 4. **Agent 写入边界**：Claude Code侧用agent frontmatter的`tools: Read, Write`做工具级白名单，路径级限制由用户/项目权限规则承担；Codex侧由派发prompt与包内`result_path`约束写入边界。两侧子Agent都只写包内`result_path`。
 5. ROOT 在两端都取主会话当前模型；Codex 侧的 'ROOT_current_flagship' 是记录约定，不是独立进程。
