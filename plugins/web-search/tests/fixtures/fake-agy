@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Fixture: a fake agy. Prints a fixed result line.
+# Honours FAKE_AGY_MODE to simulate the failure shapes the chain must catch.
+mode="${FAKE_AGY_MODE:-ok}"
+case "$mode" in
+  ok) printf 'Fake Result | fake key info | https://example.com/agy-result\n' ;;
+  literal-marker) printf 'SEARCH_FAILED troubleshooting | normal result | https://example.com/SEARCH_FAILED\n' ;;
+  empty) : ;;
+  search-failed) printf 'SEARCH_FAILED\n' ;;
+  exit-nonzero) printf 'boom\n' >&2; exit 7 ;;
+  fail-then-ok)
+    # Fails the first N invocations, then succeeds. N comes from FAKE_AGY_FAILS.
+    counter="${FAKE_AGY_COUNTER:?}"
+    current=0
+    [ -f "$counter" ] && current="$(cat "$counter")"
+    current=$((current + 1))
+    printf '%s\n' "$current" >"$counter"
+    if [ "$current" -le "${FAKE_AGY_FAILS:-3}" ]; then
+      printf 'SEARCH_FAILED\n'
+    else
+      printf 'Recovered Result | key info | https://example.com/recovered\n'
+    fi
+    ;;
+esac
+exit 0

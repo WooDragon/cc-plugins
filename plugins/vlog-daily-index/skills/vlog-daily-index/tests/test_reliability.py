@@ -105,10 +105,13 @@ class Reliability(unittest.TestCase):
             (legacy / 'typing_extensions.py').write_text("raise RuntimeError('legacy deps must not shadow venv')\n", encoding='utf-8')
             environment = dict(os.environ); environment['LOCALAPPDATA'] = td
             environment.pop('VLOG_INDEX_DEPS', None)
-            result = subprocess.run([sys.executable, '-X', 'utf8', str(Path(cli.__file__)), '--help'],
-                                    capture_output=True, text=True, env=environment, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('init', result.stdout)
+            for arguments in (['--help'], ['init', '--help']):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run([sys.executable, '-X', 'utf8', str(Path(cli.__file__)), *arguments],
+                                            capture_output=True, text=True, env=environment, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('usage:', result.stdout)
+                    self.assertNotIn('Traceback', result.stderr)
 
     def test_custom_asr_model_is_used_by_preflight_and_upload(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {'LOCALAPPDATA': td}):

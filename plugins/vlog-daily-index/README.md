@@ -4,7 +4,7 @@
 
 ## 安装
 
-此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.2.1`。两个宿主并列支持。
+此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.3.1`。两个宿主并列支持。
 
 Codex：
 
@@ -21,6 +21,8 @@ claude plugin install vlog-daily-index@cc-plugins
 ```
 
 三个子Agent（`vlog-daily-index:vlog-vision`、`vlog-daily-index:vlog-semantic`、`vlog-daily-index:vlog-geography`）随插件提供。宿主差异见[宿主说明](./skills/vlog-daily-index/references/hosts.md)。
+
+每个子Agent 定义正文都带一节 `## Execution Discipline`（窄读，以及压缩后以工作树为准恢复）。它放在 agent 正文而不是预加载 skill 里，是因为 agent 正文进入 system prompt、每次请求原样重发，不受压缩影响；`skills:` 预加载走 user 角色消息，压缩后不保留。
 
 使用时请求“用旅行记忆分析师为这一天的旅行原片建立每日索引”。
 
@@ -44,3 +46,9 @@ python scripts/vlog_daily_index.py --help
 ```
 
 测试使用合成数据和 mock。未配置 FFmpeg/ffprobe 时，真实合成媒体测试会明确跳过；测试成功不能替代新主机上的工具、ASR 协议与硬件小样验证。相关方法见[发布检验](./skills/vlog-daily-index/references/release-verification.md)。
+
+## 0.3.0 查询与归档配合
+
+可选 DuckDB 查询层读取明确指定的每日索引、转写和 [dit-media](https://github.com/WooDragon/cc-plugins/tree/main/plugins/dit-media) 十字段 CSV，支持按条件筛选并返回近源产物和原片相对路径/时码。按查询说明安装可选依赖，显式刷新后查询；不需要查询时可继续原有每日分析流程。
+
+每日索引与 DIT CSV 仍由各自工具维护；改名、移除或修复后重新刷新查询库。查询操作不修改这些源产物，也不扫描整个媒体库。依赖与命令见[查询说明](./skills/vlog-daily-index/references/query.md)。

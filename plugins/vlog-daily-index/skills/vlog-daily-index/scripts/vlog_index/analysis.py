@@ -79,7 +79,7 @@ def map_lookup(requests,provider,cache_dir,client=None,retry_failed=False):
     import httpx, math, time
     if provider not in ('photon','osm') or not isinstance(requests,list): raise ValueError('Use photon/osm and a JSON request list')
     cache_dir=Path(cache_dir); cache_dir.mkdir(parents=True,exist_ok=True)
-    owned=client is None; client=client or httpx.Client(timeout=30,trust_env=False,headers={'User-Agent':'vlog-daily-index/0.2.1 (personal media indexing)'})
+    owned=client is None; client=client or httpx.Client(timeout=30,trust_env=False,headers={'User-Agent':'vlog-daily-index/0.3.1 (personal media indexing)'})
     records=[]; called=False
     try:
         for request in requests:

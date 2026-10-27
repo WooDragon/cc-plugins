@@ -13,6 +13,7 @@ def sha(data): return hashlib.sha256(data).hexdigest()
 
 def selected_files(root):
     exact = {'SKILL.md', 'VERSION', 'requirements.lock', 'requirements-dev.txt'}
+    optional = {'requirements-query.txt'}
     suffixes = {'scripts': {'.py'}, 'tests': {'.py'}, 'tools': {'.py'},
                 'references': {'.md'}, 'agents': {'.yaml'}}
     files = []
@@ -20,7 +21,7 @@ def selected_files(root):
         if not path.is_file(): continue
         relative = path.relative_to(root)
         if any(part.startswith('.') or part == '__pycache__' for part in relative.parts): continue
-        if str(relative).replace('\\', '/') in exact or (len(relative.parts) > 1 and
+        if str(relative).replace('\\', '/') in exact | optional or (len(relative.parts) > 1 and
                 path.suffix in suffixes.get(relative.parts[0], set())):
             if path.is_symlink(): raise ValueError('Refuse linked package source: ' + str(relative))
             files.append(path)
