@@ -129,7 +129,7 @@
     {
       "name": "vlog-daily-index",
       "description": "Travel memory indexing for Codex and Claude Code — native agents, source-linked events, transcripts, itinerary and GPS/map evidence",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "author": {
         "name": "WooDragon"
       },

@@ -2,6 +2,8 @@
 
 本地状态manifest.json + state.sqlite3由协调器单写，不要同时运行两个修改同一主状态的命令。媒体多路仅使用已验证设备槽位，ASR固定1请求；视觉Agent可与本地处理并行，但不得改manifest/SQLite。独立视觉领取小状态允许与长媒体命令并行，详见[并发约定](concurrency.md)。
 
+默认视觉调度入口为[vision-work](vision-work.md)，按原包组成有界工作组；各成员原schema/result_path和本文件以下校验保持。`vision-queue`继续作为逐包兼容入口，旧claim不自动迁移。
+
 `config.vision_concurrency`是视觉Agent上限，最高6；由主控结合ready积压与当前真实空闲名额消费，不建立额外后台调度器。少包少开，实际为`min(配置上限, 真实空闲名额扣除所需语义Agent名额, ready包数)`；已有claim计入正在运行数量，不能重复领取或保持6空转。它独立于媒体槽位与`asr_concurrency=1`。本地配置的8子Agent目标不等于当前会话可用8槽。同包只分派一个worker，每包写自己的result_path，主控统一导入；排队背压不减少采样/视觉覆盖，视觉Agent不得调用ASR。
 
 角色派发由主控执行：视觉Agent仅负责逐帧可见内容及证据记录，其events/interest_points是候选；语义Agent以high推理汇总跨帧、跨文件、ASR与GPS；ROOT当前旗舰做最终质量审查，且仅ROOT依据较强错漏证据决定定向补采。`config.model_roles` 记录这项约定。复用已有结果，不全量重审；模型补抽请求不自动触发提取。最终审查通过后才能发布和清理。

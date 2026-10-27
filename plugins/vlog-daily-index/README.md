@@ -4,7 +4,7 @@
 
 ## 安装
 
-此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.3.1`。两个宿主并列支持。
+此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.4.0`。两个宿主并列支持。
 
 Codex：
 
@@ -46,6 +46,10 @@ python scripts/vlog_daily_index.py --help
 ```
 
 测试使用合成数据和 mock。未配置 FFmpeg/ffprobe 时，真实合成媒体测试会明确跳过；测试成功不能替代新主机上的工具、ASR 协议与硬件小样验证。相关方法见[发布检验](./skills/vlog-daily-index/references/release-verification.md)。
+
+## 0.4.0 视觉工作组
+
+默认用 `vision-work` 获取下一步：按完整原包组成目标10图工作组，最多两组或换目录时换新native worker，ROOT照原样宿主合同真实新建/续派/等待。成功缓存、逐帧证据校验、独立语义与地理及ROOT审查继续保留；旧claim可完成，同run接入工作组后不混用旧入口新领取。调用与恢复见[工作组说明](./skills/vlog-daily-index/references/vision-work.md)。
 
 ## 0.3.0 查询与归档配合
 

@@ -5,7 +5,7 @@ from pathlib import Path
 deps=os.environ.get('VLOG_INDEX_DEPS')
 if deps: sys.path.insert(0,str(Path(deps)))
 from vlog_index.store import State,RunLock,dump,read,digest,cleanup_registered
-from vlog_index import media,analysis,asr,report,store,vision
+from vlog_index import media,analysis,asr,report,store,vision,vision_work
 
 # codex keeps its v0.1.5 key set; its semantic and geography roles are the same model.
 HOST_MODEL_ROLES={
@@ -103,18 +103,24 @@ def vision_queue(args):
     model=getattr(args,'model',None); effort=getattr(args,'reasoning_effort',None)
     if args.available_workers<0 or args.reserve_sol<0: raise ValueError('Actual free workers and reserved workers must be nonnegative')
     with RunLock(root):
+        vision_work.recover(root)
         m=load(args); path=root/'claims.json'; claims=read(path) if path.exists() else {}
         # Resolve before the releases and any claim write: a bad route mutates nothing.
         # Reading the queue or releasing a finished worker needs no capability snapshot.
         wants_route=bool(workers or capability_path or model is not None or effort is not None)
         contract=vision.dispatch_contract(read(capability_path) if capability_path else None,model,effort,vision_role(m)) if wants_route else None
-        for pid in getattr(args,'release',[]) or []: claims.pop(pid,None)
+        for pid in getattr(args,'release',[]) or []:
+            if claims.get(pid,{}).get('group_id'): raise ValueError('Grouped claim requires vision-work native completion/failure receipt; cannot release a running group through legacy queue')
+            claims.pop(pid,None)
         waiting=[p for p in m['packages'] if p['status']=='waiting_ai']
         awaiting_validation=[p for p in waiting if p.get('result_path') and Path(p['result_path']).exists()]
         ready=[p for p in waiting if p['id'] not in claims and p not in awaiting_validation]
         claimed=sum(p['id'] in claims for p in waiting)
+        grouped=read(root/'groups.json') if (root/'groups.json').exists() else {}
+        if workers and grouped.get('groups'): raise ValueError('This run adopted vision-work; finish existing legacy claims, but use vision-work for all new dispatch')
         available=max(0,args.available_workers-args.reserve_sol)
         recommended=min(max(0,min(6,m['config'].get('vision_concurrency',2))-claimed),available,len(ready))
+        if grouped.get('groups'): recommended=0
         if len(workers)!=len(set(workers)) or len(workers)>recommended: raise ValueError('Claims exceed actual free host capacity or contain duplicate workers')
         assigned=[]
         for worker,package in zip(workers,ready):
@@ -265,6 +271,11 @@ def retry_visual(args):
     m=load(args); package=next((p for p in m['packages'] if p['id']==args.package_id),None)
     if not package or package['status']!='invalid' or not args.reason.strip(): raise ValueError('Correction requires an invalid package and ROOT evidence reason')
     if package.get('correction_attempts',0)>=1: raise ValueError('One visual correction already attempted; preserve invalid state for ROOT review')
+    root=Path(m['state_dir'])/'vision-dispatch'
+    with RunLock(root):
+        vision_work.recover(root)
+        claims=read(root/'claims.json') if (root/'claims.json').exists() else {}
+        if claims.get(package['id'],{}).get('group_id'): raise ValueError('Record confirmed native group completion with vision-work before retrying this package')
     result=Path(package['result_path']); archived=None
     if result.exists():
         if package.get('invalid_result_sha256') and store.file_hash(result)!=package['invalid_result_sha256']: raise ValueError('Result changed after failure; explicitly import-results --refresh to validate it instead of discarding it')
@@ -273,9 +284,11 @@ def retry_visual(args):
         shutil.copyfile(result,archived)
         if store.file_hash(archived)!=store.file_hash(result): raise ValueError('Invalid-result archive readback mismatch')
         result.unlink()
-    root=Path(m['state_dir'])/'vision-dispatch'
     with RunLock(root):
-        path=root/'claims.json'; claims=read(path) if path.exists() else {}; claims.pop(package['id'],None); dump(path,claims)
+        vision_work.recover(root)
+        path=root/'claims.json'; claims=read(path) if path.exists() else {}
+        if claims.get(package['id'],{}).get('group_id'): raise ValueError('Record confirmed native group completion with vision-work before retrying this package')
+        claims.pop(package['id'],None); dump(path,claims)
     package.update(status='waiting_ai',correction_attempts=1,correction_reason=args.reason,invalid_result_archive=str(archived) if archived else None)
     save(m); return {'package_id':package['id'],'status':'waiting_ai','correction_attempt':1,'archive':str(archived) if archived else None}
 
@@ -932,6 +945,7 @@ def main():
     funcs.update({'naming-plan':naming_plan,'naming-review':naming_review,'naming-apply':naming_apply})
     funcs.update({'hardware-benchmark':hardware_benchmark})
     funcs.update({'configure-concurrency':configure_concurrency,'vision-queue':vision_queue})
+    funcs.update({'vision-work':vision_work.run})
     funcs.update({'retry-visual':retry_visual})
     for name in funcs:
         if name=='init': continue
@@ -962,8 +976,15 @@ def main():
             p.add_argument('--ffmpeg',required=True); p.add_argument('--ffprobe',required=True); p.add_argument('--output',required=True); p.add_argument('--source',action='append'); p.add_argument('--start',type=float,action='append'); p.add_argument('--seconds',type=float,default=12); p.add_argument('--tasks',type=int,default=3); p.add_argument('--compare-filter-order',action='store_true'); p.add_argument('--summarize-only',action='store_true'); p.add_argument('--profiles',default='1,2,3'); p.add_argument('--select-first-only',action='store_true'); p.add_argument('--save-profile',action='store_true')
         if name=='configure-concurrency':
             p.add_argument('--media-slots',type=int,required=True); p.add_argument('--hardware-report'); p.add_argument('--vision-concurrency',type=int,default=6); p.add_argument('--ready-package-limit',type=int,default=24); p.add_argument('--temp-limit-gib',type=float,default=256); p.add_argument('--min-free-gib',type=float,default=5)
-        if name=='vision-queue':
-            p.add_argument('--available-workers',type=int,required=True); p.add_argument('--reserve-sol',type=int,default=1); p.add_argument('--claim-worker',action='append'); p.add_argument('--release',action='append')
+        if name in ('vision-queue','vision-work'):
+            p.add_argument('--available-workers',type=int,required=True); p.add_argument('--reserve-sol',type=int,default=1)
+            if name=='vision-queue': p.add_argument('--claim-worker',action='append'); p.add_argument('--release',action='append')
+            else:
+                p.add_argument('--group-id'); p.add_argument('--native-agent-id',help='Exact actual spawn receipt ID; logical worker aliases are not native IDs')
+                p.add_argument('--followup-confirmed',action='store_true',help='Exact current group was accepted by the native followup tool; requires --reason evidence')
+                p.add_argument('--outcome',choices=('complete','failed','context_warning'),help='Native turn has actually completed; failures/warnings stop reuse at this package boundary')
+                p.add_argument('--spawn-failed',action='store_true',help='Explicit evidence native dispatch failed before an Agent was created')
+                p.add_argument('--retire-confirmed',metavar='WORKER_ID'); p.add_argument('--reason')
             p.add_argument('--native-capabilities',help='Current session native tool/image capability snapshot JSON; required for new claims')
             p.add_argument('--model',help='Explicit advertised visual model ID or declared vision agent; otherwise session preference/declared role/order')
             p.add_argument('--reasoning-effort',help='Explicit supported effort; Luna is always medium and agent routes take effort from frontmatter')
@@ -972,8 +993,11 @@ def main():
         if name=='naming-review': p.add_argument('--reviewer',choices=('ROOT',),required=True); p.add_argument('--reason',required=True)
         if name=='audio': p.add_argument('--protocol'); p.add_argument('--discover',action='store_true'); p.add_argument('--chunks',type=int); p.add_argument('--acknowledge')
     args=parser.parse_args()
-    if args.action=='vision-queue':
-        print(json.dumps(vision_queue(args),ensure_ascii=False,indent=2),flush=True); return
-    with RunLock(args.state): result=funcs[args.action](args)
+    if args.action in ('vision-queue','vision-work'):
+        print(json.dumps(funcs[args.action](args),ensure_ascii=False,indent=2),flush=True); return
+    with RunLock(args.state):
+        if args.action in ('daily-package','geography-package','import-geography','render','final-review-package','approve-final','publish','cleanup'):
+            vision_work.require_finished_native_turns(args.state)
+        result=funcs[args.action](args)
     print(json.dumps(result,ensure_ascii=False,indent=2),flush=True)
 if __name__=='__main__': main()

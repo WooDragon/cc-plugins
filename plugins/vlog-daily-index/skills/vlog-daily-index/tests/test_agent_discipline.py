@@ -16,6 +16,7 @@ sessions, plus a 116-compaction survey):
   summarizer; it is gone after the first compaction.
 """
 import unittest
+import json
 from pathlib import Path
 
 AGENTS = Path(__file__).resolve().parents[3] / "agents"
@@ -28,6 +29,20 @@ FORBIDDEN = (
 
 
 class TestAgentDiscipline(unittest.TestCase):
+    def setUp(self):
+        skill = Path(__file__).resolve().parents[1]
+        # The standalone Skill ZIP intentionally excludes plugin-level agents.
+        # A full plugin checkout must still fail when its agents are missing.
+        manifest_path = skill / 'release-manifest.json'
+        if (not AGENTS.exists() and skill.parent.name != 'skills'
+                and not (AGENTS.parent / '.claude-plugin' / 'plugin.json').exists()
+                and (skill / 'SKILL.md').is_file() and manifest_path.is_file()):
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            if (manifest.get('format') == 'source-skill-zip' and manifest.get('name') == skill.name
+                    and manifest.get('version') == (skill / 'VERSION').read_text(encoding='utf-8').strip()
+                    and 'tests/test_agent_discipline.py' in manifest.get('files', {})):
+                self.skipTest('Standalone Skill release excludes plugin-level agents; checked in full plugin checkout')
+
     def test_agent_bodies_do_not_duplicate_the_global_discipline(self):
         files = sorted(AGENTS.glob("*.md"))
         self.assertTrue(files, "no agent definitions found")
