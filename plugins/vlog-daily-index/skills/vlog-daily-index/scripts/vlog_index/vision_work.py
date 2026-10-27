@@ -40,6 +40,16 @@ def require_finished_native_turns(state):
                       if g['status'] != 'dispatch_failed' and not g['turn_finished']]
         if unresolved:
             raise ValueError('Native visual turns are still running/unknown; record actual completion before downstream stages: ' + ', '.join(unresolved))
+        # Completion receipts are saved without file I/O. A caller may go straight
+        # from report to daily-package, so the gate must inspect current originals,
+        # not rely on package_errors cached by an earlier `next` call.
+        m = read(Path(state) / 'manifest.json')
+        packages = {p['id']: p for p in m['packages']}
+        blocked = [g['id'] for g in ledger['groups'].values()
+                   if g['status'] not in ('success', 'partial', 'dispatch_failed')
+                   and _group_package_errors(m, g, packages)]
+        if blocked:
+            raise ValueError('Original visual package recovery is required before downstream stages: ' + ', '.join(blocked))
 
 
 def _directory(m, source):
@@ -61,7 +71,8 @@ def package_info(m, p):
             'result_path': p['result_path'], 'source_id': source['id'],
             'archive_directory': _directory(m, source),
             'start': min(f['time'] for f in payload['frames']),
-            'presented_images': len(payload['frames']), 'package_digest': digest(payload)}
+            'presented_images': len(payload['frames']), 'package_digest': digest(payload), 'status': p['status'],
+            'original_manifest_record': dict(p)}
 
 
 def ordered_ready(m, claims, directory=None, source_id=None):
@@ -137,16 +148,44 @@ def _new_group(root, ledger, claims, members, worker, contract):
     return group
 
 
+def _group_package_errors(m, group, packages):
+    errors = []
+    for member in group['members']:
+        try:
+            p = packages.get(member['package_id'])
+            if p is None: raise ValueError('An owned original package disappeared from manifest')
+            original_record = member.get('original_manifest_record')
+            source_changed = (p.get('source_id') != original_record.get('source_id') if original_record is not None
+                              else p.get('source_id', member['source_id']) != member['source_id'])
+            if (p.get('path') != member['package_path'] or p.get('result_path') != member['result_path']
+                    or source_changed):
+                raise ValueError('An owned original package manifest identity changed; restore package_path, result_path and source_id')
+            if package_info(m, p)['package_digest'] != member['package_digest']:
+                raise ValueError('An owned original package changed; restore its original digest')
+        except Exception as exc:
+            # Local package damage is a recoverable ROOT item, not a reason
+            # to roll back another native worker's actual completion receipt.
+            errors.append({'package_id': member['package_id'], 'error': str(exc),
+                'expected_digest': member['package_digest'],
+                'package_path': member['package_path'], 'result_path': member['result_path'],
+                'original_manifest_record': member.get('original_manifest_record')})
+    return errors
+
+
 def _reconcile(m, ledger, claims):
     packages = {p['id']: p for p in m['packages']}
     for group in ledger['groups'].values():
         if group['status'] in ('success', 'partial', 'dispatch_failed'): continue
-        for member in group['members']:
-            p = packages.get(member['package_id'])
-            if p is None: raise ValueError('An owned original package disappeared')
-            if package_info(m, p)['package_digest'] != member['package_digest']:
-                raise ValueError('An owned original package changed; ROOT must resolve it')
-            member['status'] = p['status']
+        errors = _group_package_errors(m, group, packages)
+        if errors:
+            group.update(status='blocked_package', package_errors=errors)
+            worker = ledger['workers'][group['worker_id']]
+            if group['turn_finished'] and worker['status'] != 'retired':
+                worker.update(status='retire_required', retire_reason='original_package_recovery')
+            continue
+        group.pop('package_errors', None)
+        if group['status'] == 'blocked_package': group['status'] = 'running'
+        for member in group['members']: member['status'] = packages[member['package_id']]['status']
         if not group['turn_finished']: continue
         # Imported successes are reused; files awaiting the old validator hold the group.
         if any(p['status'] == 'waiting_ai' and Path(p['result_path']).exists()
@@ -160,8 +199,9 @@ def _reconcile(m, ledger, claims):
         worker['group_id'] = None
         if success:
             worker['completed_groups'] += 1
+        if worker['status'] == 'retired': continue
         worker['status'] = ('retire_required' if not success or group.get('outcome') != 'complete'
-                            or worker['completed_groups'] >= GROUPS_PER_WORKER else 'idle')
+                           or worker['completed_groups'] >= GROUPS_PER_WORKER else 'idle')
         if worker['status'] == 'retire_required':
             worker['retire_reason'] = 'group_failure_or_warning' if not success or group.get('outcome') != 'complete' else 'two_groups_completed'
 
@@ -173,7 +213,6 @@ def run(args):
         raise ValueError('Actual native free slots/reserve must be nonnegative')
     with RunLock(root):
         recover(root)
-        m = read(state / 'manifest.json')
         ledger_path = root / 'groups.json'
         ledger = read(ledger_path) if ledger_path.exists() else {
             'schema': 'native_visual_work_v1', 'next_group': 1, 'next_worker': 1,
@@ -184,9 +223,10 @@ def run(args):
         outcome = getattr(args, 'outcome', None)
         spawn_failed = getattr(args, 'spawn_failed', False)
         retired = getattr(args, 'retire_confirmed', None)
-        if sum(bool(x) for x in (native_id, outcome, spawn_failed, retired)) > 1:
+        followup_confirmed = getattr(args, 'followup_confirmed', False)
+        if sum(bool(x) for x in (native_id, outcome, spawn_failed, retired, followup_confirmed)) > 1:
             raise ValueError('Choose one receipt operation per call')
-        if native_id or outcome or spawn_failed:
+        if native_id or outcome or spawn_failed or followup_confirmed:
             if gid not in ledger['groups']: raise ValueError('Receipt requires a known --group-id')
             group = ledger['groups'][gid]; worker = ledger['workers'][group['worker_id']]
             if native_id:
@@ -207,10 +247,21 @@ def run(args):
                     group.update(status='dispatch_failed', reason=args.reason)
                     worker.update(status='retired', group_id=None)
                     for member in group['members']: claims.pop(member['package_id'], None)
+            elif followup_confirmed:
+                if not (getattr(args, 'reason', None) or '').strip():
+                    raise ValueError('Followup acceptance requires actual native dispatch evidence --reason')
+                if group.get('followup_confirmed'): pass
+                elif worker['status'] != 'pending_followup' or worker['group_id'] != gid:
+                    raise ValueError('Only the current pending followup can be acknowledged')
+                else:
+                    group.update(followup_confirmed=True, followup_evidence=args.reason)
+                    worker['status'] = 'running'
             else:
                 if group.get('outcome') == outcome: pass
-                elif group['turn_finished'] or worker['status'] != 'running':
+                elif group['turn_finished'] or worker['status'] not in ('running', 'pending_followup'):
                     raise ValueError('Report needs a bound running worker and one confirmed native turn completion')
+                elif worker['status'] == 'pending_followup' and not (getattr(args, 'reason', None) or '').strip():
+                    raise ValueError('Pending followup outcome requires matching-group native completion evidence --reason')
                 else:
                     group.update(turn_finished=True, outcome=outcome, report_reason=getattr(args, 'reason', None))
                     worker['status'] = 'awaiting_validation'
@@ -220,18 +271,27 @@ def run(args):
                 raise ValueError('Only a finished worker can be retired')
             if not getattr(args, 'reason', ''): raise ValueError('Retirement requires native completion/closure evidence --reason')
             worker.update(status='retired', retire_evidence=args.reason)
-        _reconcile(m, ledger, claims)
         # Receipt calls are deliberately not combined with a new dispatch. A lost
         # response can be retried without accidentally spawning or claiming again.
-        if native_id or outcome or spawn_failed or retired:
+        # Persist facts from native tools before reading any other group's files.
+        if native_id or outcome or spawn_failed or retired or followup_confirmed:
             commit(root, claims, ledger)
             return {'next_action': 'next', 'receipt_recorded': True}
+        m = read(state / 'manifest.json')
+        _reconcile(m, ledger, claims)
         waiting = [p for p in m['packages'] if p['status'] == 'waiting_ai']
         awaiting = [p['id'] for p in waiting if Path(p['result_path']).exists()]
         result = {'target_presented_images': TARGET_IMAGES, 'groups_per_worker': GROUPS_PER_WORKER,
                   'unfinished_original_packages': sum(p['status'] != 'success' for p in m['packages']),
                   'host_available_workers': args.available_workers, 'reserved_for_sol': args.reserve_sol}
-        if awaiting:
+        blocked = next((g for g in ledger['groups'].values() if g.get('package_errors')), None)
+        if blocked:
+            action = {'next_action': 'root_package_recovery',
+                **_task(blocked, ledger['workers'][blocked['worker_id']]),
+                'native_turn_finished': blocked['turn_finished'],
+                'package_errors': blocked['package_errors'],
+                'note': 'Keep claims while native state is unknown; inspect this exact native turn/group and record actual completion only. Restore the original package and manifest identity to the expected paths/digest, then rerun vision-work and the original import-results validator. Unrecoverable originals remain incomplete; no abandon/adopt-changed-package permission is granted.'}
+        elif awaiting:
             action = {'next_action': 'import_results', 'package_ids': awaiting,
                       'command': 'import-results', 'note': 'Use existing coordinator validator; wait if media holds the run lock.'}
         else:
@@ -246,6 +306,9 @@ def _next(root, m, ledger, claims, args):
         if worker['status'] == 'pending_bind':
             return {'next_action': 'recover_bind', **_task(ledger['groups'][worker['group_id']], worker),
                     'note': 'Do not spawn again: bind the actual existing ID, or record explicit --spawn-failed evidence.'}
+        if worker['status'] == 'pending_followup':
+            return {'next_action': 'recover_followup', **_task(ledger['groups'][worker['group_id']], worker),
+                    'note': 'Verify the exact native turn/group before acting. If accepted, record --followup-confirmed --reason EVIDENCE; if actually completed, record its outcome. Send this exact task once only with explicit evidence it was not sent. Unknown state means wait, never resend or release on timeout.'}
         if worker['status'] == 'retire_required':
             return {'next_action': 'retire_worker', 'worker_id': worker['id'],
                     'native_agent_id': worker['native_agent_id'], 'reason': worker['retire_reason'],
@@ -268,7 +331,7 @@ def _next(root, m, ledger, claims, args):
             worker.update(status='retire_required', retire_reason='native_route_or_session_changed')
             return {'next_action': 'retire_worker', 'worker_id': worker['id'],
                     'native_agent_id': worker['native_agent_id'], 'reason': worker['retire_reason']}
-        worker['status'] = 'running'
+        worker['status'] = 'pending_followup'
         group = _new_group(root, ledger, claims, take_group(candidates), worker, contract)
         return {'next_action': 'followup', **_task(group, worker)}
     unfinished = {p['id'] for p in m['packages'] if p['status'] != 'success'}
@@ -285,6 +348,8 @@ def _next(root, m, ledger, claims, args):
     if unfinished or ready or any(w['status'] == 'running' for w in workers.values()):
         return {'next_action': 'wait', 'running_native_agent_ids': [w['native_agent_id'] for w in workers.values()
                 if w['status'] == 'running'], 'legacy_claims': sorted(pid for pid in claims if pid in unfinished),
+                'active_groups': [_task(ledger['groups'][w['group_id']], w) for w in workers.values()
+                                  if w['status'] == 'running' and w.get('group_id')],
                 'reason': 'owned_work_or_actual_native_slots', 'unassigned_original_packages': len(ready)}
     for worker in workers.values():
         if worker['status'] == 'idle':

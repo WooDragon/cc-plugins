@@ -981,6 +981,7 @@ def main():
             if name=='vision-queue': p.add_argument('--claim-worker',action='append'); p.add_argument('--release',action='append')
             else:
                 p.add_argument('--group-id'); p.add_argument('--native-agent-id',help='Exact actual spawn receipt ID; logical worker aliases are not native IDs')
+                p.add_argument('--followup-confirmed',action='store_true',help='Exact current group was accepted by the native followup tool; requires --reason evidence')
                 p.add_argument('--outcome',choices=('complete','failed','context_warning'),help='Native turn has actually completed; failures/warnings stop reuse at this package boundary')
                 p.add_argument('--spawn-failed',action='store_true',help='Explicit evidence native dispatch failed before an Agent was created')
                 p.add_argument('--retire-confirmed',metavar='WORKER_ID'); p.add_argument('--reason')

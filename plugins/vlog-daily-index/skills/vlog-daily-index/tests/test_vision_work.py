@@ -39,7 +39,8 @@ def bind(state, action, native='native-1'):
 
 
 def report(state, action, outcome='complete'):
-    return next_work(state, None, '--group-id', action['group_id'], '--outcome', outcome)
+    return next_work(state, None, '--group-id', action['group_id'], '--outcome', outcome,
+                     '--reason', 'Synthetic native FINAL matches ' + action['group_id'])
 
 
 def result(member, valid=True):
@@ -273,7 +274,11 @@ class VisualWork(unittest.TestCase):
             state,caps=setup(Path(td), [('s','a',0,11)])
             action=next_work(state,caps); member=action['members'][0]
             p=store.read(member['package_path']); p['frames'][0]['time']+=1; store.dump(member['package_path'],p)
-            with self.assertRaises(ValueError): next_work(state,caps)
+            blocked=next_work(state,caps)
+            self.assertEqual(blocked['next_action'],'root_package_recovery')
+            self.assertEqual(blocked['package_errors'][0]['package_id'],member['package_id'])
+            self.assertEqual(blocked['package_errors'][0]['expected_digest'],member['package_digest'])
+            self.assertIn(member['package_id'],store.read(state/'vision-dispatch/claims.json'))
 
     def test_dispatch_lock_prevents_competing_owner(self):
         with tempfile.TemporaryDirectory() as td:
@@ -337,6 +342,141 @@ class VisualWork(unittest.TestCase):
             # Reconciliation happens in a receipt-only call, leaving an idle worker.
             report(state,action)
             self.assertEqual(invoke('vision-queue','--state',state,'--available-workers',8)['recommended_vision_workers'],0)
+
+    def test_followup_before_native_send_recovers_exact_reserved_task_without_redispatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            state,caps=setup(Path(td),[('s','a',i*20,11) for i in range(3)])
+            first=next_work(state,caps); bind(state,first); finish(state,caps,first)
+            offered=next_work(state,caps)
+            self.assertEqual(offered['next_action'],'followup')
+            for _ in range(3):
+                recovered=next_work(state,caps)
+                self.assertEqual(recovered['next_action'],'recover_followup')
+                for key in ('group_id','worker_id','native_agent_id','task_path','members','native_contract'):
+                    self.assertEqual(recovered[key],offered[key])
+            ledger=store.read(state/'vision-dispatch/groups.json')
+            self.assertEqual(len(ledger['groups']),2)
+            self.assertEqual(ledger['workers'][offered['worker_id']]['status'],'pending_followup')
+            report(state,first)  # A previous group's done is not this group's done.
+            ledger=store.read(state/'vision-dispatch/groups.json')
+            self.assertFalse(ledger['groups'][offered['group_id']]['turn_finished'])
+            self.assertEqual(ledger['workers'][offered['worker_id']]['status'],'pending_followup')
+            with self.assertRaisesRegex(ValueError,'actual native dispatch evidence'):
+                next_work(state,None,'--group-id',offered['group_id'],'--followup-confirmed')
+
+    def test_followup_sent_but_receipt_response_lost_is_idempotently_acknowledged(self):
+        with tempfile.TemporaryDirectory() as td:
+            state,caps=setup(Path(td),[('s','a',i*20,11) for i in range(2)])
+            first=next_work(state,caps); bind(state,first); finish(state,caps,first)
+            offered=next_work(state,caps)
+            ack=('--group-id',offered['group_id'],'--followup-confirmed','--reason','Synthetic native tool accepted this exact group')
+            # The native tool accepted the task; losing its local ack response does
+            # not produce a second followup or a new owner on retry.
+            self.assertEqual(next_work(state,None,*ack),next_work(state,None,*ack))
+            waiting=next_work(state,caps)
+            self.assertEqual(waiting['next_action'],'wait')
+            self.assertEqual(waiting['active_groups'][0]['group_id'],offered['group_id'])
+            self.assertEqual(waiting['active_groups'][0]['task_path'],offered['task_path'])
+            self.assertFalse(store.read(state/'vision-dispatch/groups.json')['groups'][offered['group_id']]['turn_finished'])
+
+    def test_actual_followup_completion_can_close_a_lost_dispatch_ack(self):
+        with tempfile.TemporaryDirectory() as td:
+            state,caps=setup(Path(td),[('s','a',i*20,11) for i in range(2)])
+            first=next_work(state,caps); bind(state,first); finish(state,caps,first)
+            offered=next_work(state,caps)
+            with self.assertRaisesRegex(ValueError,'matching-group native completion evidence'):
+                next_work(state,None,'--group-id',offered['group_id'],'--outcome','complete')
+            finish(state,caps,offered)
+            self.assertEqual(next_work(state,caps)['reason'],'two_groups_completed')
+
+    def test_bad_group_cannot_rollback_other_or_own_native_receipts_and_restores_normally(self):
+        for damage in ('changed','missing_file','invalid_json','unreadable','missing_manifest'):
+            with self.subTest(damage=damage),tempfile.TemporaryDirectory() as td:
+                state,caps=setup(Path(td),[('s','a',i*20,11) for i in range(2)])
+                a=next_work(state,caps); bind(state,a,'native-A')
+                b=next_work(state,caps); bind(state,b,'native-B')
+                member=a['members'][0]; path=Path(member['package_path']); original=path.read_bytes()
+                m=store.read(state/'manifest.json'); original_record=dict(m['packages'][0])
+                if damage=='changed':
+                    payload=store.read(path); payload['frames'][0]['time']+=1; store.dump(path,payload)
+                elif damage=='missing_file': path.unlink()
+                elif damage=='invalid_json': path.write_text('{not json',encoding='utf-8')
+                elif damage=='unreadable': path.unlink(); path.mkdir()
+                else:
+                    m['packages']=[p for p in m['packages'] if p['id']!=member['package_id']]
+                    store.dump(state/'manifest.json',m)
+                result(b['members'][0]); report(state,b)
+                ledger=store.read(state/'vision-dispatch/groups.json')
+                self.assertTrue(ledger['groups'][b['group_id']]['turn_finished'])
+                blocked=next_work(state,caps)
+                self.assertEqual(blocked['next_action'],'root_package_recovery')
+                self.assertFalse(blocked['native_turn_finished'])
+                self.assertEqual(blocked['native_agent_id'],'native-A')
+                self.assertEqual(blocked['package_errors'][0]['original_manifest_record'],original_record)
+                self.assertIn(member['package_id'],store.read(state/'vision-dispatch/claims.json'))
+                # A's actual native completion is durable even while A is broken.
+                self.assertEqual(report(state,a,'failed'),report(state,a,'failed'))
+                self.assertTrue(store.read(state/'vision-dispatch/groups.json')['groups'][a['group_id']]['turn_finished'])
+                for _ in range(2):
+                    still=next_work(state,caps)
+                    self.assertEqual(still['next_action'],'root_package_recovery')
+                    self.assertTrue(still['native_turn_finished'])
+                with self.assertRaisesRegex(ValueError,'Original visual package recovery'):
+                    invoke('daily-package','--state',state)
+                self.assertIn(member['package_id'],store.read(state/'vision-dispatch/claims.json'))
+                if path.is_dir(): path.rmdir()
+                path.write_bytes(original)
+                if damage=='missing_manifest':
+                    m=store.read(state/'manifest.json'); m['packages'].insert(0,original_record)
+                    store.dump(state/'manifest.json',m)
+                # The original result validator is still required after repair.
+                result(member)
+                self.assertEqual(next_work(state,caps)['next_action'],'import_results')
+                self.assertEqual(invoke('import-results','--state',state)['errors'],[])
+                for _ in range(3):
+                    action=next_work(state,caps)
+                    if action['next_action']=='visual_complete': break
+                    self.assertEqual(action['next_action'],'retire_worker')
+                    next_work(state,None,'--retire-confirmed',action['worker_id'],'--reason','Synthetic native completion already confirmed')
+                self.assertEqual(action['next_action'],'visual_complete')
+                self.assertTrue(all(p['status']=='success' for p in store.read(state/'manifest.json')['packages']))
+
+    def test_direct_downstream_rechecks_current_originals_without_prior_next_and_recovers(self):
+        for damage in ('changed','missing_file','invalid_json','missing_manifest','same_content_new_path','source_identity_missing'):
+            with self.subTest(damage=damage),tempfile.TemporaryDirectory() as td:
+                state,caps=setup(Path(td),[('s','a',0,11)])
+                action=next_work(state,caps); bind(state,action); member=action['members'][0]
+                path=Path(member['package_path']); original=path.read_bytes(); payload=store.read(path)
+                m=store.read(state/'manifest.json'); m['config']['timezone']='Asia/Shanghai'
+                m['sources'][0].update(status='ready',relative_path='a/s.mp4',duration=99999,
+                    metadata={},blocks=[],sample_times=[f['time'] for f in payload['frames']])
+                m['frames']=payload['frames']; m['transcription']={'s':{'status':'no_audio'}}
+                store.dump(state/'manifest.json',m)
+                result(member); self.assertEqual(invoke('import-results','--state',state)['errors'],[])
+                m=store.read(state/'manifest.json'); record=dict(m['packages'][0])
+                if damage=='changed':
+                    changed=dict(payload); changed['extra_damage']=True; store.dump(path,changed)
+                elif damage=='missing_file': path.unlink()
+                elif damage=='invalid_json': path.write_text('{not json',encoding='utf-8')
+                elif damage=='missing_manifest': m['packages']=[]
+                elif damage=='source_identity_missing': m['packages'][0].pop('source_id')
+                else:
+                    alias=path.with_name('same-content-copy.package.json'); alias.write_bytes(original)
+                    m['packages'][0]['path']=str(alias)
+                store.dump(state/'manifest.json',m)
+                report(state,action)  # No next/reconciliation before downstream.
+                with self.assertRaisesRegex(ValueError,'Original visual package recovery'):
+                    invoke('daily-package','--state',state)
+                blocked=next_work(state,caps)
+                self.assertEqual(blocked['next_action'],'root_package_recovery')
+                self.assertIn(member['package_id'],store.read(state/'vision-dispatch/claims.json'))
+                path.write_bytes(original)
+                m=store.read(state/'manifest.json'); m['packages']=[record]; store.dump(state/'manifest.json',m)
+                # Fresh readonly verification also recognizes restored originals;
+                # it does not require a next call to clear stale cached errors.
+                daily=invoke('daily-package','--state',state)
+                self.assertEqual(daily['validated_packages'],1)
+                self.assertTrue(Path(daily['path']).exists())
 
 
 if __name__=='__main__': unittest.main()
