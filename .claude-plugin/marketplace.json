@@ -52,7 +52,7 @@
     {
       "name": "deep-research",
       "description": "Deep research framework — 7-Stage pipeline + role-specialized subagents (harvester/analyst/reviewer/publisher) + multi-model harvest & citation-verification gate + deterministic report.md -> report.html renderer",
-      "version": "1.17.1",
+      "version": "1.17.2",
       "author": {
         "name": "WooDragon"
       },
@@ -129,7 +129,7 @@
     {
       "name": "vlog-daily-index",
       "description": "Travel memory indexing for Codex and Claude Code — native agents, source-linked events, transcripts, itinerary and GPS/map evidence",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "author": {
         "name": "WooDragon"
       },
