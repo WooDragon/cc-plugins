@@ -19,6 +19,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from vlog_index import media, store
 from test_geography import itinerary
 
+
+def native_capabilities(root):
+    """Codex-style Luna snapshot; route evidence, not a runtime model proof."""
+    path = Path(root) / 'native-capabilities.json'
+    store.dump(path, {'schema': 'native_vision_capabilities_v1',
+        'source': {'kind': 'current_session_native_tool', 'session_id': 'synthetic-session',
+                   'tool': 'collaboration.spawn_agent', 'evidence': 'Synthetic native model enum and image-capable worker fixture'},
+        'parameters': {'model': ['gpt-6-luna'], 'reasoning_effort': ['medium'], 'fork_turns': ['none', 'all']},
+        'models': [{'id': 'gpt-6-luna', 'family': 'luna', 'native_model': 'gpt-6-luna',
+                    'image_input': True, 'reasoning_efforts': ['medium']}]})
+    return path
+
 spec = importlib.util.spec_from_file_location('concurrent_cli', Path(__file__).resolve().parents[1] / 'scripts' / 'vlog_daily_index.py')
 cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
 
@@ -207,16 +219,16 @@ class Concurrency(unittest.TestCase):
             with store.RunLock(state):
                 small = invoke('vision-queue', '--state', state, '--available-workers', 2)
                 self.assertEqual(small['recommended_vision_workers'], 1)
-                arguments = ['vision-queue', '--state', state, '--available-workers', 7]
+                arguments = ['vision-queue', '--state', state, '--available-workers', 7, '--native-capabilities', native_capabilities(Path(td))]
                 for i in range(6): arguments += ['--claim-worker', f'worker{i}']
                 first = invoke(*arguments)
             self.assertEqual(len({p['id'] for p in first['assigned']}), 6)
             full = invoke('vision-queue', '--state', state, '--available-workers', 3)
             self.assertEqual(full['recommended_vision_workers'], 0)
-            with self.assertRaises(ValueError): invoke('vision-queue', '--state', state, '--available-workers', 3, '--claim-worker', 'seventh')
+            with self.assertRaises(ValueError): invoke('vision-queue', '--state', state, '--available-workers', 3, '--claim-worker', 'seventh', '--native-capabilities', native_capabilities(Path(td)))
             # A finished worker's file awaits the coordinator; release must not rerun its model.
             store.dump(first['assigned'][0]['result_path'], {'awaiting_coordinator_validation': True})
-            released = invoke('vision-queue', '--state', state, '--available-workers', 2, '--release', first['assigned'][0]['id'], '--claim-worker', 'replacement')
+            released = invoke('vision-queue', '--state', state, '--available-workers', 2, '--release', first['assigned'][0]['id'], '--claim-worker', 'replacement', '--native-capabilities', native_capabilities(Path(td)))
             self.assertEqual(len(released['assigned']), 1)
             self.assertNotEqual(released['assigned'][0]['id'], first['assigned'][0]['id'])
             self.assertEqual((state / 'manifest.json').read_bytes(), before)
@@ -241,7 +253,7 @@ class Concurrency(unittest.TestCase):
             m, state, _ = fixture(Path(td), count=1); source = m['sources'][0]; block = source['blocks'][0]
             m['frames'] = extract('mock', source, block, Path(m['temp_dir']) / 'frames', {'backend': 'cpu'})
             package = cli.stable_block_packages(m, source, block, None)[0]
-            invoke('vision-queue', '--state', state, '--available-workers', 2, '--claim-worker', 'synthetic-worker')
+            invoke('vision-queue', '--state', state, '--available-workers', 2, '--claim-worker', 'synthetic-worker', '--native-capabilities', native_capabilities(Path(td)))
             result_path = Path(package['result_path']); store.dump(result_path, {})
             original = result_path.read_bytes()
             self.assertEqual(len(invoke('import-results', '--state', state)['errors']), 1)

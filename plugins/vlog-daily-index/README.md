@@ -4,7 +4,7 @@
 
 ## 安装
 
-此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.3.0`。两个宿主并列支持。
+此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.3.1`。两个宿主并列支持。
 
 Codex：
 
@@ -28,7 +28,7 @@ claude plugin install vlog-daily-index@cc-plugins
 
 ## 宿主与依赖
 
-语义工作流需要宿主（Codex 或 Claude Code）提供真实原生子Agent工具和所需模型：视觉Agent读取视觉证据，语义Agent与地理Agent汇总语义与地理证据，ROOT 审查并验收；各角色的宿主绑定见[宿主说明](./skills/vlog-daily-index/references/hosts.md)；用户明确指定模型时按用户选择执行。Python 工具只处理确定性工作，不能替代或模拟这些 Agent。
+语义工作流需要宿主（Codex 或 Claude Code）提供真实原生子Agent工具和所需模型：视觉Agent读取视觉证据，语义Agent与地理Agent汇总语义与地理证据，ROOT 审查并验收；各角色的宿主绑定见[宿主说明](./skills/vlog-daily-index/references/hosts.md)；用户明确指定模型时按用户选择执行。纯视觉新领取必须提供当前 session 的原生工具与图像能力快照，路由由该快照和本 run 声明的视觉角色共同决定，不能静默改派 Sol/旗舰，也不按宿主名猜模型。详见[纯视觉路由](./skills/vlog-daily-index/references/vision-routing.md)；快照与请求不证明实际运行模型。Python 工具只处理确定性工作，不能替代或模拟这些 Agent。
 
 需要用户配置 Python 3.12、FFmpeg/ffprobe、兼容的 ASR 服务和模型，以及运行所需的素材、行程和 GPS/地图证据。凭证、服务地址、本机工具路径和硬件配置由使用者在本地提供，不包含在发布源码中。实际依赖、安装和配置步骤见[安装说明](./skills/vlog-daily-index/references/setup.md)。
 
