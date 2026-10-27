@@ -4,6 +4,8 @@
 
 ## 本地验证
 
+完整plugin仓库必须通过agent正文纪律检查；只有带对应source-skill-zip清单的独立Skill发行才明确跳过两项plugin-level agents检查，发行也不包含另一个DIT插件的集成工具，不能把这些skip当作已运行。
+
 先按[安装说明](setup.md)准备Python与FFmpeg。测试使用临时合成媒体、合成FIT和HTTP mock，不连接部署者的ASR、地图或NAS；真实FFmpeg测试需要显式设置工具路径，缺失时的skip不能报告为通过。
 
 ```text

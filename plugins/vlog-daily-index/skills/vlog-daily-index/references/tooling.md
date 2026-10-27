@@ -11,7 +11,7 @@
 | 并发验证与配置 | `hardware-benchmark`、`configure-concurrency` | 独立本地小样验证设备槽位，按实际证据配置1–4媒体路、视觉Agent上限6及ready/空间高水位；不从利用率推定速度，详见[并发约定](concurrency.md) |
 | 3. 协议验证 | `asr-json-sample`、`audio --discover`、`audio --acknowledge`、`adopt-json-sample` | 检查完整JSON与NDJSON终止记录，填已验证protocol JSON；unknown恢复须外部结束证据 |
 | 4. 媒体/音频 | `continue-day`、`packages`；旧`prepare --blocks`/`audio`用于有界诊断 | 正常并发流水线用continue-day确定性抽样/匹配Log预览/单ASR及背压，prepare不冒充多设备调度器，主控控制vision slots |
-| 5. 视觉 | `vision-queue`、`import-results`、`retry-visual`及包内schema/result_path | 新run稳定块ready即按真实空闲弹性claim/派发，最多6个视觉Agent；新领取须带`--native-capabilities`，路由见[纯视觉路由](vision-routing.md)；脚本不spawn，视觉Agent实际读取全图，事件/兴趣点仅候选，语义Agent后续带完整转写；invalid只显式归档纠正一次 |
+| 5. 视觉 | 默认 `vision-work`，兼容 `vision-queue`；`import-results`、`retry-visual`及原包schema/result_path | ROOT照[工作组下一步](vision-work.md)真实派发/续派；当前[原生路由合同](vision-routing.md)、全图与逐包校验保留，最多6视觉Agent，2组或换目录时换新；invalid只显式纠正一次，Sol后续仍读完整转写 |
 | 6. 语义 | `daily-package`导出完整包/schema/result_path | 语义Agent（high）跨文件汇总事件/兴趣点/主要主体，保留源时码和原话归属 |
 | 7. 地图 | `map-lookup --requests FILE --provider photon\|osm --output FILE` | Agent按事件对应可信GPS选择查询点/对象；工具保存实际响应和缓存，不编造地图成功 |
 | 8. 专项主体 | `subject-targets --template FILE`、`subject-targets --targets FILE` |语义Agent标需核验的主要地标/自然主体并填目标JSON；不能用空targets绕过明显主体 |
