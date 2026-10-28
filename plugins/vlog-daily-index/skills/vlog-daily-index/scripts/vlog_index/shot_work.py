@@ -9,9 +9,8 @@ MAX_SEGMENTS=2
 MAX_IMAGES=34
 
 def local_root(output):
-    root=Path(output).resolve()
-    if str(root).startswith('\\\\') or any(p.lower()=='onedrive' for p in root.parts):raise ValueError('Active shot state must be local and nonsync')
-    return root
+    from .store import local_nonsync
+    return local_nonsync(output)
 
 def _ledger(root):
     p=Path(root)/'work.json'
@@ -33,7 +32,7 @@ def add_packet(root,source,package,manifest_record):
         frames=copy.deepcopy(package['frames'])
         for f in frames:f['sha256']=file_hash(f['path'])
         times=[f['time'] for f in frames]
-        identity={'schema':'shot_review_input_v1','prompt_version':shot.VERSION,'source':{**shot.source_identity(source),'path':source['path'],'clock':{k:source.get('metadata',{}).get(k) for k in ('time_verified','playback_rate_verified','captured_at_utc','capture_fps','format_fps')}},'interval':{'start':min(times),'end':min(source['duration'],max(times)+1/source['fps']),'time_basis':'source_file_playback_seconds'},'frames':frames,'core_frame_ids':package['core_frame_ids'],'requires_facts':True,'preview':frames[0].get('preview',{}),'sampling':{'actual_frames':len(frames),'max_gap_seconds':max((b-a for a,b in zip(times,times[1:])),default=0),'coverage':'sampled_sequence_not_continuous_video'},'instructions':shot.INSTRUCTIONS,'result_schema':shot.Result.model_json_schema()}
+        identity={'schema':'shot_review_input_v1','prompt_version':shot.VERSION,'source':{**shot.source_identity(source),'path':source['path'],'clock':{k:source.get('metadata',{}).get(k) for k in ('time_verified','playback_rate_verified','captured_at_utc','capture_fps','format_fps')}},'interval':{'start':min(times),'end':min(source['duration'],max(times)+1/source['fps']),'time_basis':'source_file_playback_seconds'},'frames':frames,'core_frame_ids':package['core_frame_ids'],'requires_facts':True,'preview':frames[0].get('preview',{}),'sampling':{'actual_frames':len(frames),'max_gap_seconds':max((b-a for a,b in zip(times,times[1:])),default=0),'coverage':'sampled_sequence_not_continuous_video'},'instructions':shot.INSTRUCTIONS,'output_policy':shot.OBJECTIVE_POLICY,'result_schema':shot.ObjectiveResult.model_json_schema()}
         from . import pixel_cues
         identity['program_pixel_cues']=pixel_cues.build(identity)
         task={'schema':'shot_review_task_v1','review_id':'shot-'+digest(identity)[:24],'input_digest':digest(identity),'input':identity,'result_path':str(root/'jobs'/jid/'unused.result.json'),'request_route':{'stage':'shot_review','model':'gpt-6-luna','reasoning_effort':'max','runtime_model_verified':False}}
@@ -59,7 +58,10 @@ def plan_query(candidates,selected,output,ffmpeg,start=None,end=None):
         source,relative=sources[row['source_id']];source=copy.deepcopy(source);actual=query.within(library,relative)
         if row.get('relative_path')!=relative or not row.get('original_path') or Path(row['original_path']).resolve()!=actual:raise ValueError('Candidate original path lacks an exact source mapping')
         source['path']=str(actual)
+        if root.is_relative_to(actual.parent):raise ValueError('Active shot output cannot be inside the original-media directory')
         if row.get('kind')=='visual_change':
+            matching=[entry for entry in index.get('visual_changes',[]) if entry['change']['clip']['source_id']==row['source_id'] and entry['change']['clip']['start']==row.get('start_s') and entry['change']['clip']['end']==row.get('end_s') and entry['change']['clip']['precision']==row.get('precision') and entry['change']['clip']['evidence_ids']==row.get('evidence') and entry['change']['topic']+': '+entry['change']['claim_type']==row.get('title') and entry['change']['description']==row.get('text')]
+            if not matching:raise ValueError('visual_change candidate does not match an actual published canonical change')
             existing_reviews.append({'candidate':number,'source_id':source['id'],'start':row.get('start_s'),'end':row.get('end_s'),'reason':'Already reviewed; needs_playback means play the original, not recursively reanalyse'})
             continue
         if any(k not in source for k in ('fps','duration','size','mtime_ns','sidecars','metadata','start_pts')):raise ValueError('Published source lacks verified media preparation metadata')
@@ -78,7 +80,16 @@ def plan_query(candidates,selected,output,ffmpeg,start=None,end=None):
         key_input={'source':shot.source_identity(source),'path':source['path'],'interval':[a,b],'frames':17,'preview':preview,'prompt':shot.VERSION}
         legacy_key=digest(key_input)[:24]
         # Reuse existing no-cue jobs before considering any new implementation.
-        if legacy_key in _ledger(root)['jobs']:key=legacy_key
+        previous=_ledger(root)['jobs'];exact=None
+        for old_key,job in previous.items():
+            if job.get('source_id')!=source['id'] or job.get('start')!=a or ('end' in job and job['end']!=b):continue
+            frozen=read(job['task_path'])['input']
+            if frozen.get('requires_facts') or len(frozen['frames'])!=17:continue
+            expected_preview=shot.media.preview_spec(source,luts)
+            if shot.source_identity(frozen['source'])==shot.source_identity(source) and Path(frozen['source']['path']).resolve()==actual and frozen['interval']=={'start':a,'end':b,'time_basis':'source_file_playback_seconds'} and frozen['preview']==expected_preview:
+                _check(job);exact=old_key;break
+        if exact is not None:key=exact
+        elif legacy_key in previous:key=legacy_key
         else:
             from . import pixel_cues
             key=digest({**key_input,'program_pixel_cues':pixel_cues.signature()})[:24]
@@ -96,7 +107,7 @@ def plan_query(candidates,selected,output,ffmpeg,start=None,end=None):
                 continue
             manifest=root/'inputs'/(key+'.json');dump(manifest,{'sources':[source],'config':{'preview_luts':luts}})
             prepared=shot.prepare(manifest,source['id'],a,b,17,root/'jobs'/key,ffmpeg,('max',))
-            task=Path(prepared['task_paths'][0]);data['jobs'][key]={'id':key,'task_path':str(task),'task_sha256':file_hash(task),'status':'queued','source_id':source['id'],'directory':str(Path(source['path']).parent),'start':a,'images':17,'provenance':[provenance]}
+            task=Path(prepared['task_paths'][0]);data['jobs'][key]={'id':key,'task_path':str(task),'task_sha256':file_hash(task),'status':'queued','source_id':source['id'],'directory':str(Path(source['path']).parent),'start':a,'end':b,'images':17,'provenance':[provenance]}
         _save(root,data)
     return {'next_action':'next','output':str(root),'selected':len(normalized),'cache_hits':hits,'existing_reviews':existing_reviews,'native_calls':0}
 
@@ -170,26 +181,37 @@ def next_action(output,capabilities=None,available=0,reserve=1,bundle_id=None,na
                 b.update(turn_finished=True,outcome=outcome,completion_evidence=reason)
             _save(root,data);return {'next_action':'next','receipt_saved':bundle_id}
         errors=_ingest(data);_save(root,data)
-        if errors:return {'next_action':'root_correction','errors':errors,'active_bundles':[_action(b) for b in data['bundles'].values() if not b.get('turn_finished')]}
         active=[b for b in data['bundles'].values() if not b.get('turn_finished')]
         for b in active:
-            if not b.get('native_agent_id'):return {'next_action':'recover_bind',**_action(b),'rule':'Recover actual spawn receipt; unknown dispatch must not be sent again'}
-        queued=[j for j in data['jobs'].values() if j['status']=='queued' and not j.get('bundle_id')]
+            if not b.get('native_agent_id'):return {'next_action':'recover_bind',**_action(b),'errors':errors,'rule':'Recover actual spawn receipt; unknown dispatch must not be sent again'}
+        queued=[]
+        for j in data['jobs'].values():
+            if j.get('bundle_id') or j['status'] not in ('queued','invalid'):continue
+            try:
+                _check(j)
+                if j['images']!=len(read(j['task_path'])['input']['frames']) or not 2<=j['images']<=MAX_IMAGES:raise ValueError('Whole segment must contain 2..34 images and match its frozen image count')
+                j['status']='queued';j.pop('validation_error',None);queued.append(j)
+            except (ValueError,KeyError,TypeError,OSError) as error:
+                j['status']='invalid';j['validation_error']=str(error);errors.append({'job_id':j['id'],'task_path':j['task_path'],'error':str(error)})
+        _save(root,data)
         queued.sort(key=lambda j:(j['directory'],j['source_id'],j['start'],j['id']))
         if queued and max(0,available-reserve)>0:
             if not capabilities:return {'next_action':'blocked','reason':'Current native Luna max/image capability snapshot required'}
-            contract=vision.shot_dispatch_contract(capabilities);selected=[];images=0;directory=queued[0]['directory']
+            contract=vision.shot_dispatch_contract(capabilities);selected=[];images=0;directory=queued[0]['directory'];common=read(queued[0]['task_path'])['input']
             for j in queued:
                 if j['directory']!=directory:continue
-                if len(selected)>=MAX_SEGMENTS or images+j['images']>MAX_IMAGES:break
-                _check(j);selected.append(j);images+=j['images']
+                if len(selected)>=MAX_SEGMENTS:break
+                task=read(j['task_path'])['input']
+                if images+j['images']>MAX_IMAGES or any(task[k]!=common[k] for k in ('instructions','result_schema')):continue
+                selected.append(j);images+=j['images']
             if not selected:raise ValueError('A whole segment exceeds the conservative 34-image worker budget')
             bid='bundle-'+uuid.uuid4().hex[:16];folder=root/'bundles'/bid;results={j['id']:str(folder/j['id']/'result.json') for j in selected}
             b={'id':bid,'task_path':str(folder/'task.json'),'contract':contract,'jobs':[j['id'] for j in selected],'images':images,'results':results,'status':'reserved','turn_finished':False}
             shot.write_new(folder/'task.json',_bundle_task(b,data));b['task_sha256']=file_hash(b['task_path'])
             data['bundles'][bid]=b
             for j in selected:j.update(bundle_id=bid,status='running')
-            _save(root,data);return {'next_action':'spawn',**_action(b)}
+            _save(root,data);return {'next_action':'spawn',**_action(b),'recovery_required':errors}
+        if errors:return {'next_action':'root_correction','errors':errors,'active_bundles':[_action(b) for b in active]}
         if active:return {'next_action':'wait','active_bundles':[_action(b) for b in active],'rule':'Only actual matching native FINAL closes a turn; no timeout requeue'}
         if queued:return {'next_action':'wait_slots','queued_segments':len(queued)}
         return {'next_action':'complete','segments':len(data['jobs']),'cache_successes':sum(j['status']=='success' for j in data['jobs'].values())}
@@ -205,13 +227,13 @@ def require_finished(root):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);sub=p.add_subparsers(dest='action',required=True)
-    q=sub.add_parser('prepare');q.add_argument('--manifest',required=True);q.add_argument('--source-id',required=True);q.add_argument('--start',type=float,required=True);q.add_argument('--end',type=float,required=True);q.add_argument('--frames',type=int,default=17);q.add_argument('--output',required=True);q.add_argument('--ffmpeg',required=True);q.add_argument('--effort',choices=('max',),default='max',action='append')
+    q=sub.add_parser('prepare');q.add_argument('--manifest',required=True);q.add_argument('--source-id',required=True);q.add_argument('--start',type=float,required=True);q.add_argument('--end',type=float,required=True);q.add_argument('--frames',type=int,default=17);q.add_argument('--output',required=True);q.add_argument('--ffmpeg',required=True);q.add_argument('--effort',choices=('max',),default='max')
     q=sub.add_parser('validate');q.add_argument('--task',required=True);q.add_argument('--result')
     q=sub.add_parser('report');q.add_argument('--record',required=True);q.add_argument('--output',required=True)
     q=sub.add_parser('plan');q.add_argument('--candidates',required=True);q.add_argument('--select',type=int,action='append',required=True);q.add_argument('--start',type=float);q.add_argument('--end',type=float);q.add_argument('--output',required=True);q.add_argument('--ffmpeg',required=True)
     q=sub.add_parser('next');q.add_argument('--output',required=True);q.add_argument('--native-capabilities');q.add_argument('--available-workers',type=int,default=0);q.add_argument('--reserve-sol',type=int,default=1);q.add_argument('--bundle-id');q.add_argument('--native-agent-id');q.add_argument('--outcome',choices=('complete','failed'));q.add_argument('--reason')
     a=p.parse_args()
-    if a.action=='prepare':v=shot.prepare(a.manifest,a.source_id,a.start,a.end,a.frames,a.output,a.ffmpeg,('max',))
+    if a.action=='prepare':v=shot.prepare(a.manifest,a.source_id,a.start,a.end,a.frames,a.output,a.ffmpeg,(a.effort,))
     elif a.action=='validate':v=shot.validate(a.task,a.result)
     elif a.action=='report':v=shot.report(a.record,a.output)
     elif a.action=='plan':v=plan_query(a.candidates,a.select,a.output,a.ffmpeg,a.start,a.end)

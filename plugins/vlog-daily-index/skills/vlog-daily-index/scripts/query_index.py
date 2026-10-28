@@ -240,13 +240,25 @@ def publication_rows(root, location):
                 if clip['source_id'] not in sources: raise ValueError('Unknown finding source')
                 interval(clip)
                 if not isinstance(clip.get('evidence_ids'), list): raise ValueError('Missing finding evidence')
-    evidence={f['id']:f for f in index.get('evidence_frames',[])}
+    frame_rows=index.get('evidence_frames',[])
+    if not isinstance(frame_rows,list) or any(not isinstance(f,dict) or not isinstance(f.get('id'),str) or not f['id'].strip() for f in frame_rows):raise ValueError('Invalid published frame evidence')
+    evidence={f['id']:f for f in frame_rows}
+    if len(evidence)!=len(frame_rows):raise ValueError('Duplicate published frame ID')
     for entry in index.get('visual_changes',[]):
         if not isinstance(entry,dict) or set(entry)!={'review_id','change'}:raise ValueError('Invalid published visual change')
-        c=entry['change'];clip=c['clip'];a,b,precision=interval(clip);ids=clip.get('evidence_ids',[])
+        if not isinstance(entry['review_id'],str) or not entry['review_id'].strip():raise ValueError('Visual change requires a nonblank review ID')
+        c=entry['change']
+        if not isinstance(c,dict) or set(c)!={'topic','claim_type','description','clip','confidence','limits','needs_playback'}:raise ValueError('Invalid published visual change schema')
+        if c['topic'] not in ('composition','subject_action','lighting','occlusion','edit_cue') or c['confidence'] not in ('high','medium','low'):raise ValueError('Invalid visual change topic/confidence')
+        if not isinstance(c['description'],str) or not c['description'].strip() or not isinstance(c['limits'],list) or not c['limits'] or any(not isinstance(s,str) or not s.strip() for s in c['limits']):raise ValueError('Visual change needs nonblank facts and uncertainty limits')
+        clip=c['clip']
+        if not isinstance(clip,dict) or set(clip)!={'source_id','start','end','precision','evidence_ids'}:raise ValueError('Invalid visual change clip schema')
+        a,b,precision=interval(clip);ids=clip.get('evidence_ids',[])
+        if not isinstance(ids,list) or any(not isinstance(fid,str) or not fid.strip() for fid in ids):raise ValueError('Invalid visual frame IDs')
         if clip['source_id'] not in sources or precision!='sampled_frames' or len(ids)<2 or len(ids)!=len(set(ids)) or any(fid not in evidence or evidence[fid]['source_id']!=clip['source_id'] for fid in ids):raise ValueError('Invalid visual change source/frame evidence')
         times=[evidence[fid]['time'] for fid in ids]
-        if times!=sorted(times) or abs(a-min(times))>1e-6 or abs(b-max(times))>1e-6:raise ValueError('Visual change must envelope its own sampled frame evidence')
+        if any(type(t) not in (int,float) or not math.isfinite(t) for t in times):raise ValueError('Invalid actual visual evidence time')
+        if times!=sorted(set(times)) or abs(a-min(times))>1e-6 or abs(b-max(times))>1e-6:raise ValueError('Visual change must envelope distinct actual sampled frame times')
         if c.get('claim_type') not in ('visible_change','camera_motion_inference') or c.get('needs_playback') is not True or not c.get('limits') or not isinstance(c.get('description'),str):raise ValueError('Missing visual change uncertainty/claim type')
     for sid, result in transcript['sources'].items():
         if sid not in sources: raise ValueError('Unknown transcript source')

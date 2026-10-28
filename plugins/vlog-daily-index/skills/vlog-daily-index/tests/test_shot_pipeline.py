@@ -12,7 +12,9 @@ def caps():
 def result_for(task):
  i=task['input'];frames=i['frames'];sid=i['source']['id'];ids=[f['id'] for f in frames]
  clip={'source_id':sid,'start':frames[0]['time'],'end':frames[-1]['time'],'precision':'sampled_frames','evidence_ids':[ids[0],ids[-1]]}
- return {'review_id':task['review_id'],'input_digest':task['input_digest'],'observed_frame_ids':ids,'topic_status':{k:'uncertain' for k in shot.TOPICS},'observations':[{'source_id':sid,'start':f['time'],'end':f['time'],'description':'Synthetic visible frame','evidence_ids':[f['id']]} for f in frames],'changes':[{'topic':'composition','claim_type':'camera_motion_inference','description':'Synthetic change to inspect','clip':clip,'confidence':'low','limits':['Sampled only; inference is not a fact'],'needs_playback':True}],'candidate_ranges':[],'summary':'Synthetic fixture, no actual model analysis'}
+ value={'review_id':task['review_id'],'input_digest':task['input_digest'],'observed_frame_ids':ids,'topic_status':{k:'uncertain' for k in shot.TOPICS},'observations':[{'source_id':sid,'start':f['time'],'end':f['time'],'description':'Synthetic visible frame','evidence_ids':[f['id']]} for f in frames],'changes':[{'topic':'composition','claim_type':'camera_motion_inference','description':'Synthetic change to inspect','clip':clip,'confidence':'low','limits':['Sampled only; inference is not a fact'],'needs_playback':True}],'candidate_ranges':[],'summary':'Synthetic fixture, no actual model analysis'}
+ if i.get('output_policy')==shot.OBJECTIVE_POLICY:value.pop('candidate_ranges');value['topic_status'].pop('edit_cue')
+ return value
 def write_bundle(root,b,only=None):
  data=work._ledger(root)
  for jid in b['jobs']:
@@ -90,10 +92,10 @@ class ShotPipeline(unittest.TestCase):
   supplement.accept_dynamic(m,'ROOT','Authorized anchored policy')
   original=work.add_packet
   with patch.object(media,'extract_block',side_effect=fake_extract),patch.object(work,'add_packet',side_effect=RuntimeError('Simulated crash after frozen extraction')):
-   with self.assertRaises(RuntimeError):supplement.prepare(m)
+   self.assertTrue(supplement.prepare(m)['errors'])
   m=read(state/'manifest.json')
   with patch.object(media,'extract_block',side_effect=AssertionError('Resume must not re-extract frozen images')):supplement.prepare(m)
-  frames=m['supplemental_frames'];self.assertEqual((len(frames),min(f['time'] for f in frames),max(f['time'] for f in frames)),(61,0,29.96))
+  frames=m['supplemental_frames'];self.assertEqual((len(frames),min(f['time'] for f in frames),max(f['time'] for f in frames)),(61,0,30.0))
   data=work._ledger(state/'shot-review');self.assertEqual(len(data['jobs']),4);self.assertEqual(set(f['id'] for f in frames),{fid for j in data['jobs'].values() for fid in read(j['task_path'])['input']['core_frame_ids']})
   b=work.next_action(state/'shot-review',caps(),2);self.assertLessEqual(b['images'],34);self.assertEqual(len(b['jobs']),2)
   with self.assertRaises(ValueError):analysis.record_supplement_decision(m,'new-request','accept','ROOT','No recursive round')
@@ -103,7 +105,7 @@ class ShotPipeline(unittest.TestCase):
   self.assertEqual(work.next_action(out)['next_action'],'wait_slots');self.assertNotEqual(work._ledger(out)['jobs'][b['jobs'][0]]['status'],'success')
  def test_oversized_whole_segment_and_synced_state_rejected(self):
   out=self.packets(1,images=35)
-  with self.assertRaises(ValueError):work.next_action(out,caps(),2)
+  self.assertEqual(work.next_action(out,caps(),2)['next_action'],'root_correction')
   forbidden=self.root/'OneDrive'/'active'
   with self.assertRaises(ValueError):work.next_action(forbidden,caps(),2)
   self.assertFalse(forbidden.exists())
@@ -130,7 +132,7 @@ class ShotPipeline(unittest.TestCase):
     m['supplemental_pending']=[bad];self.assertEqual(supplement.accept_dynamic(m,'ROOT','Authorized policy')['accepted'],[])
   m['supplemental_pending']=[req];self.assertEqual(len(supplement.accept_dynamic(m,'ROOT','Authorized policy')['accepted']),1)
  def test_previous_frozen_prompt_success_still_finishes_reports_and_reuses_packet(self):
-  out=self.packets(1);data=work._ledger(out);job=next(iter(data['jobs'].values()));task=read(job['task_path']);task['input'].pop('program_pixel_cues',None);task['input']['instructions']='Frozen previous production prompt';task['input']['prompt_version']='4';task['input_digest']=digest(task['input']);task['review_id']='shot-'+task['input_digest'][:24];dump(job['task_path'],task);job['task_sha256']=file_hash(job['task_path']);work._save(out,data)
+  out=self.packets(1);data=work._ledger(out);job=next(iter(data['jobs'].values()));task=read(job['task_path']);task['input'].pop('program_pixel_cues',None);task['input'].pop('output_policy',None);task['input']['result_schema']=shot.Result.model_json_schema();task['input']['instructions']='Frozen previous production prompt';task['input']['prompt_version']='4';task['input_digest']=digest(task['input']);task['review_id']='shot-'+task['input_digest'][:24];dump(job['task_path'],task);job['task_sha256']=file_hash(job['task_path']);work._save(out,data)
   b=work.next_action(out,caps(),2);self.assertEqual(read(b['task_path'])['instructions'],task['input']['instructions']+work.BUNDLE_INSTRUCTIONS);work.next_action(out,bundle_id=b['bundle_id'],native_agent_id='prior-native');write_bundle(out,b);work.next_action(out,bundle_id=b['bundle_id'],outcome='complete',reason='Matching prior frozen bundle FINAL');self.assertEqual(work.next_action(out)['next_action'],'complete');work.require_finished(out)
   job=work._ledger(out)['jobs'][job['id']];record=Path(job['accepted_path']);accepted=record.read_bytes();shot.report(record,self.root/'prior-report.md');origin=job['origin'];packet=read(origin['package_path']);work.add_packet(out,packet['source'],packet,{'path':origin['package_path'],'result_path':origin['result_path']});self.assertEqual(record.read_bytes(),accepted);self.assertEqual(read(job['task_path'])['input']['prompt_version'],'4');self.assertEqual(work.next_action(out)['next_action'],'complete')
  def test_generic_cloud_water_or_legacy_candidate_does_not_auto_upgrade(self):
@@ -167,7 +169,7 @@ class RealQueryPipeline(unittest.TestCase):
    for j in data['jobs'].values():shot.report(j['accepted_path'],root/(j['id']+'.md'))
    with patch.object(media,'extract_block',side_effect=AssertionError('Exact hit must not extract')):self.assertEqual(work.plan_query(candidates,[1,2],out,ff)['cache_hits'],2)
    # A real pre-cue success keeps its original exact key/input and does not compute new cues.
-   legacy=root/'legacy-work';job=copy.deepcopy(next(j for j in data['jobs'].values() if read(j['task_path'])['input']['interval']['start']==rows[0]['start_s']));task=read(job['task_path']);task['input'].pop('program_pixel_cues');task['input_digest']=digest(task['input']);task['review_id']='shot-'+task['input_digest'][:24];task['result_path']=str(legacy/'result.json');task_path=legacy/'task.json';dump(task_path,task);dump(task['result_path'],result_for(task));accepted=shot.validate(task_path)
+   legacy=root/'legacy-work';job=copy.deepcopy(next(j for j in data['jobs'].values() if read(j['task_path'])['input']['interval']['start']==rows[0]['start_s']));task=read(job['task_path']);task['input'].pop('program_pixel_cues');task['input'].pop('output_policy',None);task['input']['result_schema']=shot.Result.model_json_schema();task['input_digest']=digest(task['input']);task['review_id']='shot-'+task['input_digest'][:24];task['result_path']=str(legacy/'result.json');task_path=legacy/'task.json';dump(task_path,task);dump(task['result_path'],result_for(task));accepted=shot.validate(task_path)
    i=task['input'];key=digest({'source':shot.source_identity(i['source']),'path':i['source']['path'],'interval':[i['interval']['start'],i['interval']['end']],'frames':17,'preview':source.get('preview',{}),'prompt':shot.VERSION})[:24]
    job.update(id=key,task_path=str(task_path),task_sha256=file_hash(task_path),accepted_path=accepted['accepted_path']);work._save(legacy,{'schema':'shot_work_v1','jobs':{key:job},'bundles':{}})
    from vlog_index import pixel_cues
