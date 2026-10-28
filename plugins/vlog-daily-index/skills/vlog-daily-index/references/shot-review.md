@@ -56,3 +56,5 @@ python scripts/shot_review.py next --output LOCAL_NONSYNC_STATE --native-capabil
 结果经`validate --task FROZEN_TASK --result RESULT_JSON`形成独立accepted记录；差异不能覆盖已有接受结果。`report --record ACCEPTED_JSON --output REPORT_MD`重新读取绑定task/result、走同一validator重建整个记录再比对，失败不覆盖旧报告。结构通过不等于语义审定，原片链接是prepare身份快照，不承诺报告时文件已再次联网核验。
 
 自动分支把已验证变化经日语义写入正式`AI_事件与兴趣点.json.visual_changes`、`AI_每日索引.md`及query的`visual_change`类型，保留源文件时码、证据、未知及事实/推断区别；不借event/interest_point触发额外地理。`visual_review_coverage`的缺失表示未评估。已有daily未带新字段时保持原序列化/证据摘要；提示升级不让既有成功初筛缓存静默失效。独立显式复看先输出单独报告/记录，后续发布仍需原日级/地理/ROOT链，不绕审核自动写回。
+
+提示版本6把相邻比较落为可核查observations：首帧基线，其后逐相邻双帧记录当前事实与可见变化/未见明确变化/不可比；再据差异合并阶段/恢复与用途候选。显示变化与未知原因分开，不强凑阶段或可用性；schema与校验器保持，旧逐帧记录仍合法。唯一提示源为shot_review.INSTRUCTIONS，新standalone/自动包共用；bundle继续取各成员已冻结提示，升级不改在途或已成功记录。query plan的精确键包含提示版本：再次显式plan是请求新版复看，不是后台失效旧缓存或全量重算；先完成旧在途bundle，再准备新版任务，不能混绑不同冻结提示。

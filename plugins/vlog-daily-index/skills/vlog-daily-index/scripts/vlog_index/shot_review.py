@@ -8,18 +8,17 @@ from . import media
 from .analysis import Evidence, Observation
 from .store import digest, read, file_hash
 
-VERSION='4'
+VERSION='6'
 TOPICS=('composition','subject_action','lighting','occlusion','edit_cue')
-INSTRUCTIONS=('独立镜头复看：按frames的实际time顺序，实际打开全部图片（含首尾），observed_frame_ids完整逐一对账。'
-'只分析本输入source与所显示时间范围；这是稀疏图片序列，不是完整视频观看。先记可见画面变化，再将相机运动仅作为camera_motion_inference单列，不能从主体位移直接断言相机移动。'
-'同时提供observations逐帧可见事实，覆盖所有core_frame_ids；每条只引用自身实际帧，start/end等于所引首尾time，单帧记同一时间点，不能把静帧外推成未显示时段的事实；同一轮不再另派medium重复看图。'
-'逐项评估composition/subject_action/lighting/occlusion/edit_cue，明确assessed/uncertain/not_assessed；没有观察到不等于无运动。'
-'每条变化/推断/候选至少引用两张不同的本序列实际帧，clip使用source文件内秒与sampled_frames精度；clip.start/end必须等于该条evidence_ids首尾实际time，不能借observed全表作未引用对照。'
-'方位按画面坐标描述；构图相近只限所显示采样时刻，不能把单帧写成运动稳定；明暗差异与原因分开，未知原因不归因。对人物姿态/光照或亮度/遮挡/构图与剪辑线索给证据；不确定具体动作/原因就写未知。不同preview状态不得据此归因光照。'
-'不能从未显示帧断言连续平滑、无抖动、无切镜、曝光原因或精确动作峰值/剪点，不给审美好坏或默认可用性定论。'
-'候选区间只是供编辑回看，不是精确剪点；needs_playback必须true。每条写confidence及具体limits，summary也保留采样限制。'
-'按result_schema写完整JSON到result_path，不把模板当分析；不读其他模型结果、旧索引文字、其他source或目录，不递归、不调用ASR、不改图片/task/业务状态。'
-'正常只回报review_id和已写结果路径；无法读全帧立即报告阻塞，不伪称看完。')
+INSTRUCTIONS=('独立镜头复看：按实际time顺序打开全部frames（含首尾），observed_frame_ids完整同序对账。只分析本source与显示范围，这是采样图片，不是完整视频观看；时间用源文件播放秒，未知倍率不换算现实速度。'
+'observations是可核查的画面事实，不是内部思维过程：首帧写基线；其后每个相邻帧对各写一条，description记录当前帧可见内容、比较状态（可见变化/未见明确变化/不可比）及相对差异。每条同时引用前后帧ID，start/end为这两帧实际time；首帧只引自身ID，时间为同一点。不要用整段概述替代逐对事实，覆盖全部core_frame_ids。'
+'逐对追踪同一对象、区域或固定参照的位置、姿态、形状、明暗、遮挡；追踪失败写不可比，不强行对应。不同可追踪区域能互证时记录显示的同步或不同步变化，不把取景、对象或preview更换当作同一区域亮暗变化。可见变化与原因分开：显示变亮/变暗可以确认而原因仍未知，不能因未知原因抹掉显示变化。'
+'再根据已记录相邻差异的出现、持续、转折、恢复合并changes，有证据才划阶段，不凑类别或变化。相机方向须由多处固定参照相对画框的位置变化支持，另列camera_motion_inference；不能只凭主体位移推相机运动，平移/转动无法区分就写未知。'
+'逐项填composition/subject_action/lighting/occlusion/edit_cue的assessed/uncertain/not_assessed；允许未见明确变化或无法判断，未观察不等于无运动。'
+'candidate_ranges按有证据的阶段与用途选回看段，在reason说明条件性保留或重点检查理由；未连续观看不能成为省略已显示阶段的理由。同质整段可整段、无依据可无候选，不强拆多个区间。候选不是已批准可用段或精确剪点，needs_playback必须true。'
+'每条变化/推断/候选引用2+本source不同实际帧，证据按时序；clip用sampled_frames，start/end等于该条evidence_ids首尾实际time，不能借observed全表补未引用端点。逐条写confidence及具体limits，summary保留采样限制。'
+'不从未显示帧断言连续平滑、无抖动、无切镜、曝光原因、精确动作峰值或剪点，不给默认审美可用性；同轮不另派medium重复看图。'
+'按result_schema写完整JSON到result_path，不把模板当分析；不读其他模型结果、旧索引、其他source/目录，不递归、不调用ASR、不改图片/task/业务状态。正常只回review_id和结果路径，无法读全帧立即报阻塞，不伪称看完；不输出内部推理过程。')
 
 class Strict(BaseModel):
     model_config=ConfigDict(extra='forbid',allow_inf_nan=False)

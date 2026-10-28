@@ -26,6 +26,11 @@ class ShotReview(unittest.TestCase):
   for field,value in [('end',7),('start',-1),('end',float('inf')),('start',float('nan')),('description','   '),('source_id','other'),('evidence_ids',['f0','f0']),('evidence_ids',['missing'])]:
    bad=copy.deepcopy(v);bad['observations'][0][field]=value;self.invalid(bad)
   v['observations'][0].update(end=1,evidence_ids=['f0','f2']);self.assertEqual(shot.validate_value(self.task,v)['observations'][0]['end'],1)
+ def test_adjacent_pair_facts_use_existing_schema_and_static_import_contract(self):
+  from vlog_index import analysis
+  self.task['input'].update(requires_facts=True,core_frame_ids=['f0','f1','f2']);self.task['input_digest']=shot.digest(self.task['input']);v=copy.deepcopy(self.value);v['input_digest']=self.task['input_digest'];v['observations']=[{'source_id':'source-A','start':0,'end':0,'description':'Visible baseline','evidence_ids':['f0']},{'source_id':'source-A','start':0,'end':0.5,'description':'Adjacent displayed comparison: no clear change in the tracked reference','evidence_ids':['f0','f1']},{'source_id':'source-A','start':0.5,'end':1,'description':'Adjacent displayed comparison: visible position difference; cause unknown','evidence_ids':['f1','f2']}]
+  checked=shot.validate_value(self.task,v);package={'package_id':'pair-fixture','source':{'id':'source-A','duration':2},'core_frame_ids':['f0','f1','f2'],'frames':self.task['input']['frames'],'transcripts':[],'gps':[]};facts={'package_id':package['package_id'],'analysed_frame_ids':checked['observed_frame_ids'],'observations':checked['observations'],'events':[],'interest_points':[],'supplemental_requests':[],'summary':checked['summary']}
+  self.assertEqual(analysis.validate_result(package,facts)['observations'],checked['observations'])
  def test_missing_observed_image_rejected(self):
   v=copy.deepcopy(self.value);v['observed_frame_ids'].pop();self.invalid(v)
  def test_duplicate_observed_image_rejected(self):
@@ -94,7 +99,7 @@ class ShotReview(unittest.TestCase):
   manifest=self.root/'manifest.json';manifest.write_text(json.dumps({'sources':[s],'config':{}}));old=manifest.read_bytes();video_hash=shot.file_hash(video)
   out=self.root/'cache';rec=shot.prepare(manifest,s['id'],0.2,2.2,9,out,ff,('max','high'))
   one,two=[json.loads(Path(p).read_bytes()) for p in rec['task_paths']]
-  self.assertEqual(one['input'],two['input']);self.assertEqual(one['input_digest'],two['input_digest']);self.assertNotEqual(one['result_path'],two['result_path']);self.assertEqual(len(one['input']['frames']),9);self.assertEqual(one['input']['frames'][0]['boundary'],'start');self.assertEqual(one['input']['frames'][-1]['boundary'],'end')
+  self.assertEqual(one['input']['instructions'],shot.INSTRUCTIONS);self.assertEqual(one['input']['prompt_version'],shot.VERSION);self.assertEqual(one['input'],two['input']);self.assertEqual(one['input_digest'],two['input_digest']);self.assertNotEqual(one['result_path'],two['result_path']);self.assertEqual(len(one['input']['frames']),9);self.assertEqual(one['input']['frames'][0]['boundary'],'start');self.assertEqual(one['input']['frames'][-1]['boundary'],'end')
   self.assertEqual(old,manifest.read_bytes());self.assertEqual(video_hash,shot.file_hash(video));self.assertEqual(one['input']['preview']['status'],'unspecified')
   with self.assertRaises(ValueError):shot.prepare(manifest,s['id'],0.2,2.2,9,out,ff)
 if __name__=='__main__':unittest.main()

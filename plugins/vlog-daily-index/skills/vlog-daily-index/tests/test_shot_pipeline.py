@@ -36,7 +36,7 @@ class ShotPipeline(unittest.TestCase):
   return out
  def test_full_two_segment_budget_unknown_and_partial_completion_recovery(self):
   out=self.packets(2);b=work.next_action(out,caps(),2);self.assertEqual((b['next_action'],b['images'],len(b['jobs'])),('spawn',34,2))
-  thin=read(b['task_path']);self.assertNotIn('result_schema',thin['members'][0]);self.assertNotIn('sha256',thin['members'][0]['frames'][0]);self.assertNotIn('preview',thin['members'][0]['frames'][0]);self.assertEqual(thin['members'][0]['requires_facts'],True)
+  thin=read(b['task_path']);self.assertEqual(thin['instructions'],shot.INSTRUCTIONS+work.BUNDLE_INSTRUCTIONS);self.assertNotIn('result_schema',thin['members'][0]);self.assertNotIn('sha256',thin['members'][0]['frames'][0]);self.assertNotIn('preview',thin['members'][0]['frames'][0]);self.assertEqual(thin['members'][0]['requires_facts'],True)
   self.assertEqual(work.next_action(out,caps(),9)['next_action'],'recover_bind')
   work.next_action(out,bundle_id=b['bundle_id'],native_agent_id='synthetic-native-1');write_bundle(out,b,[b['jobs'][0]])
   self.assertEqual(work.next_action(out,caps(),9)['next_action'],'wait')
@@ -70,6 +70,8 @@ class ShotPipeline(unittest.TestCase):
   with patch.object(media,'extract_block',side_effect=fake_extract):supplement.prepare(m)
   self.assertEqual(len([p for p in m['packages'] if p.get('shot_review')]),2)
   self.assertFalse(work._ledger(state/'shot-review')['bundles'])
+  for j in work._ledger(state/'shot-review')['jobs'].values():
+   frozen=read(j['task_path'])['input'];self.assertEqual(frozen['instructions'],shot.INSTRUCTIONS);self.assertEqual(frozen['prompt_version'],shot.VERSION)
   b=work.next_action(state/'shot-review',caps(),2);work.next_action(state/'shot-review',bundle_id=b['bundle_id'],native_agent_id='synthetic-max');write_bundle(state/'shot-review',b)
   self.assertEqual(work.next_action(state/'shot-review')['next_action'],'wait')
   work.next_action(state/'shot-review',bundle_id=b['bundle_id'],outcome='complete',reason='Synthetic native final');self.assertEqual(work.next_action(state/'shot-review')['next_action'],'complete')
@@ -126,6 +128,10 @@ class ShotPipeline(unittest.TestCase):
     with self.assertRaises(ValueError):analysis.validate_dynamic_request(package,bad)
     m['supplemental_pending']=[bad];self.assertEqual(supplement.accept_dynamic(m,'ROOT','Authorized policy')['accepted'],[])
   m['supplemental_pending']=[req];self.assertEqual(len(supplement.accept_dynamic(m,'ROOT','Authorized policy')['accepted']),1)
+ def test_previous_frozen_prompt_success_still_finishes_reports_and_reuses_packet(self):
+  out=self.packets(1);data=work._ledger(out);job=next(iter(data['jobs'].values()));task=read(job['task_path']);task['input']['instructions']='Frozen previous production prompt';task['input']['prompt_version']='4';task['input_digest']=digest(task['input']);task['review_id']='shot-'+task['input_digest'][:24];dump(job['task_path'],task);job['task_sha256']=file_hash(job['task_path']);work._save(out,data)
+  b=work.next_action(out,caps(),2);self.assertEqual(read(b['task_path'])['instructions'],task['input']['instructions']+work.BUNDLE_INSTRUCTIONS);work.next_action(out,bundle_id=b['bundle_id'],native_agent_id='prior-native');write_bundle(out,b);work.next_action(out,bundle_id=b['bundle_id'],outcome='complete',reason='Matching prior frozen bundle FINAL');self.assertEqual(work.next_action(out)['next_action'],'complete');work.require_finished(out)
+  job=work._ledger(out)['jobs'][job['id']];record=Path(job['accepted_path']);accepted=record.read_bytes();shot.report(record,self.root/'prior-report.md');origin=job['origin'];packet=read(origin['package_path']);work.add_packet(out,packet['source'],packet,{'path':origin['package_path'],'result_path':origin['result_path']});self.assertEqual(record.read_bytes(),accepted);self.assertEqual(read(job['task_path'])['input']['prompt_version'],'4');self.assertEqual(work.next_action(out)['next_action'],'complete')
  def test_generic_cloud_water_or_legacy_candidate_does_not_auto_upgrade(self):
   m,_,_=fixture(self.root,count=1);m['config']['supplement_mode']='shot_v1';m['supplemental_pending']=[{'source_id':'s','start':0,'end':8,'reason':'Clouds/water/drone category only'}]
   self.assertEqual(supplement.accept_dynamic(m,'ROOT','Authorized rule')['accepted'],[]);self.assertEqual(supplement.prepare(m)['packages'],[])
