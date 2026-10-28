@@ -21,7 +21,8 @@ def write_bundle(root,b,only=None):
 def fake_extract(ffmpeg,source,block,directory,candidate,**kwargs):
  folder=Path(directory);folder.mkdir(parents=True,exist_ok=True);frames=[]
  for n,t in enumerate(block['samples']):
-  p=folder/f'{n:04d}.jpg';p.write_bytes(b'Synthetic image '+str(t).encode());frames.append({'id':f'{source["id"]}-b{block["index"]:03d}-f{n:03d}','source_id':source['id'],'time':t,'pts':t+source['start_pts'],'precision':'decoded_frame_pts','path':str(p),'preview':kwargs.get('preview',{})})
+  from PIL import Image
+  p=folder/f'{n:04d}.jpg';Image.new('L',(32,24),min(255,int(t*7))).save(p);frames.append({'id':f'{source["id"]}-b{block["index"]:03d}-f{n:03d}','source_id':source['id'],'time':t,'pts':t+source['start_pts'],'precision':'decoded_frame_pts','path':str(p),'preview':kwargs.get('preview',{})})
  return frames
 
 class ShotPipeline(unittest.TestCase):
@@ -36,7 +37,7 @@ class ShotPipeline(unittest.TestCase):
   return out
  def test_full_two_segment_budget_unknown_and_partial_completion_recovery(self):
   out=self.packets(2);b=work.next_action(out,caps(),2);self.assertEqual((b['next_action'],b['images'],len(b['jobs'])),('spawn',34,2))
-  thin=read(b['task_path']);self.assertEqual(thin['instructions'],shot.INSTRUCTIONS+work.BUNDLE_INSTRUCTIONS);self.assertNotIn('result_schema',thin['members'][0]);self.assertNotIn('sha256',thin['members'][0]['frames'][0]);self.assertNotIn('preview',thin['members'][0]['frames'][0]);self.assertEqual(thin['members'][0]['requires_facts'],True)
+  thin=read(b['task_path']);self.assertEqual(thin['instructions'],shot.INSTRUCTIONS+work.BUNDLE_INSTRUCTIONS);self.assertNotIn('result_schema',thin['members'][0]);self.assertNotIn('sha256',thin['members'][0]['frames'][0]);self.assertNotIn('preview',thin['members'][0]['frames'][0]);self.assertEqual(thin['members'][0]['requires_facts'],True);self.assertEqual(thin['members'][0]['program_pixel_cues']['columns'],['to_frame_1based','dB','R']);self.assertEqual(len(thin['members'][0]['program_pixel_cues']['adjacent_rows']),16)
   self.assertEqual(work.next_action(out,caps(),9)['next_action'],'recover_bind')
   work.next_action(out,bundle_id=b['bundle_id'],native_agent_id='synthetic-native-1');write_bundle(out,b,[b['jobs'][0]])
   self.assertEqual(work.next_action(out,caps(),9)['next_action'],'wait')
@@ -71,7 +72,7 @@ class ShotPipeline(unittest.TestCase):
   self.assertEqual(len([p for p in m['packages'] if p.get('shot_review')]),2)
   self.assertFalse(work._ledger(state/'shot-review')['bundles'])
   for j in work._ledger(state/'shot-review')['jobs'].values():
-   frozen=read(j['task_path'])['input'];self.assertEqual(frozen['instructions'],shot.INSTRUCTIONS);self.assertEqual(frozen['prompt_version'],shot.VERSION)
+   frozen=read(j['task_path'])['input'];self.assertEqual(frozen['program_pixel_cues']['columns'],['to_frame_1based','dB','R']);self.assertEqual(frozen['instructions'],shot.INSTRUCTIONS);self.assertEqual(frozen['prompt_version'],shot.VERSION)
   b=work.next_action(state/'shot-review',caps(),2);work.next_action(state/'shot-review',bundle_id=b['bundle_id'],native_agent_id='synthetic-max');write_bundle(state/'shot-review',b)
   self.assertEqual(work.next_action(state/'shot-review')['next_action'],'wait')
   work.next_action(state/'shot-review',bundle_id=b['bundle_id'],outcome='complete',reason='Synthetic native final');self.assertEqual(work.next_action(state/'shot-review')['next_action'],'complete')
@@ -129,7 +130,7 @@ class ShotPipeline(unittest.TestCase):
     m['supplemental_pending']=[bad];self.assertEqual(supplement.accept_dynamic(m,'ROOT','Authorized policy')['accepted'],[])
   m['supplemental_pending']=[req];self.assertEqual(len(supplement.accept_dynamic(m,'ROOT','Authorized policy')['accepted']),1)
  def test_previous_frozen_prompt_success_still_finishes_reports_and_reuses_packet(self):
-  out=self.packets(1);data=work._ledger(out);job=next(iter(data['jobs'].values()));task=read(job['task_path']);task['input']['instructions']='Frozen previous production prompt';task['input']['prompt_version']='4';task['input_digest']=digest(task['input']);task['review_id']='shot-'+task['input_digest'][:24];dump(job['task_path'],task);job['task_sha256']=file_hash(job['task_path']);work._save(out,data)
+  out=self.packets(1);data=work._ledger(out);job=next(iter(data['jobs'].values()));task=read(job['task_path']);task['input'].pop('program_pixel_cues',None);task['input']['instructions']='Frozen previous production prompt';task['input']['prompt_version']='4';task['input_digest']=digest(task['input']);task['review_id']='shot-'+task['input_digest'][:24];dump(job['task_path'],task);job['task_sha256']=file_hash(job['task_path']);work._save(out,data)
   b=work.next_action(out,caps(),2);self.assertEqual(read(b['task_path'])['instructions'],task['input']['instructions']+work.BUNDLE_INSTRUCTIONS);work.next_action(out,bundle_id=b['bundle_id'],native_agent_id='prior-native');write_bundle(out,b);work.next_action(out,bundle_id=b['bundle_id'],outcome='complete',reason='Matching prior frozen bundle FINAL');self.assertEqual(work.next_action(out)['next_action'],'complete');work.require_finished(out)
   job=work._ledger(out)['jobs'][job['id']];record=Path(job['accepted_path']);accepted=record.read_bytes();shot.report(record,self.root/'prior-report.md');origin=job['origin'];packet=read(origin['package_path']);work.add_packet(out,packet['source'],packet,{'path':origin['package_path'],'result_path':origin['result_path']});self.assertEqual(record.read_bytes(),accepted);self.assertEqual(read(job['task_path'])['input']['prompt_version'],'4');self.assertEqual(work.next_action(out)['next_action'],'complete')
  def test_generic_cloud_water_or_legacy_candidate_does_not_auto_upgrade(self):
@@ -165,6 +166,18 @@ class RealQueryPipeline(unittest.TestCase):
    data=work._ledger(out)
    for j in data['jobs'].values():shot.report(j['accepted_path'],root/(j['id']+'.md'))
    with patch.object(media,'extract_block',side_effect=AssertionError('Exact hit must not extract')):self.assertEqual(work.plan_query(candidates,[1,2],out,ff)['cache_hits'],2)
+   # A real pre-cue success keeps its original exact key/input and does not compute new cues.
+   legacy=root/'legacy-work';job=copy.deepcopy(next(j for j in data['jobs'].values() if read(j['task_path'])['input']['interval']['start']==rows[0]['start_s']));task=read(job['task_path']);task['input'].pop('program_pixel_cues');task['input_digest']=digest(task['input']);task['review_id']='shot-'+task['input_digest'][:24];task['result_path']=str(legacy/'result.json');task_path=legacy/'task.json';dump(task_path,task);dump(task['result_path'],result_for(task));accepted=shot.validate(task_path)
+   i=task['input'];key=digest({'source':shot.source_identity(i['source']),'path':i['source']['path'],'interval':[i['interval']['start'],i['interval']['end']],'frames':17,'preview':source.get('preview',{}),'prompt':shot.VERSION})[:24]
+   job.update(id=key,task_path=str(task_path),task_sha256=file_hash(task_path),accepted_path=accepted['accepted_path']);work._save(legacy,{'schema':'shot_work_v1','jobs':{key:job},'bundles':{}})
+   from vlog_index import pixel_cues
+   with patch.object(pixel_cues,'signature',side_effect=AssertionError('Legacy hit must not compute/sign cues')),patch.object(media,'extract_block',side_effect=AssertionError('Legacy hit must not extract')):
+    self.assertEqual(work.plan_query(candidates,[1],legacy,ff)['cache_hits'],1)
+   frozen=Path(i['frames'][0]['path']);old_image=frozen.read_bytes();frozen.write_bytes(old_image+b'changed')
+   try:
+    with self.assertRaises(ValueError):work.plan_query(candidates,[1],legacy,ff)
+   finally:frozen.write_bytes(old_image)
+   self.assertNotIn('program_pixel_cues',read(task_path)['input'])
    self.assertEqual(file_hash(video),original_hash)
    changed=copy.deepcopy(rows);changed[0]['original_path']=str(day/'AI display alias.mp4');dump(candidates,changed)
    with self.assertRaises(ValueError):work.plan_query(candidates,[1],root/'bad-map',ff)

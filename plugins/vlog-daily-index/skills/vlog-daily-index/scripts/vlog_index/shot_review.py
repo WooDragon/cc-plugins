@@ -92,6 +92,8 @@ def prepare(manifest,source_id,start,end,count,output,ffmpeg,efforts=('max',)):
         f['sha256']=file_hash(f['path']);f['boundary']='start' if n==0 else 'end' if n==len(frames)-1 else None
     source={**source_identity(s),'path':s['path'],'clock':{k:s.get('metadata',{}).get(k) for k in ('time_verified','playback_rate_verified','captured_at_utc','capture_fps','format_fps')}}
     identity={'schema':'shot_review_input_v1','prompt_version':VERSION,'source':source,'interval':{'start':start,'end':end,'time_basis':'source_file_playback_seconds'},'frames':frames,'preview':preview,'sampling':{'requested_frames':count,'actual_frames':len(frames),'max_gap_seconds':max(b['time']-a['time'] for a,b in zip(frames,frames[1:])),'first_time':frames[0]['time'],'last_time':frames[-1]['time'],'coverage':'sampled_sequence_not_continuous_video'},'instructions':INSTRUCTIONS,'result_schema':Result.model_json_schema()}
+    from . import pixel_cues
+    identity['program_pixel_cues']=pixel_cues.build(identity)
     input_digest=digest(identity);review_id='shot-'+input_digest[:24]
     tasks=[]
     for effort in efforts:

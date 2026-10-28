@@ -99,7 +99,7 @@ class ShotReview(unittest.TestCase):
   manifest=self.root/'manifest.json';manifest.write_text(json.dumps({'sources':[s],'config':{}}));old=manifest.read_bytes();video_hash=shot.file_hash(video)
   out=self.root/'cache';rec=shot.prepare(manifest,s['id'],0.2,2.2,9,out,ff,('max','high'))
   one,two=[json.loads(Path(p).read_bytes()) for p in rec['task_paths']]
-  self.assertEqual(one['input']['instructions'],shot.INSTRUCTIONS);self.assertEqual(one['input']['prompt_version'],shot.VERSION);self.assertEqual(one['input'],two['input']);self.assertEqual(one['input_digest'],two['input_digest']);self.assertNotEqual(one['result_path'],two['result_path']);self.assertEqual(len(one['input']['frames']),9);self.assertEqual(one['input']['frames'][0]['boundary'],'start');self.assertEqual(one['input']['frames'][-1]['boundary'],'end')
+  self.assertEqual(one['input']['program_pixel_cues']['columns'],['to_frame_1based','dB','R']);self.assertEqual(len(one['input']['program_pixel_cues']['adjacent_rows']),8);self.assertEqual(one['input']['instructions'],shot.INSTRUCTIONS);self.assertEqual(one['input']['prompt_version'],shot.VERSION);self.assertEqual(one['input'],two['input']);self.assertEqual(one['input_digest'],two['input_digest']);self.assertNotEqual(one['result_path'],two['result_path']);self.assertEqual(len(one['input']['frames']),9);self.assertEqual(one['input']['frames'][0]['boundary'],'start');self.assertEqual(one['input']['frames'][-1]['boundary'],'end')
   self.assertEqual(old,manifest.read_bytes());self.assertEqual(video_hash,shot.file_hash(video));self.assertEqual(one['input']['preview']['status'],'unspecified')
   with self.assertRaises(ValueError):shot.prepare(manifest,s['id'],0.2,2.2,9,out,ff)
 if __name__=='__main__':unittest.main()

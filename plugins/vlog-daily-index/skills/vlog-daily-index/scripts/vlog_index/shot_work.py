@@ -34,6 +34,8 @@ def add_packet(root,source,package,manifest_record):
         for f in frames:f['sha256']=file_hash(f['path'])
         times=[f['time'] for f in frames]
         identity={'schema':'shot_review_input_v1','prompt_version':shot.VERSION,'source':{**shot.source_identity(source),'path':source['path'],'clock':{k:source.get('metadata',{}).get(k) for k in ('time_verified','playback_rate_verified','captured_at_utc','capture_fps','format_fps')}},'interval':{'start':min(times),'end':min(source['duration'],max(times)+1/source['fps']),'time_basis':'source_file_playback_seconds'},'frames':frames,'core_frame_ids':package['core_frame_ids'],'requires_facts':True,'preview':frames[0].get('preview',{}),'sampling':{'actual_frames':len(frames),'max_gap_seconds':max((b-a for a,b in zip(times,times[1:])),default=0),'coverage':'sampled_sequence_not_continuous_video'},'instructions':shot.INSTRUCTIONS,'result_schema':shot.Result.model_json_schema()}
+        from . import pixel_cues
+        identity['program_pixel_cues']=pixel_cues.build(identity)
         task={'schema':'shot_review_task_v1','review_id':'shot-'+digest(identity)[:24],'input_digest':digest(identity),'input':identity,'result_path':str(root/'jobs'/jid/'unused.result.json'),'request_route':{'stage':'shot_review','model':'gpt-6-luna','reasoning_effort':'max','runtime_model_verified':False}}
         task_path=root/'jobs'/jid/'task.json';shot.write_new(task_path,task)
         data['jobs'][jid]={'id':jid,'task_path':str(task_path),'task_sha256':file_hash(task_path),'status':'queued','source_id':source['id'],'directory':str(Path(source['path']).parent),'start':min(times),'images':len(frames),'provenance':[{'kind':'supplement','package_id':jid}],'origin':{'package_id':jid,'package_path':manifest_record['path'],'result_path':manifest_record['result_path'],'package_sha256':file_hash(manifest_record['path'])}}
@@ -73,7 +75,13 @@ def plan_query(candidates,selected,output,ffmpeg,start=None,end=None):
             lut=preview.get('lut_path')
             if not lut or file_hash(lut)!=preview.get('lut_sha256'):raise ValueError('Original preview LUT is unavailable/changed')
             luts[preview['device']+':'+preview['log_token']]=lut
-        key=digest({'source':shot.source_identity(source),'path':source['path'],'interval':[a,b],'frames':17,'preview':preview,'prompt':shot.VERSION})[:24]
+        key_input={'source':shot.source_identity(source),'path':source['path'],'interval':[a,b],'frames':17,'preview':preview,'prompt':shot.VERSION}
+        legacy_key=digest(key_input)[:24]
+        # Reuse existing no-cue jobs before considering any new implementation.
+        if legacy_key in _ledger(root)['jobs']:key=legacy_key
+        else:
+            from . import pixel_cues
+            key=digest({**key_input,'program_pixel_cues':pixel_cues.signature()})[:24]
         normalized.append((key,source,a,b,luts,{'kind':'query','candidate':number,'publication':str(publication),'publication_digest':snap,'original_interval':[row.get('start_s'),row.get('end_s')]}))
     if needs:return {'next_action':'select_interval','requests':needs,'prepared':0,'reason':'No extraction until every selected candidate has an executable interval'}
     if not normalized:return {'next_action':'use_existing_review','existing_reviews':existing_reviews,'prepared':0,'native_calls':0}
@@ -94,7 +102,11 @@ def plan_query(candidates,selected,output,ffmpeg,start=None,end=None):
 
 def _brief(job,task,result_path):
     i=task['input']
-    return {'job_id':job['id'],'review_id':task['review_id'],'input_digest':task['input_digest'],'source_id':i['source']['id'],'time_basis':'source_file_playback_seconds','time_precision':'decoded_frame_pts','clock':{**i['source'].get('clock',{}),'source_fps':i['source'].get('fps')},'interval':i['interval'],'core_frame_ids':i.get('core_frame_ids',[f['id'] for f in i['frames']]),'requires_facts':i.get('requires_facts',False),'preview':{k:i.get('preview',{}).get(k) for k in ('status','normalized','applied','warning')},'sampling':i['sampling'],'frames':[{k:f[k] for k in ('id','time','path')} for f in i['frames']],'result_path':str(result_path)}
+    member={'job_id':job['id'],'review_id':task['review_id'],'input_digest':task['input_digest'],'source_id':i['source']['id'],'time_basis':'source_file_playback_seconds','time_precision':'decoded_frame_pts','clock':{**i['source'].get('clock',{}),'source_fps':i['source'].get('fps')},'interval':i['interval'],'core_frame_ids':i.get('core_frame_ids',[f['id'] for f in i['frames']]),'requires_facts':i.get('requires_facts',False),'preview':{k:i.get('preview',{}).get(k) for k in ('status','normalized','applied','warning')},'sampling':i['sampling'],'frames':[{k:f[k] for k in ('id','time','path')} for f in i['frames']],'result_path':str(result_path)}
+    if 'program_pixel_cues' in i:
+        from . import pixel_cues
+        member['program_pixel_cues']=pixel_cues.brief(i['program_pixel_cues'])
+    return member
 BUNDLE_INSTRUCTIONS='按members逐段独立完成，不能跨source推运动。每段落结果；全部完成后只回报一次bundle_id和清单，异常立即报已完成/未开始并停止，不续派、不递归。'
 
 def _bundle_task(bundle,data):

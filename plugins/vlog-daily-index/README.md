@@ -51,6 +51,8 @@ python scripts/vlog_daily_index.py --help
 
 初筛提出有具体帧证据和剪辑问题的动态候选，在日语义前经批量规则接受，复用一轮补采并只派Luna max一次，同轮产生事实与变化。真实检索候选也可按源文件秒显式复看；精确缓存、2段/34图薄bundle、native未知状态和逐证据校验由程序处理。变化进入日索引JSON/Markdown和query的visual_change类型，事实与运镜推断分列，未知留给原片回看。旧run、静态路由/缓存、独立地理与ROOT审查保持；本新增max路由须宿主明确支持，不降档。见[镜头复看](./skills/vlog-daily-index/references/shot-review.md)。
 
+新建镜头复看任务附固定网格显示灰度差与归一化内容残差两列线索，Luna仍逐对核图，不由数字推断光照原因、运镜方向或可用性。两段同图历史对照仅显示亮暗过程核查有所改善；候选仍偏宽，不能视为自动精准选段或一般质量/费用证明。旧冻结任务与成功缓存继续复用。
+
 ## 0.4.0 视觉工作组
 
 默认用 `vision-work` 获取下一步：按完整原包组成目标10图工作组，最多两组或换目录时换新native worker，ROOT照原样宿主合同真实新建/续派/等待。成功缓存、逐帧证据校验、独立语义与地理及ROOT审查继续保留；旧claim可完成，同run接入工作组后不混用旧入口新领取。调用与恢复见[工作组说明](./skills/vlog-daily-index/references/vision-work.md)。

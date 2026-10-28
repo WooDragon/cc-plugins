@@ -32,4 +32,6 @@ python tools/verify_release.py --archive SKILL_ZIP --output LOCAL_VERIFICATION -
 
 安装见[setup.md](setup.md)，固定入口见[tooling.md](tooling.md)，数据流见[architecture.md](architecture.md)，故障续作见[recovery.md](recovery.md)。
 
+像素线索的合成测试覆盖零差、全局亮度/对比变化、内容替换/平移、低对比null、输入身份与旧缓存恢复；两个数值均不构成光照原因或运镜语义分类，梯度平移与整体变亮可能不可区分。
+
 0.5.0新增合成端到端覆盖真实query来源/原路径适配、精确缓存、2段/34图max薄bundle、部分失败与未知native状态、原补采到日JSON/MD/query的动态通道及needs_playback防循环；测试不调用模型。独立镜头小样仅说明有限采样可读性，不能证明完整视频观看、所有宿主实跑、一般max优势或费用下降。
