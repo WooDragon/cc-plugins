@@ -8,7 +8,7 @@
 # ENGINE_TMP_DIRS arrays are declared (and cleared) by the caller before
 # trap registration — this file only appends its own private temp paths.
 #
-# bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
+# Requires Bash 5.0+; see the plugin README.md runtime requirements.
 
 # --- One-time setup (called once, outside the retry loop): CLI existence
 #     check + model resolution + sandboxed workdir/merged-prompt/UTF-8

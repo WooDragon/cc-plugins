@@ -42,7 +42,7 @@
 #                             so agy's own session, if still "live", is now
 #                             one round behind).
 #
-# bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
+# Requires Bash 5.0+; see the plugin README.md runtime requirements.
 
 run_consultation() {
   # Portable timeout: timeout (GNU/Homebrew) > gtimeout (coreutils) > none

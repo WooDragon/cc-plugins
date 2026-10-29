@@ -1,4 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Runtime requirement: reject before stdin, libraries, switches, or state.
+if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"plan-review requires Bash 5.0+. On macOS, install Homebrew Bash (brew install bash). Put its bin first on PATH, verify bash --version, and start a new Claude Code process from that environment."}}'
+  exit 0
+fi
+
 # PreToolUse:Agent/Task hook — Manifest v2 signature-set enforcement.
 #
 # A valid v2 state written by plan-review.sh declares permitted dispatch

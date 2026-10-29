@@ -5,7 +5,7 @@
 # State-machine concerns (counter writes, ATTEMPT/TOTAL_ROUNDS mutation,
 # dispatch JSON persistence) stay in the caller — this file only renders.
 #
-# bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
+# Requires Bash 5.0+; see the plugin README.md runtime requirements.
 
 # --- Extract structured verdict (XML-tag isolation, anti-hijack) ---
 # Defensive extraction: LLM output is untrusted external input.

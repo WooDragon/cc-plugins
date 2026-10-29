@@ -1,4 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Runtime requirement: reject before stdin, libraries, switches, or state.
+if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"plan-review requires Bash 5.0+. On macOS, install Homebrew Bash (brew install bash). Put its bin first on PATH, verify bash --version, and start a new Claude Code process from that environment."}}'
+  exit 0
+fi
+
 # PreToolUse hook: Adversarial plan review via cross-model consultation.
 #
 # Triggered when Plan agent calls ExitPlanMode (via PreToolUse matcher).
@@ -8,7 +14,7 @@
 #     CONCERNS → deny with feedback, increment ATTEMPT + TOTAL, Claude revises or rebuts
 #     REJECT   → deny with feedback, increment TOTAL only (ATTEMPT frozen), Critical must resolve
 #   Termination (dual safety valves):
-#     Non-Critical valve: ATTEMPT >= MAX_ROUNDS → allow (escalate to user)
+#     Non-Critical valve: ATTEMPT >= MAX_ROUNDS → validate Manifest and arm dispatch; allow only on success
 #     Global valve:       TOTAL >= MAX_TOTAL_ROUNDS → deny (hard stop, tombstone counter)
 #
 # All non-guard exits emit structured JSON (allow or deny). No silent exit 0.
@@ -274,7 +280,7 @@ HISTORY_FILE="$COUNTER_DIR/.review-history-${SESSION_ID}"
 # Dispatch state is session-scoped, but stale files are global debris. Clean
 # them for every valid plan-review invocation, including Tier0 plans that have
 # no Manifest and therefore never enter the approval serializer branch.
-find "$DISPATCH_DIR" -maxdepth 1 -name '.dispatch-*.json*' -mmin +30 -delete 2>/dev/null || true
+find "$DISPATCH_DIR" -maxdepth 1 -type f -name '.dispatch-*.json*' -mmin +30 -delete 2>/dev/null || true
 
 # --- Read counter (new format ATTEMPT:TOTAL, backward-compat with old single-number) ---
 IFS=: read -r ATTEMPT TOTAL_ROUNDS <<< "$(cat "$COUNTER_FILE" 2>/dev/null || echo "0:0")"
@@ -360,6 +366,38 @@ if [ -f "$APPROVE_MARKER" ]; then
   fi
 fi
 
+# Shared writer: arming is not approval. Keep filesystem failures explicit even
+# when the caller invokes this function in an if/|| context (errexit is disabled).
+arm_dispatch_state() {
+  local dispatch_file="$DISPATCH_DIR/.dispatch-${SESSION_ID}.json" dispatch_temp=""
+  if [ -L "$dispatch_file" ] || { [ -e "$dispatch_file" ] && [ ! -f "$dispatch_file" ]; }; then
+    log_decision "manifest-write-skipped reason=target-not-regular"
+    return 1
+  fi
+  if ! has_manifest "$PLAN"; then
+    if [ -f "$dispatch_file" ] && ! rm -f "$dispatch_file"; then
+      log_decision "manifest-write-skipped reason=remove-failed"
+      return 1
+    fi
+    return 0
+  fi
+  if dispatch_temp=$(mktemp "$DISPATCH_DIR/.dispatch-${SESSION_ID}.json.XXXXXX" 2>/dev/null) \
+     && parse_manifest_to_json "$PLAN" "$(plan_hash "$PLAN")" > "$dispatch_temp" 2>/dev/null \
+     && dispatch_state_is_valid_v2 "$dispatch_temp" \
+     && mv -f "$dispatch_temp" "$dispatch_file" 2>/dev/null \
+     && [ -f "$dispatch_file" ] && dispatch_state_is_valid_v2 "$dispatch_file"; then
+    log_decision "manifest-written file=$dispatch_file"
+    return 0
+  fi
+  rm -f "${dispatch_temp:-}" 2>/dev/null || true
+  # Never remove an unknown object; discard only an ordinary stale/failed state.
+  if [ -f "$dispatch_file" ] && [ ! -L "$dispatch_file" ]; then
+    rm -f "$dispatch_file" 2>/dev/null || true
+  fi
+  log_decision "manifest-write-skipped reason=write-failed"
+  return 1
+}
+
 # --- Global safety valve: total rounds exhausted → hard deny (tombstone counter) ---
 # Never delete counter — tombstone blocks subsequent calls until human intervenes
 if [ "$TOTAL_ROUNDS" -ge "$REVIEW_MAX_TOTAL_ROUNDS" ]; then
@@ -378,21 +416,7 @@ EOF
   exit 0
 fi
 
-# --- Non-Critical safety valve: CONCERNS rounds exhausted → allow (escalate to user) ---
-if [ "$ATTEMPT" -ge "$REVIEW_MAX_ROUNDS" ]; then
-  log_decision "decision=allow reason=non-critical-safety-valve round=$ATTEMPT total=$TOTAL_ROUNDS"
-  rm -f "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
-  VALVE_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
-
-非 Critical 磋商已达上限（${ATTEMPT}/${REVIEW_MAX_ROUNDS}），未能达成一致。Plan 直接呈现给用户做最终裁决。"
-  VALVE_JSON=$(printf '%s' "$VALVE_MSG" | jq -Rs .)
-  cat << EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":${VALVE_JSON}}}
-EOF
-  exit 0
-fi
-
-# --- Pre-flight manifest checks (AFTER non-critical valve, not before) ---
+# --- Pre-flight manifest checks (before non-Critical escalation) ---
 # Format correction, NOT negotiation round: increments TOTAL_ROUNDS only.
 # ATTEMPT stays frozen — pre-flight denies do not count toward MAX_ROUNDS.
 # Global safety valve (TOTAL_ROUNDS >= 20) still protects against infinite loops.
@@ -445,6 +469,37 @@ ${MANIFEST_EXAMPLE}"
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":${HOARDING_JSON}}}
 EOF
   exit 0
+fi
+
+# --- Non-Critical safety valve: no further engine rounds, even after edits ---
+if [ "$ATTEMPT" -ge "$REVIEW_MAX_ROUNDS" ]; then
+  if ! arm_dispatch_state; then
+    ARM_FAIL_MSG="## Red Team Pre-flight — DISPATCH STATE NOT ARMED
+
+无法更新 dispatch 状态。请检查状态目录的文件系统、权限与目标类型，修复后重新调用 ExitPlanMode；无需为落盘失败改写 Manifest。"
+    if echo "${ATTEMPT}:$((TOTAL_ROUNDS + 1))" > "$COUNTER_FILE"; then
+      TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
+    else
+      ARM_FAIL_MSG+="
+
+计数器写入失败，TOTAL 未成功持久化；请一并修复计数器路径的文件系统、权限与目标类型后重试。"
+    fi
+    log_decision "decision=deny reason=valve-arm-failed round=$ATTEMPT total=$TOTAL_ROUNDS"
+    jq -n --arg r "$ARM_FAIL_MSG" '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":$r}}'
+    exit 0
+  fi
+  log_decision "decision=allow reason=non-critical-safety-valve round=$ATTEMPT total=$TOTAL_ROUNDS"
+  rm -f "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
+  if has_manifest "$PLAN"; then
+    DISPATCH_NOTE='已按当前 Manifest 写入 dispatch-check 签名。'
+  else
+    DISPATCH_NOTE='当前计划无需 Manifest，旧普通 dispatch 状态已清除；当前无签名集。'
+  fi
+  VALVE_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
+
+非 Critical 磋商已达上限（${ATTEMPT}/${REVIEW_MAX_ROUNDS}），未能达成一致。Plan 呈现给用户做最终裁决。
+${DISPATCH_NOTE} 布防不代表授权，只有用户通过 ExitPlanMode 原生批准后才能实施。"
+  allow_with_reason "$VALVE_MSG"
 fi
 
 # --- 2. Collect project context ---
@@ -725,21 +780,12 @@ if [ "$VERDICT" = "APPROVE" ]; then
   # Write plan hash to marker — ack-round guard compares hash to detect post-approve edits
   printf '%s' "$(plan_hash "$PLAN")" > "$APPROVE_MARKER"
 
-  # Parse manifest → dispatch JSON for Layer 2 enforcement (fail-silent: Layer 2 self-disables)
+  # Parse manifest → dispatch JSON for Layer 2 enforcement (fail-silent: Layer 2
+  # self-disables). arm_dispatch_state (defined above, shared with the
+  # non-Critical safety valve's escalation branch) does the parse/validate/
+  # write/re-verify sequence; this call site ignores its return value.
   if has_manifest "$PLAN"; then
-    mkdir -p "$DISPATCH_DIR" 2>/dev/null || true
-    DISPATCH_FILE="$DISPATCH_DIR/.dispatch-${SESSION_ID}.json"
-    DISPATCH_TEMP=$(mktemp "$DISPATCH_DIR/.dispatch-${SESSION_ID}.json.XXXXXX" 2>/dev/null || true)
-    if [ -n "$DISPATCH_TEMP" ] \
-       && parse_manifest_to_json "$PLAN" "$(plan_hash "$PLAN")" > "$DISPATCH_TEMP" 2>/dev/null \
-       && dispatch_state_is_valid_v2 "$DISPATCH_TEMP"; then
-      mv -f "$DISPATCH_TEMP" "$DISPATCH_FILE"
-      dispatch_bytes=$(wc -c < "$DISPATCH_FILE" | tr -d ' ')
-      log_decision "manifest-written file=$DISPATCH_FILE bytes=$dispatch_bytes"
-    else
-      rm -f "${DISPATCH_TEMP:-}" "$DISPATCH_FILE"
-      log_decision "manifest-write-skipped reason=invalid-json"
-    fi
+    arm_dispatch_state || true
   fi
 
   # Emit deny so Claude presents the approval to the user (allow reasons are invisible)
@@ -750,10 +796,10 @@ fi
 TOTAL_ROUNDS=$((TOTAL_ROUNDS + 1))
 
 if [ "$VERDICT" = "REJECT" ]; then
-  # REJECT (Critical): reset ATTEMPT so subsequent non-Critical rounds restart fresh
+  # REJECT (Critical): reset ATTEMPT so subsequent non-Critical rounds restart fresh.
   ATTEMPT=0
 else
-  # CONCERNS: non-Critical, increment ATTEMPT
+  # CONCERNS: non-Critical, increment ATTEMPT.
   ATTEMPT=$((ATTEMPT + 1))
 fi
 

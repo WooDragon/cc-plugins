@@ -4,6 +4,34 @@ Adversarial red-team review of implementation plans via cross-model consultation
 
 When Claude calls `ExitPlanMode`, this plugin intercepts the call and sends the plan to a review engine (Gemini, Claude, or Codex) for adversarial scrutiny. The reviewer can APPROVE, raise CONCERNS, or REJECT. On non-approval, feedback is returned to Claude for revision or rebuttal. After max rounds without consensus, the plan passes through for user arbitration.
 
+## Runtime Requirements
+
+**Bash 5.0 or later is required.** The four entry scripts check the running Bash
+version before reading stdin, loading libraries, or accessing logs and state.
+Disable switches do not bypass this requirement.
+
+Under an older Bash, the PreToolUse hooks return a deny decision. The PreCompact
+hook returns `continue: true` with an upgrade message and performs no recovery
+injection; it does not block compaction. The standalone second-opinion CLI exits
+with status 1, writes the upgrade message to stderr, and leaves stdout empty.
+
+On macOS, install Homebrew Bash and start a **new Claude Code process** from an
+environment that puts Homebrew's bin directory first on `PATH`:
+
+```bash
+brew install bash
+export PATH="$(brew --prefix)/bin:$PATH"
+command -v bash
+bash --version  # Must report version 5.0 or later.
+claude
+```
+
+The hooks and the `bash "$SO"` CLI examples select Bash from that process's
+`PATH`. Check the path and version in the environment used to launch Claude Code,
+not only in a separate terminal. Changing `PATH` in a child tool call does not
+update an already-running Claude Code process. No login-shell change or replacement
+of the system `/bin/bash` is required. The plugin does not install or restart Bash.
+
 ## Installation
 
 ```bash
@@ -19,8 +47,8 @@ claude --plugin-dir ~/.claude/dev-plugins/plan-review
 
 ```
 scripts/
-  plan-review.sh              Orchestrator (PreToolUse hook): guards → counters → dual safety
-                               valves → pre-check → prompt assembly → retry driver → verdict
+  plan-review.sh              Orchestrator (PreToolUse hook): guards → counters → global valve
+                               → pre-check → non-Critical valve → prompt → retry driver → verdict
                                branching. Plan-specific policy only (plan extraction, ack-round
                                counters, verdict routing, manifest parsing).
   second-opinion.sh           Generic second-opinion driver — a plain CLI any caller invokes
@@ -130,8 +158,9 @@ is written, separate from `plan-review.log`.
 
 A plan with dispatch keywords must include a Dispatch Manifest with at least one
 `agent` row. A plan without dispatch keywords, including Tier0 work, remains
-Manifest-free. `plan-review.sh` stores only the approved v2 signature set. The
-fixed columns are `step | location | subagent_type | model_source | model |
+Manifest-free. `plan-review.sh` writes the current v2 signature set on APPROVE
+and on non-Critical safety-valve escalation. Neither exit authorizes execution;
+only the user's native ExitPlanMode approval does. The fixed columns are `step | location | subagent_type | model_source | model |
 depends_on | parallel_with`.
 
 - `main` rows use `-` for `subagent_type`, `model_source`, and `model`.
@@ -152,8 +181,15 @@ fails open.
 ExitPlanMode → hook intercepts → engine reviews
   ├─ APPROVE → ack-deny: present review + re-call ExitPlanMode → allow (user's native go/no-go)
   ├─ CONCERNS/REJECT → deny + feedback → Claude revises → re-submit
-  └─ max rounds reached → allow through (user decides)
+  └─ non-Critical max rounds reached → validate the current Manifest → arm dispatch-check
+     → ESCALATED: allow through to the user's native go/no-go decision (not approval)
+     No further engine call occurs, even if the plan changed after the last round.
+     Pre-flight or state-write failures deny instead of escalating.
+     A Manifest-free plan clears any old ordinary dispatch state before escalation.
 ```
+
+The global round limit takes precedence over pre-flight and escalation: it denies
+with a HARD STOP and retains the counter tombstone.
 
 An engine APPROVE is **not** authorization to start work — it only clears the plan
 for the user's native ExitPlanMode decision. The ack-deny message instructs Claude to
@@ -242,9 +278,11 @@ not just an implementation plan — and gets back raw review text, not a verdict
 
 ### Interface
 
-```
-second-opinion.sh --system-prompt-file <path> [--system-prompt-file <path2> ...]
-                  [--prompt-file <path>] [--session <label>]
+With `SO` set to the driver path (see [Path discovery](#path-discovery)):
+
+```bash
+bash "$SO" --system-prompt-file <path> [--system-prompt-file <path2> ...]
+           [--prompt-file <path>] [--session <label>]
 ```
 
 - `--system-prompt-file` — **required, repeatable**. Concatenated in command-line order to form
@@ -354,7 +392,7 @@ adding a separate extraction mechanism — not currently in scope.
 
 ```bash
 SO=~/.claude/plugins/marketplaces/cc-plugins/plugins/plan-review/scripts/second-opinion.sh
-"$SO" --system-prompt-file <your-own-rubric>.md \
+bash "$SO" --system-prompt-file <your-own-rubric>.md \
       --system-prompt-file <plugin>/scripts/assets/review-common.md \
       --session my-review-t7 <<'EOF'
 <artifact under review>

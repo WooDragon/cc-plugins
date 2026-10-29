@@ -16,7 +16,7 @@
 # divergence, not a hypothetical one. An explicit flag variable is the only
 # portable signal.).
 #
-# bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
+# Requires Bash 5.0+; see the plugin README.md runtime requirements.
 
 # --- Round-memory capability declaration (orchestrator contract, NOT a user
 #     env var — see plan-review.sh's inject_review_thread()). Must be set at

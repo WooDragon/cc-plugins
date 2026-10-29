@@ -2,7 +2,7 @@
 # out-of-band plan-file contract, plus the resolver's error-message router.
 # Sourced (not executed) by plan-review.sh.
 #
-# bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
+# Requires Bash 5.0+; see the plugin README.md runtime requirements.
 
 # --- Transcript-based plan recovery (CC 2.1.x contract: plan lives in an
 #     out-of-band file referenced by the plan_mode attachment, which is NOT in
