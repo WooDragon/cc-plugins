@@ -129,7 +129,7 @@ assert_no_dispatch_temps() {
 
 @test "valve: escalation writes current signatures and enforces real dispatch-check" {
   seed_valve_cycle
-  local plan old_plan dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
+  local plan old_plan reason dispatch_file="${REVIEW_COUNTER_DIR}/.dispatch-test-session.json"
   old_plan=$(manifest_v2_plan '| 1 | agent | worker | runtime | sonnet | - | - |')
   . "${BATS_TEST_DIRNAME}/../scripts/lib/manifest.sh"
   parse_manifest_to_json "$old_plan" old-hash > "$dispatch_file"
@@ -139,6 +139,9 @@ assert_no_dispatch_temps() {
   INPUT=$(build_input "plan=$plan")
   run_hook
   assert_valve_success
+  reason=$(printf '%s' "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+  [[ "$reason" == *'已按当前 Manifest 写入 dispatch-check 签名'* ]]
+  if [[ "$reason" == *'当前无签名集'* ]]; then return 1; fi
   dispatch_state_is_valid_v2 "$dispatch_file"
   . "${BATS_TEST_DIRNAME}/../scripts/lib/common.sh"
   [ "$(jq -r .plan_hash "$dispatch_file")" = "$(plan_hash "$plan")" ]
@@ -186,7 +189,7 @@ assert_no_dispatch_temps() {
 }
 
 @test "valve: no manifest creates no state and removes old ordinary state" {
-  local old
+  local old reason
   for old in absent present; do
     seed_valve_cycle
     if [ "$old" = present ]; then
@@ -195,6 +198,10 @@ assert_no_dispatch_temps() {
     INPUT=$(build_input)
     run_hook
     assert_valve_success
+    reason=$(printf '%s' "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+    [[ "$reason" == *'当前计划无需 Manifest'* ]]
+    [[ "$reason" == *'当前无签名集'* ]]
+    if [[ "$reason" == *'已按当前 Manifest 写入'* ]]; then return 1; fi
     [ ! -e "${REVIEW_COUNTER_DIR}/.dispatch-test-session.json" ]
   done
 }

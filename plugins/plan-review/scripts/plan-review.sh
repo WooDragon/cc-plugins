@@ -14,7 +14,7 @@ fi
 #     CONCERNS → deny with feedback, increment ATTEMPT + TOTAL, Claude revises or rebuts
 #     REJECT   → deny with feedback, increment TOTAL only (ATTEMPT frozen), Critical must resolve
 #   Termination (dual safety valves):
-#     Non-Critical valve: ATTEMPT >= MAX_ROUNDS → allow (escalate to user)
+#     Non-Critical valve: ATTEMPT >= MAX_ROUNDS → validate Manifest and arm dispatch; allow only on success
 #     Global valve:       TOTAL >= MAX_TOTAL_ROUNDS → deny (hard stop, tombstone counter)
 #
 # All non-guard exits emit structured JSON (allow or deny). No silent exit 0.
@@ -490,10 +490,15 @@ if [ "$ATTEMPT" -ge "$REVIEW_MAX_ROUNDS" ]; then
   fi
   log_decision "decision=allow reason=non-critical-safety-valve round=$ATTEMPT total=$TOTAL_ROUNDS"
   rm -f "$COUNTER_FILE" "${CONV_FILE:-}" "${HISTORY_FILE:-}"
+  if has_manifest "$PLAN"; then
+    DISPATCH_NOTE='已按当前 Manifest 写入 dispatch-check 签名。'
+  else
+    DISPATCH_NOTE='当前计划无需 Manifest，旧普通 dispatch 状态已清除；当前无签名集。'
+  fi
   VALVE_MSG="## Red Team Review — ${REVIEW_ENGINE} — ESCALATED
 
 非 Critical 磋商已达上限（${ATTEMPT}/${REVIEW_MAX_ROUNDS}），未能达成一致。Plan 呈现给用户做最终裁决。
-已按当前 Manifest 更新 dispatch-check 状态；布防不代表授权，只有用户通过 ExitPlanMode 原生批准后才能实施。"
+${DISPATCH_NOTE} 布防不代表授权，只有用户通过 ExitPlanMode 原生批准后才能实施。"
   allow_with_reason "$VALVE_MSG"
 fi
 
