@@ -50,6 +50,8 @@ def render(manifest,results,output_dir,daily=None):
     dump(output/NAMES[1],index)
     index['source_failures']=cov['failed_sources']; index['sampling_adjustments']=manifest.get('plan_adjustments',[])
     index['evidence_frames']=[{k:f.get(k) for k in ('id','source_id','planned_time','time','pts','precision')} for f in manifest.get('frames',[])+manifest.get('supplemental_frames',[])]
+    index['visual_changes']=(daily or {}).get('visual_changes') or []
+    index['visual_review_coverage']={'reviewed_packages':sorted(manifest.get('shot_records',{})),'missing_means':'not_assessed'}
     index['validated_records']=results
     index['validated_records_note']='原始视觉候选审计记录：仅表示覆盖和引用已校验，语义可能经ROOT纠正；最终事件、兴趣点与日摘要以语义Agent日包及ROOT复核决定为准。'
     index['root_review_decisions']=manifest.get('root_review_decisions',[])
@@ -114,6 +116,12 @@ def render(manifest,results,output_dir,daily=None):
                         if spans: yield '    - 本片段GPS仅适用：'+'、'.join(timecode(p['start'])+'–'+timecode(p['end']) for p in spans)+'；其余缺口不外推。'
     lines+=['','## 事件','']+(list(findings(events,'event')) or ['尚无通过校验的事件。'])
     lines+=['','## 兴趣点']+(list(findings(poi,'interest_point')) or ['尚无通过校验的兴趣点。'])
+    lines+=['','## 镜头变化与待回看区间','']
+    for entry in index['visual_changes']:
+        change=entry['change'];clip=change['clip'];source=next(s for s in manifest['sources'] if s['id']==clip['source_id'])
+        label='可见变化' if change['claim_type']=='visible_change' else '相机运动推断（非确定事实）'
+        lines.append(f'- [{label}] `{source["relative_path"]}` {timecode(clip["start"])}–{timecode(clip["end"])}：{change["description"]}；限制：'+ '；'.join(change['limits'])+'；采样画面，需播放原片确认，不是精确剪点。')
+    if not index['visual_changes']:lines.append('未收录动态变化；缺少复看记录的来源表示未评估，不代表无运动。')
     lines+=['','## 缺失与限制']+[f'- {s}' for s in index['limitations']]
     lines+=[f'- 未完成图片包：{len(cov["pending_packages"])}；未完成音频来源：{len(cov["pending_audio_sources"])}；失败来源：{len(cov["failed_sources"])}。']
     for fail in cov['failed_sources']:

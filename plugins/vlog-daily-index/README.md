@@ -4,7 +4,7 @@
 
 ## 安装
 
-此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.4.0`。两个宿主并列支持。
+此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.5.0`。两个宿主并列支持。
 
 Codex：
 
@@ -46,6 +46,12 @@ python scripts/vlog_daily_index.py --help
 ```
 
 测试使用合成数据和 mock。未配置 FFmpeg/ffprobe 时，真实合成媒体测试会明确跳过；测试成功不能替代新主机上的工具、ASR 协议与硬件小样验证。相关方法见[发布检验](./skills/vlog-daily-index/references/release-verification.md)。
+
+## 0.5.0 动态补采与镜头复看
+
+初筛提出有具体帧证据和客观变化疑问的动态候选，在日语义前经批量规则接受，复用一轮补采并只派Luna max一次，同轮产生事实与变化。真实检索候选也可按源文件秒显式复看；精确缓存、2段/34图薄bundle、native未知状态和逐证据校验由程序处理。变化进入日索引JSON/Markdown和query的visual_change类型，事实与运镜推断分列，未知留给原片回看。旧run、静态路由/缓存、独立地理与ROOT审查保持；本新增max路由须宿主明确支持，不降档。见[镜头复看](./skills/vlog-daily-index/references/shot-review.md)。
+
+新建镜头复看任务附固定网格显示灰度差与归一化内容残差两列线索，Luna仍逐对核图，不由数字推断光照原因、运镜方向或可用性。两段同图历史对照仅显示亮暗过程核查有所改善；历史候选仍偏宽，不能视为自动精准选段或一般质量/费用证明；新合同仅输出客观变化与证据，不承担剪辑选择。旧冻结任务与成功缓存继续复用。
 
 ## 0.4.0 视觉工作组
 

@@ -3,6 +3,15 @@ from __future__ import annotations
 import csv, datetime, hashlib, io, json, os, re, sqlite3, time
 from pathlib import Path
 
+def local_nonsync(path):
+    """Shared active-cache gate for init, standalone preparation and work ledgers."""
+    root=Path(path).resolve()
+    if str(root).startswith('\\\\') or any('onedrive' in p.lower() for p in root.parts):raise ValueError('Active state/temp must be local and outside synchronized folders')
+    if os.name=='nt':
+        import ctypes
+        if ctypes.windll.kernel32.GetDriveTypeW(str(root.anchor))==4:raise ValueError('Active state/temp cannot use a mapped network drive')
+    return root
+
 def host_data_root():
     return Path(os.environ.get('LOCALAPPDATA',Path.home()/'.local/share'))/'VlogIndex'
 

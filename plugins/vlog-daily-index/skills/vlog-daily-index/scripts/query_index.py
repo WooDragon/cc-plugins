@@ -240,6 +240,26 @@ def publication_rows(root, location):
                 if clip['source_id'] not in sources: raise ValueError('Unknown finding source')
                 interval(clip)
                 if not isinstance(clip.get('evidence_ids'), list): raise ValueError('Missing finding evidence')
+    frame_rows=index.get('evidence_frames',[])
+    if not isinstance(frame_rows,list) or any(not isinstance(f,dict) or not isinstance(f.get('id'),str) or not f['id'].strip() for f in frame_rows):raise ValueError('Invalid published frame evidence')
+    evidence={f['id']:f for f in frame_rows}
+    if len(evidence)!=len(frame_rows):raise ValueError('Duplicate published frame ID')
+    for entry in index.get('visual_changes',[]):
+        if not isinstance(entry,dict) or set(entry)!={'review_id','change'}:raise ValueError('Invalid published visual change')
+        if not isinstance(entry['review_id'],str) or not entry['review_id'].strip():raise ValueError('Visual change requires a nonblank review ID')
+        c=entry['change']
+        if not isinstance(c,dict) or set(c)!={'topic','claim_type','description','clip','confidence','limits','needs_playback'}:raise ValueError('Invalid published visual change schema')
+        if c['topic'] not in ('composition','subject_action','lighting','occlusion','edit_cue') or c['confidence'] not in ('high','medium','low'):raise ValueError('Invalid visual change topic/confidence')
+        if not isinstance(c['description'],str) or not c['description'].strip() or not isinstance(c['limits'],list) or not c['limits'] or any(not isinstance(s,str) or not s.strip() for s in c['limits']):raise ValueError('Visual change needs nonblank facts and uncertainty limits')
+        clip=c['clip']
+        if not isinstance(clip,dict) or set(clip)!={'source_id','start','end','precision','evidence_ids'}:raise ValueError('Invalid visual change clip schema')
+        a,b,precision=interval(clip);ids=clip.get('evidence_ids',[])
+        if not isinstance(ids,list) or any(not isinstance(fid,str) or not fid.strip() for fid in ids):raise ValueError('Invalid visual frame IDs')
+        if clip['source_id'] not in sources or precision!='sampled_frames' or len(ids)<2 or len(ids)!=len(set(ids)) or any(fid not in evidence or evidence[fid]['source_id']!=clip['source_id'] for fid in ids):raise ValueError('Invalid visual change source/frame evidence')
+        times=[evidence[fid]['time'] for fid in ids]
+        if any(type(t) not in (int,float) or not math.isfinite(t) for t in times):raise ValueError('Invalid actual visual evidence time')
+        if times!=sorted(set(times)) or abs(a-min(times))>1e-6 or abs(b-max(times))>1e-6:raise ValueError('Visual change must envelope distinct actual sampled frame times')
+        if c.get('claim_type') not in ('visible_change','camera_motion_inference') or c.get('needs_playback') is not True or not c.get('limits') or not isinstance(c.get('description'),str):raise ValueError('Missing visual change uncertainty/claim type')
     for sid, result in transcript['sources'].items():
         if sid not in sources: raise ValueError('Unknown transcript source')
         if not isinstance(result,dict) or not isinstance(result.get('segments',[]),list): raise ValueError('Invalid transcript result')
@@ -277,6 +297,10 @@ def replace_unit(db, scope, root, kind, data):
             for clip_no, clip in enumerate(finding['clips']):
                 start,end,precision = interval(clip)
                 db.execute('INSERT INTO clips VALUES (?,?,?,?,?,?,?,?)', [scope,fid,clip_no,clip['source_id'],start,end,precision,json_text(clip['evidence_ids'])])
+    for number,entry in enumerate(index.get('visual_changes',[]),1):
+        c=entry['change'];fid=f'visual_change:{number}';clip=c['clip'];start,end,precision=interval(clip)
+        db.execute('INSERT INTO findings VALUES (?,?,?,?,?,?,?)',[scope,fid,'visual_change',c['topic']+': '+c['claim_type'],c['description'],json_text(None),json_text(entry)])
+        db.execute('INSERT INTO clips VALUES (?,?,?,?,?,?,?,?)',[scope,fid,0,clip['source_id'],start,end,precision,json_text(clip['evidence_ids'])])
     for sid, result in transcript['sources'].items():
         for number, segment in enumerate(result.get('segments', [])):
             start,end,precision = interval(segment)
@@ -294,6 +318,7 @@ def refresh(db, config):
                 checksum,data = digest([str(p) for p in discovered]),None
             else:
                 checksum, data = dit_rows(root, location) if kind == 'dit' else publication_rows(root, location)
+            if kind=='publication':checksum=digest(['query-parser-visual-v2',checksum])
             old = db.execute('SELECT digest FROM snapshots WHERE scope=?', [scope]).fetchone()
             changed = not old or old[0] != checksum
             db.execute('BEGIN TRANSACTION')
@@ -326,16 +351,16 @@ def refresh(db, config):
 
 def search(db, keyword='', kind=None, library=None, path=None, status=None, date=None, limit=50):
     sql = '''SELECT * FROM (
-        SELECT 'media' AS kind,coalesce(original_name,relative_path) AS title,notes AS text,
+        SELECT 'media' AS kind,source_id,coalesce(original_name,relative_path) AS title,notes AS text,
             library,relative_path,original_path,NULL::DOUBLE AS start_s,NULL::DOUBLE AS end_s,
             NULL::VARCHAR AS precision,NULL::VARCHAR AS evidence,NULL::VARCHAR AS geography,
             archival_date,dit_status,analysis_status,stale,run_id,revision,
             coalesce(dit_last_success,analysis_last_success) AS last_success,
             publication,dit_index,analysis_last_success,dit_last_success FROM media
-        UNION ALL SELECT kind,title,reason,library,relative_path,original_path,start_s,end_s,precision,evidence,
+        UNION ALL SELECT kind,source_id,title,reason,library,relative_path,original_path,start_s,end_s,precision,evidence,
             geography,archival_date,dit_status,analysis_status,stale,run_id,revision,last_success,
             publication,dit_index,analysis_last_success,dit_last_success FROM segments
-        UNION ALL SELECT 'transcript',text,text,library,relative_path,original_path,start_s,end_s,precision,evidence,
+        UNION ALL SELECT 'transcript',source_id,text,text,library,relative_path,original_path,start_s,end_s,precision,evidence,
             NULL,archival_date,dit_status,analysis_status,stale,run_id,revision,last_success,
             publication,dit_index,analysis_last_success,dit_last_success FROM transcriptions
         ) results WHERE TRUE'''
@@ -364,7 +389,7 @@ def main():
         if command == 'refresh': child.add_argument('--config', required=True, type=Path)
         if command == 'search':
             child.add_argument('keyword', nargs='?', default='')
-            child.add_argument('--kind', choices=('media','event','interest_point','transcript'))
+            child.add_argument('--kind', choices=('media','event','interest_point','visual_change','transcript'))
             for name in ('library','path','status','date'): child.add_argument('--'+name)
             child.add_argument('--limit', type=int, default=50)
     args = parser.parse_args()

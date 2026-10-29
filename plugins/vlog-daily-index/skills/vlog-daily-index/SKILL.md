@@ -3,7 +3,7 @@ name: vlog-daily-index
 description: "旅行记忆分析师：读取一天旅行原视频，检索必需行程，结合拍摄时间、GPS与地图证据生成可回到原片的每日事件、兴趣点、地点关联和完整转写。也可只检索既有DIT素材与已发布事件/转写，不剪辑或修改原素材。"
 ---
 
-先按用户意图选择模式：只查找素材、事件、兴趣点或转写时，读取[检索模式](references/query.md)，运行独立`scripts/query_index.py`；只需可选`requirements-query.txt`，不进入下方分析流程，也不要求行程、FFmpeg、ASR或派发分析Agent。读取明确库根、DIT索引与正式发布范围；DuckDB只作可重建本机缓存。需要新分析或更新近源成果时才按下方工作流执行。
+先按用户意图选择模式：只查找素材、事件、兴趣点或转写时，读取[检索模式](references/query.md)，运行独立`scripts/query_index.py`；只需可选`requirements-query.txt`，不进入下方分析流程，也不要求行程、FFmpeg、ASR或派发分析Agent。读取明确库根、DIT索引与正式发布范围；DuckDB只作可重建本机缓存。检索候选需要判断运镜、动作、明暗或镜头过程时，按[镜头复看](references/shot-review.md)将真实query输出交程序计划，独立Luna max有界回看；普通检索不全量升级。需要新分析或更新近源成果时才按下方工作流执行。
 
 在 Codex 或 Claude Code 宿主内运行，同一套规则；下表是角色到宿主的绑定，宿主差异见[宿主说明](references/hosts.md)。
 
@@ -14,9 +14,9 @@ description: "旅行记忆分析师：读取一天旅行原视频，检索必需
 | 地理Agent | 专门的地点与主体身份核验（必须另派） | 专门 GPT-6.1 Sol (high) | `vlog-daily-index:vlog-geography` |
 | ROOT | 最终实质审查与补采裁决 | 主控会话 | 主控会话 |
 
-Python负责确定性媒体/GPS/转写/引用校验；视觉Agent记录逐帧可见内容与证据，事件和兴趣点仅为候选；语义Agent（high）负责跨帧、跨文件及ASR/GPS语义汇总；ROOT当前旗舰负责最终质量审查，且只有ROOT根据较强的错漏证据决定定向补采。复用已有有效结果，不全量重审。脚本不调用隐藏模型接口，也不另建调度服务。
+Python负责确定性媒体/GPS/转写/引用校验；视觉Agent记录逐帧可见内容与证据，事件和兴趣点仅为候选；语义Agent（high）负责跨帧、跨文件及ASR/GPS语义汇总；ROOT当前旗舰负责最终质量审查，动态候选由已授权批量规则接受，其余补采仍由ROOT按错漏证据裁决。复用已有有效结果，不全量重审。脚本不调用隐藏模型接口，也不另建调度服务。
 
-纯视觉逐帧识图按模型名派发时只允许 Luna、Haiku、DeepSeek，路由由当前session的原生工具能力快照与本run声明的视觉角色共同决定：Codex按模型名派发并固定Luna medium，Claude Code按`subagent_type`派发并由agent frontmatter承载模型与档位，不受上述模型白名单约束。新claim必须传`--native-capabilities CURRENT_SESSION_CAPABILITIES_JSON`，ROOT按返回`dispatch_contract`真实派发；不静默改派Sol/旗舰、不按宿主名猜模型。领取前读[纯视觉路由](references/vision-routing.md)。
+纯视觉逐帧识图按模型名派发时只允许 Luna、Haiku、DeepSeek，路由由当前session的原生工具能力快照与本run声明的视觉角色共同决定：Codex按模型名派发并固定Luna medium，Claude Code按`subagent_type`派发并由agent frontmatter承载模型与档位，不受上述模型白名单约束。新claim必须传`--native-capabilities CURRENT_SESSION_CAPABILITIES_JSON`，ROOT按返回`dispatch_contract`真实派发；不静默改派Sol/旗舰、不按宿主名猜模型。这是静态初筛约定；独立动态复看另要求明确可请求Luna max且支持图像，不能静默降档或套用medium合同。领取前读[纯视觉路由](references/vision-routing.md)。
 
 输入：素材目录（递归）、归档日期、FIT目录、ASR服务和模型、必需行程，以及可选设备映射/时间校正/官方预览LUT映射。先从本项目已有聊天与Notion检索行程并保留来源；确实找不到或有重要冲突才与用户讨论，不能静默省略。未确认设备角色不提交音频；无人机始终跳过音频，DJI运动相机仍转写。时间不明或慢放速率未核实只给文件内时间，精确位置必须满足[GPS约定](references/gps.md)；有依据的大概区域/景点推断另存[地点关联](references/geography.md)，区分相机/记录者与远景主体。
 
@@ -31,9 +31,9 @@ Python负责确定性媒体/GPS/转写/引用校验；视觉Agent记录逐帧可
 3. 首次`asr-json-sample`验证完整单JSON，再以`audio --discover --chunks 1`完整消费同短样本流；按Content-Type选择SSE/NDJSON解析器，不收到文字就中断。已验证一种NDJSON为增量`text/is_final=false`，末条空text且`is_final=true`；拼接终止前增量，读到终止及EOF才成功。真实终止语义核实后写protocol配置，`adopt-json-sample`导入成功样本缓存，不重复转整片。增量start/end未证明是可靠词时码，当前保持30秒片段精度。无终止、断流、上传后超时/未知5xx均阻断新提交；`audio --acknowledge`只接受服务端旧任务已结束的明确证据，GET models或时间经过不算。ASR固定1请求，机器同服务锁防多chat叠加，不随媒体或Agent并发增加。详见[接口](references/interfaces.md)。
 4. `gps-build`用官方Garmin SDK及MovingPandas生成JSON；用户为本行程提供GPS即确认随行，不再要求同行参数，仅明确冲突才澄清。可信时钟/倍率和缺口门槛仍在，无人机优先自身SRT，(0,0)占位无效。用`configure-source`显式配置角色/可信带时区时间，不手改state。`packages`生成约10图的小包及固定结构。
 5. 主控以 **视觉Agent** 消费ready队列：默认循环 `vision-work`，照返回的 `next_action` 和原样 `native_contract` 做真实原生新建/续派/等待，再记录实际Agent ID与完成回执，详见[工作组](references/vision-work.md)。每组以10张实际呈现图为目标（含boundary），原包完整；下包会超10则本组结束，单个原包11图等超目标仍整包。相邻同source优先、同归档目录次之；同worker最多2组，换目录或错误/上下文告警提前换新，不推断同场景。真实空闲原生名额扣除Sol预留，视觉并发最多6；不按组员包数虚增worker、不用别名绕过名额。子Agent仅按组文件读取各原包全部图片，逐包写原 `result_path`、逐帧 `analysed_frame_ids` 与可见事实观察（无明显事件也记录）；正常一组只回报一次，异常立即报已完成/未开始清单并停止。不递归委派、不请求ASR、不改主状态。已有成功缓存及运行中的旧claim保留；旧队列保留，同run切换 `vision-work` 后不混用旧入口领取。未证实worker完成不因文件存在或等待时间重派。
-6. `import-results`检查图片对账、来源/时间/证据/位置；invalid不后台无限重校验，协调器安全暂停或批次返回后用`retry-visual`归档并安排一次纠正，仍失败保存待ROOT处置。已有改写新结果用`import-results --refresh`，不删除新文件。视觉Agent标记主要视觉主体和事实证据；`supplemental_requests`只是候选，留给事件/地理分析后ROOT统一判断，不自动执行。转写回述不冒充当时现场事件，30秒片精度不冒充词时码，GPS停留不自动等于活动。
-7. 媒体、应转写音频和核心视觉覆盖后，`daily-package`导出已校验记录与完整转写，由主控委派 **语义Agent（high）** 做事件/兴趣点及主要视觉主体语义分析，写`daily.result.json`；保留独立来源片段和证据，不拼片段summary。然后必须另派专门的 **地理Agent（high）**，结合必需行程、时间对应GPS及高德或类似地图证据做地点关联。画面重心是地标/自然景观且GPS不能识别主体时，必须专项核验：查看已有关键帧，结合可用朝向、路线与地形/地图资料，给身份候选、依据、缺证据及必要补采候选。拍摄位置与远景主体独立，近似推断合法但不伪精确；按[地理接口](references/geography.md)导入并绑定当前输入摘要。
-8. ROOT综合行程、GPS路线/全部停留、拍摄时间/倍率、视觉主体、原始语音及地图核查错漏、归属、时空矛盾和补采。逐区间`decide-supplement`采纳/拒绝；仅采纳后`supplement`，扩前15/后30秒、合并1fps，只一轮。新增证据仅回流受影响的语义与地理结果，不重跑成功ASR或全量识图。`attach-review-context`保存补充说明，`render --daily ...`生成完整待审三成果，再`final-review-package`提供综合证据及模板。ROOT记录六维审查与逐问题处置，有依据未知可留，未决实质blocking禁止批准；`approve-final --review-result ...`绑定当前证据/三成果hash，变化后定向重审，无额外用户确认。`publish`依次发原NAS并回读、Markdown最后；共享run_id/revision/摘要，不宣称整体原子。未知同名冲突或源变化停止发布。
+6. `import-results`检查图片对账、来源/时间/证据/位置；invalid不后台无限重校验，协调器安全暂停或批次返回后用`retry-visual`归档并安排一次纠正，仍失败保存待ROOT处置。已有改写新结果用`import-results --refresh`，不删除新文件。视觉Agent标记主要视觉主体和事实证据；`supplemental_requests`中的动态补采提案必须有具体客观变化疑问和2+同source不同实际时间的帧锚点；原地理/遮挡补采仍可提出，不因有人/云/无人机/普通水纹全量触发。新run在日语义前一次`accept-dynamic --reviewer ROOT --reason ...`按已授权规则批量接受，再`supplement`、循环`shot-work`照短action真实派Luna max：完整区间分包，每worker最多2段/34图，同轮逐帧事实+变化，正常组末一次回报；新镜头输出不生成候选剪辑区间、剪点、转场或主观可用性建议。旧地理/遮挡候选继续ROOT裁决，旧run/成功缓存不迁移。详见[镜头复看](references/shot-review.md)。转写回述不冒充当时现场事件，30秒片精度不冒充词时码，GPS停留不自动等于活动。
+7. 媒体、应转写音频、核心视觉及已选动态复看导入后，`daily-package`导出已校验记录与完整转写，由主控委派 **语义Agent（high）** 一次做事件/兴趣点、主要视觉主体及visual_changes语义汇总，区分可见变化与运镜推断，不由动态自动派生地理事件，写`daily.result.json`；保留独立来源片段和证据，不拼片段summary。然后必须另派专门的 **地理Agent（high）**，结合必需行程、时间对应GPS及高德或类似地图证据做地点关联。画面重心是地标/自然景观且GPS不能识别主体时，必须专项核验：查看已有关键帧，结合可用朝向、路线与地形/地图资料，给身份候选、依据、缺证据及必要补采候选。拍摄位置与远景主体独立，近似推断合法但不伪精确；按[地理接口](references/geography.md)导入并绑定当前输入摘要。
+8. ROOT综合行程、GPS路线/全部停留、拍摄时间/倍率、视觉主体、原始语音及地图核查错漏、归属、时空矛盾和补采。逐区间`decide-supplement`采纳/拒绝；仅采纳后`supplement`，旧run扩前15/后30秒、合并1fps；新run复用同一队列，地理/遮挡仍扩范围，动态保持原请求完整范围，2fps加末帧后只派max一次，只一轮；剩余不确定性交原片播放而非递归加密。新增证据仅回流受影响的语义与地理结果，不重跑成功ASR或全量识图。`attach-review-context`保存补充说明，`render --daily ...`生成完整待审三成果，再`final-review-package`提供综合证据及模板。ROOT记录六维审查与逐问题处置，有依据未知可留，未决实质blocking禁止批准；`approve-final --review-result ...`绑定当前证据/三成果hash，变化后定向重审，无额外用户确认。`publish`依次发原NAS并回读、Markdown最后；共享run_id/revision/摘要，不宣称整体原子。未知同名冲突或源变化停止发布。
 9. 全部可读素材的提取、ASR、视觉、已采纳补抽、日汇总及专门地点关联完成，但存在明确不可读源损坏时，最终状态为`terminal_with_gaps`：保留`source_failures`，报告写“可读素材处理完成，N项源损坏未覆盖”，不能宣称全部来源均已观看。服务unknown、待包、缺抽或必需地理阶段未完成仍是partial。可终结状态且发布回读成功后才cleanup本run登记临时产物；阶段partial保留恢复资料。
 
 恢复：使用原 `--state` 运行对应未完成命令；成功缓存不重复调用ASR/视觉Agent。不要重新 `init` 覆盖状态。`status`分别返回来源数/计划/提取/分析数量、失败及未完成项。改变抽帧策略时建立新运行；普通提示版本升级不自动重建成功包。明确要求更新旧提示时用`packages --refresh`重建受影响legacy包并使下游过期，block模式保留已派block身份，不混用新旧结果。

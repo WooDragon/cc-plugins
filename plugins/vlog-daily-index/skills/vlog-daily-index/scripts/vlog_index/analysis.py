@@ -6,11 +6,11 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .store import digest, dump, read, file_hash
 
-SCHEMA_VERSION='1'; PROMPT_VERSION='3'
+SCHEMA_VERSION='1'; PROMPT_VERSION='5'
 VISION_INSTRUCTIONS=('实际打开并查看frames中的全部图片（包括边界上下文），analysed_frame_ids逐一完整对账。每个核心帧必须有可见内容观察和对应evidence_ids，无明显事件也记录；无法读取不得伪称已看完，应报告阻塞。'
     'observations只写可见事实；events/interest_points是候选。模糊细节降低置信，区分观察与推测，不凭文件名、行程或相似画面臆造动作、身份或地点。'
     '严格引用本包source_id、文件内时间和证据ID；GPS仅逐字引用提供的完整记录，拍摄位置不等于远景主体位置。若有转写，仅保留原文及原精度，chunk不是词时码，不做音频事件检测。'
-    '补采只提候选区间及证据理由，不自行执行。按result_schema将完整JSON写入本包result_path，不能省略帧或伪造证据；不递归委派、不调用ASR、不操作状态库、不发布或删除文件。')
+    '仅当已有同source帧显示人物/构图/明暗/遮挡变化且具体变化过程尚不明时，提出purpose=dynamic的supplemental_requests，附question、reason、2+本包帧evidence_ids及完整源秒区间。无人机/有人/有云、普通持续水纹或常规运动本身不触发；仅选有帧证据的关键变化与客观问题，不推荐剪辑区间、剪点、转场或可用性；不要求此处完成动态分析。地理/遮挡等原补采候选仍可提出。补采只提候选区间及证据理由，不自行执行。按result_schema将完整JSON写入本包result_path，不能省略帧或伪造证据；不递归委派、不调用ASR、不操作状态库、不发布或删除文件。')
 
 def invalidate_downstream(manifest,reason):
     manifest['published_verified']=False
@@ -29,13 +29,36 @@ def record_supplement_decision(manifest,request_id,decision,reviewer,reason):
     request=next((r for r in manifest.get('supplemental_pending',[]) if digest(r)==request_id),None)
     if request is None: raise ValueError('Unknown pending supplement request')
     round_info=manifest.get('supplemental_round')
-    if decision=='accept' and round_info and request_id not in round_info['request_ids']:
-        raise ValueError('Only one supplement round is allowed; finish or review the existing round')
+    allowed=set(round_info['request_ids'])|{r['request_id'] for r in round_info.get('restored_requests',[])} if round_info else set()
+    if decision=='accept' and round_info and request_id not in allowed:
+        raise ValueError('Only the frozen supplement round is allowed; an original missing proposal needs explicit --restore-round-request evidence, never a new recursive request')
+    if decision=='accept' and request.get('purpose')=='dynamic':
+        original=next(p for p in manifest['packages'] if p['id']==request['package_id'])
+        source=next(s for s in manifest['sources'] if s['id']==request['source_id'])
+        validate_dynamic_request(read(original['path']),request,source=source)
     record={'request_id':request_id,'request':dict(request),'decision':decision,'reviewer':reviewer,'reason':reason,'at':dt.datetime.now(dt.timezone.utc).isoformat()}
     decisions[request_id]=record
     if decision=='accept': invalidate_downstream(manifest,'ROOT accepted supplement '+request_id)
     if decision=='reject': manifest['supplemental_pending']=[r for r in manifest.get('supplemental_pending',[]) if digest(r)!=request_id]
     return record
+
+def restore_round_request(manifest,request_id,reviewer,reason):
+    """Explicit ROOT repair of an old accepted-only round, never a queue migration."""
+    if reviewer!='ROOT' or not isinstance(reason,str) or not reason.strip():raise ValueError('Round recovery needs explicit ROOT provenance and reason')
+    round_info=manifest.get('supplemental_round')
+    if not round_info:raise ValueError('No frozen round needs recovery')
+    request=next((r for r in manifest.get('supplemental_pending',[]) if digest(r)==request_id),None)
+    if request is None:raise ValueError('Only an existing pending proposal can be restored')
+    original=next((p for p in manifest['packages'] if p['id']==request.get('package_id')),None)
+    if original is None or original.get('supplemental') or original.get('shot_review') or original['status']!='success':raise ValueError('Round recovery requires a successful original initial package, never a supplemental proposal')
+    path=Path(manifest['state_dir'])/'analysis'/(original['id']+'.json')
+    result=validate_result(read(original['path']),read(path))
+    proposal={k:v for k,v in request.items() if k!='package_id'}
+    if proposal not in result['supplemental_requests']:raise ValueError('Pending proposal is not in the canonical original initial result')
+    restored=round_info.setdefault('restored_requests',[])
+    if request_id not in round_info['request_ids'] and not any(r['request_id']==request_id for r in restored):
+        restored.append({'request_id':request_id,'reviewer':reviewer,'reason':reason,'original_result_path':str(path),'original_result_sha256':file_hash(path),'at':dt.datetime.now(dt.timezone.utc).isoformat()})
+    return request_id
 
 def validate_itinerary(value):
     if not isinstance(value,dict) or not str(value.get('title','')).strip(): raise ValueError('Itinerary requires a title')
@@ -254,10 +277,17 @@ class DailyResult(BaseModel):
     summary_evidence_ids:list[str]=Field(min_length=1)
     events:list[Finding]
     interest_points:list[Finding]
+    visual_changes:list[dict]|None=None
 
 def validate_daily(value,manifest,validated_results):
     """The semantic Agent supplies semantic merging; deterministic code checks provenance."""
     parsed=DailyResult.model_validate(value).model_dump()
+    if 'visual_changes' not in value:parsed.pop('visual_changes',None)
+    if manifest.get('shot_records'):
+        if 'visual_changes' not in value or value['visual_changes'] is None:raise ValueError('Daily result must explicitly assess validated shot changes')
+        from .shot_supplement import validate_daily_changes
+        validate_daily_changes(manifest,parsed['visual_changes'])
+    elif parsed.get('visual_changes'):raise ValueError('No validated shot evidence for daily visual changes')
     analysed={fid for p in manifest['packages'] if p['status']=='success' for fid in p['core_frame_ids']}
     evidence={f['id']:f for f in manifest.get('frames',[])+manifest.get('supplemental_frames',[]) if f['id'] in analysed}
     frame_ids=set(evidence)
@@ -302,6 +332,8 @@ def make_packages(source,frames,transcripts,output_dir,gps=None,size=10,visual_m
         frame_ids={f['id'] for f in context+core}
         locations=[p for p in (gps or []) if p.get('frame_id') in frame_ids]
         payload={'schema_version':SCHEMA_VERSION,'prompt_version':PROMPT_VERSION,'instructions':VISION_INSTRUCTIONS,'source':source_context,'core_frame_ids':[f['id'] for f in core],'frames':context+core,'transcripts':tr,'gps':locations,'interval':{'start':begin,'end':end},'image_warning':'技术预览以各帧preview记录为准；缺少已验证变换时不推断画面质量。','result_schema':Result.model_json_schema()}
+        payload['dynamic_request_policy']='bounded_sampling_v1'
+        if 'fps' in source:source_context['fps']=source['fps']
         if visual_mode:
             payload['visual_package_mode']=visual_mode
             payload['transcript_policy']='Pure visible-content observations only; complete independent ASR is supplied to the semantic Agent in the daily package. Never infer speech or audio events.'
@@ -310,6 +342,43 @@ def make_packages(source,frames,transcripts,output_dir,gps=None,size=10,visual_m
         path=output_dir/(payload['package_id']+'.package.json'); dump(path,payload)
         packages.append({'id':payload['package_id'],'path':str(path),'result_path':payload['result_path'],'status':'waiting_ai','core_frame_ids':payload['core_frame_ids']})
     return packages
+
+def dynamic_sample_times(source,a,b,anchor_times=()):
+    """Use known actual anchors; average fps is not an absolute PTS lattice."""
+    import math
+    fps=source.get('fps');duration=source.get('duration')
+    if any(type(t) not in (int,float) or not math.isfinite(t) for t in (a,b,fps,duration)) or fps<=0 or not 0<=a<b<=duration:raise ValueError('Dynamic interval needs finite source fps/duration and legal source seconds')
+    anchors=list(anchor_times)
+    if anchors and (any(type(t) not in (int,float) or not math.isfinite(t) or not a-1e-6<=t<=b+1e-6 for t in anchors) or len(set(anchors))<2):raise ValueError('Dynamic plan needs two distinct verified actual anchors in its interval')
+    last=max(a,b-1/fps)
+    times=sorted(set([round(a+n/2,6) for n in range(math.ceil((b-a)*2)) if a+n/2<last]+[round(last,6)]))
+    if anchors:
+        # Replace the terminal reference point, rather than appending every anchor
+        # or treating average frame rate as evidence against observed VFR PTS.
+        times[-1]=max(times[-1],max(anchors))
+        if len(times)==1 and times[0]>a:times.insert(0,a)
+    times=sorted(set(times))
+    if len(times)<2:raise ValueError('Dynamic interval cannot plan two distinct source times')
+    return times
+
+def validate_dynamic_request(package,request,source=None,strict=True):
+    """Shared eligibility gate; batch policy never trusts pending-dict truthiness."""
+    import math
+    sid=package['source']['id'];a=request.get('start');b=request.get('end');ids=request.get('evidence_ids')
+    if request.get('source_id')!=sid or any(not isinstance(request.get(k),str) or not request[k].strip() for k in ('question','reason')):raise ValueError('Dynamic candidate requires a concrete nonblank question/reason and original source')
+    if any(type(t) not in (int,float) or not math.isfinite(t) for t in (a,b)) or not 0<=a<b<=package['source']['duration']:raise ValueError('Dynamic candidate requires a finite original source interval')
+    frames={f['id']:f for f in package['frames']}
+    if not isinstance(ids,list) or len(ids)<2 or any(not isinstance(fid,str) or not fid.strip() for fid in ids) or len(ids)!=len(set(ids)):raise ValueError('Dynamic candidate requires 2+ distinct frame IDs')
+    tolerance=1e-6 if strict else 0.25
+    if any(fid not in frames or frames[fid].get('source_id')!=sid or not a-tolerance<=frames[fid]['time']<=b+tolerance for fid in ids):raise ValueError('Dynamic frame anchors must belong to the original source and requested interval')
+    if strict:
+        actual=[frames[fid]['time'] for fid in ids]
+        if any(type(t) not in (int,float) or not math.isfinite(t) for t in actual) or len(set(actual))<2:raise ValueError('Dynamic anchors need two distinct finite actual frame times')
+        source=source or package['source']
+        if 'fps' in source:
+            times=dynamic_sample_times(source,a,b,actual)
+            if min(actual)<times[0]-1e-6 or max(actual)>times[-1]+1e-6:raise ValueError('Dynamic anchors lie outside the executable sampled envelope')
+    return request
 
 def validate_result(package,result):
     parsed=Result.model_validate(result); data=parsed.model_dump()
@@ -335,7 +404,8 @@ def validate_result(package,result):
             permitted=package.get('gps') or []
             if finding['location'] not in permitted: raise ValueError('location must exactly cite a provided location record; visual guesses prohibited')
     for req in data['supplemental_requests']:
-        if req.get('source_id')!=sid or not 0<=req.get('start',-1)<=req.get('end',-1)<=duration or not req.get('reason'): raise ValueError('invalid supplemental interval')
+        if req.get('purpose')=='dynamic':validate_dynamic_request(package,req,strict=package.get('dynamic_request_policy')=='bounded_sampling_v1')
+        elif req.get('source_id')!=sid or not 0<=req.get('start',-1)<=req.get('end',-1)<=duration or not req.get('reason'):raise ValueError('invalid supplemental interval')
     return data
 
 def merge_intervals(requests,duration,before=15,after=30):

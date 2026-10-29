@@ -29,15 +29,12 @@ def init(args):
     if state.exists() and (state/'manifest.json').exists(): raise ValueError('State already exists; resume existing run')
     for root in (state,temp):
         if source==root or source in root.parents or root==source.parent: raise ValueError('State/temp must be local and outside source tree')
-        if str(root).startswith('\\\\') or any('onedrive' in p.lower() for p in root.parts): raise ValueError('State/temp must be local and outside synchronized folders')
-        if os.name=='nt':
-            import ctypes
-            if ctypes.windll.kernel32.GetDriveTypeW(str(root.anchor))==4: raise ValueError('State/temp cannot use mapped network drives')
+        store.local_nonsync(root)
         root.mkdir(parents=True,exist_ok=True)
     files=sorted(p for p in source.rglob('*') if p.is_file() and p.suffix.lower() in ('.mp4','.mov','.mkv','.mts'))
     m={'run_id':run_id,'state_dir':str(state),'temp_dir':str(temp),'status':'running','temporary_artifacts':[],'frames':[],'packages':[],'transcription':{},'config':{'source_root':str(source),'date':args.date,'timezone':'Asia/Shanghai','ffmpeg':args.ffmpeg,'ffprobe':args.ffprobe,'asr_service':args.service,'asr_model':asr.MODEL,'asr_concurrency':1,'vision_concurrency':args.vision_concurrency,'sample_interval':10,'schema_version':analysis.SCHEMA_VERSION,'prompt_version':analysis.PROMPT_VERSION},'sources':[],'versions':{'python':platform.python_version()}}
     host=getattr(args,'host','codex'); m['config']['host']=host; m['config']['model_roles']=dict(HOST_MODEL_ROLES[host])
-    m['config'].update(visual_package_mode='block_visual_v1',extraction_pipeline='select_first_v3',ready_package_limit=24,temp_limit_bytes=256*1024**3,min_free_bytes=5*1024**3)
+    m['config'].update(supplement_mode='shot_v1',visual_package_mode='block_visual_v1',extraction_pipeline='select_first_v3',ready_package_limit=24,temp_limit_bytes=256*1024**3,min_free_bytes=5*1024**3)
     m['config']['asr_model']=getattr(args,'asr_model',asr.MODEL)
     if getattr(args,'preview_lut_map',None):
         map_file=Path(args.preview_lut_map).resolve(); mapping=read(map_file)
@@ -112,7 +109,7 @@ def vision_queue(args):
         for pid in getattr(args,'release',[]) or []:
             if claims.get(pid,{}).get('group_id'): raise ValueError('Grouped claim requires vision-work native completion/failure receipt; cannot release a running group through legacy queue')
             claims.pop(pid,None)
-        waiting=[p for p in m['packages'] if p['status']=='waiting_ai']
+        waiting=[p for p in m['packages'] if p['status']=='waiting_ai' and not p.get('shot_review')]
         awaiting_validation=[p for p in waiting if p.get('result_path') and Path(p['result_path']).exists()]
         ready=[p for p in waiting if p['id'] not in claims and p not in awaiting_validation]
         claimed=sum(p['id'] in claims for p in waiting)
@@ -555,9 +552,17 @@ def _continue_day_serial(args):
     return {'status':m['status'],'coverage':report.coverage(m)}
 
 def decide_supplement(args):
-    m=load(args); result=analysis.record_supplement_decision(m,args.request_id,args.decision,args.reviewer,args.reason); save(m); return result
+    m=load(args)
+    if getattr(args,'restore_round_request',False):
+        if args.decision!='accept':raise ValueError('--restore-round-request applies only to explicit same-round acceptance')
+        analysis.restore_round_request(m,args.request_id,args.reviewer,args.reason)
+    result=analysis.record_supplement_decision(m,args.request_id,args.decision,args.reviewer,args.reason); save(m); return result
 
 def supplement(args):
+    m=load(args)
+    if m.get('config',{}).get('supplement_mode')=='shot_v1' and not getattr(args,'list_requests',False):
+        from vlog_index.shot_supplement import prepare as prepare_shots
+        result=prepare_shots(m,source_ids=getattr(args,'source_id',None),extraction_options=extraction_options(m));save(m);return result
     m=load(args); candidates=m.get('supplemental_pending',[]); created=[]
     decisions=m.get('supplemental_decisions',{})
     if getattr(args,'list_requests',False): return {'requests':[{'request_id':digest(r),'request':r,'decision':decisions.get(digest(r),{}).get('decision','undecided')} for r in candidates]}
@@ -623,6 +628,24 @@ def audio(args):
     finally: state.close()
     return {'processed_chunks':processed}
 
+def accept_dynamic(args):
+    from vlog_index import shot_supplement
+    m=load(args);result=shot_supplement.accept_dynamic(m,args.reviewer,args.reason,source_ids=getattr(args,'source_id',None));save(m);return result
+
+def shot_work_action(args):
+    from types import SimpleNamespace
+    from vlog_index import shot_work,shot_supplement
+    if getattr(args,'source_id',None):raise ValueError('shot-work owns complete frozen bundles; --source-id is not supported; filter at accept-dynamic or supplement instead')
+    root=Path(args.state)/'shot-review'
+    # Bind/completion facts do not depend on other package files or import success.
+    result=shot_work.next_action(root,read(args.native_capabilities) if args.native_capabilities else None,args.available_workers,args.reserve_sol,args.bundle_id,args.native_agent_id,args.outcome,args.reason)
+    if args.bundle_id:return result
+    m=load(args)
+    if shot_supplement.import_successes(m):
+        import_results(SimpleNamespace(state=args.state,source_id=None,refresh=False),m)
+    return result
+
+
 def resolve_supplements(m):
     packages_by_id={p['id']:p for p in m['packages']}; resolved=set()
     for plan in m.get('supplemental_plans',{}).values():
@@ -631,8 +654,11 @@ def resolve_supplements(m):
 
 def daily_package(args):
     from types import SimpleNamespace
+    from vlog_index.shot_supplement import daily_changes
     import_results(SimpleNamespace(state=args.state,source_id=None,refresh=False))
     m=load(args); resolve_supplements(m); cov=report.coverage(m)
+    if m.get('config',{}).get('supplement_mode')=='shot_v1' and any(r.get('purpose')=='dynamic' and digest(r) not in m.get('supplemental_decisions',{}) for r in m.get('supplemental_pending',[])):
+        raise ValueError('Dynamic candidates precede daily semantics: run accept-dynamic --reviewer ROOT --reason AUTHORIZED_POLICY, then supplement and shot-work')
     if not cov['analysis_ready']: save(m); raise ValueError('Readable material still has unfinished extraction, ASR, analysis or accepted supplements')
     active=[p for p in m['packages'] if p['status']=='success']
     results=[read(Path(m['state_dir'])/'analysis'/(p['id']+'.json')) for p in active]
@@ -643,7 +669,7 @@ def daily_package(args):
         item['clock']['usable_mapping']=bool(md.get('time_verified') and md.get('playback_rate_verified'))
         source_context.append(item)
     analysed={f for p in active for f in p['core_frame_ids']}
-    payload={'run_id':m['run_id'],'stage':'readable_material_complete_awaiting_daily','archival_date':m['config']['date'],'timezone':m['config']['timezone'],'coverage':cov,'sources':source_context,'frames':[{k:f.get(k) for k in ('id','source_id','time','pts','precision')} for f in m['frames']+m.get('supplemental_frames',[]) if f['id'] in analysed],'validated_records':results,'transcriptions':m['transcription'],'gps_context':m.get('gps'),'root_review_decisions':m.get('root_review_decisions',[]),'sampling_adjustments':m.get('plan_adjustments',[]),'result_schema':analysis.DailyResult.model_json_schema(),'instructions':'仅依据已校验观察/原始转写做日摘要与跨文件语义合并；保留每个source片段及证据ID，不改原话，不猜山名/景物坐标，不把ASR文字当音频事件检测。跨来源画面相似不证明同一事件；语音回述不是现场正在发生的事实，chunk区间不当精确剪辑点或词时码。遵守本包有证据的root_review_decisions，不继承其他运行结论。时间仅按usable_mapping源的UTC+文件内秒换算，其余标未核实。源损坏独立保留，不宣称全部来源均已覆盖。'}
+    payload={'run_id':m['run_id'],'stage':'readable_material_complete_awaiting_daily','archival_date':m['config']['date'],'timezone':m['config']['timezone'],'coverage':cov,'sources':source_context,'frames':[{k:f.get(k) for k in ('id','source_id','time','pts','precision')} for f in m['frames']+m.get('supplemental_frames',[]) if f['id'] in analysed],'validated_records':results,'visual_changes':daily_changes(m),'visual_review_coverage':{'reviewed_packages':sorted(m.get('shot_records',{})),'missing_means':'not_assessed'},'transcriptions':m['transcription'],'gps_context':m.get('gps'),'root_review_decisions':m.get('root_review_decisions',[]),'sampling_adjustments':m.get('plan_adjustments',[]),'result_schema':analysis.DailyResult.model_json_schema(),'instructions':'同时显式返回visual_changes（无变化也返回[]），visual_changes逐条原样引用所给review_id已接受的canonical事实，不改写其描述、方向、亮暗、时间或证据，叙事概括只写summary，保留visible_change与camera_motion_inference，不把运镜自动变成事件或地理finding。仅依据已校验观察/原始转写做日摘要与跨文件语义合并；保留每个source片段及证据ID，不改原话，不猜山名/景物坐标，不把ASR文字当音频事件检测。跨来源画面相似不证明同一事件；语音回述不是现场正在发生的事实，chunk区间不当精确剪辑点或词时码。遵守本包有证据的root_review_decisions，不继承其他运行结论。时间仅按usable_mapping源的UTC+文件内秒换算，其余标未核实。源损坏独立保留，不宣称全部来源均已覆盖。'}
     payload['package_id']=digest(payload)[:24]
     path=Path(m['temp_dir'])/'daily.package.json'; result_path=Path(m['temp_dir'])/'daily.result.json'; payload['result_path']=str(result_path)
     dump(path,payload); m['temporary_artifacts'] += list(map(str,(path,result_path))); m['status']='awaiting_daily'; m['daily_package']={'id':payload['package_id'],'path':str(path),'result_path':str(result_path)}; save(m)
@@ -946,15 +972,19 @@ def main():
     funcs.update({'hardware-benchmark':hardware_benchmark})
     funcs.update({'configure-concurrency':configure_concurrency,'vision-queue':vision_queue})
     funcs.update({'vision-work':vision_work.run})
-    funcs.update({'retry-visual':retry_visual})
+    funcs.update({'retry-visual':retry_visual,'accept-dynamic':accept_dynamic,'shot-work':shot_work_action})
     for name in funcs:
         if name=='init': continue
         p=sub.add_parser(name); p.add_argument('--state',required=True); p.add_argument('--source-id',action='append')
         if name=='prepare': p.add_argument('--blocks',type=int,help='Process a bounded batch; full remaining plan stays pending')
         if name=='packages': p.add_argument('--gps'); p.add_argument('--garmin-companion',action='append',help='Explicit source id whose camera accompanies the Garmin recorder'); p.add_argument('--refresh',action='store_true',help='Explicitly rebuild legacy prompt packages; downstream semantic approvals become stale')
         if name=='render': p.add_argument('--daily',help='Semantic Agent merged daily JSON; citations are checked before rendering')
+        if name=='accept-dynamic':p.add_argument('--reviewer',choices=('ROOT',),required=True);p.add_argument('--reason',required=True)
+        if name=='shot-work':
+            p.add_argument('--native-capabilities');p.add_argument('--available-workers',type=int,default=0);p.add_argument('--reserve-sol',type=int,default=1);p.add_argument('--bundle-id');p.add_argument('--native-agent-id');p.add_argument('--outcome',choices=('complete','failed'));p.add_argument('--reason')
         if name=='decide-supplement':
             p.add_argument('--request-id',required=True); p.add_argument('--decision',choices=('accept','reject'),required=True); p.add_argument('--reviewer',choices=('ROOT',),required=True); p.add_argument('--reason',required=True)
+            p.add_argument('--restore-round-request',action='store_true',help='ROOT-confirmed recovery of an original canonical proposal omitted by an old round; never a new recursive request')
         if name=='supplement': p.add_argument('--list-requests',action='store_true',help='Show candidate ids and ROOT decisions without extracting')
         if name=='approve-final': p.add_argument('--reviewer',choices=('ROOT',),required=True); p.add_argument('--reason',required=True); p.add_argument('--review-result',required=True)
         if name=='import-results': p.add_argument('--refresh',action='store_true',help='Revalidate an explicitly corrected existing result')
@@ -998,6 +1028,8 @@ def main():
     with RunLock(args.state):
         if args.action in ('daily-package','geography-package','import-geography','render','final-review-package','approve-final','publish','cleanup'):
             vision_work.require_finished_native_turns(args.state)
+            from vlog_index.shot_work import require_finished
+            require_finished(Path(args.state)/'shot-review')
         result=funcs[args.action](args)
     print(json.dumps(result,ensure_ascii=False,indent=2),flush=True)
 if __name__=='__main__': main()

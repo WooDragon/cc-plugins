@@ -78,7 +78,7 @@ def package_info(m, p):
 def ordered_ready(m, claims, directory=None, source_id=None):
     rank = {s['id']: i for i, s in enumerate(m['sources'])}
     ready = [package_info(m, p) for p in m['packages']
-             if p['status'] == 'waiting_ai' and p['id'] not in claims
+             if p['status'] == 'waiting_ai' and not p.get('shot_review') and p['id'] not in claims
              and not Path(p['result_path']).exists()]
     ready.sort(key=lambda p: (p['source_id'] != source_id,
         p['archive_directory'] != directory, rank.get(p['source_id'], len(rank)),
@@ -279,10 +279,10 @@ def run(args):
             return {'next_action': 'next', 'receipt_recorded': True}
         m = read(state / 'manifest.json')
         _reconcile(m, ledger, claims)
-        waiting = [p for p in m['packages'] if p['status'] == 'waiting_ai']
+        waiting = [p for p in m['packages'] if p['status'] == 'waiting_ai' and not p.get('shot_review')]
         awaiting = [p['id'] for p in waiting if Path(p['result_path']).exists()]
         result = {'target_presented_images': TARGET_IMAGES, 'groups_per_worker': GROUPS_PER_WORKER,
-                  'unfinished_original_packages': sum(p['status'] != 'success' for p in m['packages']),
+                  'unfinished_original_packages': sum(p['status'] != 'success' for p in m['packages'] if not p.get('shot_review')),
                   'host_available_workers': args.available_workers, 'reserved_for_sol': args.reserve_sol}
         blocked = next((g for g in ledger['groups'].values() if g.get('package_errors')), None)
         if blocked:
@@ -313,7 +313,7 @@ def _next(root, m, ledger, claims, args):
             return {'next_action': 'retire_worker', 'worker_id': worker['id'],
                     'native_agent_id': worker['native_agent_id'], 'reason': worker['retire_reason'],
                     'note': 'Stop reusing this native worker; acknowledge actual native completion/closure, then re-read real free slots.'}
-    invalid = [p['id'] for p in m['packages'] if p['status'] == 'invalid']
+    invalid = [p['id'] for p in m['packages'] if p['status'] == 'invalid' and not p.get('shot_review')]
     if invalid: return {'next_action': 'root_correction', 'package_ids': invalid,
                         'note': 'Existing retry-visual / import-results --refresh rules apply; no automatic retry.'}
     ready = ordered_ready(m, claims)
@@ -334,7 +334,7 @@ def _next(root, m, ledger, claims, args):
         worker['status'] = 'pending_followup'
         group = _new_group(root, ledger, claims, take_group(candidates), worker, contract)
         return {'next_action': 'followup', **_task(group, worker)}
-    unfinished = {p['id'] for p in m['packages'] if p['status'] != 'success'}
+    unfinished = {p['id'] for p in m['packages'] if p['status'] != 'success' and not p.get('shot_review')}
     legacy_workers = {c['worker'] for pid, c in claims.items() if pid in unfinished and not c.get('group_id')}
     active = sum(w['status'] != 'retired' for w in workers.values()) + len(legacy_workers)
     capacity = min(6, m['config'].get('vision_concurrency', 2)) - active
