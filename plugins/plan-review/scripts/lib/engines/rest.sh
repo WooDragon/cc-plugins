@@ -20,7 +20,7 @@
 # HOOK_BUDGET, REVIEW_API_URL, REVIEW_API_KEY, GEMINI_MODEL,
 # REVIEW_REST_TIMEOUT, REVIEW_REST_STALL_TIMEOUT, _fail_reason.
 #
-# bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
+# Requires Bash 5.0+; see the plugin README.md runtime requirements.
 
 # --- Build the request + call the endpoint. Writes body to $ENGINE_OUT,
 #     HTTP status to $ENGINE_STATUS, sets $curl_exit. REQ_FILE/ENGINE_STATUS

@@ -6,7 +6,7 @@
 # SYSTEM_INSTRUCTIONS, ARTIFACT, ROUND_INDEX, ENGINE_OUT, ENGINE_TIMEOUT,
 # TIMEOUT_CMD, CONV_FILE, LOG_FILE, ENGINE_CMD.
 #
-# bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
+# Requires Bash 5.0+; see the plugin README.md runtime requirements.
 
 # --- One-time setup (called once, outside the retry loop): CLI existence
 #     check + model resolution + system-prompt prep. Returns 0 if usable,

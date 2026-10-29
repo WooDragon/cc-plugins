@@ -2,7 +2,7 @@
 # Sourced (not executed) by plan-review.sh. Requires LOG_FILE and LOG_DIR to
 # already be set by the caller before any of these functions are invoked.
 #
-# bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
+# Requires Bash 5.0+; see the plugin README.md runtime requirements.
 
 # DELTA_REVIEW_RULES — single source of truth for the delta-review-rules
 # NUMBERED LIST (the actual re-verification discipline) used in every

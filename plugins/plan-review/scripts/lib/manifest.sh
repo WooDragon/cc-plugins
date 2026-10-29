@@ -1,7 +1,7 @@
 # lib/manifest.sh — Dispatch Manifest v2 detection, validation, and serialization.
 # Sourced by plan-review.sh. This file validates only manifest structure; it
 # deliberately has no dynamic agent catalog or model ownership policy.
-# bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
+# Requires Bash 5.0+; see the plugin README.md runtime requirements.
 
 needs_manifest() { printf '%s' "$1" | grep -qiE '(Task\(|subagent_type|agent_type|Plan agent|Explore agent|worker agent|dev agent)'; }
 has_manifest() { printf '%s' "$1" | grep -qi '^## Dispatch Manifest'; }

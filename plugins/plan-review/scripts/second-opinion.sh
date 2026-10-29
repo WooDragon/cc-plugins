@@ -1,4 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Runtime requirement: reject before stdin, libraries, switches, or state.
+if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  printf '%s\n' 'plan-review requires Bash 5.0+. On macOS, install Homebrew Bash (brew install bash). Put its bin first on PATH, verify bash --version, and start a new Claude Code process from that environment.' >&2
+  exit 1
+fi
+
 # second-opinion.sh — out-of-plugin driver for plan-review's engine
 # infrastructure (agy + Gemini 4 Argon (High) + REST fallback + session reuse),
 # built on top of lib/consult.sh's run_consultation() state machine (PR1).
@@ -63,7 +69,7 @@
 # Gemini capacity-exhaustion degraded state is shared between the hook and
 # this driver) — this driver does not invent a separate directory.
 #
-# bash 3.2 compatible: no associative arrays, no ${var^^}, no &>>.
+# Requires Bash 5.0+; see README.md runtime requirements.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
