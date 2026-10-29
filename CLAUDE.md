@@ -8,13 +8,16 @@ WooDragon 的 Claude Code 插件 + 技能包 marketplace。
 |------|------|------|
 | Plugin | plan-review | 对抗性审阅（Gemini/Claude/Codex）+ `second-opinion.sh` 通用第二意见驱动（插件外可调用） |
 | Plugin | ppt-press（4 skills） | PPT 全生命周期（init/create/deploy/manage） |
-| Plugin | doc-gate（1 skill + 3 hooks + 2 tools） | 文档编辑门禁 + 词法召回 |
+| Plugin | doc-gate（2 skills + 2 hooks + 4 tools） | 文档入口判据注入 + 出口工作树一致性检查 |
 | Plugin | code-search（1 skill） | 代码搜索与符号导航方法论（纯 skill，零 hook） |
+| Plugin | github-collab（1 skill） | 管理者 / 协作者两条 GitHub 协作工作流；纯 skill，零 hook |
 | Plugin | deep-research（1 skill + 4 agents + 1 hook） | 7-Stage 深度研究管线 + 多模型采集引擎 + 引用验证门禁 |
 | Plugin | guardrails（2 hooks） | 代码规模提示（信息性）+ git push 防手滑（拦截误推 main/master，非防绕过安全边界） |
 | Plugin | pr-review（1 skill + 5 scripts） | 已开 PR 的 AI 评审：grok/claude/codex 本地同步评审（`pr-review.sh` 统一入口自动路由，均含多轮对抗复评的 session 状态管理）+ Copilot bot 异步评审（可选） |
 | Plugin | dispatch-contract（1 skill + 5 hooks） | 子 agent 派发契约：四条派发铁律 + `%%DONE%%` 定稿门禁（SubagentStop）（判据按正文体量分档）+ background-dispatch 同步守卫 + 派发能力匹配守卫 + 派发通道守卫（均 PreToolUse）+ 派发规则注入（SubagentStart） |
 | Plugin | brain-route（2 skills + 1 hook） | second-brain 跨项目记忆路由：`brain-recall` 召回与写入规约 + `brain-curate` 复核去重流程 + 写本地 memory 条目文件时的路由提醒 hook（软提醒，重试即放行） |
+| Plugin | vlog-daily-index（1 skill + 3 agents + Python tools） | 旅行记忆分析师：Codex / Claude Code 双宿主原生 Agent 工作流，结合原片、行程、语音与 GPS/地图证据建立每日索引 |
+| Plugin | dit-media（1 skill + Python tools） | 素材归档与 DIT：复制校验回执、同卷归位、十字段近源 CSV 与按需修复 |
 
 ## 版本变更铁律
 
@@ -58,22 +61,33 @@ plugins/
       second-opinion.bats         # second-opinion.sh 驱动测试
       test_helper/
         common-setup.bash         # 测试基础设施（mock、断言）
-  doc-gate/                       # 文档编辑门禁 + 词法召回插件
+  doc-gate/                       # 文档入口判据注入 + 出口工作树一致性检查插件
     .claude-plugin/plugin.json   # 插件元数据（声明 skills + hooks）
-    hooks/hooks.json             # PreToolUse: Edit(skill-gate+recall-gate), Write(同), Skill(marker)
+    hooks/hooks.json             # PostToolUse: Edit|Write(doc-entry), Stop(doc-exit)
     scripts/
-      skill-gate.sh              # 硬门禁（.md 编辑前检查 doc-maintenance marker）
-      skill-marker.sh            # 标记脚本（Skill 调用时写 marker）
-      recall-gate.sh             # 软门禁（BM25 召回 + 孤儿检测 + 出链验证，deny-once-per-file）
+      doc-entry.sh               # 入口层（零 deny、零状态）：每次 .md 编辑后注入表述规范判据
+      doc-exit.sh                # 出口层：回合结束时从 git status 推导脏文件，跑一次链接图谱，报四类 finding
+      _doc_gate_exclude.sh       # 两个 hook 共用的排除名单谓词单一来源
     tools/
-      _doc_gate_common.py        # 共享模块：排除名单 + 链接图谱原语单一来源（recall-gate/docs-graph 共用）
-      recall-gate.py             # BM25 + 链接图谱合并引擎（单趟扫描，零依赖）
+      _doc_gate_common.py        # 共享模块：排除名单 + 链接图谱原语单一来源（recall-gate/docs-graph/doc-exit-report 共用）
+      recall-gate.py             # BM25 + 链接图谱合并引擎（独立 CLI，`gate` 子命令，不再被任何 hook 调用）
+      doc-exit-report.py         # doc-exit.sh 的出口判定引擎：stale_inlinks/dangling_refs/recall/broken_outlinks
       docs-graph.py              # 链接图谱独立 CLI（7 子命令：check/backlinks/links/orphans/hubs/related/export）
     skills/
       doc-maintenance/SKILL.md   # 文档维护工作流
-    tests/                       # BDD 测试套件（skill-gate + skill-marker）
-      skill-gate.bats            # 54 个测试用例
-      skill-marker.bats          # 13 个测试用例
+      memory-cleanup/SKILL.md    # 项目 auto-memory 清理方法
+    tests/                       # BDD 测试套件：入口、出口、排除、BM25 与 auto-memory 行为
+      doc-entry.bats             # 入口过滤、注入载荷、全局配置、开关与 fail-open
+      memory-cleanup.bats        # Memory 清理内容与打包合同
+      doc-exit.bats              # git 状态传输、生命周期门控、finding、排除与鲁棒性
+      exclude.bats               # 共享 Shell 排除谓词与受治理路径覆盖
+      test_bm25.py               # 正文/标题索引评分、排序、阈值与兼容性
+      test_doc_exit_report.py    # 批量 finding、删除处理、预算降级与 NUL 路径传输
+      test_exclude.py            # Shell/Python 排除规则一致性
+      test_auto_memory.py        # 根路径感知排除、memory 读取隔离、链接豁免、standalone 空结果与零预算
+      auto-memory-paths.sh       # Shell/Python 共享 auto-memory 路径矩阵运行器
+      fixtures/
+        auto-memory-paths.json   # 共享 auto-memory 路径矩阵
       test_helper/
         common-setup.bash        # 测试基础设施
   ppt-press/                     # PPT 发布系统插件（skills-only，预留 hooks）
@@ -93,6 +107,11 @@ plugins/
     .claude-plugin/plugin.json   # 插件元数据（纯 skill）
     skills/
       code-search/SKILL.md       # 工具决策树 + 按意图策略 + 组合技巧 + 上下文经济
+    README.md                    # 面向安装者说明
+  github-collab/                 # GitHub 协作工作流插件（纯 skill，零 hook）
+    .claude-plugin/plugin.json   # 插件元数据（纯 skill）
+    skills/
+      github-collab/SKILL.md     # 管理者 / 协作者两条工作流 + PR 卡住速查表 + 分支保护配置附录
     README.md                    # 面向安装者说明
   deep-research/                 # 深度研究管线插件
     .claude-plugin/plugin.json   # 插件元数据（声明 skill + 4 个 native subagent）
@@ -122,10 +141,10 @@ plugins/
       references/grok-review.md  # grok 后端参数、机制、故障排查
       references/claude-review.md # claude 后端特有部分：隔离旗标原理、会话续接、state 文件后缀
       references/copilot-review.md # Copilot 后端三条路径（REST 首触 / GraphQL 重触 / 状态查询）
-    tests/grok-review.bats       # 66 个测试用例（stub grok/gh/uuidgen，git 用真实临时仓库）
-    tests/claude-review.bats     # 24 个测试用例（stub claude，覆盖隔离旗标/会话续接/state 文件隔离，隔离旗标含 --safe-mode/--strict-mcp-config，在首轮与 --resume 复核轮两条路径均有断言）
-    tests/resolve-backend.bats   # 10 个测试用例（后端解析优先级 + pr-review.sh 路由）
-    tests/skill-contract.bats    # 3 个测试用例（修复子任务与主线复核生命周期的 Markdown 所有权合同）
+    tests/grok-review.bats       # 测试用例（stub grok/gh/uuidgen，git 用真实临时仓库）
+    tests/claude-review.bats     # 测试用例（stub claude，覆盖隔离旗标/会话续接/state 文件隔离，隔离旗标含 --safe-mode/--strict-mcp-config，在首轮与 --resume 复核轮两条路径均有断言）
+    tests/resolve-backend.bats   # 测试用例（后端解析优先级 + pr-review.sh 路由）
+    tests/skill-contract.bats    # 测试用例（修复子任务与主线复核生命周期的 Markdown 所有权合同）
     README.md                    # 面向安装者说明
   dispatch-contract/             # 子 agent 派发契约插件（1 skill + 5 hooks）
     .claude-plugin/plugin.json   # 插件元数据（声明 skill + 5 个 hook）
@@ -150,6 +169,15 @@ plugins/
       gate-composition.bats      # 门禁组合测试：从 hooks.json 动态发现同 matcher 下全部门禁并逐一验证
       test_helper/
         common-setup.bash        # 测试基础设施
+  vlog-daily-index/              # 旅行记忆分析师（Codex / Claude Code 双宿主原生 Agent）
+    .claude-plugin/plugin.json   # 插件元数据（版本与 marketplace 同步）
+    skills/vlog-daily-index/     # 自包含技能、Python 工具、通用引用、合成测试与依赖说明
+    agents/                      # Claude Code 原生 subagent（vision / semantic / geography）
+    README.md                    # 安装者说明、依赖与宿主限制
+  dit-media/                     # 相机素材归档与 DIT
+    .claude-plugin/plugin.json   # 插件元数据（版本与 marketplace 同步）
+    skills/dit-media/            # 归档技能、标准库工具、合成测试、通用参考与 FastCopy 配置
+    README.md                    # 安装者说明与索引兼容边界
   brain-route/                   # second-brain 跨项目记忆路由插件（2 skills + 1 hook）
     .claude-plugin/plugin.json   # 插件元数据（声明 2 个 skill + 1 个 hook）
     hooks/hooks.json             # 本地 memory 写入时的路由提醒 hook 声明
@@ -172,7 +200,7 @@ plugins/
 | 插件 | 变量前缀/名称 | 权威文档 |
 |------|--------------|----------|
 | plan-review | `REVIEW_*`、`AGY_MODEL`、`CLAUDE_MODEL`、`GEMINI_MODEL`、`CODEX_BIN`、`CODEX_MODEL`、`DISPATCH_CHECK_DISABLED` | [plugins/plan-review/README.md](plugins/plan-review/README.md#environment-variables) |
-| doc-gate | `SKILL_GATE_*`、`RECALL_GATE_*` | [plugins/doc-gate/README.md](plugins/doc-gate/README.md#environment-variables) |
+| doc-gate | `DOC_ENTRY_GATE_*`、`DOC_EXIT_GATE_*` | [plugins/doc-gate/README.md](plugins/doc-gate/README.md#environment-variables) |
 | deep-research | `GATEWAY_API_KEY`、`TAVILY_API_KEY`、`JINA_API_KEY`（可选凭证） | [plugins/deep-research/README.md](plugins/deep-research/README.md#prerequisites) |
 | pr-review | `GROK_MODEL`、`GROK_EFFORT`、`CLAUDE_REVIEW_MODEL`、`CLAUDE_REVIEW_EFFORT`、`PR_REVIEW_BACKEND`、`XDG_STATE_HOME`（session 落盘根） | [plugins/pr-review/README.md](plugins/pr-review/README.md#environment-variables) |
 | dispatch-contract | `ALLOW_UNMARKED_FINAL`、`ALLOW_BACKGROUND_DISPATCH`、`ALLOW_NO_RULES_INJECT`、`CLAUDE_CODE_FORK_SUBAGENT`、`ALLOW_DISPATCH_CAPABILITY_MISMATCH`、`ALLOW_UNMANAGED_TEAMMATE`、`CLAUDE_AUTO_BACKGROUND_TASKS` | [plugins/dispatch-contract/README.md](plugins/dispatch-contract/README.md#environment-variables) |
@@ -196,18 +224,21 @@ plugins/
 
 ## Doc-Gate 文档编辑门禁
 
-双层门禁：硬门禁（skill-gate）+ 软门禁（recall-gate）。
+零持久状态的两层：入口注入（entry） + 出口判定（exit），两者管辖对象不同——入口管"写的时候有没有判据在场"，出口管"改完之后工作树整体是否自洽"。
 
-**硬门禁（skill-gate）**：Edit/Write `.md` 文件时检查 session 级 marker，无 marker 则 deny 并提示调用 doc-maintenance skill。CLAUDE.md 按层级分两级强度：全局 `~/.claude/CLAUDE.md` 最严（无条件门禁 + 通用化四判据全过），项目级普通强度。
+Claude Code auto-memory 子树使用根路径上下文精确排除；行为边界见 [doc-gate README](plugins/doc-gate/README.md#exclusions)。
 
-**软门禁（recall-gate）**：首次编辑某 .md 文件时执行三维分析，deny-once-per-file（重试即通过）：
-- **内容维度**：BM25 词法召回，表面已有文档可能与待写内容重叠
-- **结构维度**：孤儿检测（backlinks），标记无入链文件（最易产生重复）
-- **完整性维度**：出链验证，检查内容引用的文件是否存在
+**入口层（`doc-entry.sh`，`PostToolUse: Edit|Write`）**：每次 `.md` 编辑后触发，零 deny、零状态，把表述规范判据（writing-standards §A 的 A1-A13 条目陈述 + 判定要点）注入模型上下文。目标是全局 `~/.claude/CLAUDE.md` 时额外追加通用化四判据段落。
 
-recall-gate 内含 double-deny guard：skill-gate 启用且 marker 不存在时跳过（避免双重拒绝）。`SKILL_GATE_DISABLED=1` 时 recall-gate 独立运行。
+**出口层（`doc-exit.sh`，`Stop`）**：回合结束时从 `git status --porcelain=v1 -z` 推导当前脏 `.md` 文件集合，跑一趟全库链接图谱，产出四类 finding，发现问题时 `exit 2` 拦一次：
+- `stale_inlinks`：链向某脏文件、但自身未被改动的文档（描述可能已陈旧）——核心 finding，且自终止（改了之后就退出下次报告）
+- `dangling_refs`：链向已不存在路径的文档（覆盖 RENAME/ARCHIVE 场景）
+- `recall`：BM25 词法查重，查询用脏文件的最终态全文
+- `broken_outlinks`：脏文件自身的出链目标验证
 
-**独立工具**：`tools/docs-graph.py` 提供链接图谱查询（断链检测、反向引用、孤儿文档、枢纽文档、2 跳邻域、JSON 导出）。
+`orphan`（无入链）也报，但对已删除的文件不报——它需要的是别人停止链它，那是 `dangling_refs` 的职责。带 `name` 的 teammate 拓扑下 `Stop` 会触发两次，`background_tasks` 仍有 `running` 项时判定为中间态并跳过。非 git 仓库下直接静默放行。
+
+**独立工具**：`tools/docs-graph.py` 提供链接图谱查询（断链检测、反向引用、孤儿文档、枢纽文档、2 跳邻域、JSON 导出）；`tools/recall-gate.py` 的 `gate` 子命令仍可独立调用做一次性查重，但不再被任何 hook 消费。
 
 ## Skills
 
@@ -242,11 +273,18 @@ recall-gate 内含 double-deny guard：skill-gate 启用且 marker 不存在时�
 | 机制 | Hook 拦截（`hooks.json` + 脚本） | 知识注入（`SKILL.md` + references） |
 | 发现 | `.claude-plugin/` 目录 | `skills/<name>/SKILL.md` 目录 |
 | 执行 | 脚本自动执行 | AI 读取并遵循 |
-| 安装 | `claude plugin add` | `npx skills add` |
+| 安装 | `claude plugin install` | `npx skills add` |
+
+### 素材归档与查询
+
+`dit-media` 沿用使用者已有归档规范，以成熟复制工具完成传输和校验，维护十字段近源 CSV；不自动清卡或迁移索引。`vlog-daily-index` 可选 DuckDB 查询读取明确指定的每日索引、转写及 DIT CSV，刷新后提供可回到源产物、原片路径与时码的检索。安装与命令分别见两个插件 README。
 
 ## 历史记录
 
 开发踩坑记录已归档至 GitHub Issues：
+
+- [#275 原生视觉宿主角色兼容修复](https://github.com/WooDragon/cc-plugins/issues/275)
+- [#276 可选 DuckDB 查询与 DIT 配合](https://github.com/WooDragon/cc-plugins/issues/276)
 
 - [#8 初期插件开发陷阱](https://github.com/WooDragon/cc-plugins/issues/8) — Marketplace 命名、hooks 重复加载、版本双写、KV Cache 原则
 - [#9 Hook 可靠性与诊断改进 (v1.0.12~v1.0.15)](https://github.com/WooDragon/cc-plugins/issues/9) — Compaction 绕过、入口诊断日志、set-e 静默退出、进程残留

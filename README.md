@@ -7,7 +7,8 @@ WooDragon's CC plugin & skill marketplace.
 **Plugins:**
 
 ```bash
-claude plugin add WooDragon/cc-plugins
+claude plugin marketplace add WooDragon/cc-plugins
+claude plugin install <plugin-name>@cc-plugins
 ```
 
 **Skills:**
@@ -21,12 +22,16 @@ npx skills add WooDragon/cc-plugins -g
 | Plugin | Description |
 |--------|-------------|
 | [plan-review](./plugins/plan-review/) | Adversarial plan review via cross-model consultation (agy/Claude) |
-| [doc-gate](./plugins/doc-gate/) | Document editing governance — skill gate + lexical recall advisory + link graph tools |
+| [doc-gate](./plugins/doc-gate/) | Document editing governance — entry-layer writing-standards injection + exit-layer working-tree consistency check + link graph tools |
 | [ppt-press](./plugins/ppt-press/) | Self-contained PPT publishing — scaffold + create + deploy + manage |
 | [code-search](./plugins/code-search/) | Code search & symbol navigation — pick the right tool by search intent |
+| [github-collab](./plugins/github-collab/) | GitHub maintainer/collaborator workflow — role boundaries, both roles' event-ordered workflows, a PR-stuck lookup table, and a branch-protection setup appendix |
 | [deep-research](./plugins/deep-research/) | Deep research framework — 7-Stage pipeline + role-specialized subagents + multi-model harvest & citation-verification gate |
 | [pr-review](./plugins/pr-review/) | AI review for open GitHub PRs — grok CLI local synchronous review (default, multi-round follow-up) + Copilot bot asynchronous review (optional) |
 | [dispatch-contract](./plugins/dispatch-contract/) | Subagent dispatch contract — four dispatch rules + `%%DONE%%` finalization gate (SubagentStop) |
+| [web-search](./plugins/web-search/) | Web search escalation ladder — agy/grok CLIs → host WebSearch → DuckDuckGo, with capability probing that skips missing CLIs instead of wasting retries |
+| [vlog-daily-index](./plugins/vlog-daily-index/) | Travel memory indexing for Codex and Claude Code with native agents, transcripts and GPS/map evidence |
+| [dit-media](./plugins/dit-media/) | Camera media archiving, verified transfers, relocation and source-adjacent CSV indexes |
 
 ## Skills
 
@@ -37,10 +42,15 @@ npx skills add WooDragon/cc-plugins -g
 | [ppt-deploy](./plugins/ppt-press/skills/ppt-deploy/) | ppt-press | Build, test, and deploy PPT decks to AWS Amplify |
 | [ppt-manage](./plugins/ppt-press/skills/ppt-manage/) | ppt-press | List, search, and retrieve PPT deck URLs |
 | [doc-maintenance](./plugins/doc-gate/skills/doc-maintenance/) | doc-gate | Document maintenance workflow with pre/post-flight checks |
+| [memory-cleanup](./plugins/doc-gate/skills/memory-cleanup/) | doc-gate | On-demand project auto-memory cleanup — trim permanent context, deduplicate, and safely discard obsolete memories |
 | [code-search](./plugins/code-search/skills/code-search/) | code-search | Pick the right search tool (ctags/ast-grep/grep) by intent |
+| [github-collab](./plugins/github-collab/skills/github-collab/) | github-collab | 管理者 / 协作者两条 GitHub 协作工作流 + PR 卡住速查表 + 分支保护配置附录 |
 | [deep-research](./plugins/deep-research/skills/deep-research/) | deep-research | Router skill for the 7-stage research pipeline + quality gates |
 | [pr-review](./plugins/pr-review/skills/pr-review/) | pr-review | Review an open PR by number — grok (default) or Copilot bot backend |
 | [subagent-dispatch](./plugins/dispatch-contract/skills/subagent-dispatch/) | dispatch-contract | Four dispatch rules + `%%DONE%%` finalization contract for subagent delegation |
+| [vlog-daily-index](./plugins/vlog-daily-index/skills/vlog-daily-index/) | vlog-daily-index | 旅行记忆分析师：原片、行程、语音与地理证据的每日索引（Codex and Claude Code 原生 Agent） |
+| [dit-media](./plugins/dit-media/skills/dit-media/) | dit-media | 相机素材归档、批量复制校验、同卷归位与精简近源索引 |
+| [web-search](./plugins/web-search/skills/web-search/) | web-search | Search isolation red line, four-level escalation ladder, community research track, content-farm blocklist, and result verification rules |
 
 ## Basic Usage
 
@@ -48,7 +58,7 @@ Each plugin's own README has full detail (env vars, architecture, test suites). 
 
 **plan-review** — fully automatic, no invocation needed. Enter plan mode as usual; when Claude calls `ExitPlanMode`, the plugin intercepts the plan for adversarial cross-model review before it reaches you.
 
-**doc-gate** — also automatic. Editing any `.md` file triggers the gate; if `doc-maintenance` hasn't been invoked this session, Claude is prompted to call it first. To use the workflow directly: ask Claude to "创建/更新文档" and it will invoke `doc-maintenance` and follow the pre/post-flight checklist.
+**doc-gate** — also automatic. Editing any `.md` file injects writing-standards judgment criteria into context on the spot, and ending a turn with uncommitted `.md` changes runs a working-tree-wide link-graph check that can block once with structural findings (stale references, dangling links, broken outlinks). To use the workflow directly: ask Claude to "创建/更新文档" and it will invoke `doc-maintenance` and follow the pre/post-flight checklist.
 
 ```bash
 # standalone link-graph queries, no skill invocation needed
@@ -84,3 +94,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/create-research-project.sh" "研究主题" -
 # The gate is fail-open: no %%DONE%% in the prompt → gate stays silent.
 export ALLOW_UNMARKED_FINAL=1  # escape hatch if needed
 ```
+
+**vlog-daily-index** — use Codex or Claude Code with native Agent tools and the required models; ask to build a daily travel-memory index from original clips. Configure FFmpeg/ffprobe, ASR and itinerary/GPS evidence first. See the [plugin README](./plugins/vlog-daily-index/) for setup and host limitations.
+
+**dit-media** — provide the source, media root and existing library conventions; ask to archive and verify camera footage. The [plugin README](./plugins/dit-media/) covers tools and CSV compatibility. Optional cross-day and DIT CSV queries are available through vlog-daily-index.

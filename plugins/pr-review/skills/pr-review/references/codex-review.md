@@ -27,8 +27,10 @@ CLI 参数形态（`<PR> [--repo] [--model] [--effort] [--followup] [--since] [-
 
 | 参数 | codex 后端 | claude 后端（对照） | grok 后端（对照） |
 |---|---|---|---|
-| `--model M` | `gpt-5.6-luna`（`CODEX_REVIEW_MODEL` 覆盖，实测取自本机 codex 未传 `-m` 时的默认转译模型） | `claude-opus-5`（`CLAUDE_REVIEW_MODEL` 覆盖） | `grok-4.6`（`GROK_MODEL` 覆盖） |
+| `--model M` | `gpt-5.6-luna`（`CODEX_REVIEW_MODEL` 覆盖，实测取自本机 codex 未传 `-m` 时的默认转译模型） | `claude-opus-5`（`CLAUDE_REVIEW_MODEL` 覆盖） | `grok-4.7`（`GROK_MODEL` 覆盖） |
 | `--effort E` | 合法值严格为 `none/low/medium/high/xhigh/max`，默认 `medium`（`CODEX_REVIEW_EFFORT` 覆盖） | 合法值严格为 `low/medium/high/xhigh/max`，默认 `medium` | 合法值严格为 `none/minimal/low/medium/high`，默认 `high` |
+
+表中 Grok 默认值用于新会话。复核未显式传 `--model` 时，Grok 优先沿用旧 session 的 state `MODEL`，包括 `grok-4.6`，不强迁；state 缺少 `MODEL` 时才回退到 `GROK_MODEL` 或新默认值。显式 `--model` 只覆盖本轮，不改写旧 state 的模型。
 
 三后端的 effort 合法集合两两不同（codex 比 claude 多一个 `none`；比 grok 多 `xhigh`/`max`，少 `minimal`），**不可混用判据**——`--effort minimal` 在 grok 合法、在 codex/claude 都非法；`--effort none` 在 codex/grok 合法、在 claude 非法。
 

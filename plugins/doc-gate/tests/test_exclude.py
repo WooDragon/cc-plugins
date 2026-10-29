@@ -23,7 +23,7 @@ def test_pipeline_excluded_deliverables_and_docs_included(tmp_path):
     _write(tmp_path / "deliverables" / "final" / "report.md", "final report")
     _write(tmp_path / "docs" / "guide.md", "guide")
 
-    corpus, all_files, _forward, _backward = build_corpus_and_graph(str(tmp_path))
+    corpus, all_files, _forward, _backward, _dangling = build_corpus_and_graph(str(tmp_path))
 
     corpus_paths = {doc["path"] for doc in corpus}
 
@@ -46,7 +46,7 @@ def test_intake_excluded(tmp_path):
     _write(tmp_path / "intake" / "background" / "context.md", "background")
     _write(tmp_path / "deliverables" / "final" / "report.md", "final report")
 
-    corpus, all_files, _forward, _backward = build_corpus_and_graph(str(tmp_path))
+    corpus, all_files, _forward, _backward, _dangling = build_corpus_and_graph(str(tmp_path))
 
     corpus_paths = {doc["path"] for doc in corpus}
 

@@ -24,6 +24,31 @@ get_arg_value() {
   awk -v flag="$2" '$0==flag{getline; print; exit}' "$1"
 }
 
+load test_helper/scope-assertions
+
+@test "scope: 首轮实际 CLI stdin 保留安全规则和 PR 文件边界" {
+  run bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  assert_pr_file_scope "$(< "$CODEX_PROMPT_CAPTURE")"
+}
+
+@test "scope: 复核额外路径不扩容，实际 CLI 规则继续限定 PR" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  printf 'extra context\n' > outside-pr.txt
+  run bash "$SCRIPT" 42 --followup "请复核"
+  [ "$status" -eq 0 ]
+  grep -q 'outside-pr.txt' "$CODEX_PROMPT_CAPTURE"
+  assert_pr_file_scope "$(< "$CODEX_PROMPT_CAPTURE")"
+}
+
+@test "scope: 无增量纯讨论仍有边界和无法验证纪律" {
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  run bash "$SCRIPT" 42 --followup "讨论 finding，不声称修复"
+  [ "$status" -eq 0 ]
+  ! grep -q 'BEGIN UNTRUSTED_.*INCREMENTAL DIFF' "$CODEX_PROMPT_CAPTURE"
+  assert_pr_file_scope "$(< "$CODEX_PROMPT_CAPTURE")"
+}
+
 setup() {
   WORK="$BATS_TEST_TMPDIR"
   mkdir -p "$WORK/bin" "$WORK/home" "$WORK/repo" "$WORK/nongit"

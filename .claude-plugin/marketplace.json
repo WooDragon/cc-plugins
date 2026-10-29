@@ -29,8 +29,8 @@
     },
     {
       "name": "doc-gate",
-      "description": "Document editing governance — doc-maintenance skill + hard gate + recall advisory",
-      "version": "1.7.2",
+      "description": "Document editing governance — doc-maintenance skill + entry-side criteria injection + exit-side worktree consistency check",
+      "version": "2.1.0",
       "author": {
         "name": "WooDragon"
       },
@@ -41,7 +41,7 @@
     {
       "name": "code-search",
       "description": "Code search & symbol navigation — pick ctags / ast-grep / grep by search symptom (definition / structure / caller)",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "author": {
         "name": "WooDragon"
       },
@@ -52,7 +52,7 @@
     {
       "name": "deep-research",
       "description": "Deep research framework — 7-Stage pipeline + role-specialized subagents (harvester/analyst/reviewer/publisher) + multi-model harvest & citation-verification gate + deterministic report.md -> report.html renderer",
-      "version": "1.17.0",
+      "version": "1.17.2",
       "author": {
         "name": "WooDragon"
       },
@@ -63,7 +63,7 @@
     {
       "name": "pr-review",
       "description": "AI review for open GitHub PRs — grok/claude/copilot backends, grok and claude auto-routed via a unified entry point, both with adversarial multi-round follow-up over a persisted session; copilot optional and async",
-      "version": "1.3.3",
+      "version": "1.3.7",
       "author": {
         "name": "WooDragon"
       },
@@ -83,9 +83,20 @@
       "homepage": "https://github.com/WooDragon/cc-plugins"
     },
     {
+      "name": "github-collab",
+      "description": "GitHub maintainer/collaborator workflow — how each role works once a repo is set up as maintainer-owns-main, collaborators-PR-only",
+      "version": "1.0.4",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/github-collab",
+      "category": "development",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
       "name": "dispatch-contract",
       "description": "Subagent dispatch contract — four dispatch rules + %%DONE%% finalization gate (SubagentStop) + sync, agent-ownership, capability, and channel guards (PreToolUse) + dispatch-rules injection (SubagentStart)",
-      "version": "1.7.1",
+      "version": "1.11.1",
       "author": {
         "name": "WooDragon"
       },
@@ -102,6 +113,39 @@
       },
       "source": "./plugins/brain-route",
       "category": "development",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "web-search",
+      "description": "Web search escalation ladder — agy/grok CLIs, host WebSearch, DuckDuckGo fallback, with capability probing so missing CLIs are skipped instead of burning retries",
+      "version": "1.0.1",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/web-search",
+      "category": "research",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "vlog-daily-index",
+      "description": "Travel memory indexing for Codex and Claude Code — native agents, source-linked events, transcripts, itinerary and GPS/map evidence",
+      "version": "0.5.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/vlog-daily-index",
+      "category": "productivity",
+      "homepage": "https://github.com/WooDragon/cc-plugins"
+    },
+    {
+      "name": "dit-media",
+      "description": "Camera media archiving and DIT — verified transfer receipts, same-volume relocation and source-adjacent ten-column CSV indexes",
+      "version": "0.1.0",
+      "author": {
+        "name": "WooDragon"
+      },
+      "source": "./plugins/dit-media",
+      "category": "productivity",
       "homepage": "https://github.com/WooDragon/cc-plugins"
     }
   ]

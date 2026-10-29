@@ -1,44 +1,26 @@
 {
-  "description": "Document governance: skill gate (hard) + recall gate (soft advisory)",
+  "description": "Document governance: entry-side criteria injection (PostToolUse) + exit-side worktree consistency check (Stop)",
   "hooks": {
-    "PreToolUse": [
+    "PostToolUse": [
       {
-        "matcher": "Edit",
+        "matcher": "Edit|Write",
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/skill-gate.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/doc-entry.sh",
             "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/recall-gate.sh",
-            "timeout": 10
           }
         ]
-      },
+      }
+    ],
+    "Stop": [
       {
-        "matcher": "Write",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/skill-gate.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/recall-gate.sh",
-            "timeout": 10
-          }
-        ]
-      },
-      {
-        "matcher": "Skill",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/skill-marker.sh",
-            "timeout": 5
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/scripts/doc-exit.sh",
+            "timeout": 60
           }
         ]
       }

@@ -250,3 +250,14 @@ PY
   assert_contains "$default_path" "子任务新建 commit，且不得 amend 首轮 tip"
   assert_absent "$default_path" "修复请 git commit"
 }
+
+@test "插件 scripts/ 目录不含编辑器残渣（.tmp/.bak/.orig/~）" {
+  local root stray
+  root="$(cd "${BATS_TEST_DIRNAME}/../skills/pr-review/scripts" && pwd)"
+  stray=$(find "$root" -maxdepth 2 -type f \( -name '*.tmp' -o -name '*.bak' -o -name '*.orig' -o -name '*~' \) | sort)
+  if [ -n "$stray" ]; then
+    echo "插件 scripts/ 出现残留文件：" >&2
+    echo "$stray" >&2
+    return 1
+  fi
+}

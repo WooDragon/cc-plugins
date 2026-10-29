@@ -344,3 +344,69 @@ EOF
   [ "$OWNERSHIP_EXIT" -eq 0 ]
   [[ "$OWNERSHIP_STDERR" == *"[GATE-DEGRADE] dispatch-agent-ownership-guard: agent-kind.sh lacks required helpers"* ]]
 }
+
+@test "ownership #18: named redteam teammate accepts explicit sonnet for Agent and Task" {
+  local tool payload
+  for tool in Agent Task; do
+    payload=$(mk_ownership_payload "$tool" redteam string sonnet redteam-1)
+    [[ "$(jq -r '.tool_input.name' <<<"$payload")" == "redteam-1" ]]
+    [[ "$(jq -r '.tool_input.model' <<<"$payload")" == "sonnet" ]]
+    run_ownership_guard "$payload"
+    assert_ownership_pass
+  done
+}
+
+@test "ownership #19: removing name from the same redteam sonnet payload remains blocked" {
+  local tool payload
+  for tool in Agent Task; do
+    payload=$(mk_ownership_payload "$tool" redteam string sonnet redteam-1)
+    payload=$(jq -c 'del(.tool_input.name)' <<<"$payload")
+    [[ "$(jq -e '.tool_input | has("name") | not' <<<"$payload")" == "true" ]]
+    run_ownership_guard "$payload"
+    assert_ownership_block
+    [[ "$OWNERSHIP_STDERR" == *"具名注册 agent"* ]]
+  done
+}
+
+@test "ownership #20: nonblank agent_id allows explicit model ownership for Agent and Task" {
+  local tool payload
+  for tool in Agent Task; do
+    payload=$(mk_ownership_payload "$tool" redteam string sonnet __OMIT__ teammate-1)
+    [[ "$(jq -r '.agent_id' <<<"$payload")" == "teammate-1" ]]
+    run_ownership_guard "$payload"
+    assert_ownership_pass
+  done
+}
+
+@test "ownership #21: missing, null, empty, or whitespace Team identities keep ad-hoc model rules" {
+  local tool identity payload
+  for tool in Agent Task; do
+    for identity in __OMIT__ __NULL__ '' '  ' $'\t'; do
+      payload=$(mk_ownership_payload "$tool" redteam string sonnet "$identity")
+      run_ownership_guard "$payload"
+      assert_ownership_block
+    done
+    for identity in __OMIT__ __NULL__ '' '  ' $'\t'; do
+      payload=$(mk_ownership_payload "$tool" redteam string sonnet __OMIT__ "$identity")
+      run_ownership_guard "$payload"
+      assert_ownership_block
+    done
+  done
+}
+
+@test "ownership #22: Team identity skips runtime model requirement before classification" {
+  local tool payload
+  for tool in Agent Task; do
+    payload=$(mk_ownership_payload "$tool" general-purpose omit __OMIT__ __OMIT__ teammate-1)
+    [[ "$(jq -e '.tool_input | has("model") | not' <<<"$payload")" == "true" ]]
+    [[ "$(jq -r '.agent_id' <<<"$payload")" == "teammate-1" ]]
+    run_ownership_guard "$payload"
+    assert_ownership_pass
+
+    payload=$(mk_ownership_payload "$tool" general-purpose omit __OMIT__ lead)
+    [[ "$(jq -e '.tool_input | has("model") | not' <<<"$payload")" == "true" ]]
+    [[ "$(jq -r '.tool_input.name' <<<"$payload")" == "lead" ]]
+    run_ownership_guard "$payload"
+    assert_ownership_pass
+  done
+}

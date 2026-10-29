@@ -8,7 +8,8 @@ When Claude writes or edits a file under `*/memory/*.md` (excluding `MEMORY.md` 
 
 ```bash
 # From marketplace
-claude plugin add brain-route@WooDragon-cc-plugins
+claude plugin marketplace add WooDragon/cc-plugins
+claude plugin install brain-route@cc-plugins
 ```
 
 ## Backend Dependency

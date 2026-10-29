@@ -824,11 +824,14 @@ run_one_gate() {
 
 OWNERSHIP_GUARD_SCRIPT="${BATS_TEST_DIRNAME}/../hooks/dispatch-agent-ownership-guard.sh"
 
-# mk_ownership_payload TOOL_NAME TYPE_MODE MODEL_MODE [MODEL_VALUE]
+# mk_ownership_payload TOOL_NAME TYPE_MODE MODEL_MODE [MODEL_VALUE] [NAME_VALUE] [AGENT_ID_VALUE]
 # TYPE_MODE: omit | null | any literal type. MODEL_MODE: omit | null | string.
+# NAME_VALUE / AGENT_ID_VALUE: omitted by default; pass __NULL__ for JSON null,
+# or any literal string (including empty and whitespace-only values).
 mk_ownership_payload() {
   local tool="$1" type_mode="$2" model_mode="$3" model_value="${4:-}"
-  local ti='{}'
+  local name_value="${5-__OMIT__}" agent_id_value="${6-__OMIT__}"
+  local ti='{}' payload
 
   case "$type_mode" in
     omit) ;;
@@ -841,7 +844,18 @@ mk_ownership_payload() {
     omit) ;;
     *) return 2 ;;
   esac
-  jq -cn --arg tool "$tool" --argjson ti "$ti" '{tool_name:$tool, tool_input:$ti}'
+  if [[ "$name_value" == "__NULL__" ]]; then
+    ti=$(jq -cn --argjson base "$ti" '$base + {name:null}')
+  elif [[ "$name_value" != "__OMIT__" ]]; then
+    ti=$(jq -cn --argjson base "$ti" --arg value "$name_value" '$base + {name:$value}')
+  fi
+  payload=$(jq -cn --arg tool "$tool" --argjson ti "$ti" '{tool_name:$tool, tool_input:$ti}')
+  if [[ "$agent_id_value" == "__NULL__" ]]; then
+    payload=$(jq -cn --argjson base "$payload" '$base + {agent_id:null}')
+  elif [[ "$agent_id_value" != "__OMIT__" ]]; then
+    payload=$(jq -cn --argjson base "$payload" --arg value "$agent_id_value" '$base + {agent_id:$value}')
+  fi
+  echo "$payload"
 }
 
 # run_ownership_guard PAYLOAD [env_overrides...]

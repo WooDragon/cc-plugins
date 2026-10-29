@@ -6,13 +6,14 @@ Subagent dispatch contract enforcement for Claude Code — a `%%DONE%%` finaliza
 
 Version 1.6.0 makes caller-side `model` ownership explicit. Runtime-owned built-ins must carry a non-empty `model` in an `Agent` or `Task` call. Registered agents must omit `model`; `model: null` is equivalent to omission and preserves the agent frontmatter preset. Any other registered-agent model value is rejected because it overrides that preset. This is a breaking contract for callers that previously supplied a model for a registered agent.
 
-The plugin has seven parts: four **PreToolUse hooks** — one blocks dispatch calls omitting `run_in_background:false`, one enforces model ownership, one blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, and one blocks a `name`-carrying dispatch (upgrading a one-shot subagent to a teammate) whose `subagent_type` is not a recognized team-ops role — a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
+The plugin has nine parts: two **PostToolUse hooks** — one reminds the main session when a subagent has completed at least two automatic compactions, and one gives the caller a convergence reminder after a completed synchronous `Agent` or `Task` return — plus four **PreToolUse hooks** — one blocks dispatch calls omitting `run_in_background:false`, one enforces model ownership, one blocks dispatch calls whose `subagent_type`/`model` cannot deliver what the prompt asks for, and one blocks a `name`-carrying dispatch (upgrading a one-shot subagent to a teammate) whose `subagent_type` is not a recognized team-ops role — a **SubagentStart hook** that injects the dispatch rules into every spawned subagent, a **SubagentStop hook** that enforces the `%%DONE%%` finalization marker when it is declared in the dispatch prompt, and a **`subagent-dispatch` skill** that inlines the four dispatch rules, offload-scenario guidance, and background-subagent patterns on demand.
 
 ## Installation
 
 ```bash
 # From marketplace
-claude plugin add dispatch-contract@WooDragon-cc-plugins
+claude plugin marketplace add WooDragon/cc-plugins
+claude plugin install dispatch-contract@cc-plugins
 ```
 
 ## Architecture
@@ -46,6 +47,20 @@ PreToolUse (matcher: Agent, Task)
          entirely out of scope for this hook and falls straight through —
          see § Two-Domain Split below.
 
+PostToolUse (matcher: ^(Agent|Task|SendMessage|TaskOutput)$)
+  │
+  └─ subagent-compact-reminder.sh → subagent-compact-reminder.py
+         Reminds only the main session after a dispatch tool returns.
+         Reports each provable subagent with >=2 completed auto compactions.
+         Requires python3; missing runtime or unknown sources fail open.
+
+PostToolUse (matcher: ^(Agent|Task)$)
+  │
+  └─ dispatch-convergence-reminder.sh (5s timeout)
+         Gives the caller a convergence reminder on tool_response.status=completed.
+         Requires jq; unknown or malformed input produces no output.
+         Adds context only: no blocking decision, transcript scan, or state files.
+
 SubagentStart (matcher: *)
   │
   └─ dispatch-rules-inject.sh (5s timeout)
@@ -74,10 +89,11 @@ skills/subagent-dispatch  (no hook — loaded by description match)
          contract is reachable at dispatch time rather than only after a block.
 ```
 
-This plugin registers six hooks: `PreToolUse` (dispatch-sync-guard,
+This plugin registers eight hooks: `PreToolUse` (dispatch-sync-guard,
 dispatch-agent-ownership-guard, dispatch-capability-guard,
-pre-dispatch-channel-guard), `SubagentStart` (dispatch-rules-inject), and
-`SubagentStop` (subagent-done-gate).
+pre-dispatch-channel-guard), `SubagentStart` (dispatch-rules-inject),
+`SubagentStop` (subagent-done-gate), and `PostToolUse` (subagent-compact-reminder
+and dispatch-convergence-reminder).
 There is no dispatch-side hook that guesses whether a given task needs a
 `%%DONE%%` deliverable — that judgment is semantic, and a keyword guess would
 misfire often enough to be ignored. The skill closes that gap instead.
@@ -88,6 +104,13 @@ Declare the contract per task, not per role. When a dispatch prompt requires a f
 deliverable, append the canonical marker line, copied verbatim from the `定稿标记` section of
 `skills/subagent-dispatch/SKILL.md`. That line carries both halves of the ask: give the full
 report, *then* end with the marker.
+
+Finalization is independent of report length. A complete report includes the current
+conclusions, decision-relevant grounds, and unresolved matters; it is not a requirement to copy full logs.
+Raw evidence may be supplied through direct references that the recipient can read and verify.
+Excerpts of key evidence must preserve the distinction between established and unverified claims.
+The final message must still deliver the report itself, not just a "done / see file" status note.
+Intermediate updates cannot replace a finalized deliverable for dispatch decisions or irreversible actions.
 
 This README deliberately shows no shortened version. A format-only paraphrase such as
 `末尾单独一行输出 %%DONE%%。` drops the report half and reads literally as "output nothing but
@@ -250,6 +273,10 @@ document. Read
 `skills/subagent-dispatch/references/dispatch-contract.md` before changing the
 policy, the caller-side model field, or its escape hatch.
 
+This ad-hoc model check applies only when both Team identity signals are absent
+or blank: top-level `agent_id` and `tool_input.name`. If either is nonblank, this
+guard skips its model check; sibling guards still evaluate their own contracts.
+
 The guard has three repairs. Add a non-empty runtime model for a runtime-owned
 built-in. For a model-optional built-in, omit `model` or use `null` to follow the
 parent session, or provide a valid model name. For a registered-agent call,
@@ -323,6 +350,11 @@ stderr message before a single trailing `exit 2`:
   unpinned tradeoff, redispatch to `dev`/`worker` and omit `model`; or raise
   the runtime-owned built-in's `model` to `sonnet`.
 
+**Repair-message behavior:** A/B guidance for an ordinary one-shot dispatch
+includes the synchronous `run_in_background:false` field. The dispatcher keeps
+the original `prompt`, `description`, and other unspecified fields; teammate
+and registered-agent routes remain separate.
+
 **Why A's condition had to widen**: the original `pre-dispatch-readonly-guard.sh`
 had no WRITE signal at all, so `!EXEC` meant "this task needs nothing beyond
 read-only" in that world. Once WRITE was introduced to this hook, a mixed
@@ -392,9 +424,11 @@ guard moves the dispatch into the sync guard's domain, so the re-dispatch must c
 `pre-dispatch-channel-guard.sh` runs on `PreToolUse` for `Agent` and `Task` calls,
 immediately after `dispatch-sync-guard.sh`. It owns the non-blank-`name` domain
 described above: passing `name` upgrades a one-shot subagent into a teammate, whose
-output then travels through the mailbox (an explicit `SendMessage(to:"main")` from
-the subagent side) rather than the tool's return value — miss that step and the
-result is silently lost.
+output then travels through the mailbox rather than the tool's return value.
+The dispatch must identify the actual dispatcher and delivery protocol. Team
+agents retain their existing artifact and control-signal protocol; they do not
+send every full report to `main`. When `main` is the actual dispatcher and the
+contract requires a message artifact, use `SendMessage(to:"main")` to deliver it.
 
 Decision chain, each step fail-opening before the next runs. `gate_preamble` checks
 the escape hatch before the degrade conditions — a human deliberately opening the
@@ -438,15 +472,19 @@ Bash tool call does not reach the hook process).
 ## The SubagentStart Rules Injector
 
 `dispatch-rules-inject.sh` runs on `SubagentStart` for every spawned subagent
-(`matcher: "*"`). It writes `additionalContext` carrying the three dispatch rules
-(output-is-deliverable, scope fence, incremental progress) plus a pointer to the
-`subagent-dispatch` skill, so the rules reach the subagent even when the dispatching
-prompt omitted them.
+(`matcher: "*"`). It writes `additionalContext` carrying the dispatch rules
+(output-is-deliverable, scope fence, incremental progress, and the conditional
+finalization marker) plus a pointer to the `subagent-dispatch` skill.
+
+Every type receives the current-deliverable boundary: one instance defaults to
+one current deliverable; a later independent deliverable defaults to a new
+instance. Necessary investigation, correction, and re-testing within an unfinished
+deliverable remain in the original execution. A final message, failure, or idle
+signal alone does not establish completion. Named teammates follow the actual
+dispatcher and delivery protocol; Team retains its artifact and control signals.
 
 Agent types with Edit/Write disabled by the platform (`Explore`, `Plan`, matched
-case-insensitively) receive only the output-is-deliverable and incremental-progress
-rules — the scope-fence rule's file-boundary wording would be a no-op reminder for a
-type that cannot write files at all.
+case-insensitively) receive that same boundary without file-edit instructions.
 
 The hook writes stdout exactly once, in a single statement at the end of the script.
 Every fail-open path (empty stdin, no `jq`, unparsable JSON,
@@ -467,6 +505,69 @@ The bundled skill covers:
 
 The skill triggers on dispatch-related requests: "派发 subagent", "dispatch subagent", "delegate to agent", "offload", "%%DONE%%", and related terms. It does not use a hook — code dispatch has no deterministic tool-level signal, so the skill loads by description-match instead.
 
+## Automatic Compaction Reminder
+
+The reminder requires `python3` with its standard library. It runs after the main
+session completes an `Agent`, `Task`, `SendMessage`, or `TaskOutput` tool call.
+A top-level non-empty `agent_id` makes the hook return silently. The hook sends
+`hookSpecificOutput.additionalContext` to the main model; it does not send a
+message from a subagent context.
+
+Each check reads the current session's `subagents/agent-*.jsonl` transcripts and
+metadata, including native transcript subdirectories. The hook follows only
+explicit native parent references when it needs inherited history. Adopted
+transcripts may contain older session IDs. The main transcript serves only as
+source evidence, never as a reminder object.
+
+The count includes unique UUIDs of completed `system/compact_boundary` records
+with `compactMetadata.trigger: auto` and the instance's actual `agentId`.
+Manual compactions, attempts, duplicate UUIDs, explicit `forkedFrom` copies,
+and boundaries inherited from a parent do not count. Resume preserves the
+instance's accumulated count. A newly created in-process teammate has independent
+history. Named agents, including PM, have no role-based exemption.
+
+For every provable instance with a count of at least two, every check emits
+its instance ID and count. The reminder asks the main model to check the current
+deliverable's load while preserving execution continuity for unfinished work.
+The hook creates no state files, reminder markers, cooldowns, or cross-check
+cache. It does not terminate agents or force task splitting or replacement.
+
+The threshold is `REMINDER_THRESHOLD` (currently 2) in
+`hooks/subagent-compact-reminder.py`; the test scenarios derive their counts
+from the same value. `os.O_NONBLOCK` is applied where the platform provides it
+and omitted where it does not (Windows), where it only guards a FIFO hang that
+cannot occur; the regular-file decision is made by `fstat` on every platform,
+so the hook produces its reminder on Windows too instead of failing open on
+every call.
+
+**Timing and limitations:** A synchronous `Agent` call must return before the
+main session can receive this reminder. The hook does not wake the main session
+during a running synchronous call, and it does not poll between matching tool
+returns. Missing Python, invalid input, unreadable or non-regular files, and
+missing, damaged, or ambiguous provenance fail open. An instance with unknown
+provenance is omitted rather than assigned an unverified count; other provable
+instances remain eligible. The hook reads native JSONL relationships and does
+not guarantee compatibility with future changes to that log format.
+
+## Synchronous-Return Convergence Reminder
+
+`dispatch-convergence-reminder.sh` requires `jq`. After a synchronous `Agent`
+or `Task` return with `tool_response.status: completed`, the hook adds a fixed
+convergence reminder to the caller's context via
+`hookSpecificOutput.additionalContext` on `PostToolUse`.
+Callers with an `agent_id`, including PM, remain eligible. A completed return
+indicates that the tool returned, not that the delegated work passed acceptance.
+
+The hook adds context only; it never blocks a tool or changes its result.
+Launch statuses, unknown structures, malformed input, and missing `jq` produce
+no output. The hook creates no state, scans no transcripts, and calls no model.
+Each matching return receives one reminder; there is no cross-event deduplication.
+
+This reminder does not cover `SendMessage`, `TaskOutput`, background-completion
+notifications, or teammate-launch returns. It does not change TeamOps routing or
+guarantee fewer subsequent dispatches. The automatic compaction reminder remains
+independent of this hook.
+
 ## Running Tests
 
 ```bash
@@ -478,6 +579,8 @@ bats plugins/dispatch-contract/tests/dispatch-capability-guard.bats
 bats plugins/dispatch-contract/tests/dispatch-channel-guard.bats
 bats plugins/dispatch-contract/tests/gate-composition.bats
 bats plugins/dispatch-contract/tests/skill-contract.bats
+bats plugins/dispatch-contract/tests/subagent-compact-reminder.bats
+bats plugins/dispatch-contract/tests/dispatch-convergence-reminder.bats
 ```
 
 `subagent-done-gate.bats` has 26 test cases covering: core judgment (marker
@@ -494,8 +597,9 @@ unset, FIFO must not hang), and the kill switch.
 `{Agent, Task}`, the `agent_id` and `tool_input.name` exemptions including an
 empty-string `agent_id` that must still block, the two escape hatches, and three
 malformed-stdin shapes), plus the rules-injector's JSON-shape checks (normal
-`agent_type` gets all three rules, `Explore` omits the scope-fence rule, empty stdin
-and `ALLOW_NO_RULES_INJECT=1` both leave stdout fully empty).
+`agent_type` gets the current-deliverable boundary, `Explore` and `Plan` omit only
+file-edit instructions, named delivery retains the actual dispatcher and Team
+protocol, and empty stdin and `ALLOW_NO_RULES_INJECT=1` leave stdout fully empty).
 
 `dispatch-agent-ownership-guard.bats` covers all runtime-owned types, model-optional Plan omission, `null`, valid-model, empty, and whitespace shapes, model field presence states, case normalization, registered-agent `inherit`/empty/whitespace overrides, both `Agent` and `Task`, escape-hatch and fail-open paths, plus Plan-classification mutation and runtime-rejection wording-anchor cases that prove the policy is load-bearing.
 
@@ -530,8 +634,12 @@ file exercises is also verified not to still get caught by a sibling gate —
 see `gate-composition.bats`'s header for the issue-shaped failure mode this
 exists to catch mechanically rather than by header comment.
 
-The `skill-contract.bats` suite reads the real
-`skills/subagent-dispatch/references/offload-scenarios.md` directly. It locks
+The `skill-contract.bats` suite reads the real `skills/subagent-dispatch/SKILL.md`,
+`references/dispatch-contract.md`, `references/offload-scenarios.md`, and this README.
+It checks item-level dispatch necessity, inherited-plan boundaries, directly affected premise tracing,
+removal of unsupported work, and the separation of necessity pre-review from implementation quality.
+It also checks finalization independently of report length, verifiable evidence references,
+final-message delivery, and the canonical marker line and file-delivery boundaries. It locks
 the requirement that the main context first have a complete final result
 sufficient to support its current decision before applying the re-dispatch
 stop condition. It also locks the value of a concrete factual gap or an
@@ -547,8 +655,9 @@ All five blocking hooks in this plugin — `dispatch-sync-guard.sh`
 (PreToolUse), and `subagent-done-gate.sh` (SubagentStop) — block via `exit 2`
 plus a stderr message. Some sibling plugins
 in this repo use a different shape instead: `plan-review`'s `dispatch-check.sh`
-and `doc-gate`'s `skill-gate.sh` return JSON `permissionDecision: deny`. This
-repo does not use one block-response shape across all plugins — `guardrails`'
+returns JSON `permissionDecision: deny`, while `doc-gate`'s `doc-exit.sh`
+(Stop) blocks the same way this plugin's hooks do — `exit 2` plus a stderr
+message. This repo does not use one block-response shape across all plugins — `guardrails`'
 `git-push-guard.sh` also blocks via `exit 2`. Within this plugin, consistency
 across the four blocking hooks takes priority over matching an unrelated
 plugin's shape. The two forms are functionally equivalent here. The runtime

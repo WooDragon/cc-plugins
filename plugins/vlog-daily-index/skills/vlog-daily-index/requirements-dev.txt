@@ -1,0 +1,3 @@
+-r requirements.lock
+# Only required for the skill-creator format validator; not used at runtime.
+PyYAML==6.0.3

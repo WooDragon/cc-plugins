@@ -5,13 +5,15 @@ import os
 import sys
 import math
 import json
+import time
 import argparse
 from pathlib import Path
 from collections import Counter
 
 from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST, CODE_FENCE,
-    detect_root, should_skip_link, resolve_link, extract_links_from_content,
+    detect_root, is_auto_memory_path, should_skip_link, resolve_link,
+    extract_links_from_content,
 )
 
 _EN_TOKEN_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9_.-]{1,}')
@@ -76,27 +78,79 @@ def build_idf(corpus_tokens: list) -> dict:
     return idf
 
 
-def bm25_score(query_tokens: list, doc_tokens: list, doc_len: int, avg_dl: float,
-               idf: dict, k1: float = 1.2, b: float = 0.75) -> float:
-    tf_map = Counter(doc_tokens)
+def _bm25_term_contribution(term_frequency: int, denominator_base: float,
+                            term_idf: float, k1: float = 1.2) -> float:
+    """Return one document term's BM25 contribution using the legacy arithmetic order."""
+    numerator = term_frequency * (k1 + 1)
+    denominator = term_frequency + k1 * denominator_base
+    return term_idf * (numerator / denominator if denominator > 0 else 0.0)
+
+
+class BM25Index:
+    """Precomputed BM25 postings bound to one immutable corpus ordering.
+
+    `postings` maps a token to (document index, contribution) pairs. The
+    source corpus must remain in the same order for this index's lifetime.
+    """
+
+    def __init__(self, postings: dict, document_count: int):
+        self.postings = postings
+        self.document_count = document_count
+
+    def score(self, query_frequencies: dict) -> list:
+        """Return complete corpus-order scores, visiting only matching postings."""
+        scores = [0.0] * self.document_count
+        for term, query_frequency in query_frequencies.items():
+            for document_index, contribution in self.postings.get(term, ()):
+                scores[document_index] += query_frequency * contribution
+        return scores
+
+
+def _bm25_score_from_frequencies(query_frequencies: dict, doc_frequencies: dict,
+                                 doc_len: int, avg_dl: float, idf: dict,
+                                 k1: float = 1.2, b: float = 0.75) -> float:
+    """Score frequency maps through the same single-term contribution formula."""
+    denominator_base = 1.0 - b + b * (doc_len / avg_dl) if avg_dl > 0 else 1.0
     score = 0.0
-    denom_base = 1.0 - b + b * (doc_len / avg_dl) if avg_dl > 0 else 1.0
-    for term in query_tokens:
-        if term not in idf:
-            continue
-        tf = tf_map.get(term, 0)
-        numerator = tf * (k1 + 1)
-        denominator = tf + k1 * denom_base
-        score += idf[term] * (numerator / denominator if denominator > 0 else 0.0)
+    for term, query_frequency in query_frequencies.items():
+        term_frequency = doc_frequencies.get(term, 0)
+        if term_frequency and term in idf:
+            score += query_frequency * _bm25_term_contribution(
+                term_frequency, denominator_base, idf[term], k1,
+            )
     return score
 
 
+def _build_bm25_index(corpus_tokens: list, document_lengths: list, idf: dict,
+                      avg_dl: float, k1: float = 1.2, b: float = 0.75) -> BM25Index:
+    """Build postings from token lists without retaining counters in caller corpus data."""
+    postings = {}
+    for document_index, (tokens, doc_len) in enumerate(zip(corpus_tokens, document_lengths)):
+        denominator_base = 1.0 - b + b * (doc_len / avg_dl) if avg_dl > 0 else 1.0
+        for term, term_frequency in Counter(tokens).items():
+            if term in idf:
+                contribution = _bm25_term_contribution(
+                    term_frequency, denominator_base, idf[term], k1,
+                )
+                postings.setdefault(term, []).append((document_index, contribution))
+    return BM25Index(postings, len(corpus_tokens))
+
+
+def bm25_score(query_tokens: list, doc_tokens: list, doc_len: int, avg_dl: float,
+               idf: dict, k1: float = 1.2, b: float = 0.75) -> float:
+    """Compatibility adapter for callers supplying the original token lists."""
+    return _bm25_score_from_frequencies(
+        Counter(query_tokens), Counter(doc_tokens), doc_len, avg_dl, idf, k1, b,
+    )
+
+
 def batch_bm25(query_tokens: list, corpus: list, idf: dict, avg_dl: float) -> list:
-    results = []
-    for idx, doc in enumerate(corpus):
-        score = bm25_score(query_tokens, doc['tokens'], doc['token_count'], avg_dl, idf)
-        results.append((idx, score))
-    results.sort(key=lambda x: x[1], reverse=True)
+    """Score body-only legacy documents through a temporary sparse index."""
+    index = _build_bm25_index(
+        [doc['tokens'] for doc in corpus], [doc['token_count'] for doc in corpus], idf, avg_dl,
+    )
+    results = list(enumerate(index.score(Counter(query_tokens))))
+    results.sort(key=lambda item: item[1], reverse=True)
     return results
 
 
@@ -115,20 +169,18 @@ def filename_jaccard(query_filename: str, doc_filename: str) -> float:
 
 
 def rank_candidates(query_text: str, query_filename: str, corpus: list,
-                    content_idf: dict, title_idf: dict,
-                    avg_dl: float, avg_title_dl: float,
+                    content_index: BM25Index, title_index: BM25Index,
                     threshold: float = 0.0, top_n: int = 10) -> list:
-    query_tokens = tokenize(query_text)
+    """Rank candidates using indexes built for this unchanged corpus order."""
+    query_frequencies = Counter(tokenize(query_text))
     query_fname_base = os.path.basename(query_filename)
 
-    content_scores = batch_bm25(query_tokens, corpus, content_idf, avg_dl)
-    max_content = max((s for _, s in content_scores), default=0.0)
+    content_raw = content_index.score(query_frequencies)
+    content_scores = list(enumerate(content_raw))
+    content_scores.sort(key=lambda item: item[1], reverse=True)
+    max_content = max(content_raw, default=0.0)
 
-    title_raw = []
-    for doc in corpus:
-        ts = bm25_score(query_tokens, doc['title_tokens'],
-                        len(doc['title_tokens']), avg_title_dl, title_idf)
-        title_raw.append(ts)
+    title_raw = title_index.score(query_frequencies)
     max_title = max(title_raw, default=0.0)
 
     ranked = []
@@ -160,36 +212,108 @@ def rank_candidates(query_text: str, query_filename: str, corpus: list,
 
 
 def build_indexes(corpus: list) -> tuple:
-    content_idf = build_idf([doc['tokens'] for doc in corpus])
-    title_idf = build_idf([doc['title_tokens'] for doc in corpus])
-    total_len = sum(doc['token_count'] for doc in corpus)
-    avg_dl = total_len / len(corpus) if corpus else 1.0
-    total_title_len = sum(len(doc['title_tokens']) for doc in corpus)
-    avg_title_dl = total_title_len / len(corpus) if corpus else 1.0
-    return content_idf, title_idf, avg_dl, avg_title_dl
+    """Build independent content and title indexes for one fixed corpus batch."""
+    content_tokens = [doc['tokens'] for doc in corpus]
+    title_tokens = [doc['title_tokens'] for doc in corpus]
+    content_lengths = [doc['token_count'] for doc in corpus]
+    title_lengths = [len(tokens) for tokens in title_tokens]
+    document_count = len(corpus)
+    avg_dl = sum(content_lengths) / document_count if document_count else 1.0
+    avg_title_dl = sum(title_lengths) / document_count if document_count else 1.0
+    content_index = _build_bm25_index(
+        content_tokens, content_lengths, build_idf(content_tokens), avg_dl,
+    )
+    title_index = _build_bm25_index(
+        title_tokens, title_lengths, build_idf(title_tokens), avg_title_dl,
+    )
+    return content_index, title_index
 
 
 # ---------------------------------------------------------------------------
 # Single-pass scanner: BM25 corpus + link adjacency
 # ---------------------------------------------------------------------------
 
-def build_corpus_and_graph(root: str) -> tuple:
-    """Single os.walk pass building BM25 corpus, forward/backward adjacency, and all_files set."""
+class GraphBudgetExceeded(Exception):
+    """Raised by build_corpus_and_graph when start_time/budget_sec are given
+    and the os.walk pass itself — the single most expensive step (full
+    directory walk + reading every .md's content) — does not finish inside
+    budget (A7, #219). The caller must NOT fall back to reporting findings
+    off a partial graph: a truncated walk means an unknown subset of
+    all_files/backward/dangling, and stale_inlinks/orphan/dangling_refs
+    computed from that subset would be actively wrong, not just incomplete.
+    """
+
+    def __init__(self, scanned_count: int):
+        super().__init__(f'graph build budget exceeded after scanning {scanned_count} files')
+        self.scanned_count = scanned_count
+
+
+# How many .md files to scan between budget checks. A per-file check would
+# add a time.monotonic() syscall to the hottest loop in this tool; checking
+# every file is unnecessary precision when the budget is measured in whole
+# seconds - checking periodically bounds the overshoot to about one
+# interval's worth of scanning past the deadline, which is an acceptable
+# trade against a genuinely large corpus.
+_GRAPH_BUDGET_CHECK_INTERVAL = 25
+
+
+def build_corpus_and_graph(root: str, start_time: float = None, budget_sec: float = None) -> tuple:
+    """Single os.walk pass building BM25 corpus, forward/backward adjacency, all_files set,
+    and dangling-link map (edges whose target .md no longer exists).
+
+    start_time/budget_sec are both optional and both required together to
+    enable the budget check (the two existing callers — recall-gate.py's own
+    cmd_gate, and tests/test_exclude.py — never pass them, so they keep
+    running unbounded exactly as before; only doc-exit-report.py's
+    build_report passes them). When given and the walk exceeds budget_sec
+    measured from start_time, raises GraphBudgetExceeded instead of
+    returning a partial graph silently.
+    """
     root_path = Path(root).resolve()
+    if is_auto_memory_path(root_path):
+        return [], set(), {}, {}, {}
+
     corpus = []
     # all_files: set of relative path strings
     all_files: set = set()
     # adjacency keyed by relative path string
     forward: dict = {}   # rel_path -> set of rel target strings
     backward: dict = {}  # rel_path -> set of rel source strings
+    # dangling: rel_target (nonexistent .md) -> set of rel source strings that link it
+    dangling: dict = {}
+
+    _budget_active = start_time is not None and budget_sec is not None
+    _scanned = 0
 
     # First pass: collect content and tokens
     file_contents: dict = {}  # rel_path -> content
     for dirpath, dirnames, filenames in os.walk(str(root_path)):
-        dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
+        directory = Path(dirpath)
+        if is_auto_memory_path(directory):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            name for name in dirnames
+            if name not in EXCLUDED_DIRS
+            and not is_auto_memory_path(directory / name, root_path)
+        ]
         for fname in filenames:
-            if not fname.endswith('.md'):
+            # Case-insensitive: filesystems and the doc-exit.sh dirty-set
+            # filter (*.[mM][dD]) both treat UPPER.MD as a markdown file.
+            # A bare `.endswith('.md')` here would skip it during os.walk,
+            # so it never enters all_files/backward — making it permanently
+            # orphan=True and turning any inbound link into a dangling edge,
+            # regardless of platform (实测: os.walk keeps the on-disk case on
+            # both Linux and macOS; this was dormant only while doc-exit.sh
+            # still pathspec-filtered to lowercase `*.md` upstream) (A4, #219).
+            if not fname.lower().endswith('.md'):
                 continue
+
+            _scanned += 1
+            if _budget_active and _scanned % _GRAPH_BUDGET_CHECK_INTERVAL == 0:
+                if time.monotonic() - start_time > budget_sec:
+                    raise GraphBudgetExceeded(_scanned)
+
             fpath = Path(dirpath) / fname
             try:
                 content = fpath.read_text(encoding='utf-8', errors='ignore')
@@ -221,7 +345,7 @@ def build_corpus_and_graph(root: str) -> tuple:
             if should_skip_link(target):
                 continue
             resolved = resolve_link(src_path, target, root_path)
-            if resolved is None:
+            if resolved is None or is_auto_memory_path(resolved, root_path):
                 continue
             try:
                 rel_target = os.path.relpath(str(resolved), str(root_path))
@@ -230,20 +354,27 @@ def build_corpus_and_graph(root: str) -> tuple:
             if rel_target in all_files:
                 forward[rel_path].add(rel_target)
                 backward.setdefault(rel_target, set()).add(rel_path)
+            elif rel_target.lower().endswith('.md'):
+                dangling.setdefault(rel_target, set()).add(rel_path)
 
-    return corpus, all_files, forward, backward
+    return corpus, all_files, forward, backward, dangling
 
 
 # ---------------------------------------------------------------------------
 # Gate-specific checks
 # ---------------------------------------------------------------------------
 
+def is_orphan(inlinks: set, basename: str, whitelist: set) -> bool:
+    """Pure whitelist judgment: no inlinks and not on the whitelist → orphan."""
+    if basename in whitelist:
+        return False
+    return len(inlinks) == 0
+
+
 def check_orphan(target_file: str, backward: dict, orphan_whitelist: set) -> bool:
     basename = os.path.basename(target_file)
-    if basename in orphan_whitelist:
-        return False
     inlinks = backward.get(target_file, set())
-    return len(inlinks) == 0
+    return is_orphan(inlinks, basename, orphan_whitelist)
 
 
 def check_broken_outlinks(content: str, target_file: str, root: str, all_files: set) -> list:
@@ -258,6 +389,8 @@ def check_broken_outlinks(content: str, target_file: str, root: str, all_files: 
         resolved = resolve_link(src_path, target, root_path)
         if resolved is None:
             broken.append({'target': target, 'line': lineno})
+            continue
+        if is_auto_memory_path(resolved, root_path):
             continue
         try:
             rel_target = os.path.relpath(str(resolved), str(root_path))
@@ -293,15 +426,24 @@ def cmd_gate(args):
     else:
         target_file = ''
 
-    corpus, all_files, _forward, backward = build_corpus_and_graph(root)
+    target_path = Path(root) / target_file if target_file else Path(root)
+    if is_auto_memory_path(target_path, root):
+        print(json.dumps({
+            'has_findings': False,
+            'recall': [],
+            'orphan': False,
+            'broken_outlinks': [],
+        }, ensure_ascii=False))
+        return
+
+    corpus, all_files, _forward, backward, _dangling = build_corpus_and_graph(root)
 
     recall_results = []
     has_recall = False
     if corpus and content.strip():
-        content_idf, title_idf, avg_dl, avg_title_dl = build_indexes(corpus)
+        content_index, title_index = build_indexes(corpus)
         candidates = rank_candidates(
-            content, target_file, corpus,
-            content_idf, title_idf, avg_dl, avg_title_dl,
+            content, target_file, corpus, content_index, title_index,
             threshold=args.threshold,
             top_n=args.top_n,
         )

@@ -1,16 +1,7 @@
 ---
 name: pr-review
 description: |
-  对已开的 GitHub PR 做 AI 代码评审，四个后端：grok（本地 CLI 同步产出评审到终端，即时深度评审、默认 high 档可调低档控成本，适合本地自审）、claude（本地 `claude -p` 同步评审，wrapper 会话经 grok provider 路由时的默认自动切换目标，也可手动强制）、codex（本地 codex CLI 同步评审，需要第三方独立视角时显式指定）、copilot（gh 触发 GitHub Copilot bot 异步评审、结果回帖 PR，成本高通常不启用、仅复杂项目收尾）。统一入口 `pr-review.sh` 在 grok/claude 间自动路由。当需要：
-  - 评审某个 PR（给出 PR 编号）、快速自审改动质量
-  - 本地评审 PR（默认路径，grok/claude 自动路由）
-  - 用 claude 评审 PR / 强制走 claude 后端
-  - 用 codex 评审 PR / 强制走 codex 后端（第三方独立视角）
-  - 触发 / 重新触发 GitHub Copilot 评审 PR（可选路径）
-  - 查询 Copilot 评审请求状态
-  时调用此 Skill。
-  注意边界：本 skill 针对「已开 PR 编号」的评审；本地未提交 working diff 的即时 review 走 /code-review，不由本 skill 承接。
-  Triggers: pr review, review this pr, 评审 PR, 评审这个 PR, 审查 PR, grok review, grok 评审, 用 grok 评审 PR, claude review, claude 评审, 用 claude 评审 PR, codex review, codex 评审, 用 codex 评审 PR, copilot review, copilot 评审, 触发 copilot, request copilot reviewer, re-request review, 重新评审 PR.
+  对已开的 GitHub PR 做 AI 代码评审（PR review），支持本地 Grok/Claude/Codex 评审及指定后端、跨轮复核，以及 GitHub Copilot 评审的首次触发、重新触发和状态查询。Grok/Claude 默认自动路由，Codex 显式选择；Copilot 异步回帖 PR。仅针对已开 PR；本地未提交 working diff 的即时 review 走 /code-review。
 ---
 
 # PR Review
@@ -49,7 +40,7 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 
 `$(git rev-parse --git-dir)` 在 worktree 里返回该 worktree 自己的 gitdir——评审日志随工作区走，不入版本库。
 
-**两流必须分文件，不得 `2>&1` 合并**：脚本有意把评审正文放 stdout、诊断放 stderr，而首轮的引擎调用不做 stderr 隔离，`2>&1` 会让进度与告警插进评审正文中间。脚本非零退出时读 `.err` 拿原文，不自行重试、不改用其他评审方式。
+**两流必须分文件，不得 `2>&1` 合并**：脚本把评审正文放 stdout、诊断放 stderr。Grok 首轮和复核轮都会把引擎 stderr 捕获到 `ERR_LOG`，待引擎退出后再透传到 stderr。`2>&1` 仍会把诊断混进评审正文。脚本非零退出时读 `.err` 拿原文，不自行重试、不改用其他评审方式。
 
 **路径用 `${CLAUDE_PLUGIN_ROOT}`，不要 `find … | head -1`**：本文件经 skill 加载时该变量已展开成绝对路径；被当**文件**读取时它是字面量（主线 shell 环境里并没有这个变量），故配方带 `[ -x "$REVIEW" ]` 先验——路径解析不出来就当场停，不往下跑。**每处 `REVIEW=` 赋值后面都紧跟这行先验**，本仓文档无例外：配方要能独立照抄，就不能靠「上一节已经写过」。`find` 有两个实测失败模式——它解析到的是 marketplace 源码副本而非已安装的 cache（cache 路径含版本段，`*/pr-review/skills/…` 匹配不到），而远程安装无本地 clone 时零命中。
 
@@ -82,7 +73,7 @@ LOG="$(git rev-parse --git-dir)/pr-review"
 
 **收敛判据是「本轮评审跑成了，且采纳清单为空」，不是「评审方说了 `LGTM`」**——评审引擎是对等 peer 不是权威，把它的措辞当出口就是让 peer 变回权威。
 
-**前置必须先验**：本轮 `exit=0` 且 `.log` 是完整评审正文。复核轮的 Fail Fast（cwd 钉死、`BASE_SHA` 非祖先、session 失效）走 `die()`，原因进 `.err`、**`.log` 是空的**——拿空 `.log` 当「本轮无 finding」会把采纳清单清成空、假收敛，失败与「没问题」同形。非零退出一律读 `.err` 按 §1 的失败路径处理：不重试、不换引擎，**也不收工**。
+**前置必须先验**：本轮 `exit=0` 且 `.log` 是完整评审正文。复核轮在调用引擎前 Fail Fast（如 cwd 钉死、`BASE_SHA` 非祖先）时，原因进 `.err`，`.log` 可能为空。Grok 会话失效时，脚本仍提示重开首轮，但保留 CLI 的真实非零退出码，不保证为 1；stdout 也可能已有残正文。主线不应靠 `.log` 是否为空或假定 `exit=1` 判定失败。所有非零退出的正文均不采纳，也不据此清空采纳清单。非零退出一律读 `.err` 按 §1 的失败路径处理：不重试、不换引擎，**也不收工**。
 
 前置成立后：采纳清单为空即收工，无论本轮评审是 `LGTM`、还是仍在复述已被驳回的 finding；采纳清单非空（未改净的旧项，或新 finding 经裁决进入）则回第 3 步再派一次。
 

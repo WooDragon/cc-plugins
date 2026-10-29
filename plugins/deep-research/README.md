@@ -7,12 +7,15 @@ The framework treats the main session as a **Lead** that orchestrates the pipeli
 ## Installation
 
 ```bash
-claude plugin add deep-research@WooDragon-cc-plugins
+claude plugin marketplace add WooDragon/cc-plugins
+claude plugin install deep-research@cc-plugins
 ```
 
 ## Prerequisites
 
 The methodology (skill + subagents) works out of the box. The **multi-model harvest engine** (`scripts/harvest.py`) needs external credentials — without them the framework still runs via the legacy manual search chain (see the skill's `references/context-economics.md`).
+
+The four bundled subagent definitions carry no reading-discipline text of their own. That discipline lives in the user's global `~/.claude/CLAUDE.md`, which every subagent loads and which is re-injected after auto-compaction; keeping a copy in each agent body would duplicate it in every request's system prompt.
 
 | Dependency | Needed for | How |
 |------------|-----------|-----|

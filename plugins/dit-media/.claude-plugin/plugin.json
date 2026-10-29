@@ -1,0 +1,7 @@
+{
+  "name": "dit-media",
+  "description": "相机素材归档与 DIT：批量复制校验、同卷归位、十字段近源索引和按需视频修复",
+  "version": "0.1.0",
+  "author": { "name": "WooDragon" },
+  "skills": ["./skills/dit-media"]
+}

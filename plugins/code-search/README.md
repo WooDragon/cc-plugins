@@ -8,7 +8,8 @@ A **pure skill plugin** (no hooks, no scripts). It injects a code-search methodo
 
 ```bash
 # From marketplace
-claude plugin add code-search@WooDragon-cc-plugins
+claude plugin marketplace add WooDragon/cc-plugins
+claude plugin install code-search@cc-plugins
 ```
 
 ## What it does
@@ -24,7 +25,7 @@ Plus anti-pattern correction (never grep for definitions), ctags command templat
 
 ## Triggering
 
-Activation is purely semantic — the skill's `description` enumerates code-search scenarios and triggers across Chinese/English keywords and colloquial phrasings ("where is X defined", "who calls X", "全局搜 TODO", "find references"…). No hook, no manual invocation: any code-search / symbol-navigation task surfaces it.
+Activation is semantic: the skill's `description` covers code-search and symbol-navigation tasks. Claude uses that description to decide when to load the skill; no hook or manual invocation is required.
 
 **Why no hook?** There's no decidable signal for "this tool call is a code search" — searches run through Grep, Glob, Bash (`grep`/`rg`/`ast-grep`/`find`), and Read interchangeably, and a PreToolUse matcher only sees the tool name, not intent. Gating a high-frequency action would also wreck the workflow. Semantic matching hands the judgment to the model that already reads the description every turn.
 
