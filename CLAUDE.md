@@ -255,16 +255,18 @@ Claude Code auto-memory 子树使用根路径上下文精确排除；行为边�
 
 ### 代码搜索技能
 
-`code-search` skill 注入代码检索执行层方法论，让 Claude 按「症状」选对工具，不漏触发、不滥用 grep：
+`code-search` skill 按已知信息与检索意图选择工具：
 
-| 症状 | 工具 |
+| 意图 | 工具 |
 |------|------|
-| 找符号定义 / 跳转到定义 | **ctags**（建索引 + readtags 查） |
-| 找 AST 结构形状（import / 调用形态 / 组件定义 / try-catch） | **ast-grep**（`run -p`） |
-| 找 caller / 纯文本 | **grep**（1-2 跳够） |
-| grep/ctags 扛不住的精确调用图 | **LSP/SCIP**（gopls / rust-analyzer） |
+| 已知文件和准确名称的局部定位 | **grep**，再局部 Read；无需先建索引 |
+| 文件未知、符号名确定的一次定义查询 | 按模块/路径线索缩范围，必要时文本筛候选文件，再用 **ctags + readtags** |
+| 定义消歧 / 反复跨文件导航 | **ctags + readtags**，索引候选范围并按需复用 |
+| AST 结构匹配（import / 调用形态 / JSX 节点 / try-catch） | **ast-grep** |
+| caller / 引用候选 / 纯文本 | **grep**，再核对源码 |
+| 精确类型与多态关系 | **LSP/SCIP** |
 
-含反模式纠偏（禁 grep 找定义）、ctags 命令模板与坑、升级信号。与全局 CLAUDE.md「代码检索」路由一致。触发靠 description 语义匹配，不用 hook——搜代码无可判定的 tool-level 信号，高频动作门禁会破坏工作流。
+工具示例、文件范围与结果边界由 skill 正文定义。索引是定位线索，当前源码是真源；局部或截断结果不代表完整清单。触发靠 description 语义匹配，不用 hook。
 
 ### Plugin vs Skill
 
