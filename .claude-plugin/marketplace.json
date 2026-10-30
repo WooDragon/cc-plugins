@@ -40,8 +40,8 @@
     },
     {
       "name": "code-search",
-      "description": "Code search & symbol navigation — pick ctags / ast-grep / grep by search symptom (definition / structure / caller)",
-      "version": "1.1.1",
+      "description": "Code search & symbol navigation — use known scope and intent for local text lookup, ctags disambiguation, and AST matching",
+      "version": "1.1.2",
       "author": {
         "name": "WooDragon"
       },

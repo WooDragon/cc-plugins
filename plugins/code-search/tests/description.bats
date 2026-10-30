@@ -112,6 +112,81 @@ print("correct mappings accepted; swapped and unmapped in-memory copies rejected
 PY
 }
 
+# Execute only the three marked, single-line source examples, never shell text.
+source_example_scenario() {
+  python3 - "$SKILL_PATH" "$BATS_TEST_TMPDIR" "$1" <<'PY'
+import json
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+root = Path(sys.argv[2])
+fixture = root / "Component.tsx"
+tags = root / "navigation.tags"
+fixture.write_text('''export function SearchPanel() {
+  return <Panel active={true} />;
+}
+// <Panel active={true} />
+const text = "<Panel active={true} />";
+''', encoding="utf-8")
+replacements = {"<file.tsx>": str(fixture), "<tags>": str(tags), "<symbol>": "SearchPanel"}
+
+def example(marker):
+    anchor = "# example: " + marker
+    assert source.count(anchor) == 1, f"missing or duplicate source marker: {anchor}"
+    command = shlex.split(source[source.index(anchor) + 1])
+    return [replacements.get(arg, arg) for arg in command]
+
+def execute(command, expected):
+    result = subprocess.run(command, cwd=root, text=True, capture_output=True)
+    assert result.returncode == expected, (command, result.returncode, result.stdout, result.stderr)
+    return result.stdout
+
+def assert_jsx_match(output):
+    matches = json.loads(output)
+    assert len(matches) == 1, matches
+    match = matches[0]
+    assert Path(match["file"]) == fixture, match
+    assert match["range"]["start"]["line"] == 1, match
+    assert match["text"] == "<Panel active={true} />", match
+
+if sys.argv[3] == "tsx":
+    command = example("tsx-node")
+    assert command[:2] == ["ast-grep", "run"], command
+    command += ["--json=compact"]
+    assert_jsx_match(execute(command, 0))
+    language = command.index("--lang") + 1
+    assert command[language] == "tsx", command
+    mutated = command.copy()
+    mutated[language] = "typescript"
+    result = subprocess.run(mutated, cwd=root, text=True, capture_output=True)
+    assert result.returncode in (0, 1), (mutated, result.stderr)
+    try:
+        assert_jsx_match(result.stdout)
+    except (AssertionError, json.JSONDecodeError):
+        print("source TSX matches only the real node; tsx→typescript mutation rejected")
+    else:
+        raise AssertionError("known wrong TypeScript parser escaped the JSX oracle")
+else:
+    build = example("tags-build")
+    query = example("tags-query")
+    assert build[0] == "ctags" and query[0] == "readtags", (build, query)
+    assert build[build.index("-f") + 1] == query[query.index("-t") + 1] == str(tags)
+    execute(build, 0)
+    for _ in range(2):
+        output = execute(query, 0)
+        entries = [line.split("\t") for line in output.splitlines()]
+        assert len(entries) == 1, output
+        name, path, address, *fields = entries[0]
+        assert name == "SearchPanel" and Path(path) == fixture, entries
+        assert address.startswith("/^export function SearchPanel()"), address
+        assert "kind:f" in fields or "f" in fields, fields
+    print("source ctags/readtags examples navigate the real TSX definition twice")
+PY
+}
+
 @test "description metadata stays registered and shorter than its baseline" {
   local name description bytes
   name="$(metadata '.name')"
@@ -138,4 +213,66 @@ PY
     printf '%s\n' "$output" >&2
     return 1
   fi
+}
+
+@test "Given a known file and exact name, local text lookup needs no index" {
+  run python3 - "$SKILL_PATH" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+rows = [line for line in text.splitlines() if line.startswith("|")]
+assert any("已知文件" in row and "准确名称" in row and "grep" in row for row in rows)
+assert any("消歧" in row and "ctags" in row for row in rows)
+assert "不要求先建索引" in text
+assert "O(1)" not in text
+assert "旧式裸 `sg -p` 不对" not in text
+PY
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+}
+
+@test "Given incomplete searches, scope and empty results do not prove absence or completeness" {
+  run python3 - "$SKILL_PATH" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+for boundary in ("tracked", "未跟踪", "已跟踪生成物", "当前源码", "空结果不证明", "截断", "不完整"):
+    assert boundary in text, f"missing search boundary: {boundary}"
+assert "天然避开" not in text
+assert "typescript`，TSX 用 `tsx`，JS/JSX 用 `javascript`" in text
+PY
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+}
+
+@test "Given real JSX and lookalike text, the source TSX command matches only the node" {
+  command -v ast-grep >/dev/null || skip "ast-grep missing; required acceptance incomplete"
+  run source_example_scenario tsx
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"tsx→typescript mutation rejected"* ]]
+}
+
+@test "Given repeated TSX navigation, source ctags/readtags commands share temporary tags" {
+  command -v ctags >/dev/null || skip "ctags missing; required acceptance incomplete"
+  command -v readtags >/dev/null || skip "readtags missing; required acceptance incomplete"
+  run ctags --version
+  [[ "$output" == *"Universal Ctags"* ]] || skip "Universal Ctags missing; required acceptance incomplete"
+  run source_example_scenario tags
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+}
+
+@test "Given packaged guidance, versions and short-path descriptions stay synchronized" {
+  local marketplace="$BATS_TEST_DIRNAME/../../../.claude-plugin/marketplace.json"
+  [ "$(jq -r '.version' "$PLUGIN_PATH")" = "1.1.2" ]
+  [ "$(jq -r '.plugins[] | select(.name == "code-search") | .version' "$marketplace")" = "1.1.2" ]
+  run python3 - "$BATS_TEST_DIRNAME/../README.md" "$BATS_TEST_DIRNAME/../../../CLAUDE.md" <<'PY'
+from pathlib import Path
+import sys
+readme = Path(sys.argv[1]).read_text()
+overview = Path(sys.argv[2]).read_text().split("### 代码搜索技能\n", 1)[1].split("\n### ", 1)[0]
+assert "never grep for definitions" not in readme
+assert "known file" in readme and "exact name" in readme
+assert "tracked" in readme and "untracked" in readme
+assert "禁 grep 找定义" not in overview
+assert "已知文件" in overview and "grep" in overview
+PY
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
 }
