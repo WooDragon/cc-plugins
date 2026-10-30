@@ -112,7 +112,7 @@ print("correct mappings accepted; swapped and unmapped in-memory copies rejected
 PY
 }
 
-# Execute only the three marked, single-line source examples, never shell text.
+# Execute only marked, single-line source examples, never shell text.
 source_example_scenario() {
   python3 - "$SKILL_PATH" "$BATS_TEST_TMPDIR" "$1" <<'PY'
 import json
@@ -131,7 +131,19 @@ fixture.write_text('''export function SearchPanel() {
 // <Panel active={true} />
 const text = "<Panel active={true} />";
 ''', encoding="utf-8")
-replacements = {"<file.tsx>": str(fixture), "<tags>": str(tags), "<symbol>": "SearchPanel"}
+source_dir = root / "source"
+if sys.argv[3] == "directory":
+    nested = source_dir / "nested"
+    nested.mkdir(parents=True)
+    fixture.rename(nested / fixture.name)
+    fixture = nested / fixture.name
+    for excluded in ("node_modules", "dist", "target", "vendor", ".git"):
+        decoy = source_dir / excluded
+        decoy.mkdir()
+        (decoy / "Decoy.tsx").write_text("export function SearchPanel() {}\n")
+    (source_dir / "linked").symlink_to(root, target_is_directory=True)
+replacements = {"<file.tsx>": str(fixture), "<source-dir>": str(source_dir),
+                "<tags>": str(tags), "<symbol>": "SearchPanel"}
 
 def example(marker):
     anchor = "# example: " + marker
@@ -170,20 +182,35 @@ if sys.argv[3] == "tsx":
     else:
         raise AssertionError("known wrong TypeScript parser escaped the JSX oracle")
 else:
-    build = example("tags-build")
+    build = example("tags-build-directory" if sys.argv[3] == "directory" else "tags-build")
     query = example("tags-query")
     assert build[0] == "ctags" and query[0] == "readtags", (build, query)
     assert build[build.index("-f") + 1] == query[query.index("-t") + 1] == str(tags)
-    execute(build, 0)
-    for _ in range(2):
-        output = execute(query, 0)
+
+    def assert_definition(output):
         entries = [line.split("\t") for line in output.splitlines()]
-        assert len(entries) == 1, output
+        assert len(entries) == 1, f"expected one real definition, got: {output!r}"
         name, path, address, *fields = entries[0]
         assert name == "SearchPanel" and Path(path) == fixture, entries
         assert address.startswith("/^export function SearchPanel()"), address
         assert "kind:f" in fields or "f" in fields, fields
-    print("source ctags/readtags examples navigate the real TSX definition twice")
+
+    execute(build, 0)
+    for _ in range(2):
+        assert_definition(execute(query, 0))
+    if sys.argv[3] == "directory":
+        mutated = [arg for arg in build if arg != "-R"]
+        execute(mutated, 0)
+        output = execute(query, 0)
+        try:
+            assert_definition(output)
+        except AssertionError:
+            assert output == "", output
+            print("directory source finds only the real definition; no-R exit-0 empty-index mutation rejected")
+        else:
+            raise AssertionError("nonrecursive empty index escaped the definition oracle")
+    else:
+        print("source ctags/readtags examples navigate the real TSX definition twice")
 PY
 }
 
@@ -230,6 +257,20 @@ PY
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
 }
 
+@test "Given an unknown file and exact symbol, narrow candidates before ctags definition lookup" {
+  run python3 - "$SKILL_PATH" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+rows = [line for line in text.splitlines() if line.startswith("|")]
+assert any("文件未知" in row and "符号名确定" in row and "ctags" in row
+           and "模块/路径" in row and "文本" in row and "候选" in row
+           and "readtags" in row for row in rows), "missing unknown-file definition route"
+assert "未知文件" in text.split("---", 2)[1], "missing description entry"
+PY
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+}
+
 @test "Given incomplete searches, scope and empty results do not prove absence or completeness" {
   run python3 - "$SKILL_PATH" <<'PY'
 from pathlib import Path
@@ -259,10 +300,22 @@ PY
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
 }
 
+@test "Given a source directory, recursive source indexing excludes decoys and rejects empty indexes" {
+  command -v ctags >/dev/null || skip "ctags missing; required acceptance incomplete"
+  command -v readtags >/dev/null || skip "readtags missing; required acceptance incomplete"
+  run ctags --version
+  [[ "$output" == *"Universal Ctags"* ]] || skip "Universal Ctags missing; required acceptance incomplete"
+  run source_example_scenario directory
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  [[ "$output" == *"no-R exit-0 empty-index mutation rejected"* ]]
+}
+
 @test "Given packaged guidance, versions and short-path descriptions stay synchronized" {
   local marketplace="$BATS_TEST_DIRNAME/../../../.claude-plugin/marketplace.json"
   [ "$(jq -r '.version' "$PLUGIN_PATH")" = "1.1.2" ]
   [ "$(jq -r '.plugins[] | select(.name == "code-search") | .version' "$marketplace")" = "1.1.2" ]
+  [ "$(jq -r '.description' "$PLUGIN_PATH")" = "$(jq -r '.plugins[] | select(.name == "code-search") | .description' "$marketplace")" ]
+  [[ "$(jq -r '.description' "$PLUGIN_PATH")" == *"ctags definition lookup"* ]]
   run python3 - "$BATS_TEST_DIRNAME/../README.md" "$BATS_TEST_DIRNAME/../../../CLAUDE.md" <<'PY'
 from pathlib import Path
 import sys
@@ -270,9 +323,13 @@ readme = Path(sys.argv[1]).read_text()
 overview = Path(sys.argv[2]).read_text().split("### 代码搜索技能\n", 1)[1].split("\n### ", 1)[0]
 assert "never grep for definitions" not in readme
 assert "known file" in readme and "exact name" in readme
+assert any("file is unknown" in row and "module/path" in row and "text search" in row
+           and "ctags + readtags" in row for row in readme.splitlines())
 assert "tracked" in readme and "untracked" in readme
 assert "禁 grep 找定义" not in overview
 assert "已知文件" in overview and "grep" in overview
+assert any("文件未知" in row and "符号名确定" in row and "模块/路径" in row
+           and "文本" in row and "ctags + readtags" in row for row in overview.splitlines())
 PY
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
 }

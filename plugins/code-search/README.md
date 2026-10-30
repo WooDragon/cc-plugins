@@ -17,13 +17,14 @@ claude plugin install code-search@cc-plugins
 | Symptom | Tool |
 |---------|------|
 | Locate an exact name in a known file | **grep**, then read the relevant source; no index required |
+| Find a definition once when the symbol name is known but the file is unknown | Narrow by module/path clues, use text search to select candidate files if needed, then **ctags + readtags** on that scope |
 | Disambiguate symbol definitions, kinds, or multiline declarations | **ctags** on candidate files, then **readtags** |
 | Navigate repeatedly across files | Reuse a task-local **ctags** index |
 | Find code matching an **AST structure shape** (imports, calls, JSX nodes, try/catch) | **ast-grep** (`ast-grep run -p`) |
 | Find **callers** / reference candidates / plain text | **grep**, then verify the source |
 | Resolve precise type-dependent relationships | **LSP/SCIP** (gopls, rust-analyzer, SCIP) |
 
-The skill includes source examples for TSX structure matching and ctags/readtags navigation. It distinguishes TypeScript, TSX, and JavaScript/JSX parsers and keeps index generation and lookup on the same tags path.
+The skill includes source examples for TSX structure matching and ctags/readtags navigation over a single file or a recursively indexed source directory. It distinguishes TypeScript, TSX, and JavaScript/JSX parsers and keeps index generation and lookup on the same tags path.
 
 An index provides navigation hints; current source is authoritative. `git ls-files` lists tracked files by default: it can omit untracked source and include tracked generated files. Index filters and stale tags can also omit relevant symbols.
 

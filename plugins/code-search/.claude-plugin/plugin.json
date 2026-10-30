@@ -1,6 +1,6 @@
 {
   "name": "code-search",
-  "description": "Code search & symbol navigation — use known scope and intent for local text lookup, ctags disambiguation, and AST matching",
+  "description": "Code search & symbol navigation — local text lookup, scoped ctags definition lookup and disambiguation, and AST matching",
   "version": "1.1.2",
   "author": { "name": "WooDragon" },
   "skills": ["./skills/code-search"]

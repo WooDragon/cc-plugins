@@ -1,7 +1,7 @@
 ---
 name: code-search
 description: |
-  代码搜索与符号导航（code search/navigation）：定义消歧用 ctags，AST 结构匹配用 ast-grep，调用点／引用及文本搜索用 grep。用于找定义、找 caller、追调用链、定位依赖影响面和陌生代码库相关代码，以及复杂精确导航的 LSP/SCIP 升级。已知文件和准确名称可直接局部文本定位，具体工具选择按正文决策表执行。
+  代码搜索与符号导航（code search/navigation）：未知文件找定义或定义消歧用 ctags，AST 结构匹配用 ast-grep，调用点／引用及文本搜索用 grep。用于找定义、找 caller、追调用链、定位依赖影响面和陌生代码库相关代码，以及复杂精确导航的 LSP/SCIP 升级。先按模块/路径线索缩范围，必要时文本筛候选文件；已知文件和准确名称可直接局部文本定位，具体工具选择按正文决策表执行。
 ---
 
 # 代码搜索
@@ -13,6 +13,7 @@ description: |
 | 意图 | 工具 | 定位方式 |
 |------|------|----------|
 | 已知文件和准确名称，只需定位 | **grep** | 在该文件搜索，再局部 Read；不要求先建索引 |
+| 文件未知、符号名确定，查找一次定义 | **ctags** | 先按模块/路径线索缩范围，必要时文本筛候选文件 → 索引候选范围 → `readtags` 定位定义 |
 | 定义消歧：区分类别、同名符号或跨行声明 | **ctags** | 索引候选文件/范围 → `readtags` 查 → 文件 + 定位 + kind |
 | 反复跨文件导航 | **ctags** | 建立并复用任务内 tags |
 | 找符合 AST（抽象语法树）结构的代码，如 import、调用形态、JSX 节点、try/catch | **ast-grep** | `ast-grep run -p '<pattern>' --lang <lang> <path>` |
@@ -24,11 +25,13 @@ description: |
 
 要求 **Universal Ctags**，而非旧的 exuberant-ctags。先索引明确的候选文件或目录；反复导航时可复用任务内 tags，不要求每个任务先建全仓索引。
 
-以下占位符应替换为实际文件、tags 路径和符号名。生成与查询应使用同一个 tags 路径：
+以下占位符应替换为实际文件、源目录、tags 路径和符号名。按候选范围选用单文件或目录命令；目录命令用 `-R` 递归索引。生成与查询应使用同一个 tags 路径：
 
 ```bash
 # example: tags-build
 ctags --links=no --langmap=TypeScript:+.tsx -f '<tags>' '<file.tsx>'
+# example: tags-build-directory
+ctags -R --links=no --exclude=node_modules --exclude=dist --exclude=target --exclude=vendor --exclude=.git --langmap=TypeScript:+.tsx -f '<tags>' '<source-dir>'
 # example: tags-query
 readtags -t '<tags>' -en '<symbol>'
 ```
