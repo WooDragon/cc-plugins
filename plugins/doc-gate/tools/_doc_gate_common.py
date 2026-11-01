@@ -10,6 +10,7 @@ recall-gate.py 与 docs-graph.py 共享此模块，杜绝排除逻辑三处漂�
 
 import re
 import os
+import sys
 import urllib.parse
 from pathlib import Path
 
@@ -178,6 +179,27 @@ def exists_with_exact_case(path) -> bool:
     except OSError:
         return False
     return current.exists()
+
+
+def ensure_utf8_stdout() -> None:
+    """Force this process's stdout to UTF-8 regardless of platform locale.
+
+    Every tool here prints ``json.dumps(..., ensure_ascii=False)`` — the
+    report is full of Chinese. On Windows the default stdout encoding is the
+    ANSI code page (GBK on a zh-CN box), so those bytes reach the caller in a
+    different encoding than the UTF-8 the message was written in: jq may
+    still pass them through, but the hook's stderr renders mojibake and any
+    UTF-8 assertion in the tests can never match. macOS/Linux already default
+    to UTF-8, so reconfiguring is a no-op there; it is not a behaviour change
+    for them, only a fix for Windows.
+    """
+    stream = getattr(sys, 'stdout', None)
+    reconfigure = getattr(stream, 'reconfigure', None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding='utf-8', errors='replace')
+        except (ValueError, OSError):
+            pass
 
 
 def should_skip_link(target: str) -> bool:
