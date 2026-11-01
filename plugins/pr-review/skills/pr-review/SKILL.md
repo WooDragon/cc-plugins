@@ -120,10 +120,16 @@ PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改
 
 | 后端 | 机制 | 何时用 | 详细用法 |
 |---|---|---|---|
-| grok | 本地 CLI 同步产出评审 → 终端 | 本地即时深度评审，默认 high 可调档；`pr-review.sh` 自动路由的默认目标 | `references/grok-review.md` |
+| grok | 本地 CLI 同步产出评审 → 终端 | 本地即时评审，默认 medium；复杂评审按选档说明显式选择 high；`pr-review.sh` 自动路由的默认目标 | `references/grok-review.md` |
 | claude | 本地 `claude -p` 同步产出评审 → 终端 | wrapper 会话经 grok provider 路由时，`pr-review.sh` 自动切换到的目标；也可手动强制 | `references/claude-review.md` |
 | codex | 本地 codex CLI 同步产出评审 → 终端 | 需要第三方独立视角时显式指定；不参与自动路由 | `references/codex-review.md` |
 | copilot（可选） | gh 触发 GitHub Copilot bot 异步评审 → 回帖 PR | 复杂项目收尾、成本高通常不启用 | `references/copilot-review.md` |
+
+### Grok 选档
+
+日常评审的默认档位为 `medium`。
+跨模块数据流、并发、权限或兼容性等复杂评审应显式选择 `--effort high`。
+应优先遵循用户显式选档。本 Skill 不自动分类评审复杂度。
 
 ## 默认路径：`pr-review.sh`
 
@@ -135,7 +141,7 @@ PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改
 
 **cwd 必须是被评审 PR 所在的仓库工作区**——底层脚本按 `git rev-parse --show-toplevel` 钉死 session 身份、按 cwd 取增量 diff，不是"不依赖 cwd"。结果打到 stdout（按上文重定向落盘），不发 PR 评论。
 
-**强制指定后端**：设 `PR_REVIEW_BACKEND=grok` 或 `PR_REVIEW_BACKEND=claude` 后再调 `pr-review.sh`，或直接调用对应的 `grok-review.sh`/`claude-review.sh`。两个后端 CLI 参数形态完全一致（`<PR> [--repo] [--model] [--effort] [--followup] [--since] [--session] [--allow-divergent-base]`），仅 `--effort` 合法集合不同：grok 严格为 `none/minimal/low/medium/high`（默认 `high`，`GROK_EFFORT` 覆盖），claude 严格为 `low/medium/high/xhigh/max`（默认 `medium`，`CLAUDE_REVIEW_EFFORT` 覆盖，`CLAUDE_REVIEW_MODEL` 覆盖 model，默认 `claude-opus-5`）。grok 复核轮读到旧持久 state 的 `EFFORT=xhigh` 时会在调用前一次性迁移为 `high`（claude 无此历史包袱）。参数细节、工作原理、故障排查见 `references/grok-review.md`（grok）/ `references/claude-review.md`（claude）。
+**强制指定后端**：设 `PR_REVIEW_BACKEND=grok` 或 `PR_REVIEW_BACKEND=claude` 后再调 `pr-review.sh`，或直接调用对应的 `grok-review.sh`/`claude-review.sh`。两个后端 CLI 参数形态完全一致（`<PR> [--repo] [--model] [--effort] [--followup] [--since] [--session] [--allow-divergent-base]`），仅 `--effort` 合法集合不同：grok 严格为 `none/minimal/low/medium/high`（默认 `medium`，`GROK_EFFORT` 覆盖，显式 `--effort` 优先），claude 严格为 `low/medium/high/xhigh/max`（默认 `medium`，`CLAUDE_REVIEW_EFFORT` 覆盖，`CLAUDE_REVIEW_MODEL` 覆盖 model，默认 `claude-opus-5`）。grok 复核轮读到旧持久 state 的 `EFFORT=xhigh` 时会在调用前一次性迁移为 `high`（claude 无此历史包袱）。参数细节、工作原理、故障排查见 `references/grok-review.md`（grok）/ `references/claude-review.md`（claude）。
 
 **脚本路径发现**：主线用 `${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh`——展开时机与配套先验见「执行分工」§1。该路径只供主线调用，不得下发给修复子任务。只需认识 `pr-review.sh` 这一个命令，不必先跑 `resolve-backend.sh` 再自行选脚本。
 
@@ -154,7 +160,11 @@ mkdir -p "$(git rev-parse --git-dir)/pr-review"
 REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"
 [ -x "$REVIEW" ] || { echo "pr-review 脚本路径解析失败" >&2; exit 1; }
 LOG="$(git rev-parse --git-dir)/pr-review"
+# 普通评审使用 medium 默认值：
 "$REVIEW" 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
+
+# 复杂评审显式选择 high：
+# "$REVIEW" 123 --effort high > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"
 
 # 修复子任务只修改、测试、新建 commit、push 并回传 immutable SHA。
 # 主线核对 SHA 后，以后台方式启动 r2；两流继续分文件：

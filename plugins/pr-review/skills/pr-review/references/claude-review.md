@@ -28,7 +28,7 @@ CLI 参数形态（`<PR> [--repo] [--model] [--effort] [--followup] [--since] [-
 | 参数 | claude 后端 | grok 后端（对照） |
 |---|---|---|
 | `--model M` | `claude-opus-5`（`CLAUDE_REVIEW_MODEL` 覆盖） | `grok-4.7`（`GROK_MODEL` 覆盖） |
-| `--effort E` | 合法值严格为 `low/medium/high/xhigh/max`，默认 `medium`（`CLAUDE_REVIEW_EFFORT` 覆盖） | 合法值严格为 `none/minimal/low/medium/high`，默认 `high`（`GROK_EFFORT` 覆盖） |
+| `--effort E` | 合法值严格为 `low/medium/high/xhigh/max`，默认 `medium`（`CLAUDE_REVIEW_EFFORT` 覆盖） | 合法值严格为 `none/minimal/low/medium/high`，默认 `medium`（`GROK_EFFORT` 覆盖） |
 
 表中 Grok 默认值用于新会话。复核未显式传 `--model` 时，Grok 优先沿用旧 session 的 state `MODEL`，包括 `grok-4.6`，不强迁；state 缺少 `MODEL` 时才回退到 `GROK_MODEL` 或新默认值。显式 `--model` 只覆盖本轮，不改写旧 state 的模型。
 

@@ -21,7 +21,7 @@ claude plugin install pr-review@cc-plugins
 | Mechanism | Local `grok` CLI, synchronous | Local `claude -p` CLI, synchronous | Local `codex exec` CLI, synchronous | `gh` triggers the GitHub Copilot bot, asynchronous |
 | Output | Printed to your terminal — posts nothing to the PR | Printed to your terminal — posts nothing to the PR | Printed to your terminal — posts nothing to the PR | Posted back as a review on the PR |
 | Latency | Immediate | Immediate | Immediate | Minutes; must be polled |
-| Cost | Cheap; `--effort` is tunable (default `high`) | Cheap; `--effort` is tunable (default `medium`) | Cheap; reasoning effort tunable via `-c model_reasoning_effort` (default `high`) | Expensive — usually left off |
+| Cost | Cheap; `--effort` is tunable (default `medium`) | Cheap; `--effort` is tunable (default `medium`) | Cheap; reasoning effort tunable via `-c model_reasoning_effort` (default `high`) | Expensive — usually left off |
 | Multi-round | Yes — adversarial follow-up over a persisted session | Yes — adversarial follow-up over a persisted session | Yes — adversarial follow-up over a persisted thread (`codex exec resume`) | No |
 | Use when | `pr-review.sh`'s default auto-routed target; also local self-review before asking for human eyes | Auto-routed target when the current session is itself already routed through a grok provider (self-review-by-the-same-model would be low-value); can also be forced manually | A third independent reviewer is wanted, or when both grok and claude are the same family as the code's author; explicit `PR_REVIEW_BACKEND=codex` only — never auto-routed | Wrapping up a complex project, when a native bot review record on the PR is wanted |
 | Script | `skills/pr-review/scripts/grok-review.sh` | `skills/pr-review/scripts/claude-review.sh` | `skills/pr-review/scripts/codex-review.sh` | `skills/pr-review/scripts/copilot-review.sh` |
@@ -96,7 +96,7 @@ A failed first round does not create or overwrite session state. A failed ordina
 | Variable | Default | Notes |
 |---|---|---|
 | `GROK_MODEL` | `grok-4.7` | grok backend model override for new sessions; existing session models remain unchanged |
-| `GROK_EFFORT` | `high` | grok backend reasoning effort; legal values exactly `none`/`minimal`/`low`/`medium`/`high` (`xhigh` unsupported — a persisted legacy `xhigh` session value is migrated to `high` once before the review runs) |
+| `GROK_EFFORT` | `medium` | grok backend reasoning effort; legal values exactly `none`/`minimal`/`low`/`medium`/`high` (`xhigh` unsupported — a persisted legacy `xhigh` session value is migrated to `high` once before the review runs) |
 | `CLAUDE_REVIEW_MODEL` | `claude-opus-5` | claude backend model override |
 | `CLAUDE_REVIEW_EFFORT` | `medium` | claude backend reasoning effort; legal values exactly `low`/`medium`/`high`/`xhigh`/`max` |
 | `CODEX_REVIEW_MODEL` | `gpt-5.6-luna` | codex backend model override |
@@ -104,7 +104,7 @@ A failed first round does not create or overwrite session state. A failed ordina
 | `PR_REVIEW_BACKEND` | unset | `grok`/`claude`/`codex`/`copilot` — explicit override for `pr-review.sh`'s auto-routing, takes priority over auto-detection (codex does not participate in auto-detection) |
 | `XDG_STATE_HOME` | `$HOME/.local/state` | root of the session state files (`pr-review/<owner>__<name>__<PR>.session` for grok, `.claude.session` for claude, `.codex.session` for codex — independent, never overwrite each other) |
 
-On a follow-up round, persisted session `MODEL`/`EFFORT` values win over env vars unless the CLI flag is given explicitly.
+On a follow-up round, persisted session `MODEL` and `EFFORT` values win over environment variables unless the matching CLI flag is explicit. For a first round, effort priority is explicit CLI `--effort` > `GROK_EFFORT` > the `medium` fallback. On a follow-up, effort priority is explicit CLI `--effort` > persisted session state > `GROK_EFFORT` > the `medium` fallback. The first successful round saves the effective effort, including an explicit CLI `--effort`, in session state. On a follow-up round, an explicit CLI flag overrides only that round and does not update state.
 
 ## Tests
 

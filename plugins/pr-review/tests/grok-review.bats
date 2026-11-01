@@ -94,8 +94,30 @@ load test_helper/scope-assertions
   [ -f "$STATE_FILE_42" ]
   grep -qx 'SID=TESTUUID-1' "$STATE_FILE_42"
   grep -qx 'MODEL=grok-4.7' "$STATE_FILE_42"
-  grep -qx 'EFFORT=high' "$STATE_FILE_42"
+  grep -qx 'EFFORT=medium' "$STATE_FILE_42"
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--effort")" = "medium" ]
   grep -q '^CWD=' "$STATE_FILE_42"
+}
+
+@test "effort: 首轮 GROK_EFFORT 为空时使用 medium 默认并持久化" {
+  run env GROK_EFFORT= bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--effort")" = "medium" ]
+  grep -qx 'EFFORT=medium' "$STATE_FILE_42"
+}
+
+@test "effort: 首轮 GROK_EFFORT=high 覆盖 medium 默认" {
+  run env GROK_EFFORT=high bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--effort")" = "high" ]
+  grep -qx 'EFFORT=high' "$STATE_FILE_42"
+}
+
+@test "effort: 显式 --effort high 优先于 GROK_EFFORT=medium" {
+  run env GROK_EFFORT=medium bash "$SCRIPT" 42 --effort high
+  [ "$status" -eq 0 ]
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--effort")" = "high" ]
+  grep -qx 'EFFORT=high' "$STATE_FILE_42"
 }
 
 @test "状态文件: 目录权限 700" {
@@ -301,6 +323,24 @@ load test_helper/scope-assertions
   [ "$status" -eq 0 ]
   grep -qx -- 'grok-combo' "$GROK_ARGS_LOG"
   grep -qx -- 'medium' "$GROK_ARGS_LOG"
+}
+
+@test "model/effort 一致: 复核轮 high state 优先于 GROK_EFFORT=medium" {
+  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+  printf 'SID=SID-HIGH\nMODEL=grok-4.5\nEFFORT=high\nCWD=%s\nCREATED=1\n' "$(git -C "$WORK/repo" rev-parse --show-toplevel)" > "$STATE_FILE_42"
+  run env GROK_EFFORT=medium bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--effort")" = "high" ]
+  grep -qx 'EFFORT=high' "$STATE_FILE_42"
+}
+
+@test "model/effort 一致: 显式 medium 覆盖 high state 且不写回" {
+  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+  printf 'SID=SID-HIGH-EXPLICIT\nMODEL=grok-4.5\nEFFORT=high\nCWD=%s\nCREATED=1\n' "$(git -C "$WORK/repo" rev-parse --show-toplevel)" > "$STATE_FILE_42"
+  run bash "$SCRIPT" 42 --followup "复核" --effort medium
+  [ "$status" -eq 0 ]
+  [ "$(get_arg_value "$GROK_ARGS_LOG" "--effort")" = "medium" ]
+  grep -qx 'EFFORT=high' "$STATE_FILE_42"
 }
 
 

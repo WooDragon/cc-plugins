@@ -7,6 +7,34 @@
 
 SKILL="$BATS_TEST_DIRNAME/../skills/pr-review/SKILL.md"
 GROK_REFERENCE="$BATS_TEST_DIRNAME/../skills/pr-review/references/grok-review.md"
+README="$BATS_TEST_DIRNAME/../README.md"
+CLAUDE_REFERENCE="$BATS_TEST_DIRNAME/../skills/pr-review/references/claude-review.md"
+CODEX_REFERENCE="$BATS_TEST_DIRNAME/../skills/pr-review/references/codex-review.md"
+
+table_cell() {
+  python3 - "$1" "$2" "$3" <<'PY'
+from pathlib import Path
+import sys
+
+path, column, row = sys.argv[1:]
+header = None
+matches = []
+for line in Path(path).read_text(encoding="utf-8").splitlines():
+    if not line.startswith("|"):
+        header = None
+        continue
+    cells = [cell.strip() for cell in line.strip("|").split("|")]
+    if column in cells:
+        header = cells
+    elif header is not None and cells[0] == row:
+        if len(cells) != len(header):
+            raise SystemExit("table row/header width mismatch")
+        matches.append(cells[header.index(column)])
+if len(matches) != 1:
+    raise SystemExit(f"expected one {row} cell under {column}, found {len(matches)}")
+print(matches[0])
+PY
+}
 
 section() {
   python3 - "$1" "$2" <<'PY'
@@ -260,4 +288,43 @@ PY
     echo "$stray" >&2
     return 1
   fi
+}
+
+@test "Grok 选档说明默认 medium，复杂评审显式 high" {
+  run section "$SKILL" "Grok 选档"
+  [ "$status" -eq 0 ]
+  policy="$output"
+  assert_contains "$policy" "medium"
+  assert_contains "$policy" "跨模块数据流"
+  assert_contains "$policy" "并发"
+  assert_contains "$policy" "权限"
+  assert_contains "$policy" "兼容性"
+  assert_contains "$policy" "--effort high"
+  assert_contains "$policy" "用户显式选档"
+  assert_contains "$policy" "不自动分类"
+
+  run section "$SKILL" '默认路径：`pr-review.sh`'
+  [ "$status" -eq 0 ]
+  default_path="$output"
+  assert_contains "$default_path" '"$REVIEW" 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"'
+  assert_contains "$default_path" '# "$REVIEW" 123 --effort high > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"'
+
+  run table_cell "$GROK_REFERENCE" "默认" '`--effort E`'
+  [ "$status" -eq 0 ]
+  [[ "$output" == '默认 `medium`（首轮优先级：'* ]]
+  assert_contains "$output" "GROK_EFFORT"
+
+  local reference
+  for reference in "$CLAUDE_REFERENCE" "$CODEX_REFERENCE"; do
+    run table_cell "$reference" "grok 后端（对照）" '`--effort E`'
+    [ "$status" -eq 0 ]
+    [[ "$output" == '合法值严格为 `none/minimal/low/medium/high`，默认 `medium`'* ]]
+  done
+
+  run section "$README" "Environment variables"
+  [ "$status" -eq 0 ]
+  assert_contains "$output" '`GROK_EFFORT` | `medium`'
+  assert_contains "$output" 'The first successful round saves the effective effort, including an explicit CLI `--effort`, in session state.'
+  assert_contains "$output" 'On a follow-up round, an explicit CLI flag overrides only that round and does not update state.'
+  assert_absent "$output" 'An explicit CLI flag applies only to that round and does not update state.'
 }
