@@ -356,10 +356,11 @@ def test_docs_graph_scan_prunes_auto_memory_subtree_when_root_is_claude_dir(tmp_
     """root 设在 .claude 目录本身时，'.claude' 不再是 root 以下的路径段，
     EXCLUDED_DIRS 剪枝覆盖不到 memory 子树，只剩 is_auto_memory_path 能挡。
 
-    钉的是整个 auto-memory 剪枝契约，不是某一行：顶层
-    `if is_auto_memory_path(directory): dirnames[:] = []; continue` 与列表推导里的
-    `and not is_auto_memory_path(directory / name, root)` 功能重叠，单删
-    任一处行为不变。变异自检须同时禁掉两处才会红。"""
+    钉住的是列表推导里的 `and not is_auto_memory_path(directory / name, root)`：
+    只删这一处，`walked` 就会下探进 memory，本用例转红。顶层
+    `if is_auto_memory_path(directory): dirnames[:] = []; continue` 保留是为了
+    与 recall-gate.py 的 walk 同构；它在可观测行为上是冗余的，本用例钉不住它。
+    """
     root = tmp_path / ".claude"
     (root / "projects" / "p" / "memory").mkdir(parents=True)
     (root / "projects" / "p" / "memory" / "entry.md").write_text("# E\n\nx\n", encoding="utf-8")
