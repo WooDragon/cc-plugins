@@ -89,6 +89,29 @@ def is_auto_memory_path(path, root=None) -> bool:
     return False
 
 
+def repo_relative_key(path, root) -> str:
+    """Return *path* relative to *root*, spelled with POSIX separators.
+
+    Every key in the link graph is built here, because those keys are looked
+    up with paths that come from `git status --porcelain`, which always uses
+    forward slashes. A key built with the platform separator can never equal
+    one of those: on Windows ``os.path.relpath`` yields ``docs\\a.md`` while
+    the git side asks for ``docs/a.md``, so every file below the root looks
+    like an orphan and every inbound link from it looks like a dangling
+    edge. Normalising once at generation keeps both sides in one spelling
+    instead of translating at each of the several lookup sites.
+
+    Raises ValueError when *path* is not inside *root* (on Windows, also
+    when the two are on different drives) — callers decide what an
+    out-of-tree path means, because it differs: a resolved link that escapes
+    the root is skipped, a CLI target that escapes it simply is not a node.
+    """
+    relative = os.path.relpath(os.fspath(path), os.fspath(root))
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        raise ValueError(f'{os.fspath(path)!r} is outside {os.fspath(root)!r}')
+    return Path(relative).as_posix()
+
+
 def should_skip_link(target: str) -> bool:
     """外部链接 / 纯锚点 / 绝对路径 → 跳过（不纳入图）。"""
     return target.startswith(('http://', 'https://', 'mailto:', '#', 'file://', '/'))
