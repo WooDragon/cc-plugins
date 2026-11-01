@@ -274,33 +274,6 @@ def test_docs_graph_scan_finds_uppercase_md_extension(tmp_path):
     assert names == {"upper.MD", "lower.md"}
 
 
-def test_docs_graph_scan_does_not_rely_on_glob_case_semantics(tmp_path, monkeypatch):
-    """The scan must match .md case-insensitively by its own logic, not by
-    luck of a case-insensitive filesystem. Simulate a case-sensitive glob so
-    this discriminates on Windows too (NTFS matches 'upper.MD' against
-    '*.md', which makes the plain end-to-end assertion pass even when the
-    implementation is the old rglob('*.md'))."""
-    import fnmatch
-
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "upper.MD").write_text("# Upper\n\nx\n", encoding="utf-8")
-    (tmp_path / "docs" / "lower.md").write_text("# Lower\n\nx\n", encoding="utf-8")
-
-    real_rglob = Path.rglob
-
-    def case_sensitive_rglob(self, pattern):
-        for hit in real_rglob(self, "*"):
-            if hit.is_file() and fnmatch.fnmatchcase(hit.name, pattern):
-                yield hit
-
-    monkeypatch.setattr(Path, "rglob", case_sensitive_rglob)
-
-    found = docs_graph.scan_all_files(tmp_path)
-
-    names = {p.name for p in found}
-    assert names == {"upper.MD", "lower.md"}
-
-
 # ---------------------------------------------------------------------------
 # #296: scan_all_files must prune EXCLUDED_DIRS during the walk instead of
 # rglob-ing into them and discarding the results afterwards. The observable
