@@ -40,7 +40,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/pr-review-common.sh"
 
 MODEL="${GROK_MODEL:-grok-4.7}"
-EFFORT="${GROK_EFFORT:-high}"
+EFFORT="${GROK_EFFORT:-medium}"
 ENV_EFFORT="${GROK_EFFORT:-}"
 # 命令行是否显式给出 model/effort（复核轮据此决定沿用 state 还是尊重 flag；set -u 下必须先初始化）
 MODEL_EXPLICIT=0

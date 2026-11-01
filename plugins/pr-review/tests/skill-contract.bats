@@ -7,6 +7,7 @@
 
 SKILL="$BATS_TEST_DIRNAME/../skills/pr-review/SKILL.md"
 GROK_REFERENCE="$BATS_TEST_DIRNAME/../skills/pr-review/references/grok-review.md"
+README="$BATS_TEST_DIRNAME/../README.md"
 
 section() {
   python3 - "$1" "$2" <<'PY'
@@ -260,4 +261,33 @@ PY
     echo "$stray" >&2
     return 1
   fi
+}
+
+@test "Grok 选档说明默认 medium，复杂评审显式 high" {
+  run section "$SKILL" "Grok 选档"
+  [ "$status" -eq 0 ]
+  policy="$output"
+  assert_contains "$policy" "medium"
+  assert_contains "$policy" "跨模块数据流"
+  assert_contains "$policy" "并发"
+  assert_contains "$policy" "权限"
+  assert_contains "$policy" "兼容性"
+  assert_contains "$policy" "--effort high"
+  assert_contains "$policy" "用户显式选档"
+  assert_contains "$policy" "不自动分类"
+
+  run section "$SKILL" '默认路径：`pr-review.sh`'
+  [ "$status" -eq 0 ]
+  default_path="$output"
+  assert_contains "$default_path" '"$REVIEW" 123 > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"'
+  assert_contains "$default_path" '# "$REVIEW" 123 --effort high > "$LOG/123-r1.log" 2> "$LOG/123-r1.err"'
+
+  run section "$GROK_REFERENCE" "参数语义"
+  [ "$status" -eq 0 ]
+  assert_contains "$output" "medium"
+  assert_contains "$output" "GROK_EFFORT"
+
+  run section "$README" "Environment variables"
+  [ "$status" -eq 0 ]
+  assert_contains "$output" '`GROK_EFFORT` | `medium`'
 }

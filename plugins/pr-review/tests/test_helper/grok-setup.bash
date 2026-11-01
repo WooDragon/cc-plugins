@@ -101,7 +101,7 @@ EOF
   export GROK_PROMPT_CAPTURE="$WORK/grok_prompt.txt"
   export GH_CALLS_LOG="$WORK/gh_calls.log"
   export UUID_COUNTER_FILE="$WORK/uuid_counter"
-  # 隔离宿主环境：断言默认 EFFORT=high/MODEL=grok-4.7 的用例不能吃宿主 export 的 GROK_EFFORT/GROK_MODEL
+  # 隔离宿主环境：断言默认 EFFORT=medium/MODEL=grok-4.7 的用例不能吃宿主 export 的 GROK_EFFORT/GROK_MODEL
   # （这工具的用户天天 export GROK_EFFORT=low/high；不 unset 会让默认值断言随宿主环境飘红）
   unset GROK_STUB_MODE GROK_EFFORT GROK_MODEL GH_STUB_PR_HEAD GH_STUB_PR_HEAD_EMPTY GH_STUB_REPO 2>/dev/null || true
 
