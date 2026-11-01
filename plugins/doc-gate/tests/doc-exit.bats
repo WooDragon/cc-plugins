@@ -392,8 +392,14 @@ teardown() {
   # #291 orphan only applies to added paths, so an added file is the only
   # shape where the orphan assertion below can still be violated. The inlink
   # is what must keep it from being one.
+  #
+  # UPPER2.MD also carries a broken outlink, giving it a structural finding
+  # that does not depend on the BM25 recall threshold: without it, whether
+  # this file renders a block at all would hinge on its similarity score
+  # clearing 0.30, and a harmless tuning change could make the test pass
+  # vacuously by never rendering the block the orphan assertion inspects.
   write_md "linker2.md" $'# Linker2\n\n[upper2](UPPER2.MD)\n'
-  write_md "UPPER2.MD" $'# Upper2\n\ncontent\n'
+  write_md "UPPER2.MD" $'# Upper2\n\n[gone](GONE2.md)\n'
 
   run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]
@@ -404,6 +410,9 @@ teardown() {
   local block
   block="${HOOK_STDERR#*--- UPPER2.MD ---}"
   block="${block%%--- *}"
+  # The block must exist because of the structural (broken-outlink) finding,
+  # not because of a recall hit.
+  echo "$block" | grep -qF "出链验证"
   # UPPER2.MD must NOT be reported as orphan (it has a real inlink, from an
   # equally new file that is itself in the dirty set). A bare `! cmd` here
   # would be exempt from errexit unless it's the function's LAST statement
@@ -414,8 +423,11 @@ teardown() {
     echo "unexpected: UPPER2.MD reported as orphan despite having a real inlink" >&2
     return 1
   fi
-  # linker2.md's link to UPPER2.MD must NOT be reported dangling anywhere.
-  if echo "$HOOK_STDERR" | grep -qF "断链反查"; then
+  # linker2.md's link to the existing UPPER2.MD must NOT be reported dangling
+  # in UPPER2.MD's own block. Scoped to this block: UPPER2.MD's own GONE2.md
+  # link legitimately dangles, but that is reported by GONE2.md's block (which
+  # is not in the dirty set here), never as an inlink problem on UPPER2.MD.
+  if echo "$block" | grep -qF "断链反查"; then
     echo "unexpected: UPPER2.MD's real inlink reported as dangling" >&2
     return 1
   fi
@@ -598,12 +610,13 @@ teardown() {
 
 @test "budget degrade: DOC_EXIT_GATE_BUDGET_SEC=0 renders the degrade notice" {
   # Deterministic finding independent of the recall pass this test targets:
-  # since #291 orphan needs an ADDED path, so this adds one rather than
-  # editing a tracked lone file.
-  write_md "LONE.md" $'# Lone\n\ncontent\n'
+  # since #291 orphan needs an ADDED path, so add one (untracked, `??`)
+  # rather than editing a tracked lone file. `rm` + rewrite the same path
+  # reuses the tracked file — git reports it as ` M`, not `??`, so it never
+  # lands in the added set and orphan stays silent.
+  write_md "SEED.md" $'# Seed\n\ncontent\n'
   git_commit_all "init"
-  rm "${REPO_DIR}/LONE.md"
-  write_md "LONE.md" $'# Lone\n\nedited\n'
+  write_md "LONE.md" $'# Lone\n\ncontent\n'
 
   DOC_EXIT_GATE_BUDGET_SEC=0 run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]
@@ -626,14 +639,8 @@ teardown() {
     write_md "filler${i}.md" "# Filler ${i}"$'\n\ncontent number '"${i}"$'.\n'
   done
   write_md "TARGET.md" $'# Target\n\ncontent\n'
-  write_md "LINKER.md" $'# Linker\n\n[target](TARGET.md)\n'
   git_commit_all "init"
-  # A rename, so TARGET.md is dirty and (as OLD.md's dangling target) carries
-  # a finding that does not depend on the per-file pass this test proves
-  # never runs. A plain edit would have nothing to report here since #291
-  # narrowed orphan to added paths — the test would then pass vacuously on
-  # exit code alone.
-  git -C "$REPO_DIR" mv TARGET.md TARGET2.md
+  write_md "TARGET.md" $'# Target\n\nedited\n'
 
   DOC_EXIT_GATE_BUDGET_SEC=0 run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]
@@ -645,10 +652,6 @@ teardown() {
   echo "$HOOK_STDERR" | grep -qF "已扫描"
   # No per-file structural block must appear -- a partial graph must never
   # be used to render findings (files={} on this path).
-  if echo "$HOOK_STDERR" | grep -qF -- "--- TARGET2.md ---"; then
-    echo "unexpected: a structural finding block rendered from a partial (budget-exceeded) graph" >&2
-    return 1
-  fi
   if echo "$HOOK_STDERR" | grep -qF -- "--- TARGET.md ---"; then
     echo "unexpected: a structural finding block rendered from a partial (budget-exceeded) graph" >&2
     return 1
@@ -686,12 +689,14 @@ teardown() {
 # ============================================================
 
 @test "robustness: Chinese filename does not crash the pipeline" {
-  # No other file links this one, and it's not in ORPHAN_WHITELIST, so
-  # orphan=true is forced — the outcome is deterministic, not "may or may
-  # not fire".
-  write_md "中文文档.md" $'# 中文标题\n\n内容正文。\n'
+  # The Chinese path arrives as an untracked ADD (git `??`), not as a
+  # committed-then-edited path. Since #291 orphan applies only to added
+  # paths, an untracked file with no inlinks is a forced, deterministic
+  # finding — while still exercising the same Chinese-path transport into
+  # Python this test is actually about.
+  write_md "SEED.md" $'# Seed\n\ncontent\n'
   git_commit_all "init"
-  write_md "中文文档.md" $'# 中文标题\n\n修改后的正文。\n'
+  write_md "中文文档.md" $'# 中文标题\n\n内容正文。\n'
 
   run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]

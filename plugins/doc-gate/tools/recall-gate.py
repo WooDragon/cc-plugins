@@ -13,7 +13,8 @@ from collections import Counter
 from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST, CODE_FENCE,
     detect_root, is_auto_memory_path, should_skip_link, resolve_link,
-    extract_links_from_content, repo_relative_key,
+    extract_links_from_content, repo_relative_key, exists_with_exact_case,
+    ensure_utf8_stdout,
 )
 
 _EN_TOKEN_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9_.-]{1,}')
@@ -363,7 +364,13 @@ def build_corpus_and_graph(root: str, start_time: float = None, budget_sec: floa
                 # filesystem — the same oracle the non-.md branch below has
                 # always used — and only a genuinely missing target is
                 # dangling.
-                if not resolved.exists():
+                #
+                # Existence must be case-EXACT: on macOS's default
+                # case-insensitive APFS a link to `Guide.md` resolves against
+                # an on-disk `guide.md`, but that link is broken on Linux and
+                # on CI. `exists()` would exonerate it here and the bug would
+                # only surface on the platforms we cannot test locally.
+                if not exists_with_exact_case(resolved):
                     dangling.setdefault(rel_target, set()).add(rel_path)
 
     return corpus, all_files, forward, backward, dangling
@@ -411,8 +418,11 @@ def check_broken_outlinks(content: str, target_file: str, root: str, all_files: 
         # node_modules, .agents, ...) exist but are never indexed, so
         # "not in all_files" alone would report every link into them as
         # broken. The corpus set still answers the common case cheaply.
+        # Existence is case-EXACT for the same reason as in
+        # build_corpus_and_graph: macOS's case-insensitive APFS would
+        # otherwise pass a link that is broken on Linux and CI.
         if rel_target.lower().endswith('.md'):
-            if rel_target not in all_files and not resolved.exists():
+            if rel_target not in all_files and not exists_with_exact_case(resolved):
                 broken.append({'target': target, 'line': lineno})
         else:
             # Non-.md: not indexed at all, filesystem is the only oracle.
@@ -512,6 +522,8 @@ def main():
     subparsers.add_parser('gate', help='Read content from stdin, output gate JSON')
 
     args = parser.parse_args()
+
+    ensure_utf8_stdout()
 
     if args.subcommand == 'gate':
         cmd_gate(args)

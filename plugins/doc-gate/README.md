@@ -99,7 +99,7 @@ Markdown links inside the dirty file's own content whose targets don't exist.
 
 ### orphan
 
-The dirty file has zero inbound links from other documents, **and this change added it**. "Added" means the working tree reports it as untracked (`??`) or newly staged (`A`) — a rename does not count, since the document is not new and its old path is gone rather than added.
+The dirty file has zero inbound links from other documents, **and this change added it**. "Added" means the working tree reports it as untracked (`??`) or newly staged (`A`) in either status column. A rename only stays out when git itself records it as a rename (a staged `git mv`, which reports `R`); a plain `mv OLD.md NEW.md` leaves git with ` D OLD.md` plus `?? NEW.md`, so the new path *does* count as added and can be reported as orphan.
 
 Two deliberate exclusions:
 

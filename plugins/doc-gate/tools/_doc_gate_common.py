@@ -10,6 +10,7 @@ recall-gate.py 与 docs-graph.py 共享此模块，杜绝排除逻辑三处漂�
 
 import re
 import os
+import sys
 import urllib.parse
 from pathlib import Path
 
@@ -110,6 +111,81 @@ def repo_relative_key(path, root) -> str:
     if relative == os.pardir or relative.startswith(os.pardir + os.sep):
         raise ValueError(f'{os.fspath(path)!r} is outside {os.fspath(root)!r}')
     return Path(relative).as_posix()
+
+
+def exists_with_exact_case(path) -> bool:
+    """Return whether *path* exists on disk with exactly this spelling.
+
+    ``Path.exists()`` alone cannot answer that on every platform. macOS's
+    default APFS is case-insensitive, so a link to ``Guide.md`` resolves
+    against an on-disk ``guide.md`` and looks fine locally — while the same
+    link is genuinely broken on Linux and on GitHub's runners. The graph has
+    to judge "does the target exist" the way the case-sensitive platforms
+    will, or a dangling link passes here and breaks elsewhere.
+
+    So: a quick ``exists()`` first (a genuinely absent path is absent under
+    every spelling — nothing to compare), then a component-by-component
+    comparison against the real directory entry names. The walk starts from
+    an anchor prefix and descends, so a case-insensitive filesystem cannot
+    hand back the wrong spelling at any single level: each level's listing is
+    scanned for an exact string match before the next level is entered. A
+    path that leaves the filesystem (symlink target outside the walk) simply
+    fails the exact comparison and reports False — the conservative answer
+    for a link checker.
+
+    On case-sensitive filesystems (Linux) this cannot disagree with
+    ``exists()``; the extra directory scans are bounded by path depth and
+    only run for targets that actually exist, which is not the hot path.
+    """
+    target = Path(os.path.abspath(os.fspath(path)))
+    if not target.exists():
+        return False
+
+    # Walk from the filesystem root so a relative input still gets a stable
+    # starting point, then compare each remaining component against the real
+    # directory entry names. os.path.abspath collapses '.'/'..' and makes the
+    # path absolute WITHOUT normalising case — unlike Path.resolve(), which on
+    # Windows rewrites every component to its on-disk spelling and would
+    # destroy exactly the evidence this function exists to inspect.
+    parts = target.parts
+    if not parts:
+        return False
+
+    anchor = Path(parts[0])
+    try:
+        current = anchor
+        for part in parts[1:]:
+            try:
+                entries = os.listdir(current)
+            except OSError:
+                return False
+            if part not in entries:
+                return False
+            current = current / part
+    except OSError:
+        return False
+    return current.exists()
+
+
+def ensure_utf8_stdout() -> None:
+    """Force this process's stdout to UTF-8 regardless of platform locale.
+
+    Every tool here prints ``json.dumps(..., ensure_ascii=False)`` — the
+    report is full of Chinese. On Windows the default stdout encoding is the
+    ANSI code page (GBK on a zh-CN box), so those bytes reach the caller in a
+    different encoding than the UTF-8 the message was written in: jq may
+    still pass them through, but the hook's stderr renders mojibake and any
+    UTF-8 assertion in the tests can never match. macOS/Linux already default
+    to UTF-8, so reconfiguring is a no-op there; it is not a behaviour change
+    for them, only a fix for Windows.
+    """
+    stream = getattr(sys, 'stdout', None)
+    reconfigure = getattr(stream, 'reconfigure', None)
+    if reconfigure is not None:
+        try:
+            reconfigure(encoding='utf-8', errors='replace')
+        except (ValueError, OSError):
+            pass
 
 
 def should_skip_link(target: str) -> bool:
