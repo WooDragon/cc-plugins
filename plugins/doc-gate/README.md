@@ -99,7 +99,14 @@ Markdown links inside the dirty file's own content whose targets don't exist.
 
 ### orphan
 
-The dirty file has zero inbound links from other documents. Deliberately **not** reported for files that have been deleted — a deleted file doesn't need inbound links, it needs everyone else to stop linking it, which is `dangling_refs`'s job, not `orphan`'s.
+The dirty file has zero inbound links from other documents, **and this change added it**. "Added" means the working tree reports it as untracked (`??`) or newly staged (`A`) — a rename does not count, since the document is not new and its old path is gone rather than added.
+
+Two deliberate exclusions:
+
+- **Deleted files** — a deleted file doesn't need inbound links, it needs everyone else to stop linking it, which is `dangling_refs`'s job, not `orphan`'s.
+- **Edited but pre-existing files** — a document's zero-inlink state is a property of the repository, not something the current edit created. Reporting it every time someone touches such a file produced a finding that no edit within that change could satisfy (the only fix is adding index links, usually unrelated work), so the gate blocked on it indefinitely.
+
+This is also what makes `orphan` genuinely self-terminating: a document that did not exist before this change can be indexed by this change. `doc-exit.sh` derives the added set from the same `git status --porcelain -z` records it already parses, and passes it to `doc-exit-report.py` through a NUL-delimited file (`--added-paths-file`) — the Python side still never touches git.
 
 ### recall
 
@@ -108,6 +115,8 @@ BM25 lexical recall (English words + Chinese bigrams) plus filename Jaccard simi
 **`recall` does not participate in the block decision.** It is still computed and still rendered in the report, but it alone never causes `exit 2`. The other four are structural facts about the graph and are each actionable — editing the right file makes them go away. `recall` is a heuristic similarity signal that no edit can make disappear: putting it in the blocking predicate would mean the same recall pair gets flagged every single turn between now and commit, with no action available that satisfies it. A concrete false-positive from testing: root `CLAUDE.md` and `plugins/pr-review/skills/pr-review/references/claude-review.md` scored 0.357 mostly from filename Jaccard (both contain "claude"), with no actual content overlap.
 
 In practice this means: a brand-new file has no inbound links yet, so it trips `orphan`, which drags `recall` along into the same rendered report — new content gets a duplicate-check signal for free. An edit to an already-indexed file that happens to duplicate existing content triggers no structural finding and thus no automatic signal; catching that case is left to periodic manual DEDUP (see `doc-maintenance` skill §5.6).
+
+All graph keys are repo-relative POSIX strings. `git status --porcelain` always reports forward slashes, so every key is generated through `_doc_gate_common.repo_relative_key()` rather than `os.path.relpath()` — on Windows the latter produces `docs\a.md`, which never matches the `docs/a.md` a git-driven lookup asks for, and the mismatch made every nested file look like an orphan whose inbound links all looked dangling.
 
 ## docs-graph.py — Link Graph CLI
 
@@ -198,11 +207,11 @@ The BM25 unit tests cover reusable body/title indexes, the legacy call interface
 |-------|----------|
 | `memory-cleanup.bats` | Source-checkout skill packaging, synchronized versions, preserved hook declarations, and section-scoped Memory cleanup content contracts (not model behavior) |
 | `doc-entry.bats` | Filters, exclusions, injection payload shape, global-CLAUDE.md segment, kill switch, fail-open |
-| `doc-exit.bats` | git-status parsing (incl. rename records in either column), stop_hook_active gating, background_tasks mid-flight skip, non-git repo, exclusion filtering, finding rendering, kill switch, robustness (space in path, deleted file), `--dirty-superset-file` transport end-to-end |
+| `doc-exit.bats` | git-status parsing (incl. rename records in either column), stop_hook_active gating, background_tasks mid-flight skip, non-git repo, exclusion filtering, finding rendering, kill switch, robustness (space in path, deleted file), `--dirty-superset-file` transport end-to-end, and the orphan add-only narrowing (tracked edit vs untracked/staged add) |
 | `exclude.bats` | Shared `_doc_gate_exclude.sh` predicate — basename and path exclusions (incl. relative & nested paths), governed paths |
 | `test_bm25.py` | Body/title index scoring, legacy list and body-only inputs, sparse postings in query Counter order, one normalization per document, zero-score and self/whitelist boundaries, stable candidate ordering, and pre-rounding thresholds |
-| `test_doc_exit_report.py` | `build_report()`: one body/title-index build per batch, stale_inlinks, orphan (including deleted-file suppression), dangling_refs, broken_outlinks, non-blocking recall, budget degradation, and `read_nul_paths_from_file` NUL-not-newline parsing |
-| `test_exclude.py` | Shared exclusion predicate parity checks |
+| `test_doc_exit_report.py` | `build_report()`: one body/title-index build per batch, stale_inlinks, orphan (deleted-file suppression, and the added-paths narrowing with its `None` default), dangling_refs, broken_outlinks, non-blocking recall, budget degradation, and `read_nul_paths_from_file` NUL-not-newline parsing |
+| `test_exclude.py` | Shared exclusion predicate parity checks, POSIX graph-key generation, and existence-based judgment for links into excluded directories |
 | `test_auto_memory.py` | Root-aware exclusion, no reads from `memory/`, link exemptions, standalone empty results, and zero-budget behavior |
 | `auto-memory-paths.sh` + `fixtures/auto-memory-paths.json` | Shared Shell/Python auto-memory path matrix, validated with Bash 3.2 and Bash 5 under `-u` |
 
@@ -220,6 +229,7 @@ The BM25 unit tests cover reusable body/title indexes, the legacy call interface
 
 See [GitHub Issues](https://github.com/WooDragon/cc-plugins/issues) for detailed change logs:
 
+- **v2.2.0** — Three exit-gate fixes: graph keys are now generated as repo-relative POSIX strings, so Windows no longer reports every nested file as an orphan with all its inbound links dangling (#289); a link to a real file inside an `EXCLUDED_DIRS` directory is judged by filesystem existence, so it stops being reported as broken/dangling while genuinely missing targets still are (#290); `orphan` is narrowed to files this change adds, so editing a pre-existing zero-inlink document no longer blocks every Stop with a finding that edit cannot satisfy (#291).
 - **v2.0.0** — Behavior-breaking rearchitecture: replaced the dual PreToolUse gate (`skill-gate.sh` hard gate + `recall-gate.sh` soft gate + `skill-marker.sh`) with a PostToolUse entry-injection layer (`doc-entry.sh`) and a Stop exit-judgment layer (`doc-exit.sh` + `doc-exit-report.py`). All `SKILL_GATE_*` and hook-level `RECALL_GATE_*` environment variables removed; the session-scoped marker protocol removed entirely; new `DOC_ENTRY_GATE_*` / `DOC_EXIT_GATE_*` variables introduced. `recall` finding demoted to non-blocking; `dangling_refs` and `stale_inlinks` added as new blocking findings not present under the old architecture.
 - **v1.7.2** — `.agents/*` exclusion widened from `.agents/directives/*` — the narrower scope denied other team-ops runtime artifacts (`intel/`, `handoffs/`, `tasks/`), and non-`Skill`-equipped roles like `intel` had no way to self-unlock (#176)
 - **v1.7.1** — Removed the writing-standards item digest from both delivery points (SKILL.md §2 table and the `skill-gate.sh` deny message): a readable digest created false satiety, so the model skipped `references/writing-standards.md` and self-checked against rules it never read. Both now carry an unconditional imperative plus the authoritative path only; §5.1/§5.2 checklist pointers go straight to the reference instead of hopping through §2 (#139)
