@@ -79,7 +79,7 @@ def _dedupe_preserve_order(paths: list) -> list:
 
 def build_report(root: str, dirty_paths: list, threshold: float, top_n: int,
                   budget_sec: float, start_time: float,
-                  dirty_superset: list = None) -> dict:
+                  dirty_superset: list = None, added_paths: list = None) -> dict:
     # dirty_paths is the report set — the files this call actually iterates
     # and emits findings for (already exclusion-filtered by the caller).
     # dirty_superset (when given) is the UNFILTERED superset of every dirty
@@ -91,8 +91,18 @@ def build_report(root: str, dirty_paths: list, threshold: float, top_n: int,
     # finding permanently unsatisfiable. dirty_superset=None (the default)
     # preserves the pre-A2 behavior for callers — notably existing tests —
     # that only ever had one list to begin with.
+    #
+    # added_paths (when given) is the set of files this working tree ADDS
+    # (git `??` untracked / `A` newly staged). orphan is judged only against
+    # it (#291): a pre-existing document's zero-inlink state is a repo-wide
+    # property the current edit did not create, and blocking every Stop on
+    # it made the gate unsatisfiable — short of unrelated edits that add
+    # index links. None means "nothing was added this cycle", which is the
+    # safe default: a caller that predates this parameter never sees an
+    # orphan finding it did not ask for.
     root_path = Path(root)
     raw_dirty_set = dirty_superset if dirty_superset is not None else dirty_paths
+    added_set = set(added_paths) if added_paths is not None else set()
     dirty_set = {
         path for path in raw_dirty_set
         if not is_auto_memory_path(root_path / path, root_path)
@@ -153,6 +163,9 @@ def build_report(root: str, dirty_paths: list, threshold: float, top_n: int,
         inlinks = sorted(inlinks_set)
         stale_inlinks = sorted(x for x in inlinks_set if x not in dirty_set)
         orphan = recall_gate.is_orphan(inlinks_set, basename, recall_gate.ORPHAN_WHITELIST)
+        # Narrowed to files this change ADDS (#291) — see added_paths above.
+        if orphan and relpath not in added_set:
+            orphan = False
         dangling_refs = sorted(dangling.get(relpath, set()))
 
         abs_path = Path(root) / relpath
@@ -228,7 +241,10 @@ def build_report(root: str, dirty_paths: list, threshold: float, top_n: int,
         # orphan IS kept in this predicate, which is what lets recall still
         # surface for the case it's meant to catch: a newly created
         # document (which has no inlinks yet, hence orphan=True) will still
-        # block and show its recall candidates for review.
+        # block and show its recall candidates for review. That is also why
+        # orphan is narrowed to added paths above — the self-terminating
+        # story ("add an index link") only holds for a document that did not
+        # exist before this edit.
         if stale_inlinks or orphan or broken_outlinks or dangling_refs:
             has_findings = True
 
@@ -252,6 +268,10 @@ def main():
     parser.add_argument('--dirty-superset-file', default=None,
                          help='Path to a NUL-delimited file listing every dirty .md path '
                               'unfiltered by the exclusion list (see build_report docstring)')
+    parser.add_argument('--added-paths-file', default=None,
+                         help='Path to a NUL-delimited file listing the .md paths this '
+                              'working tree adds (untracked / newly staged). orphan is '
+                              'judged only against these (see build_report docstring)')
     args = parser.parse_args()
 
     start_time = time.monotonic()
@@ -259,9 +279,10 @@ def main():
 
     dirty_paths = read_dirty_paths_from_stdin()
     dirty_superset = read_nul_paths_from_file(args.dirty_superset_file) if args.dirty_superset_file else None
+    added_paths = read_nul_paths_from_file(args.added_paths_file) if args.added_paths_file else None
 
     report = build_report(root, dirty_paths, args.threshold, args.top_n, args.budget_sec, start_time,
-                           dirty_superset=dirty_superset)
+                           dirty_superset=dirty_superset, added_paths=added_paths)
     print(json.dumps(report, ensure_ascii=False))
     sys.exit(0)
 
