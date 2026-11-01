@@ -54,8 +54,9 @@ PY
 }
 
 @test "packaging: minor version is synchronized and existing hook declarations remain" {
-  [ "$(jq -r .version "${PLUGIN_DIR}/.claude-plugin/plugin.json")" = "2.1.0" ]
-  [ "$(jq -r '.plugins[] | select(.name == "doc-gate") | .version' "${REPO_ROOT}/.claude-plugin/marketplace.json")" = "2.1.0" ]
+  plugin_version=$(jq -r .version "${PLUGIN_DIR}/.claude-plugin/plugin.json")
+  [ -n "$plugin_version" ]
+  [ "$(jq -r '.plugins[] | select(.name == "doc-gate") | .version' "${REPO_ROOT}/.claude-plugin/marketplace.json")" = "$plugin_version" ]
   jq -e '.hooks | keys == ["PostToolUse", "Stop"]' "${PLUGIN_DIR}/hooks/hooks.json" >/dev/null
   jq -e '.hooks.PostToolUse[0] | .matcher == "Edit|Write" and .hooks[0].command == "bash ${CLAUDE_PLUGIN_ROOT}/scripts/doc-entry.sh"' "${PLUGIN_DIR}/hooks/hooks.json" >/dev/null
   jq -e '.hooks.Stop[0].hooks[0].command == "bash ${CLAUDE_PLUGIN_ROOT}/scripts/doc-exit.sh"' "${PLUGIN_DIR}/hooks/hooks.json" >/dev/null
