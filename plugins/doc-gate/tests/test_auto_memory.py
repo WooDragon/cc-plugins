@@ -205,6 +205,7 @@ def test_docs_graph_cli_ignores_memory_links_but_reports_normal_missing_link(tmp
     completed = subprocess.run(
         [sys.executable, str(_TOOLS_DIR / "docs-graph.py"), "--root", str(root), "check"],
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
