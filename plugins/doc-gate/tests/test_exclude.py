@@ -343,10 +343,40 @@ def test_docs_graph_scan_prunes_excluded_dirs_during_walk(tmp_path, monkeypatch)
     # pays the cost this fix exists to remove. A bare rglob never calls
     # os.walk, so `walked` is empty and this assertion fails — that is the
     # discrimination the mutation check relies on.
+    parts = {part for d in walked for part in Path(d).parts}
     assert walked, "scan_all_files must use os.walk (pruning contract)"
-    # The walk must never descend into an excluded directory.
-    assert not any("/.git" in d or d.endswith("/.git") for d in walked)
-    assert not any("node_modules" in d for d in walked)
-    assert not any(".venv" in d for d in walked)
+    # Path(d).parts正常化分隔符：Windows 的 os.walk 返回反斜杠路径，
+    # 直接做字符串包含判断会永远为假。
+    assert ".git" not in parts
+    assert "node_modules" not in parts
+    assert ".venv" not in parts
+
+
+def test_docs_graph_scan_prunes_auto_memory_subtree_when_root_is_claude_dir(tmp_path, monkeypatch):
+    """root 设在 .claude 目录本身时，'.claude' 不再是 root 以下的路径段，
+    EXCLUDED_DIRS 剪枝不再覆盖 memory 子树——只有专门的 is_auto_memory_path
+    剪枝能挡住它。这条用例钉住那行代码。"""
+    root = tmp_path / ".claude"
+    (root / "projects" / "p" / "memory").mkdir(parents=True)
+    (root / "projects" / "p" / "memory" / "entry.md").write_text("# E\n\nx\n", encoding="utf-8")
+    (root / "keep.md").write_text("# K\n\nx\n", encoding="utf-8")
+
+    walked = []
+    real_walk = os.walk
+
+    def spying_walk(top):
+        for entry in real_walk(top):
+            walked.append(entry[0])
+            yield entry
+
+    monkeypatch.setattr(os, "walk", spying_walk)
+
+    found = docs_graph.scan_all_files(root)
+
+    names = sorted(p.relative_to(root).as_posix() for p in found)
+    assert names == ["keep.md"]
+    assert not any("memory" in Path(d).parts for d in walked), (
+        "the walk must not descend into the auto-memory subtree"
+    )
 
 

@@ -60,6 +60,9 @@ def scan_all_files(root: Path):
     用 os.walk 并在遍历时就剪掉 EXCLUDED_DIRS，与 recall-gate.py 的语料
     walk 同构。rglob 版本要先进入 .git / node_modules 等目录、拿到每个
     Path 才过滤，大仓库上绝大部分时间花在随后被丢弃的条目上。
+
+    与旧 rglob 实现相比唯一的集合差异：名为 `x.md` 的目录不再被当成图节点。
+    旧行为会把目录读作空内容并报成孤儿，是 bug；新行为与 recall-gate.py 一致。
     """
     files = set()
     for dirpath, dirnames, filenames in os.walk(str(root)):
