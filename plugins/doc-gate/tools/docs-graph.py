@@ -15,6 +15,7 @@ docs-graph.py — 文档链接图谱查询工具
 版本：1.0.0
 """
 
+import os
 import sys
 import json
 import argparse
@@ -54,16 +55,32 @@ def extract_links(filepath: Path):
 
 
 def scan_all_files(root: Path):
-    """扫描所有 .md 文件，返回 set[Path]"""
+    """扫描所有 .md 文件，返回 set[Path]
+
+    用 os.walk 并在遍历时就剪掉 EXCLUDED_DIRS，与 recall-gate.py 的语料
+    walk 同构。rglob 版本要先进入 .git / node_modules 等目录、拿到每个
+    Path 才过滤，大仓库上绝大部分时间花在随后被丢弃的条目上。
+
+    与旧 rglob 实现相比唯一的集合差异：名为 `x.md` 的目录不再被当成图节点。
+    旧行为会把目录读作空内容并报成孤儿，是 bug；新行为与 recall-gate.py 一致。
+    """
     files = set()
-    # '*.[mM][dD]' is a fnmatch character class, not a POSIX class: Python
-    # translates it itself, so .MD is matched on every platform regardless
-    # of the filesystem's case semantics. Keeping the filter in the glob
-    # also avoids materialising a Path for every non-.md entry — on a large
-    # tree that is ~40% of this function's runtime.
-    for p in root.rglob('*.[mM][dD]'):
-        if not is_excluded(p, root):
-            files.add(p.resolve())
+    for dirpath, dirnames, filenames in os.walk(str(root)):
+        directory = Path(dirpath)
+        if is_auto_memory_path(directory):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            name for name in dirnames
+            if name not in EXCLUDED_DIRS
+            and not is_auto_memory_path(directory / name, root)
+        ]
+        for name in filenames:
+            if not name.lower().endswith('.md'):
+                continue
+            p = directory / name
+            if not is_excluded(p, root):
+                files.add(p.resolve())
     return files
 
 

@@ -274,30 +274,87 @@ def test_docs_graph_scan_finds_uppercase_md_extension(tmp_path):
     assert names == {"upper.MD", "lower.md"}
 
 
-def test_docs_graph_scan_does_not_rely_on_glob_case_semantics(tmp_path, monkeypatch):
-    """The scan must match .md case-insensitively by its own logic, not by
-    luck of a case-insensitive filesystem. Simulate a case-sensitive glob so
-    this discriminates on Windows too (NTFS matches 'upper.MD' against
-    '*.md', which makes the plain end-to-end assertion pass even when the
-    implementation is the old rglob('*.md'))."""
-    import fnmatch
+# ---------------------------------------------------------------------------
+# #296: scan_all_files must prune EXCLUDED_DIRS during the walk instead of
+# rglob-ing into them and discarding the results afterwards. The observable
+# contract is unchanged — this test pins that equivalence across the
+# exclusion shapes that matter (plain dir, nested dir, auto-memory subtree).
+# ---------------------------------------------------------------------------
 
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "upper.MD").write_text("# Upper\n\nx\n", encoding="utf-8")
-    (tmp_path / "docs" / "lower.md").write_text("# Lower\n\nx\n", encoding="utf-8")
+def test_docs_graph_scan_prunes_excluded_dirs_during_walk(tmp_path, monkeypatch):
+    for rel in [
+        "a.md",
+        "b.txt",
+        ".git/x.md",
+        "node_modules/y.md",
+        ".venv/z.md",
+        "docs/deep/c.md",
+        "docs/deep/.git/d.md",
+        ".claude/projects/p/memory/e.md",
+        "deliverables/final/f.md",
+    ]:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x\n", encoding="utf-8")
 
-    real_rglob = Path.rglob
+    walked = []
+    real_walk = os.walk
 
-    def case_sensitive_rglob(self, pattern):
-        for hit in real_rglob(self, "*"):
-            if hit.is_file() and fnmatch.fnmatchcase(hit.name, pattern):
-                yield hit
+    def spying_walk(top):
+        for entry in real_walk(top):
+            walked.append(entry[0])
+            yield entry
 
-    monkeypatch.setattr(Path, "rglob", case_sensitive_rglob)
+    monkeypatch.setattr(os, "walk", spying_walk)
 
     found = docs_graph.scan_all_files(tmp_path)
 
-    names = {p.name for p in found}
-    assert names == {"upper.MD", "lower.md"}
+    names = sorted(p.relative_to(tmp_path).as_posix() for p in found)
+    assert names == ["a.md", "deliverables/final/f.md", "docs/deep/c.md"]
+    # The pruning contract is implementation-level: a walk that descends into
+    # excluded trees and filters afterwards satisfies the return set above but
+    # pays the cost this fix exists to remove. A bare rglob never calls
+    # os.walk, so `walked` is empty and this assertion fails — that is the
+    # discrimination the mutation check relies on.
+    parts = {part for d in walked for part in Path(d).parts}
+    assert walked, "scan_all_files must use os.walk (pruning contract)"
+    # Path(d).parts正常化分隔符：Windows 的 os.walk 返回反斜杠路径，
+    # 直接做字符串包含判断会永远为假。
+    assert ".git" not in parts
+    assert "node_modules" not in parts
+    assert ".venv" not in parts
+
+
+def test_docs_graph_scan_prunes_auto_memory_subtree_when_root_is_claude_dir(tmp_path, monkeypatch):
+    """root 设在 .claude 目录本身时，'.claude' 不再是 root 以下的路径段，
+    EXCLUDED_DIRS 剪枝覆盖不到 memory 子树，只剩 is_auto_memory_path 能挡。
+
+    钉住的是列表推导里的 `and not is_auto_memory_path(directory / name, root)`：
+    只删这一处，`walked` 就会下探进 memory，本用例转红。顶层
+    `if is_auto_memory_path(directory): dirnames[:] = []; continue` 保留是为了
+    与 recall-gate.py 的 walk 同构；它在可观测行为上是冗余的，本用例钉不住它。
+    """
+    root = tmp_path / ".claude"
+    (root / "projects" / "p" / "memory").mkdir(parents=True)
+    (root / "projects" / "p" / "memory" / "entry.md").write_text("# E\n\nx\n", encoding="utf-8")
+    (root / "keep.md").write_text("# K\n\nx\n", encoding="utf-8")
+
+    walked = []
+    real_walk = os.walk
+
+    def spying_walk(top):
+        for entry in real_walk(top):
+            walked.append(entry[0])
+            yield entry
+
+    monkeypatch.setattr(os, "walk", spying_walk)
+
+    found = docs_graph.scan_all_files(root)
+
+    names = sorted(p.relative_to(root).as_posix() for p in found)
+    assert names == ["keep.md"]
+    assert not any("memory" in Path(d).parts for d in walked), (
+        "the walk must not descend into the auto-memory subtree"
+    )
 
 
