@@ -89,6 +89,97 @@ def is_auto_memory_path(path, root=None) -> bool:
     return False
 
 
+def repo_relative_key(path, root) -> str:
+    """Return *path* relative to *root*, spelled with POSIX separators.
+
+    Every key in the link graph is built here, because those keys are looked
+    up with paths that come from `git status --porcelain`, which always uses
+    forward slashes. A key built with the platform separator can never equal
+    one of those: on Windows ``os.path.relpath`` yields ``docs\\a.md`` while
+    the git side asks for ``docs/a.md``, so every file below the root looks
+    like an orphan and every inbound link from it looks like a dangling
+    edge. Normalising once at generation keeps both sides in one spelling
+    instead of translating at each of the several lookup sites.
+
+    Raises ValueError when *path* is not inside *root* (on Windows, also
+    when the two are on different drives) — callers decide what an
+    out-of-tree path means, because it differs: a resolved link that escapes
+    the root is skipped, a CLI target that escapes it simply is not a node.
+    """
+    relative = os.path.relpath(os.fspath(path), os.fspath(root))
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        raise ValueError(f'{os.fspath(path)!r} is outside {os.fspath(root)!r}')
+    return Path(relative).as_posix()
+
+
+def exists_with_exact_case(path) -> bool:
+    """Return whether *path* exists on disk with exactly this spelling.
+
+    ``Path.exists()`` alone cannot answer that everywhere. macOS's default
+    APFS is case-insensitive, so a link to ``Guide.md`` resolves against an
+    on-disk ``guide.md`` and looks fine locally — while the same link is
+    genuinely broken on Linux and on GitHub's runners. The graph has to
+    judge "does the target exist" the way the case-sensitive platforms will,
+    or a dangling link passes here and breaks elsewhere. APFS is
+    case-insensitive yet does not rewrite spelling on resolution, so the
+    original spelling survives long enough to be checked here; this is the
+    platform the function was written for.
+
+    So: a quick ``exists()`` first (a genuinely absent path is absent under
+    every spelling — nothing to compare), then a component-by-component
+    comparison against the real directory entry names. The walk starts from
+    an anchor prefix and descends, so a case-insensitive filesystem cannot
+    hand back the wrong spelling at any single level: each level's listing is
+    scanned for an exact string match before the next level is entered.
+    ``os.listdir`` follows symlinks, so a correctly spelled path through a
+    symlink is reported as existing, and a path that leaves the filesystem
+    fails the exact comparison and reports False — the conservative answer
+    for a link checker.
+
+    Platform caveat: the comparison can only see the spelling it is handed.
+    Both call sites pass paths that have already gone through
+    ``resolve_link()``'s ``.resolve()``, and on Windows that call rewrites
+    every component to its on-disk spelling. Input here is therefore already
+    normalised on Windows, and a case-typo cannot be detected there: the
+    function falls back to baseline ``exists()`` semantics. That is not a
+    regression, but do not claim Windows case-typo detection.
+
+    On case-sensitive filesystems (Linux) this cannot disagree with
+    ``exists()``; the extra directory scans are bounded by path depth and
+    only run for targets that actually exist, which is not the hot path.
+    """
+    target = Path(os.path.abspath(os.fspath(path)))
+    if not target.exists():
+        return False
+
+    # Walk from the filesystem root so a relative input still gets a stable
+    # starting point, then compare each remaining component against the real
+    # directory entry names. os.path.abspath collapses '.'/'..' and makes the
+    # path absolute WITHOUT normalising case — unlike Path.resolve(), which on
+    # Windows rewrites every component to its on-disk spelling. That only
+    # preserves spelling the caller has not already normalised, which is why
+    # this check works on macOS/Linux but degrades to exists() on Windows
+    # (see the platform caveat above).
+    parts = target.parts
+    if not parts:
+        return False
+
+    anchor = Path(parts[0])
+    try:
+        current = anchor
+        for part in parts[1:]:
+            try:
+                entries = os.listdir(current)
+            except OSError:
+                return False
+            if part not in entries:
+                return False
+            current = current / part
+    except OSError:
+        return False
+    return current.exists()
+
+
 def should_skip_link(target: str) -> bool:
     """外部链接 / 纯锚点 / 绝对路径 → 跳过（不纳入图）。"""
     return target.startswith(('http://', 'https://', 'mailto:', '#', 'file://', '/'))

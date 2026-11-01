@@ -13,7 +13,7 @@ from collections import Counter
 from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST, CODE_FENCE,
     detect_root, is_auto_memory_path, should_skip_link, resolve_link,
-    extract_links_from_content,
+    extract_links_from_content, repo_relative_key, exists_with_exact_case,
 )
 
 _EN_TOKEN_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9_.-]{1,}')
@@ -319,7 +319,7 @@ def build_corpus_and_graph(root: str, start_time: float = None, budget_sec: floa
                 content = fpath.read_text(encoding='utf-8', errors='ignore')
             except OSError:
                 continue
-            rel_path = os.path.relpath(str(fpath), str(root_path))
+            rel_path = repo_relative_key(fpath, root_path)
             all_files.add(rel_path)
             file_contents[rel_path] = content
 
@@ -348,14 +348,29 @@ def build_corpus_and_graph(root: str, start_time: float = None, budget_sec: floa
             if resolved is None or is_auto_memory_path(resolved, root_path):
                 continue
             try:
-                rel_target = os.path.relpath(str(resolved), str(root_path))
+                rel_target = repo_relative_key(resolved, root_path)
             except ValueError:
                 continue
             if rel_target in all_files:
                 forward[rel_path].add(rel_target)
                 backward.setdefault(rel_target, set()).add(rel_path)
             elif rel_target.lower().endswith('.md'):
-                dangling.setdefault(rel_target, set()).add(rel_path)
+                # Absence from all_files is NOT absence from disk. A target
+                # under an EXCLUDED_DIRS directory (.claude, node_modules,
+                # .agents, ...) is a real file os.walk deliberately never
+                # indexed, so treating "not a graph node" as "does not
+                # exist" reports every such link as dangling. Check the
+                # filesystem — the same oracle the non-.md branch below has
+                # always used — and only a genuinely missing target is
+                # dangling.
+                #
+                # Existence must be case-EXACT: on macOS's default
+                # case-insensitive APFS a link to `Guide.md` resolves against
+                # an on-disk `guide.md`, but that link is broken on Linux and
+                # on CI. `exists()` would exonerate it here and the bug would
+                # only surface on the platforms we cannot test locally.
+                if not exists_with_exact_case(resolved):
+                    dangling.setdefault(rel_target, set()).add(rel_path)
 
     return corpus, all_files, forward, backward, dangling
 
@@ -393,16 +408,23 @@ def check_broken_outlinks(content: str, target_file: str, root: str, all_files: 
         if is_auto_memory_path(resolved, root_path):
             continue
         try:
-            rel_target = os.path.relpath(str(resolved), str(root_path))
+            rel_target = repo_relative_key(resolved, root_path)
         except ValueError:
             broken.append({'target': target, 'line': lineno})
             continue
-        # For .md targets check against corpus all_files set
+        # A .md target is judged by real file existence, not by corpus
+        # membership: files under an EXCLUDED_DIRS directory (.claude,
+        # node_modules, .agents, ...) exist but are never indexed, so
+        # "not in all_files" alone would report every link into them as
+        # broken. The corpus set still answers the common case cheaply.
+        # Existence is case-EXACT for the same reason as in
+        # build_corpus_and_graph: macOS's case-insensitive APFS would
+        # otherwise pass a link that is broken on Linux and CI.
         if rel_target.lower().endswith('.md'):
-            if rel_target not in all_files:
+            if rel_target not in all_files and not exists_with_exact_case(resolved):
                 broken.append({'target': target, 'line': lineno})
         else:
-            # Non-.md: fall back to filesystem existence check
+            # Non-.md: not indexed at all, filesystem is the only oracle.
             if not resolved.exists():
                 broken.append({'target': target, 'line': lineno})
     return broken
@@ -422,7 +444,20 @@ def cmd_gate(args):
         root = detect_root(start, override_root=env_override)
 
     if args.target_file:
-        target_file = os.path.relpath(args.target_file, root) if os.path.isabs(args.target_file) else args.target_file
+        if os.path.isabs(args.target_file):
+            # Graph keys are repo-relative POSIX strings (repo_relative_key);
+            # an absolute CLI target must be brought into the same spelling,
+            # or every backward/dangling lookup misses on Windows.
+            try:
+                target_file = repo_relative_key(args.target_file, root)
+            except ValueError:
+                # Outside the root: it cannot be a graph node. Keep the
+                # caller's own spelling rather than inventing a key.
+                target_file = args.target_file
+        else:
+            # Already relative — only the separator may differ (a Windows
+            # caller passing `docs\a.md` by hand).
+            target_file = args.target_file.replace('\\', '/')
     else:
         target_file = ''
 
