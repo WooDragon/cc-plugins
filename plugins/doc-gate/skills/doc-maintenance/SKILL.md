@@ -125,7 +125,7 @@ CLAUDE.md 是 Claude Code 的配置入口，会注入任务上下文，是污染
 
 ### 内置工具
 
-doc-gate 插件包含三个零依赖 Python CLI 工具。下列路径以插件根（`${CLAUDE_PLUGIN_ROOT}`）为基准，而非本 skill 目录；三个工具都位于插件根的 `tools/` 下。
+doc-gate 插件包含三个零依赖 Python CLI 工具，都位于**插件根**的 `tools/` 下，不在本 skill 目录下。下列路径中的 `${CLAUDE_PLUGIN_ROOT}` 在本文件经 skill 加载时会展开成插件根的绝对路径。若你看到的是字面量 `${CLAUDE_PLUGIN_ROOT}`（本文件被当普通文件读取），插件根就是本文件所在目录的上两级（`skills/doc-maintenance/` 的上一层），即工具位于 `<本文件所在目录>/../../tools/`。不要用 glob 在 `~/.claude/plugins/cache/` 下搜索：那里同时存在多个已安装版本，搜到的未必是与本文件同版本的工具。
 
 - **`${CLAUDE_PLUGIN_ROOT}/tools/recall-gate.py`** — BM25 词法召回 + 链接图谱合并引擎。不再由任何 hook 自动调用；仍可用其 `gate` 子命令独立运行做一次性查重。该子命令只从 `RECALL_GATE_ROOT` 读根目录覆盖；阈值与结果条数无环境变量，只能用 `--threshold` / `--top-n` 命令行参数指定，与 hook 无关。
 - **`${CLAUDE_PLUGIN_ROOT}/tools/doc-exit-report.py`** — Stop hook（`doc-exit.sh`）的出口判定引擎。从传入的脏文件列表出发，跑一趟全库链接图谱，产出 `stale_inlinks` / `orphan` / `dangling_refs` / `recall` / `broken_outlinks` 五类 finding；其中 `orphan`（无入链）是阻断项，也是新建文档拖出查重结果的唯一载体。`DOC_EXIT_GATE_BUDGET_SEC` 预算罩两个阶段、超预算行为不同：建图阶段（`os.walk` 全仓扫描）本身超时——不产出任何结构类 finding，只回一条降级消息点名 `DOC_EXIT_GATE_BUDGET_SEC`（调高预算）与 `DOC_EXIT_GATE_DISABLED`（临时关闭本检查）两个旋钮；建图跑完后才轮到 BM25 查重（recall）阶段超时——此时 `stale_inlinks` / `orphan` / `dangling_refs` / `broken_outlinks` 等结构类检查仍照常产出，只丢查重建议。
