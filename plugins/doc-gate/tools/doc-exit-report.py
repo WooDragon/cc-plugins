@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from _doc_gate_common import is_auto_memory_path, ensure_utf8_stdout
+from _doc_gate_common import is_auto_memory_path
 
 _SELF_DIR = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("recall_gate", _SELF_DIR / "recall-gate.py")
@@ -274,7 +274,6 @@ def main():
                               'judged only against these (see build_report docstring)')
     args = parser.parse_args()
 
-    ensure_utf8_stdout()
     start_time = time.monotonic()
     root = str(Path(args.root).resolve())
 
