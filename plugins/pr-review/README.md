@@ -104,7 +104,7 @@ A failed first round does not create or overwrite session state. A failed ordina
 | `PR_REVIEW_BACKEND` | unset | `grok`/`claude`/`codex`/`copilot` — explicit override for `pr-review.sh`'s auto-routing, takes priority over auto-detection (codex does not participate in auto-detection) |
 | `XDG_STATE_HOME` | `$HOME/.local/state` | root of the session state files (`pr-review/<owner>__<name>__<PR>.session` for grok, `.claude.session` for claude, `.codex.session` for codex — independent, never overwrite each other) |
 
-On a follow-up round, persisted session `MODEL` and `EFFORT` values win over environment variables unless the matching CLI flag is explicit. For a first round, effort priority is explicit CLI `--effort` > `GROK_EFFORT` > the `medium` fallback. On a follow-up, effort priority is explicit CLI `--effort` > persisted session state > `GROK_EFFORT` > the `medium` fallback. An explicit CLI flag applies only to that round and does not update state.
+On a follow-up round, persisted session `MODEL` and `EFFORT` values win over environment variables unless the matching CLI flag is explicit. For a first round, effort priority is explicit CLI `--effort` > `GROK_EFFORT` > the `medium` fallback. On a follow-up, effort priority is explicit CLI `--effort` > persisted session state > `GROK_EFFORT` > the `medium` fallback. The first successful round saves the effective effort, including an explicit CLI `--effort`, in session state. On a follow-up round, an explicit CLI flag overrides only that round and does not update state.
 
 ## Tests
 
