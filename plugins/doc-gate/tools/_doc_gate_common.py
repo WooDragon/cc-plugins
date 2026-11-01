@@ -3,13 +3,15 @@
 recall-gate.py 与 docs-graph.py 共享此模块，杜绝排除逻辑三处漂移。
 任何新增排除目录 / 链接处理改动只改这里，import 重力井保证消费者引用同一对象。
 
-零依赖：仅标准库 re / os / urllib.parse / pathlib。
+零依赖：仅标准库 re / os / sys / codecs / urllib.parse / pathlib。
 两个消费者以绝对路径被调用，Python 将脚本所在目录置于 sys.path[0]，
 故同目录 import 不依赖 cwd，hook 热路径可靠。
 """
 
-import re
+import codecs
 import os
+import re
+import sys
 import urllib.parse
 from pathlib import Path
 
@@ -178,6 +180,40 @@ def exists_with_exact_case(path) -> bool:
     except OSError:
         return False
     return current.exists()
+
+
+def ensure_utf8_stdout() -> None:
+    """Force this process's stdout to UTF-8 when the platform locale isn't.
+
+    Every tool here prints ``json.dumps(..., ensure_ascii=False)`` — the
+    report is full of Chinese. On Windows the default stdout encoding is the
+    ANSI code page (GBK on a zh-CN box), so those bytes reach the caller in a
+    different encoding than the UTF-8 the message was written in: jq may
+    still pass them through, but the hook's stderr renders mojibake and any
+    UTF-8 assertion in the tests can never match.
+
+    Only non-UTF-8 streams are reconfigured. A stream already speaking UTF-8
+    is left untouched — including its error handler, which is
+    ``surrogateescape`` under Python's UTF-8 mode and ``strict`` in a normal
+    UTF-8 locale. Reconfiguring those would turn undecodable filename bytes
+    into ``?`` where they used to round-trip, a real behaviour change on
+    Linux/macOS for no benefit: the encoding is already correct there.
+    """
+    stream = getattr(sys, 'stdout', None)
+    reconfigure = getattr(stream, 'reconfigure', None)
+    if reconfigure is None:
+        return
+    encoding = getattr(stream, 'encoding', None)
+    if encoding:
+        try:
+            if codecs.lookup(encoding).name == 'utf-8':
+                return
+        except LookupError:
+            pass
+    try:
+        reconfigure(encoding='utf-8', errors='replace')
+    except (ValueError, OSError):
+        pass
 
 
 def should_skip_link(target: str) -> bool:

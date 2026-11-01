@@ -14,6 +14,7 @@ from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST, CODE_FENCE,
     detect_root, is_auto_memory_path, should_skip_link, resolve_link,
     extract_links_from_content, repo_relative_key, exists_with_exact_case,
+    ensure_utf8_stdout,
 )
 
 _EN_TOKEN_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9_.-]{1,}')
@@ -521,6 +522,7 @@ def main():
     subparsers.add_parser('gate', help='Read content from stdin, output gate JSON')
 
     args = parser.parse_args()
+    ensure_utf8_stdout()
 
     if args.subcommand == 'gate':
         cmd_gate(args)

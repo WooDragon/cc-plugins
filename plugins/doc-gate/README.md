@@ -214,6 +214,7 @@ The BM25 unit tests cover reusable body/title indexes, the legacy call interface
 | `test_exclude.py` | Shared exclusion predicate parity checks, POSIX graph-key generation, and existence-based judgment for links into excluded directories |
 | `test_auto_memory.py` | Root-aware exclusion, no reads from `memory/`, link exemptions, standalone empty results, and zero-budget behavior |
 | `auto-memory-paths.sh` + `fixtures/auto-memory-paths.json` | Shared Shell/Python auto-memory path matrix, validated with Bash 3.2 and Bash 5 under `-u` |
+| `test_stdout_encoding.py` | `ensure_utf8_stdout()` stream-shape safety, UTF-8-only reconfiguration (error handler preserved), and all three tool entry points emitting UTF-8 under a forced non-UTF-8 stdout |
 
 ## Known Boundaries
 
@@ -229,6 +230,7 @@ The BM25 unit tests cover reusable body/title indexes, the legacy call interface
 
 See [GitHub Issues](https://github.com/WooDragon/cc-plugins/issues) for detailed change logs:
 
+- **v2.2.1** — Windows stdout encoding fix: all three Python tools now force a non-UTF-8 stdout (the ANSI code page) to UTF-8, so Chinese finding messages reach the hook and tests as UTF-8 and paths containing characters outside the local code page no longer crash into a silent pass. Streams already speaking UTF-8 are left untouched, so Linux/macOS behaviour — including their error handlers — is unchanged (#293).
 - **v2.2.0** — Three exit-gate fixes: graph keys are now generated as repo-relative POSIX strings, so Windows no longer reports every nested file as an orphan with all its inbound links dangling (#289); a link to a real file inside an `EXCLUDED_DIRS` directory is judged by filesystem existence, so it stops being reported as broken/dangling while genuinely missing targets still are (#290); `orphan` is narrowed to files this change adds, so editing a pre-existing zero-inlink document no longer blocks every Stop with a finding that edit cannot satisfy (#291).
 - **v2.0.0** — Behavior-breaking rearchitecture: replaced the dual PreToolUse gate (`skill-gate.sh` hard gate + `recall-gate.sh` soft gate + `skill-marker.sh`) with a PostToolUse entry-injection layer (`doc-entry.sh`) and a Stop exit-judgment layer (`doc-exit.sh` + `doc-exit-report.py`). All `SKILL_GATE_*` and hook-level `RECALL_GATE_*` environment variables removed; the session-scoped marker protocol removed entirely; new `DOC_ENTRY_GATE_*` / `DOC_EXIT_GATE_*` variables introduced. `recall` finding demoted to non-blocking; `dangling_refs` and `stale_inlinks` added as new blocking findings not present under the old architecture.
 - **v1.7.2** — `.agents/*` exclusion widened from `.agents/directives/*` — the narrower scope denied other team-ops runtime artifacts (`intel/`, `handoffs/`, `tasks/`), and non-`Skill`-equipped roles like `intel` had no way to self-unlock (#176)

@@ -25,6 +25,7 @@ from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST,
     detect_root, is_auto_memory_path, should_skip_link, resolve_link,
     extract_links_from_content,
+    ensure_utf8_stdout,
 )
 
 
@@ -270,6 +271,7 @@ def cmd_export(args, root: Path):
 
 
 def main():
+    ensure_utf8_stdout()
     # 推导 repo 根目录
     default_root = Path(detect_root(str(Path.cwd())))
 
