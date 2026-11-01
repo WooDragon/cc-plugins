@@ -56,7 +56,9 @@ def extract_links(filepath: Path):
 def scan_all_files(root: Path):
     """扫描所有 .md 文件，返回 set[Path]"""
     files = set()
-    for p in root.rglob('*.md'):
+    for p in root.rglob('*'):
+        if p.suffix.lower() != '.md':
+            continue
         if not is_excluded(p, root):
             files.add(p.resolve())
     return files

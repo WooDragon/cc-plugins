@@ -14,6 +14,10 @@ recall_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(recall_gate)
 build_corpus_and_graph = recall_gate.build_corpus_and_graph
 
+_spec_graph = importlib.util.spec_from_file_location("docs_graph", _TOOLS_DIR / "docs-graph.py")
+docs_graph = importlib.util.module_from_spec(_spec_graph)
+_spec_graph.loader.exec_module(docs_graph)
+
 
 def _write(path: Path, title: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,5 +255,22 @@ def test_broken_outlink_branch_consults_exact_case_helper(tmp_path, monkeypatch)
 
     assert calls, "broken-outlink .md branch must consult the exact-case existence helper"
     assert broken == [{"target": "missing.md", "line": 3}]
+
+
+# ---------------------------------------------------------------------------
+# #220: docs-graph's own rglob scan must match .md case-insensitively, the
+# same way recall-gate's corpus walk does. A case-sensitive filesystem
+# otherwise drops X.MD from this CLI's graph entirely.
+# ---------------------------------------------------------------------------
+
+def test_docs_graph_scan_finds_uppercase_md_extension(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "upper.MD").write_text("# Upper\n\nx\n", encoding="utf-8")
+    (tmp_path / "docs" / "lower.md").write_text("# Lower\n\nx\n", encoding="utf-8")
+
+    found = docs_graph.scan_all_files(tmp_path)
+
+    names = {p.name for p in found}
+    assert names == {"upper.MD", "lower.md"}
 
 

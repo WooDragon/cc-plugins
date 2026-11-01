@@ -55,7 +55,7 @@ Scores content against a fixed signal-word list (`worktree`, `门禁`, `printf`,
 
 ### Marker Protocol
 
-Per-file, per-session marker in `$BRAIN_ROUTE_GATE_DIR` (falls back to `$SKILL_GATE_DIR`, default `/tmp/claude-reviews`):
+Per-file, per-session marker in `$BRAIN_ROUTE_GATE_DIR` (default `/tmp/claude-reviews`; the legacy `$SKILL_GATE_DIR` is still honored as a fallback — see Environment Variables):
 
 | Marker | Created by | Checked by | Purpose |
 |--------|-----------|------------|---------|
@@ -72,7 +72,7 @@ Two different consumers read environment variables in this plugin: the hook read
 | Variable | Default | Description |
 |----------|---------|--------------|
 | `BRAIN_ROUTE_DISABLED` | `0` | `1` disables the hook (kill switch) |
-| `BRAIN_ROUTE_GATE_DIR` | _(empty)_ | Marker directory override; falls back to `SKILL_GATE_DIR`, then `/tmp/claude-reviews` |
+| `BRAIN_ROUTE_GATE_DIR` | `/tmp/claude-reviews` | Marker directory. If unset, falls back to `SKILL_GATE_DIR` — a legacy name from doc-gate < 2.0.0, kept only for compatibility with existing user settings; no plugin sets it — then to `/tmp/claude-reviews` |
 | `BRAIN_ROUTE_STALE_MIN` | `120` | Marker expiry in minutes |
 | `BRAIN_ROUTE_MIN_HITS` | `2` | Minimum distinct signal-word hits required to trigger the reminder |
 
