@@ -214,7 +214,7 @@ The BM25 unit tests cover reusable body/title indexes, the legacy call interface
 | `test_exclude.py` | Shared exclusion predicate parity checks, POSIX graph-key generation, and existence-based judgment for links into excluded directories |
 | `test_auto_memory.py` | Root-aware exclusion, no reads from `memory/`, link exemptions, standalone empty results, and zero-budget behavior |
 | `auto-memory-paths.sh` + `fixtures/auto-memory-paths.json` | Shared Shell/Python auto-memory path matrix, validated with Bash 3.2 and Bash 5 under `-u` |
-| `test_stdout_encoding.py` | `ensure_utf8_stdout()` stream-shape safety, UTF-8-only reconfiguration (error handler preserved), and docs-graph subprocess output on native filenames |
+| `test_stdout_encoding.py` | `ensure_utf8_stdout()` stream-shape safety, UTF-8-only reconfiguration (error handler preserved), and all three tool entry points emitting UTF-8 under a forced non-UTF-8 stdout |
 
 ## Known Boundaries
 

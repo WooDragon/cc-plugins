@@ -182,6 +182,7 @@ def test_recall_cli_memory_target_returns_empty_schema_without_reading_fixture_c
         ],
         input="private-memory-token",
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
@@ -260,6 +261,7 @@ def test_report_cli_memory_only_batch_skips_budget_degrade(tmp_path):
         ],
         input=memory_rel + "\0",
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
