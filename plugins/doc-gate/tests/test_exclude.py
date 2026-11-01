@@ -301,3 +301,52 @@ def test_docs_graph_scan_does_not_rely_on_glob_case_semantics(tmp_path, monkeypa
     assert names == {"upper.MD", "lower.md"}
 
 
+# ---------------------------------------------------------------------------
+# #296: scan_all_files must prune EXCLUDED_DIRS during the walk instead of
+# rglob-ing into them and discarding the results afterwards. The observable
+# contract is unchanged — this test pins that equivalence across the
+# exclusion shapes that matter (plain dir, nested dir, auto-memory subtree).
+# ---------------------------------------------------------------------------
+
+def test_docs_graph_scan_prunes_excluded_dirs_during_walk(tmp_path, monkeypatch):
+    for rel in [
+        "a.md",
+        "b.txt",
+        ".git/x.md",
+        "node_modules/y.md",
+        ".venv/z.md",
+        "docs/deep/c.md",
+        "docs/deep/.git/d.md",
+        ".claude/projects/p/memory/e.md",
+        "deliverables/final/f.md",
+    ]:
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x\n", encoding="utf-8")
+
+    walked = []
+    real_walk = os.walk
+
+    def spying_walk(top):
+        for entry in real_walk(top):
+            walked.append(entry[0])
+            yield entry
+
+    monkeypatch.setattr(os, "walk", spying_walk)
+
+    found = docs_graph.scan_all_files(tmp_path)
+
+    names = sorted(p.relative_to(tmp_path).as_posix() for p in found)
+    assert names == ["a.md", "deliverables/final/f.md", "docs/deep/c.md"]
+    # The pruning contract is implementation-level: a walk that descends into
+    # excluded trees and filters afterwards satisfies the return set above but
+    # pays the cost this fix exists to remove. A bare rglob never calls
+    # os.walk, so `walked` is empty and this assertion fails — that is the
+    # discrimination the mutation check relies on.
+    assert walked, "scan_all_files must use os.walk (pruning contract)"
+    # The walk must never descend into an excluded directory.
+    assert not any("/.git" in d or d.endswith("/.git") for d in walked)
+    assert not any("node_modules" in d for d in walked)
+    assert not any(".venv" in d for d in walked)
+
+
