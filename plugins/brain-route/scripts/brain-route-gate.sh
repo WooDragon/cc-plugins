@@ -15,7 +15,7 @@
 # Environment variables:
 #   BRAIN_ROUTE_DISABLED=1       — kill switch
 #   BRAIN_ROUTE_GATE_DIR         — marker directory override
-#   SKILL_GATE_DIR               — shared marker directory (default: /tmp/claude-reviews)
+#   SKILL_GATE_DIR               — legacy fallback for the marker directory (name kept from doc-gate < 2.0.0; nothing sets it; prefer BRAIN_ROUTE_GATE_DIR)
 #   BRAIN_ROUTE_STALE_MIN        — marker staleness minutes (default: 120)
 #   BRAIN_ROUTE_MIN_HITS         — distinct signal-word threshold (default: 2)
 set -euo pipefail

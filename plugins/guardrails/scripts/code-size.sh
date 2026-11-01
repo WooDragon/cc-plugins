@@ -155,12 +155,12 @@ _main() {
   PATH_HASH=$(printf '%s' "$ABS_PATH" | shasum -a 256 2>/dev/null | awk '{print $1}') || PATH_HASH=""
   [ -n "$PATH_HASH" ] || return
 
-  # .code-size- prefix keeps this namespace distinct from doc-gate's
-  # .skill-gate-*/.recall-gate-* markers sharing the same directory.
+  # .code-size- prefix namespaces this hook's markers: GATE_DIR defaults to
+  # the shared /tmp/claude-reviews, which other hooks also write into.
   MARKER="$GATE_DIR/.code-size-${SAFE_SESSION_ID}_${PATH_HASH}"
 
-  # Stale cleanup — scoped strictly to our own prefix so doc-gate markers
-  # are never touched by this hook.
+  # Stale cleanup — scoped strictly to our own prefix so other hooks' files
+  # in the shared directory are never touched.
   find "$GATE_DIR" -maxdepth 1 -name '.code-size-*' -mmin +"$STALE_MIN" -delete 2>/dev/null || true
 
   PREV_FILE_TIER="NONE"

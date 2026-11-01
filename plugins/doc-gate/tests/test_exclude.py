@@ -14,6 +14,10 @@ recall_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(recall_gate)
 build_corpus_and_graph = recall_gate.build_corpus_and_graph
 
+_spec_graph = importlib.util.spec_from_file_location("docs_graph", _TOOLS_DIR / "docs-graph.py")
+docs_graph = importlib.util.module_from_spec(_spec_graph)
+_spec_graph.loader.exec_module(docs_graph)
+
 
 def _write(path: Path, title: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,5 +255,49 @@ def test_broken_outlink_branch_consults_exact_case_helper(tmp_path, monkeypatch)
 
     assert calls, "broken-outlink .md branch must consult the exact-case existence helper"
     assert broken == [{"target": "missing.md", "line": 3}]
+
+
+# ---------------------------------------------------------------------------
+# #220: docs-graph's own rglob scan must match .md case-insensitively, the
+# same way recall-gate's corpus walk does. A case-sensitive filesystem
+# otherwise drops X.MD from this CLI's graph entirely.
+# ---------------------------------------------------------------------------
+
+def test_docs_graph_scan_finds_uppercase_md_extension(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "upper.MD").write_text("# Upper\n\nx\n", encoding="utf-8")
+    (tmp_path / "docs" / "lower.md").write_text("# Lower\n\nx\n", encoding="utf-8")
+
+    found = docs_graph.scan_all_files(tmp_path)
+
+    names = {p.name for p in found}
+    assert names == {"upper.MD", "lower.md"}
+
+
+def test_docs_graph_scan_does_not_rely_on_glob_case_semantics(tmp_path, monkeypatch):
+    """The scan must match .md case-insensitively by its own logic, not by
+    luck of a case-insensitive filesystem. Simulate a case-sensitive glob so
+    this discriminates on Windows too (NTFS matches 'upper.MD' against
+    '*.md', which makes the plain end-to-end assertion pass even when the
+    implementation is the old rglob('*.md'))."""
+    import fnmatch
+
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "upper.MD").write_text("# Upper\n\nx\n", encoding="utf-8")
+    (tmp_path / "docs" / "lower.md").write_text("# Lower\n\nx\n", encoding="utf-8")
+
+    real_rglob = Path.rglob
+
+    def case_sensitive_rglob(self, pattern):
+        for hit in real_rglob(self, "*"):
+            if hit.is_file() and fnmatch.fnmatchcase(hit.name, pattern):
+                yield hit
+
+    monkeypatch.setattr(Path, "rglob", case_sensitive_rglob)
+
+    found = docs_graph.scan_all_files(tmp_path)
+
+    names = {p.name for p in found}
+    assert names == {"upper.MD", "lower.md"}
 
 
