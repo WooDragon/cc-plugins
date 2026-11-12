@@ -263,12 +263,60 @@ def test_git_timeout_fails_open(tmp_path, monkeypatch):
     ignored = _write(repo / ".cache" / "README.md", "ignored")
     _commit_all(repo)
 
+    seen_kwargs = {}
+
     def _timed_out(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="git ls-files", timeout=30)
+        seen_kwargs.update(kwargs)
+        raise subprocess.TimeoutExpired(cmd="git ls-files", timeout=kwargs.get("timeout", 0))
 
     monkeypatch.setattr(doc_gate_common.subprocess, "run", _timed_out)
 
     assert doc_gate_common.build_git_visibility(repo).is_visible(ignored)
+    # 钉住生产代码确实传了 timeout：假 run 不传也会抛，只有这条断言能杀掉
+    # 「删掉 timeout= 参数」的变异。
+    assert seen_kwargs.get("timeout") == doc_gate_common._GIT_LS_FILES_TIMEOUT_SEC
+
+
+def test_tracked_uppercase_markdown_visible_through_real_git(tmp_path):
+    """真实 git 产出侧的归一化：索引路径必须经 `_visibility_key` 再比较。
+
+    若 `_repo_visible_files` 把 `visible.add(_visibility_key(relative))` 改回
+    `visible.add(relative)`，集合里是 casefold 值而查询键已 casefold → 不匹配，
+    这条在任何平台都会变红。它守的正是 macOS 上 CLAUDE.md / README.md 这类
+    含大写字母的已跟踪文档不会从图谱与语料里静默消失。
+    """
+    repo = _init_repo(tmp_path / "repo")
+    guide = _write(repo / "docs" / "Guide.md", "guide")
+    readme = _write(repo / "README.md", "readme")
+    _commit_all(repo)
+
+    graph_files, _outgoing, _forward, _backward = docs_graph.build_graph(repo)
+    assert guide.resolve() in graph_files
+    assert readme.resolve() in graph_files
+
+    corpus_paths, all_files = _corpus_paths(repo)
+    for path in (guide, readme):
+        assert _rel(repo, path) in all_files
+        assert _rel(repo, path) in corpus_paths
+
+
+def test_tracked_unicode_markdown_visible_through_real_git(tmp_path):
+    """真实 git 产出侧的 Unicode 路径：NFC/NFD 都能端到端进入图谱与语料。
+
+    macOS 上 APFS 可能把磁盘写法归一化为与索引不同的组合形式；统一 NFC 键
+    后两边仍匹配。Linux 上两侧本就一致，这条退化为恒真但无害。
+    """
+    repo = _init_repo(tmp_path / "repo")
+    nfc_name = unicodedata.normalize("NFC", "café.md")
+    doc = _write(repo / "docs" / nfc_name, "cafe")
+    _commit_all(repo)
+
+    graph_files, _outgoing, _forward, _backward = docs_graph.build_graph(repo)
+    assert doc.resolve() in graph_files
+
+    corpus_paths, all_files = _corpus_paths(repo)
+    assert _rel(repo, doc) in all_files
+    assert _rel(repo, doc) in corpus_paths
 
 
 def test_linked_worktree_git_file_is_discovered(tmp_path):

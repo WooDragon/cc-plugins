@@ -131,7 +131,11 @@ def _discover_git_repos(root) -> list:
 # Stop hook 热路径：git 在损坏仓库 / 网络文件系统上挂起时，外层的时间预算
 # 检查兜不住这一次调用（第一次检查要到第 25 个可见 .md），所以这里必须自己
 # 有超时，超时按「查询失败」处理（fail-open）。
-_GIT_LS_FILES_TIMEOUT_SEC = 30
+#
+# 正常 ls-files 是毫秒级，10s 已是两个数量级的余量。定这个上限还要算多仓
+# 串行：Infra 四个仓库最坏 40s，仍在 hooks.json 的 60s 上限之内（30s × 4 会
+# 越过它，也超过 doc-exit.sh 默认 25s 的报告预算）。
+_GIT_LS_FILES_TIMEOUT_SEC = 10
 
 
 def _visibility_key(relative: str) -> str:
@@ -196,7 +200,12 @@ class GitVisibility:
         return bool(self._repos)
 
     def is_visible(self, path) -> bool:
-        """*path* 是否保留。不属于任何仓库 → 保留；仓库查询失败 → 保留。"""
+        """*path* 是否保留。不属于任何仓库 → 保留；仓库查询失败 → 保留。
+
+        判定按 ``resolve()`` 之后的路径进行：符号链接看的是**目标**路径，
+        链接名本身不参与比较。因此链接指向仓库内已跟踪文件时按该文件判定，
+        指向仓库外时解析后不属于任何仓库，直接保留。
+        """
         resolved = Path(path).resolve()
         nearest = None
         for repo_root in self._repos:
@@ -213,12 +222,8 @@ class GitVisibility:
         visible = self._repos[nearest]
         if visible is None:
             return True
-        try:
-            relative = resolved.relative_to(nearest).as_posix()
-        except ValueError:
-            # resolve() 后越出该仓库（例如经 symlink 指到仓库外）——不属于
-            # 该仓库，落回「保留」这一侧。
-            return True
+        # nearest 就是按 relative_to 成功选出来的，这里必然成立。
+        relative = resolved.relative_to(nearest).as_posix()
         return _visibility_key(relative) in visible
 
 
