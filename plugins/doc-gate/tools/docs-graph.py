@@ -25,7 +25,7 @@ from collections import defaultdict, deque
 from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST,
     detect_root, is_auto_memory_path, should_skip_link, resolve_link,
-    extract_links_from_content,
+    extract_links_from_content, build_git_visibility,
     ensure_utf8_stdout,
 )
 
@@ -61,9 +61,13 @@ def scan_all_files(root: Path):
     walk 同构。rglob 版本要先进入 .git / node_modules 等目录、拿到每个
     Path 才过滤，大仓库上绝大部分时间花在随后被丢弃的条目上。
 
+    第二道闸门是按「最近祖先 git 仓库」的 .gitignore 可见性；被忽略的文件
+    连节点都不是，自然也不会成为断链检查的源。
+
     与旧 rglob 实现相比唯一的集合差异：名为 `x.md` 的目录不再被当成图节点。
     旧行为会把目录读作空内容并报成孤儿，是 bug；新行为与 recall-gate.py 一致。
     """
+    visibility = build_git_visibility(root)
     files = set()
     for dirpath, dirnames, filenames in os.walk(str(root)):
         directory = Path(dirpath)
@@ -79,8 +83,9 @@ def scan_all_files(root: Path):
             if not name.lower().endswith('.md'):
                 continue
             p = directory / name
-            if not is_excluded(p, root):
-                files.add(p.resolve())
+            if is_excluded(p, root) or not visibility.is_visible(p):
+                continue
+            files.add(p.resolve())
     return files
 
 
