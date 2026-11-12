@@ -3,7 +3,8 @@
 recall-gate.py 与 docs-graph.py 共享此模块，杜绝排除逻辑三处漂移。
 任何新增排除目录 / 链接处理改动只改这里，import 重力井保证消费者引用同一对象。
 
-零依赖：仅标准库 re / os / sys / codecs / subprocess / urllib.parse / pathlib。
+零依赖：仅标准库 re / os / sys / codecs / subprocess / unicodedata /
+urllib.parse / pathlib。
 两个消费者以绝对路径被调用，Python 将脚本所在目录置于 sys.path[0]，
 故同目录 import 不依赖 cwd，hook 热路径可靠。
 """
@@ -13,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 import urllib.parse
 from pathlib import Path
 
@@ -126,18 +128,45 @@ def _discover_git_repos(root) -> list:
     return repos
 
 
-def _repo_visible_files(repo: Path):
-    """返回 *repo* 中 git 认为「存在」的绝对路径集合（已 resolve）。
+# Stop hook 热路径：git 在损坏仓库 / 网络文件系统上挂起时，外层的时间预算
+# 检查兜不住这一次调用（第一次检查要到第 25 个可见 .md），所以这里必须自己
+# 有超时，超时按「查询失败」处理（fail-open）。
+_GIT_LS_FILES_TIMEOUT_SEC = 30
 
-    返回 None 表示无法判定（git 不存在 / 非 0 退出）。调用方必须把 None
-    当作 fail-open，绝不能当作「该仓库下一个文件都不可见」。
+
+def _visibility_key(relative: str) -> str:
+    """把 git 索引写法与磁盘写法归一化到同一条比较键。
+
+    同一个文件在两侧可能拼写不同，而这不是错误：
+
+    - 大小写：macOS/Windows 的常见文件系统大小写不敏感，`git mv` 之外的
+      改名（`mv Guide.md guide.md`）不会改变索引里的路径，于是 `ls-files`
+      仍输出 `Guide.md`，`os.walk` 读到 `guide.md`；
+    - Unicode：APFS 可能返回 NFD 组合形式，而索引里是 NFC。
+
+    精确比较会让这些「其实是同一个文件」的已跟踪文档静默退出图谱与语料，
+    正是 fail-open 要杜绝的方向。统一 NFC + casefold 后比较。刻意不按仓库的
+    `core.ignorecase` / `core.precomposeunicode` 分支——代价是大小写敏感
+    文件系统上「同目录仅大小写不同的两个文件」会互相放行，落在多保留一侧，
+    换来的是一条不依赖配置的判定路径。
+    """
+    return unicodedata.normalize('NFC', relative).casefold()
+
+
+def _repo_visible_files(repo: Path):
+    """返回 *repo* 中 git 认为「存在」的规范化相对路径键集合。
+
+    返回 None 表示无法判定（git 不存在 / 非 0 退出 / 超时）。调用方必须把
+    None 当作 fail-open，绝不能当作「该仓库下一个文件都不可见」。
     """
     try:
         proc = subprocess.run(
             ['git', '-C', str(repo), *_GIT_LS_FILES_ARGS],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+            timeout=_GIT_LS_FILES_TIMEOUT_SEC,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
+        # TimeoutExpired 不是 OSError 的子类，必须显式并列。
         return None
     if proc.returncode != 0:
         return None
@@ -148,15 +177,16 @@ def _repo_visible_files(repo: Path):
             continue
         # surrogateescape 让非 UTF-8 文件名原样往返，不丢也不炸。
         relative = entry.decode('utf-8', errors='surrogateescape')
-        visible.add((repo / relative).resolve())
+        visible.add(_visibility_key(relative))
     return frozenset(visible)
 
 
 class GitVisibility:
     """按最近祖先仓库判定的 .gitignore 可见性。
 
-    `repos` 映射「仓库根绝对路径 → 可见绝对路径集合（或 None = 该仓库查询失败）」。
-    空映射表示 root 下没有仓库根，此时过滤器整体不启用（保持历史行为）。
+    `repos` 映射「仓库根绝对路径 → 规范化相对路径键集合（见
+    `_visibility_key`），或 None = 该仓库查询失败」。空映射表示 root 下没有
+    仓库根，此时过滤器整体不启用（保持历史行为）。
     """
 
     def __init__(self, repos: dict):
@@ -183,7 +213,13 @@ class GitVisibility:
         visible = self._repos[nearest]
         if visible is None:
             return True
-        return resolved in visible
+        try:
+            relative = resolved.relative_to(nearest).as_posix()
+        except ValueError:
+            # resolve() 后越出该仓库（例如经 symlink 指到仓库外）——不属于
+            # 该仓库，落回「保留」这一侧。
+            return True
+        return _visibility_key(relative) in visible
 
 
 def build_git_visibility(root) -> GitVisibility:

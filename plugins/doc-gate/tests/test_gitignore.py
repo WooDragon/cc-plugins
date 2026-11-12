@@ -4,8 +4,10 @@
 判定按「最近祖先 git 仓库」分段：外层仓库忽略某个子目录，不等于该目录里的
 嵌套仓库也被忽略——Infra monorepo 正是靠这条才没有把三个子仓整片判成不可见。
 
-测试用真实 git 在 tmp_path 造仓库（git init + 提交 + .gitignore），不做任何
-mock；因此 git 必须存在于 PATH，缺失时整组跳过而不是给出假绿。
+行为主路径用真实 git 在 tmp_path 造仓库（git init + 提交 + .gitignore），
+不做 mock；git 必须存在于 PATH，缺失时整组跳过而不是给出假绿。退化路径
+（git 调用失败 / 超时）与归一化键的判定则用 monkeypatch 或直接构造
+`GitVisibility` 映射来钉，避免依赖本机文件系统的大小写 / 归一化特性。
 """
 
 import importlib.util
@@ -13,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -78,6 +81,15 @@ def _write(path: Path, title: str) -> Path:
 
 def _rel(repo: Path, path: Path) -> str:
     return os.path.relpath(str(path.resolve()), str(repo.resolve()))
+
+
+def _visibility(repo: Path, *relative_keys: str) -> doc_gate_common.GitVisibility:
+    """直接构造 GitVisibility 映射，不经过 git，也不依赖文件系统特性。"""
+    return doc_gate_common.GitVisibility({
+        repo.resolve(): frozenset(
+            doc_gate_common._visibility_key(key) for key in relative_keys
+        ),
+    })
 
 
 def _corpus_paths(repo: Path):
@@ -198,6 +210,13 @@ def test_path_outside_any_repo_is_kept(tmp_path):
     assert visible.resolve() in files
     assert hidden.resolve() not in files
 
+    corpus_paths, all_files = _corpus_paths(workspace)
+    assert _rel(workspace, loose) in all_files
+    assert _rel(workspace, loose) in corpus_paths
+    assert _rel(workspace, visible) in corpus_paths
+    assert _rel(workspace, hidden) not in all_files
+    assert _rel(workspace, hidden) not in corpus_paths
+
 
 def test_git_failure_fails_open(tmp_path, monkeypatch):
     """退化路径：某仓库 git 查询失败时该仓库范围内不启用过滤，绝不误删文档。"""
@@ -217,3 +236,87 @@ def test_git_failure_fails_open(tmp_path, monkeypatch):
     corpus_paths, all_files = _corpus_paths(repo)
     assert _rel(repo, ignored) in all_files
     assert _rel(repo, ignored) in corpus_paths
+
+
+def test_git_unavailable_fails_open(tmp_path, monkeypatch):
+    """git 不存在（OSError）时该仓库范围 fail-open，不丢已跟踪文档。"""
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text(".cache/\n", encoding="utf-8")
+    ignored = _write(repo / ".cache" / "README.md", "ignored")
+    _commit_all(repo)
+
+    def _missing_git(*args, **kwargs):
+        raise FileNotFoundError(2, "git", "not found")
+
+    monkeypatch.setattr(doc_gate_common.subprocess, "run", _missing_git)
+
+    assert doc_gate_common.build_git_visibility(repo).is_visible(ignored)
+    corpus_paths, all_files = _corpus_paths(repo)
+    assert _rel(repo, ignored) in all_files
+    assert _rel(repo, ignored) in corpus_paths
+
+
+def test_git_timeout_fails_open(tmp_path, monkeypatch):
+    """git 挂起（超时）按查询失败处理：该仓库范围 fail-open。"""
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text(".cache/\n", encoding="utf-8")
+    ignored = _write(repo / ".cache" / "README.md", "ignored")
+    _commit_all(repo)
+
+    def _timed_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git ls-files", timeout=30)
+
+    monkeypatch.setattr(doc_gate_common.subprocess, "run", _timed_out)
+
+    assert doc_gate_common.build_git_visibility(repo).is_visible(ignored)
+
+
+def test_linked_worktree_git_file_is_discovered(tmp_path):
+    """`.git` 是文件（linked worktree）时仓库仍被发现并参与过滤。"""
+    repo = _init_repo(tmp_path / "repo")
+    (repo / ".gitignore").write_text(".cache/\n", encoding="utf-8")
+    _write(repo / "docs" / "a.md", "a")
+    _commit_all(repo)
+
+    worktree = tmp_path / "wt"
+    _git(repo, "worktree", "add", "-q", "--detach", str(worktree), "HEAD")
+    assert (worktree / ".git").is_file()
+
+    hidden = _write(worktree / ".cache" / "x.md", "hidden")
+    files = docs_graph.scan_all_files(worktree)
+    assert (worktree / "docs" / "a.md").resolve() in files
+    assert hidden.resolve() not in files
+
+
+def test_visibility_key_ignores_case_difference(tmp_path):
+    """索引写 Guide.md、磁盘读到 guide.md（未用 git mv 的改名）→ 仍可见。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    visibility = _visibility(repo, "docs/Guide.md")
+
+    assert visibility.is_visible(repo / "docs" / "guide.md")
+    assert visibility.is_visible(repo / "docs" / "GUIDE.MD")
+
+
+def test_visibility_key_ignores_unicode_normalization_difference(tmp_path):
+    """索引是 NFC、磁盘返回 NFD（APFS 可能如此）→ 仍可见。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    nfc = unicodedata.normalize("NFC", "docs/café.md")
+    nfd = unicodedata.normalize("NFD", "docs/café.md")
+    assert nfc != nfd
+
+    visibility = _visibility(repo, nfc)
+
+    assert visibility.is_visible(repo / nfd)
+
+
+def test_visibility_key_negative_control(tmp_path):
+    """真的不在集合里的路径必须仍然不可见，否则上面的放行没有意义。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    visibility = _visibility(repo, "docs/tracked.md")
+
+    assert not visibility.is_visible(repo / "docs" / "untracked.md")
+    assert not visibility.is_visible(repo / "other" / "tracked.md")
+    assert not visibility.is_visible(repo / "docs" / "tracked.md.bak")
