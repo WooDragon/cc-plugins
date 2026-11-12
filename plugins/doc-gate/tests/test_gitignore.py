@@ -281,7 +281,8 @@ def test_tracked_uppercase_markdown_visible_through_real_git(tmp_path):
     """真实 git 产出侧的归一化：索引路径必须经 `_visibility_key` 再比较。
 
     若 `_repo_visible_files` 把 `visible.add(_visibility_key(relative))` 改回
-    `visible.add(relative)`，集合里是 casefold 值而查询键已 casefold → 不匹配，
+    `visible.add(relative)`，集合里留下的是**原始大小写**的索引值
+    （`docs/Guide.md`），而查询键是 casefold 后的 `docs/guide.md` → 不匹配，
     这条在任何平台都会变红。它守的正是 macOS 上 CLAUDE.md / README.md 这类
     含大写字母的已跟踪文档不会从图谱与语料里静默消失。
     """
@@ -301,10 +302,12 @@ def test_tracked_uppercase_markdown_visible_through_real_git(tmp_path):
 
 
 def test_tracked_unicode_markdown_visible_through_real_git(tmp_path):
-    """真实 git 产出侧的 Unicode 路径：NFC/NFD 都能端到端进入图谱与语料。
+    """真实 git 产出侧的 Unicode 路径冒烟用例：文件能端到端进入图谱与语料。
 
-    macOS 上 APFS 可能把磁盘写法归一化为与索引不同的组合形式；统一 NFC 键
-    后两边仍匹配。Linux 上两侧本就一致，这条退化为恒真但无害。
+    这条不承担变异守护：Linux 上索引与磁盘同字节，macOS 上 git 与 APFS 都
+    给 NFC，两种平台下把依赖的归一化改坏都不会变红。归一化的判别性守护由
+    `test_visibility_key_ignores_unicode_normalization_difference` 与
+    `test_tracked_uppercase_markdown_visible_through_real_git` 承担。
     """
     repo = _init_repo(tmp_path / "repo")
     nfc_name = unicodedata.normalize("NFC", "café.md")
