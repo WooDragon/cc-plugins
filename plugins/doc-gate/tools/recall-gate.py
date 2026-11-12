@@ -13,7 +13,7 @@ from collections import Counter
 from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST, CODE_FENCE,
     detect_root, is_auto_memory_path, should_skip_link, resolve_link,
-    extract_links_from_content,
+    extract_links_from_content, build_git_visibility,
 )
 
 _EN_TOKEN_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9_.-]{1,}')
@@ -285,6 +285,10 @@ def build_corpus_and_graph(root: str, start_time: float = None, budget_sec: floa
     _budget_active = start_time is not None and budget_sec is not None
     _scanned = 0
 
+    # 第二道排除闸门：被忽略的 .md 不进 corpus/all_files（EXCLUDED_DIRS 与
+    # auto-memory 已在上面剪枝），因此既无 BM25 文档也不制造 dangling 边。
+    visibility = build_git_visibility(root_path)
+
     # First pass: collect content and tokens
     file_contents: dict = {}  # rel_path -> content
     for dirpath, dirnames, filenames in os.walk(str(root_path)):
@@ -309,12 +313,15 @@ def build_corpus_and_graph(root: str, start_time: float = None, budget_sec: floa
             if not fname.lower().endswith('.md'):
                 continue
 
+            fpath = Path(dirpath) / fname
+            if not visibility.is_visible(fpath):
+                continue
+
             _scanned += 1
             if _budget_active and _scanned % _GRAPH_BUDGET_CHECK_INTERVAL == 0:
                 if time.monotonic() - start_time > budget_sec:
                     raise GraphBudgetExceeded(_scanned)
 
-            fpath = Path(dirpath) / fname
             try:
                 content = fpath.read_text(encoding='utf-8', errors='ignore')
             except OSError:

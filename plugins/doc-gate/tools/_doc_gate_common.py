@@ -3,13 +3,14 @@
 recall-gate.py 与 docs-graph.py 共享此模块，杜绝排除逻辑三处漂移。
 任何新增排除目录 / 链接处理改动只改这里，import 重力井保证消费者引用同一对象。
 
-零依赖：仅标准库 re / os / urllib.parse / pathlib。
+零依赖：仅标准库 re / os / subprocess / urllib.parse / pathlib。
 两个消费者以绝对路径被调用，Python 将脚本所在目录置于 sys.path[0]，
 故同目录 import 不依赖 cwd，hook 热路径可靠。
 """
 
 import re
 import os
+import subprocess
 import urllib.parse
 from pathlib import Path
 
@@ -87,6 +88,108 @@ def is_auto_memory_path(path, root=None) -> bool:
                 and normalized_parts[index + 3] == 'memory'):
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# .gitignore 可见性（按「最近祖先 git 仓库」分段判定）
+# ---------------------------------------------------------------------------
+
+# 一次调用同时取已跟踪文件与未被忽略的未跟踪文件。--exclude-standard 让
+# .gitignore / .git/info/exclude / 全局 excludes 一并生效；-z 避免路径被
+# 按换行切分（合法路径可以包含换行）。
+_GIT_LS_FILES_ARGS = ('ls-files', '-z', '--cached', '--others', '--exclude-standard')
+
+
+def _discover_git_repos(root) -> list:
+    """返回 *root* 之内（含 *root* 自身）的 git 仓库根，剪枝 EXCLUDED_DIRS。
+
+    剪枝与扫描本身同一份名单，仓库发现不会走进 node_modules / .git 等目录。
+    普通仓库的 `.git` 是目录，linked worktree 的 `.git` 是文件，两者都算仓库根。
+    """
+    repos = []
+    for dirpath, dirnames, _filenames in os.walk(os.fspath(root)):
+        current = Path(dirpath)
+        marker = current / '.git'
+        if marker.is_dir() or marker.is_file():
+            repos.append(current.resolve())
+        dirnames[:] = [name for name in dirnames if name not in EXCLUDED_DIRS]
+    return repos
+
+
+def _repo_visible_files(repo: Path):
+    """返回 *repo* 中 git 认为「存在」的绝对路径集合（已 resolve）。
+
+    返回 None 表示无法判定（git 不存在 / 非 0 退出）。调用方必须把 None
+    当作 fail-open，绝不能当作「该仓库下一个文件都不可见」。
+    """
+    try:
+        proc = subprocess.run(
+            ['git', '-C', str(repo), *_GIT_LS_FILES_ARGS],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+
+    visible = set()
+    for entry in proc.stdout.split(b'\0'):
+        if not entry:
+            continue
+        # surrogateescape 让非 UTF-8 文件名原样往返，不丢也不炸。
+        relative = entry.decode('utf-8', errors='surrogateescape')
+        visible.add((repo / relative).resolve())
+    return frozenset(visible)
+
+
+class GitVisibility:
+    """按最近祖先仓库判定的 .gitignore 可见性。
+
+    `repos` 映射「仓库根绝对路径 → 可见绝对路径集合（或 None = 该仓库查询失败）」。
+    空映射表示 root 下没有仓库根，此时过滤器整体不启用（保持历史行为）。
+    """
+
+    def __init__(self, repos: dict):
+        self._repos = repos
+
+    def __bool__(self) -> bool:
+        return bool(self._repos)
+
+    def is_visible(self, path) -> bool:
+        """*path* 是否保留。不属于任何仓库 → 保留；仓库查询失败 → 保留。"""
+        resolved = Path(path).resolve()
+        nearest = None
+        for repo_root in self._repos:
+            try:
+                resolved.relative_to(repo_root)
+            except ValueError:
+                continue
+            # 嵌套子仓：最近（路径最长）的仓库根是唯一权威。
+            if nearest is None or len(repo_root.parts) > len(nearest.parts):
+                nearest = repo_root
+
+        if nearest is None:
+            return True
+        visible = self._repos[nearest]
+        if visible is None:
+            return True
+        return resolved in visible
+
+
+def build_git_visibility(root) -> GitVisibility:
+    """为 *root* 下每个仓库构建一次 .gitignore 可见性过滤器。
+
+    三种退化全部落在保守一侧：
+    - root 下找不到任何仓库根 → 过滤器不启用（测试沙箱、非 git 目录不受影响）
+    - 某仓库 git 查询失败 → 该仓库范围内不启用过滤（绝不误删文档）
+    - 文件不属于任何已发现仓库 → 保留
+
+    每次调用重新构建，不落盘、不缓存（工具设计约束是无状态）。
+    """
+    repos = {}
+    for repo_root in _discover_git_repos(root):
+        repos[repo_root] = _repo_visible_files(repo_root)
+    return GitVisibility(repos)
 
 
 def should_skip_link(target: str) -> bool:

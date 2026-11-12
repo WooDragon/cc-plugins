@@ -24,7 +24,7 @@ from collections import defaultdict, deque
 from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST,
     detect_root, is_auto_memory_path, should_skip_link, resolve_link,
-    extract_links_from_content,
+    extract_links_from_content, build_git_visibility,
 )
 
 
@@ -53,11 +53,18 @@ def extract_links(filepath: Path):
 
 
 def scan_all_files(root: Path):
-    """扫描所有 .md 文件，返回 set[Path]"""
+    """扫描所有 .md 文件，返回 set[Path]
+
+    两道排除闸门，都通过才保留：先 EXCLUDED_DIRS / auto-memory（历史行为），
+    再按「最近祖先 git 仓库」的 .gitignore 可见性。被忽略的文件连节点都不是，
+    自然也不会成为断链检查的源。
+    """
+    visibility = build_git_visibility(root)
     files = set()
     for p in root.rglob('*.md'):
-        if not is_excluded(p, root):
-            files.add(p.resolve())
+        if is_excluded(p, root) or not visibility.is_visible(p):
+            continue
+        files.add(p.resolve())
     return files
 
 
