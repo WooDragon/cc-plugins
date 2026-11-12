@@ -3,14 +3,16 @@
 recall-gate.py 与 docs-graph.py 共享此模块，杜绝排除逻辑三处漂移。
 任何新增排除目录 / 链接处理改动只改这里，import 重力井保证消费者引用同一对象。
 
-零依赖：仅标准库 re / os / subprocess / urllib.parse / pathlib。
+零依赖：仅标准库 re / os / sys / codecs / subprocess / urllib.parse / pathlib。
 两个消费者以绝对路径被调用，Python 将脚本所在目录置于 sys.path[0]，
 故同目录 import 不依赖 cwd，hook 热路径可靠。
 """
 
-import re
+import codecs
 import os
+import re
 import subprocess
+import sys
 import urllib.parse
 from pathlib import Path
 
@@ -103,16 +105,24 @@ _GIT_LS_FILES_ARGS = ('ls-files', '-z', '--cached', '--others', '--exclude-stand
 def _discover_git_repos(root) -> list:
     """返回 *root* 之内（含 *root* 自身）的 git 仓库根，剪枝 EXCLUDED_DIRS。
 
-    剪枝与扫描本身同一份名单，仓库发现不会走进 node_modules / .git 等目录。
+    剪枝与扫描本身同一份名单（EXCLUDED_DIRS + auto-memory），仓库发现不走
+    进 node_modules / .git / auto-memory 等扫描也不会进入的目录。
     普通仓库的 `.git` 是目录，linked worktree 的 `.git` 是文件，两者都算仓库根。
     """
     repos = []
     for dirpath, dirnames, _filenames in os.walk(os.fspath(root)):
         current = Path(dirpath)
+        if is_auto_memory_path(current):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [
+            name for name in dirnames
+            if name not in EXCLUDED_DIRS
+            and not is_auto_memory_path(current / name)
+        ]
         marker = current / '.git'
         if marker.is_dir() or marker.is_file():
             repos.append(current.resolve())
-        dirnames[:] = [name for name in dirnames if name not in EXCLUDED_DIRS]
     return repos
 
 
@@ -190,6 +200,131 @@ def build_git_visibility(root) -> GitVisibility:
     for repo_root in _discover_git_repos(root):
         repos[repo_root] = _repo_visible_files(repo_root)
     return GitVisibility(repos)
+
+
+def repo_relative_key(path, root) -> str:
+    """Return *path* relative to *root*, spelled with POSIX separators.
+
+    Every key in the link graph is built here, because those keys are looked
+    up with paths that come from `git status --porcelain`, which always uses
+    forward slashes. A key built with the platform separator can never equal
+    one of those: on Windows ``os.path.relpath`` yields ``docs\\a.md`` while
+    the git side asks for ``docs/a.md``, so every file below the root looks
+    like an orphan and every inbound link from it looks like a dangling
+    edge. Normalising once at generation keeps both sides in one spelling
+    instead of translating at each of the several lookup sites.
+
+    Raises ValueError when *path* is not inside *root* (on Windows, also
+    when the two are on different drives) — callers decide what an
+    out-of-tree path means, because it differs: a resolved link that escapes
+    the root is skipped, a CLI target that escapes it simply is not a node.
+    """
+    relative = os.path.relpath(os.fspath(path), os.fspath(root))
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        raise ValueError(f'{os.fspath(path)!r} is outside {os.fspath(root)!r}')
+    return Path(relative).as_posix()
+
+
+def exists_with_exact_case(path) -> bool:
+    """Return whether *path* exists on disk with exactly this spelling.
+
+    ``Path.exists()`` alone cannot answer that everywhere. macOS's default
+    APFS is case-insensitive, so a link to ``Guide.md`` resolves against an
+    on-disk ``guide.md`` and looks fine locally — while the same link is
+    genuinely broken on Linux and on GitHub's runners. The graph has to
+    judge "does the target exist" the way the case-sensitive platforms will,
+    or a dangling link passes here and breaks elsewhere. APFS is
+    case-insensitive yet does not rewrite spelling on resolution, so the
+    original spelling survives long enough to be checked here; this is the
+    platform the function was written for.
+
+    So: a quick ``exists()`` first (a genuinely absent path is absent under
+    every spelling — nothing to compare), then a component-by-component
+    comparison against the real directory entry names. The walk starts from
+    an anchor prefix and descends, so a case-insensitive filesystem cannot
+    hand back the wrong spelling at any single level: each level's listing is
+    scanned for an exact string match before the next level is entered.
+    ``os.listdir`` follows symlinks, so a correctly spelled path through a
+    symlink is reported as existing, and a path that leaves the filesystem
+    fails the exact comparison and reports False — the conservative answer
+    for a link checker.
+
+    Platform caveat: the comparison can only see the spelling it is handed.
+    Both call sites pass paths that have already gone through
+    ``resolve_link()``'s ``.resolve()``, and on Windows that call rewrites
+    every component to its on-disk spelling. Input here is therefore already
+    normalised on Windows, and a case-typo cannot be detected there: the
+    function falls back to baseline ``exists()`` semantics. That is not a
+    regression, but do not claim Windows case-typo detection.
+
+    On case-sensitive filesystems (Linux) this cannot disagree with
+    ``exists()``; the extra directory scans are bounded by path depth and
+    only run for targets that actually exist, which is not the hot path.
+    """
+    target = Path(os.path.abspath(os.fspath(path)))
+    if not target.exists():
+        return False
+
+    # Walk from the filesystem root so a relative input still gets a stable
+    # starting point, then compare each remaining component against the real
+    # directory entry names. os.path.abspath collapses '.'/'..' and makes the
+    # path absolute WITHOUT normalising case — unlike Path.resolve(), which on
+    # Windows rewrites every component to its on-disk spelling. That only
+    # preserves spelling the caller has not already normalised, which is why
+    # this check works on macOS/Linux but degrades to exists() on Windows
+    # (see the platform caveat above).
+    parts = target.parts
+    if not parts:
+        return False
+
+    anchor = Path(parts[0])
+    try:
+        current = anchor
+        for part in parts[1:]:
+            try:
+                entries = os.listdir(current)
+            except OSError:
+                return False
+            if part not in entries:
+                return False
+            current = current / part
+    except OSError:
+        return False
+    return current.exists()
+
+
+def ensure_utf8_stdout() -> None:
+    """Force this process's stdout to UTF-8 when the platform locale isn't.
+
+    Every tool here prints ``json.dumps(..., ensure_ascii=False)`` — the
+    report is full of Chinese. On Windows the default stdout encoding is the
+    ANSI code page (GBK on a zh-CN box), so those bytes reach the caller in a
+    different encoding than the UTF-8 the message was written in: jq may
+    still pass them through, but the hook's stderr renders mojibake and any
+    UTF-8 assertion in the tests can never match.
+
+    Only non-UTF-8 streams are reconfigured. A stream already speaking UTF-8
+    is left untouched — including its error handler, which is
+    ``surrogateescape`` under Python's UTF-8 mode and ``strict`` in a normal
+    UTF-8 locale. Reconfiguring those would turn undecodable filename bytes
+    into ``?`` where they used to round-trip, a real behaviour change on
+    Linux/macOS for no benefit: the encoding is already correct there.
+    """
+    stream = getattr(sys, 'stdout', None)
+    reconfigure = getattr(stream, 'reconfigure', None)
+    if reconfigure is None:
+        return
+    encoding = getattr(stream, 'encoding', None)
+    if encoding:
+        try:
+            if codecs.lookup(encoding).name == 'utf-8':
+                return
+        except LookupError:
+            pass
+    try:
+        reconfigure(encoding='utf-8', errors='replace')
+    except (ValueError, OSError):
+        pass
 
 
 def should_skip_link(target: str) -> bool:

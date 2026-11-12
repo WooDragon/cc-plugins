@@ -15,6 +15,7 @@ docs-graph.py — 文档链接图谱查询工具
 版本：1.0.0
 """
 
+import os
 import sys
 import json
 import argparse
@@ -25,6 +26,7 @@ from _doc_gate_common import (
     EXCLUDED_DIRS, ORPHAN_WHITELIST,
     detect_root, is_auto_memory_path, should_skip_link, resolve_link,
     extract_links_from_content, build_git_visibility,
+    ensure_utf8_stdout,
 )
 
 
@@ -55,16 +57,35 @@ def extract_links(filepath: Path):
 def scan_all_files(root: Path):
     """扫描所有 .md 文件，返回 set[Path]
 
-    两道排除闸门，都通过才保留：先 EXCLUDED_DIRS / auto-memory（历史行为），
-    再按「最近祖先 git 仓库」的 .gitignore 可见性。被忽略的文件连节点都不是，
-    自然也不会成为断链检查的源。
+    用 os.walk 并在遍历时就剪掉 EXCLUDED_DIRS，与 recall-gate.py 的语料
+    walk 同构。rglob 版本要先进入 .git / node_modules 等目录、拿到每个
+    Path 才过滤，大仓库上绝大部分时间花在随后被丢弃的条目上。
+
+    第二道闸门是按「最近祖先 git 仓库」的 .gitignore 可见性；被忽略的文件
+    连节点都不是，自然也不会成为断链检查的源。
+
+    与旧 rglob 实现相比唯一的集合差异：名为 `x.md` 的目录不再被当成图节点。
+    旧行为会把目录读作空内容并报成孤儿，是 bug；新行为与 recall-gate.py 一致。
     """
     visibility = build_git_visibility(root)
     files = set()
-    for p in root.rglob('*.md'):
-        if is_excluded(p, root) or not visibility.is_visible(p):
+    for dirpath, dirnames, filenames in os.walk(str(root)):
+        directory = Path(dirpath)
+        if is_auto_memory_path(directory):
+            dirnames[:] = []
             continue
-        files.add(p.resolve())
+        dirnames[:] = [
+            name for name in dirnames
+            if name not in EXCLUDED_DIRS
+            and not is_auto_memory_path(directory / name, root)
+        ]
+        for name in filenames:
+            if not name.lower().endswith('.md'):
+                continue
+            p = directory / name
+            if is_excluded(p, root) or not visibility.is_visible(p):
+                continue
+            files.add(p.resolve())
     return files
 
 
@@ -277,6 +298,7 @@ def cmd_export(args, root: Path):
 
 
 def main():
+    ensure_utf8_stdout()
     # 推导 repo 根目录
     default_root = Path(detect_root(str(Path.cwd())))
 

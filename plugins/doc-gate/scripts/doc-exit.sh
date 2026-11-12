@@ -127,6 +127,15 @@ ROOT=$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)
 # so it doesn't get misparsed as an independent record on the next
 # iteration.
 declare -a DIRTY_PATHS=()
+# Paths this working tree ADDS: untracked (`??`) or newly staged (`A` in
+# either column, e.g. `A `/`AM`/` A`). orphan is judged only against this
+# set (#291) — a pre-existing document's zero-inlink state is a repo-wide
+# property that the current edit did not introduce, so blocking every Stop
+# on it made the gate unsatisfiable without unrelated edits. Splitting a
+# rename's new side out by its own X/Y status (a rename shows `R`, so it
+# does NOT land here) and never adding the old side keeps this conservative:
+# a moved document is not "new" and its old path is gone, not added.
+declare -a ADDED_PATHS=()
 while IFS= read -r -d '' rec; do
   [ -n "$rec" ] || continue
   xy="${rec:0:2}"
@@ -145,6 +154,12 @@ while IFS= read -r -d '' rec; do
   case "$bn" in
     *.[mM][dD])
       DIRTY_PATHS+=("$path")
+      # A record is "added" only when its OWN status says so; a rename's new
+      # side reports `R` and therefore never lands here.
+      is_added=false
+      case "$x" in '?'|'A') is_added=true ;; esac
+      case "$y" in '?'|'A') is_added=true ;; esac
+      [ "$is_added" = "true" ] && ADDED_PATHS+=("$path")
       if [ "$is_rename" = "true" ]; then
         if IFS= read -r -d '' old_path; then
           DIRTY_PATHS+=("$old_path")
@@ -215,15 +230,26 @@ for _tool_root_cand in "${CLAUDE_PLUGIN_ROOT:-}" "$(cd "$(dirname "${BASH_SOURCE
 done
 [ -n "$TOOL_DIR" ] || exit 0
 SUPERSET_FILE=$(mktemp 2>/dev/null) || exit 0
-trap 'rm -f "$SUPERSET_FILE"' EXIT
+# Same NUL-delimited transport as the superset, and for the same reason: a
+# legal path may contain a literal newline, and orphan is now judged per
+# added path. Empty is meaningful (nothing added this cycle) — the file
+# exists but carries no record, which Python reads as an empty list, not as
+# "not supplied". Created before the trap so the EXIT handler never has to
+# expand an unset name under `set -u`.
+ADDED_FILE=$(mktemp 2>/dev/null) || { rm -f "$SUPERSET_FILE"; exit 0; }
+trap 'rm -f "$SUPERSET_FILE" "$ADDED_FILE"' EXIT
 printf '%s\0' "${DIRTY_PATHS[@]}" > "$SUPERSET_FILE" 2>/dev/null
+if [ "${#ADDED_PATHS[@]}" -gt 0 ]; then
+  printf '%s\0' "${ADDED_PATHS[@]}" > "$ADDED_FILE" 2>/dev/null
+fi
 
 RESULT=$(printf '%s\0' "${FILTERED_PATHS[@]}" | python3 "$TOOL_DIR/doc-exit-report.py" \
   --root "$ROOT" \
   --threshold "${DOC_EXIT_GATE_THRESHOLD:-0.30}" \
   --top-n "${DOC_EXIT_GATE_TOP_N:-5}" \
   --budget-sec "${DOC_EXIT_GATE_BUDGET_SEC:-25}" \
-  --dirty-superset-file "$SUPERSET_FILE" 2>/dev/null)
+  --dirty-superset-file "$SUPERSET_FILE" \
+  --added-paths-file "$ADDED_FILE" 2>/dev/null)
 [ $? -eq 0 ] || exit 0
 [ -n "$RESULT" ] || exit 0
 

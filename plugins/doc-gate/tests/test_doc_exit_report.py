@@ -121,6 +121,11 @@ def test_deleted_file_not_referenced_orphan_false(tmp_path):
     Before the fix, a deleted file would report orphan=True because inlinks_set
     is empty. Now, any nonexistent file must have orphan=False (it doesn't need
     an index link; it needs other files to stop linking it).
+
+    The first phase passes added_paths so the file counts as newly added —
+    since #291 orphan only applies to paths this change ADDS, and without
+    that the pre-deletion baseline would be False for a reason other than
+    the one this test is about.
     """
     _write(tmp_path / "orphaned.md", "# Orphaned\n\ncontent\n")
     # Create another file so the corpus is non-empty, avoiding unrelated
@@ -134,6 +139,7 @@ def test_deleted_file_not_referenced_orphan_false(tmp_path):
         top_n=5,
         budget_sec=25.0,
         start_time=time.monotonic(),
+        added_paths=["orphaned.md"],
     )
     entry = report["files"]["orphaned.md"]
     assert entry["exists"] is True
@@ -349,6 +355,102 @@ def test_has_findings_false_when_only_inlinks_nonempty(tmp_path):
         assert entry["broken_outlinks"] == [], name
         assert entry["dangling_refs"] == [], name
     assert report["has_findings"] is False
+
+
+# ---------------------------------------------------------------------------
+# #291: orphan applies only to files this change ADDS. A pre-existing
+# document's zero-inlink state is a repo-wide property the edit did not
+# create — blocking every Stop on it made the gate unsatisfiable without
+# unrelated edits that add index links.
+# ---------------------------------------------------------------------------
+
+def test_edited_tracked_file_without_inlinks_does_not_report_orphan(tmp_path):
+    _write(tmp_path / "lonely.md", "# Lonely\n\ncontent\n")
+    _write(tmp_path / "other.md", "# Other\n\ncontent\n")
+
+    report = doc_exit_report.build_report(
+        root=str(tmp_path),
+        dirty_paths=["lonely.md"],
+        threshold=0.30,
+        top_n=5,
+        budget_sec=25.0,
+        start_time=time.monotonic(),
+        added_paths=[],
+    )
+    entry = report["files"]["lonely.md"]
+    assert entry["exists"] is True
+    assert entry["inlinks"] == []
+    # Zero inlinks, still not a finding: the file existed before this edit.
+    assert entry["orphan"] is False
+
+
+def test_newly_added_file_without_inlinks_reports_orphan(tmp_path):
+    # Untracked (git `??`) — the caller passes it in added_paths.
+    _write(tmp_path / "brand-new.md", "# Brand New\n\ncontent\n")
+    _write(tmp_path / "other.md", "# Other\n\ncontent\n")
+
+    report = doc_exit_report.build_report(
+        root=str(tmp_path),
+        dirty_paths=["brand-new.md"],
+        threshold=0.30,
+        top_n=5,
+        budget_sec=25.0,
+        start_time=time.monotonic(),
+        added_paths=["brand-new.md"],
+    )
+    entry = report["files"]["brand-new.md"]
+    assert entry["inlinks"] == []
+    assert entry["orphan"] is True
+
+
+def test_added_paths_omitted_treats_nothing_as_added(tmp_path):
+    """added_paths=None (the default) must not report orphan.
+
+    Callers that predate this parameter never asked for orphan-on-add
+    semantics, so the safe default is an empty added set — and this is what
+    keeps a direct build_report caller from getting a new finding.
+    """
+    _write(tmp_path / "brand-new.md", "# Brand New\n\ncontent\n")
+    _write(tmp_path / "other.md", "# Other\n\ncontent\n")
+
+    report = doc_exit_report.build_report(
+        root=str(tmp_path),
+        dirty_paths=["brand-new.md"],
+        threshold=0.30,
+        top_n=5,
+        budget_sec=25.0,
+        start_time=time.monotonic(),
+    )
+    assert report["files"]["brand-new.md"]["orphan"] is False
+
+
+def test_orphan_still_forces_has_findings_for_added_paths(tmp_path):
+    """The gating predicate must follow the narrowed orphan, both ways."""
+    _write(tmp_path / "topic.md", "# Topic\n\n重复关键字重复关键字用于命中查重。\n")
+
+    added_report = doc_exit_report.build_report(
+        root=str(tmp_path),
+        dirty_paths=["topic.md"],
+        threshold=10.0,
+        top_n=5,
+        budget_sec=25.0,
+        start_time=time.monotonic(),
+        added_paths=["topic.md"],
+    )
+    assert added_report["files"]["topic.md"]["orphan"] is True
+    assert added_report["has_findings"] is True
+
+    tracked_report = doc_exit_report.build_report(
+        root=str(tmp_path),
+        dirty_paths=["topic.md"],
+        threshold=10.0,
+        top_n=5,
+        budget_sec=25.0,
+        start_time=time.monotonic(),
+        added_paths=[],
+    )
+    assert tracked_report["files"]["topic.md"]["orphan"] is False
+    assert tracked_report["has_findings"] is False
 
 
 # ---------------------------------------------------------------------------

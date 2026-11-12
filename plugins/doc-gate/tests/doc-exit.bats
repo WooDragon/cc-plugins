@@ -108,7 +108,11 @@ teardown() {
 # ============================================================
 
 @test "rename: git mv consumes old-path segment correctly (new tracked, old not double-counted, third party reports dangling)" {
-  write_md "OLD.md" $'# Old\n\ncontent\n'
+  # OLD.md carries a broken outlink so that after the rename NEW.md has a
+  # finding of its own and therefore renders a block. Relying on orphan for
+  # that no longer works: since #291 orphan applies only to added paths, and
+  # a rename's new side reports as `R`, not `A`.
+  write_md "OLD.md" $'# Old\n\n[missing](MISSING.md)\n'
   write_md "THIRD.md" $'# Third\n\n[old](OLD.md)\n'
   git_commit_all "init"
 
@@ -116,7 +120,7 @@ teardown() {
 
   run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]
-  # (a) NEW.md entered the check set
+  # (a) NEW.md entered the check set, carrying its (inherited) finding
   echo "$HOOK_STDERR" | grep -qF -- "--- NEW.md ---"
   # (b) OLD.md's own block must not look like a routine independent finding
   # record beyond what dangling reverse-lookup produces for it — assert its
@@ -137,7 +141,9 @@ teardown() {
   # which git's own rename detection then reports as an UNSTAGED rename
   # (实测 git 2.48.1: plain `mv old new` + `git add -N new` emits
   # ` R new\0old\0`, confirming the header comment's claimed byte layout).
-  write_md "OLD2.md" $'# Old2\n\ncontent\n'
+  # Same broken-outlink setup as the test above: NEW2.md needs a finding of
+  # its own to render a block, since a rename is not an "added" path (#291).
+  write_md "OLD2.md" $'# Old2\n\n[missing](MISSING2.md)\n'
   write_md "THIRD2.md" $'# Third2\n\n[old](OLD2.md)\n'
   git_commit_all "init"
 
@@ -168,20 +174,17 @@ teardown() {
 # ============================================================
 
 @test "newline in filename: path with a literal newline reaches Python as a single path" {
+  # The weird-named file carries a broken outlink so it renders a block of
+  # its own. Leaning on orphan for that no longer works: since #291 orphan
+  # applies only to added paths, and this file is committed then edited.
   local nl=$'weird'$'\n'"name.md"
-  write_md "$nl" $'# Weird\n\ncontent that will not match any recall bait\n'
+  write_md "$nl" $'# Weird\n\n[gone](GONE.md)\n'
   git_commit_all "init"
 
-  write_md "$nl" $'# Weird\n\nedited so it is dirty\n'
-  write_md "linker.md" "# Linker
-
-[weird](${nl})
-"
-  git_commit_all "add linker"
-  # dirty the newline-named file again post-commit so it's the thing under test
-  write_md "$nl" $'# Weird\n\nedited again\n'
+  write_md "$nl" $'# Weird\n\n[gone](GONE.md) edited\n'
 
   run_exit_gate
+  [ "$HOOK_EXIT" -eq 2 ]
   # Must not crash the pipeline. Prove the embedded newline survived as ONE
   # path (not split into two independent records) by stripping all newlines
   # from the rendered message and checking "weird" and "name.md" are then
@@ -200,6 +203,11 @@ teardown() {
 @test "recall uses final full-text content: overlap only exists in final state, not any single edit fragment" {
   write_md "topic.md" $'# Topic\n\n关于配置文件热重载与动态刷新机制的详细说明文档正文内容。\n'
   write_md "other.md" $'# Other\n\n完全无关的初始占位内容。\n'
+  # An untouched inlink, so editing other.md produces a blocking finding on
+  # its own. This test used to lean on other.md's zero-inlink orphan signal
+  # for the exit code; since #291 orphan only applies to ADDED paths, so a
+  # trackable edit has to earn its block from a structural finding instead.
+  write_md "LINKER.md" $'# Linker\n\n[other](other.md)\n'
   git_commit_all "init"
 
   # Final content overlaps heavily with topic.md; if the tool only looked at
@@ -345,15 +353,21 @@ teardown() {
   # before the shell's own *.[mM][dD] filter ever saw it. Removing the
   # pathspec means git now reports every dirty path (all extensions), and
   # the shell-side case filter alone must correctly keep non-.md paths out.
+  #
+  # The file is COMMITTED first and only then edited: since #291 orphan
+  # applies only to newly ADDED paths, and a tracked edit has no other
+  # forced finding to lean on. The extension filter is what's under test,
+  # so any finding will do.
   write_md "UPPER.MD" $'# Upper\n\ncontent\n'
   write_md "notes.txt" "plain text, not markdown"
+  write_md "LINKER.md" $'# Linker\n\n[upper](UPPER.MD)\n'
   git_commit_all "init"
 
   write_md "UPPER.MD" $'# Upper\n\nedited\n'
   write_md "notes.txt" "edited plain text"
 
   run_exit_gate
-  # UPPER.MD has no inlinks -> orphan is a forced, deterministic finding.
+  # LINKER.md is untouched, so UPPER.MD reports it as a stale inlink.
   [ "$HOOK_EXIT" -eq 2 ]
   echo "$HOOK_STDERR" | grep -qF -- "--- UPPER.MD ---"
   ! echo "$HOOK_STDERR" | grep -qF -- "--- notes.txt ---"
@@ -371,29 +385,52 @@ teardown() {
   # to isolate the bug precisely).
   write_md "linker.md" $'# Linker\n\n[upper](UPPER.MD)\n'
   write_md "UPPER.MD" $'# Upper\n\ncontent\n'
+  write_md "notes.txt" "plain text, not markdown"
   git_commit_all "init"
 
-  write_md "UPPER.MD" $'# Upper\n\nedited\n'
+  # ADD a brand-new UPPER2.MD rather than editing the tracked one: since
+  # #291 orphan only applies to added paths, so an added file is the only
+  # shape where the orphan assertion below can still be violated. The inlink
+  # is what must keep it from being one.
+  #
+  # UPPER2.MD also carries a broken outlink, giving it a structural finding
+  # that does not depend on the BM25 recall threshold: without it, whether
+  # this file renders a block at all would hinge on its similarity score
+  # clearing 0.30, and a harmless tuning change could make the test pass
+  # vacuously by never rendering the block the orphan assertion inspects.
+  write_md "linker2.md" $'# Linker2\n\n[upper2](UPPER2.MD)\n'
+  write_md "UPPER2.MD" $'# Upper2\n\n[gone](GONE2.md)\n'
 
   run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]
-  echo "$HOOK_STDERR" | grep -qF -- "--- UPPER.MD ---"
-  # UPPER.MD must NOT be reported as orphan (it has a real inlink). A bare
-  # `! cmd` here would be exempt from errexit unless it's the function's
-  # LAST statement (bash: a `!`-negated pipeline never triggers -e on its
-  # own), so a failing negated assertion followed by more statements would
-  # silently NOT fail the test -- use an explicit if/return instead.
-  if echo "$HOOK_STDERR" | grep -qF "建议补充索引链接"; then
-    echo "unexpected: UPPER.MD reported as orphan despite having a real inlink" >&2
+  echo "$HOOK_STDERR" | grep -qF -- "--- UPPER2.MD ---"
+  # Scope the orphan assertion to UPPER2.MD's OWN block. linker2.md is an
+  # added file with no inlinks, so it is legitimately orphan (#291) and a
+  # whole-output grep would trip on its block instead of the one under test.
+  local block
+  block="${HOOK_STDERR#*--- UPPER2.MD ---}"
+  block="${block%%--- *}"
+  # The block must exist because of the structural (broken-outlink) finding,
+  # not because of a recall hit.
+  echo "$block" | grep -qF "出链验证"
+  # UPPER2.MD must NOT be reported as orphan (it has a real inlink, from an
+  # equally new file that is itself in the dirty set). A bare `! cmd` here
+  # would be exempt from errexit unless it's the function's LAST statement
+  # (bash: a `!`-negated pipeline never triggers -e on its own), so a
+  # failing negated assertion followed by more statements would silently
+  # NOT fail the test -- use an explicit if/return instead.
+  if echo "$block" | grep -qF "建议补充索引链接"; then
+    echo "unexpected: UPPER2.MD reported as orphan despite having a real inlink" >&2
     return 1
   fi
-  # linker.md's link to UPPER.MD must NOT be reported dangling anywhere.
-  if echo "$HOOK_STDERR" | grep -qF "断链反查"; then
-    echo "unexpected: UPPER.MD's real inlink reported as dangling" >&2
+  # linker2.md's link to the existing UPPER2.MD must NOT be reported dangling
+  # in UPPER2.MD's own block. Scoped to this block: UPPER2.MD's own GONE2.md
+  # link legitimately dangles, but that is reported by GONE2.md's block (which
+  # is not in the dirty set here), never as an inlink problem on UPPER2.MD.
+  if echo "$block" | grep -qF "断链反查"; then
+    echo "unexpected: UPPER2.MD's real inlink reported as dangling" >&2
     return 1
   fi
-  # And UPPER.MD's stale_inlinks must correctly name the untouched linker.
-  echo "$HOOK_STDERR" | grep -qF "linker.md"
 }
 
 @test "exclusion: dirty node_modules/x.md is not checked" {
@@ -423,7 +460,8 @@ teardown() {
   # folds an entirely-untracked directory into one '?? dir/' record whose
   # basename never matches *.[mM][dD] -- the whole new doc tree is silently
   # dropped. A brand-new, never-committed directory with one orphan .md
-  # inside it is a forced, deterministic finding once correctly picked up.
+  # inside it is a forced, deterministic finding once correctly picked up
+  # (and since #291 the untracked status is exactly what makes orphan apply).
   mkdir -p "${REPO_DIR}/brand-new"
   printf '%s' $'# Guide\n\ncontent\n' > "${REPO_DIR}/brand-new/guide.md"
   # Nothing committed yet in this repo at all -- but init_test_git_repo only
@@ -433,6 +471,7 @@ teardown() {
   run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]
   echo "$HOOK_STDERR" | grep -qF -- "--- brand-new/guide.md ---"
+  echo "$HOOK_STDERR" | grep -qF "建议补充索引链接"
 }
 
 @test "A1: status.showUntrackedFiles=no still surfaces untracked .md (explicit --untracked-files=all overrides config)" {
@@ -444,6 +483,73 @@ teardown() {
   run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]
   echo "$HOOK_STDERR" | grep -qF -- "--- brand-new2/guide2.md ---"
+}
+
+# ============================================================
+# #291: orphan applies only to files this change ADDS. A pre-existing
+# document's zero-inlink state is a repo-wide property the current edit did
+# not create, so blocking every Stop on it made the gate unsatisfiable
+# without unrelated edits that add index links.
+# ============================================================
+
+@test "orphan narrowed: editing a tracked file with no inlinks is not a finding" {
+  write_md "LONELY.md" $'# Lonely\n\noriginal\n'
+  git_commit_all "init"
+
+  write_md "LONELY.md" $'# Lonely\n\nedited\n'
+
+  run_exit_gate
+  # Zero inlinks, but the file existed before this edit — nothing to report.
+  [ "$HOOK_EXIT" -eq 0 ]
+  [ -z "$HOOK_STDERR" ]
+}
+
+@test "orphan narrowed: an untracked new file with no inlinks is still a finding" {
+  write_md "SEED.md" $'# Seed\n\ncontent\n'
+  git_commit_all "init"
+
+  # git status reports this as `??`.
+  write_md "BRAND-NEW.md" $'# Brand New\n\ncontent\n'
+
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 2 ]
+  echo "$HOOK_STDERR" | grep -qF -- "--- BRAND-NEW.md ---"
+  echo "$HOOK_STDERR" | grep -qF "建议补充索引链接"
+}
+
+@test "orphan narrowed: a staged new file (git add) with no inlinks is still a finding" {
+  write_md "SEED.md" $'# Seed\n\ncontent\n'
+  git_commit_all "init"
+
+  # `git add` on a brand-new file reports `A `, not `??` — both must count
+  # as added, or the gate would depend on whether the user happened to stage.
+  write_md "STAGED-NEW.md" $'# Staged New\n\ncontent\n'
+  git -C "$REPO_DIR" add STAGED-NEW.md
+
+  run_exit_gate
+  [ "$HOOK_EXIT" -eq 2 ]
+  echo "$HOOK_STDERR" | grep -qF -- "--- STAGED-NEW.md ---"
+  echo "$HOOK_STDERR" | grep -qF "建议补充索引链接"
+}
+
+@test "orphan narrowed: editing a tracked file that HAS an inlink stays silent" {
+  # Control for the first case above: the same tracked edit, but with a real
+  # inlink, must also be silent — proving the silence comes from the added
+  # narrowing and not from some unrelated regression in the dirty path.
+  write_md "HUB.md" $'# Hub\n\n[t](TRACKED.md)\n'
+  write_md "TRACKED.md" $'# Tracked\n\noriginal\n'
+  git_commit_all "init"
+
+  write_md "TRACKED.md" $'# Tracked\n\nedited\n'
+
+  run_exit_gate
+  # HUB.md is untouched -> stale_inlinks fires, so exit 2 is expected here;
+  # what must NOT happen is an orphan suggestion.
+  [ "$HOOK_EXIT" -eq 2 ]
+  if echo "$HOOK_STDERR" | grep -qF "建议补充索引链接"; then
+    echo "unexpected: tracked file with an inlink reported as orphan" >&2
+    return 1
+  fi
 }
 
 # ============================================================
@@ -503,12 +609,14 @@ teardown() {
 # ============================================================
 
 @test "budget degrade: DOC_EXIT_GATE_BUDGET_SEC=0 renders the degrade notice" {
-  # Single file with no inlinks -> orphan=true is a forced, deterministic
-  # finding, so has_findings is guaranteed true independent of the recall
-  # pass this test is actually targeting.
-  write_md "LONE.md" $'# Lone\n\ncontent\n'
+  # Deterministic finding independent of the recall pass this test targets:
+  # since #291 orphan needs an ADDED path, so add one (untracked, `??`)
+  # rather than editing a tracked lone file. `rm` + rewrite the same path
+  # reuses the tracked file — git reports it as ` M`, not `??`, so it never
+  # lands in the added set and orphan stays silent.
+  write_md "SEED.md" $'# Seed\n\ncontent\n'
   git_commit_all "init"
-  write_md "LONE.md" $'# Lone\n\nedited\n'
+  write_md "LONE.md" $'# Lone\n\ncontent\n'
 
   DOC_EXIT_GATE_BUDGET_SEC=0 run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]
@@ -581,12 +689,14 @@ teardown() {
 # ============================================================
 
 @test "robustness: Chinese filename does not crash the pipeline" {
-  # No other file links this one, and it's not in ORPHAN_WHITELIST, so
-  # orphan=true is forced — the outcome is deterministic, not "may or may
-  # not fire".
-  write_md "中文文档.md" $'# 中文标题\n\n内容正文。\n'
+  # The Chinese path arrives as an untracked ADD (git `??`), not as a
+  # committed-then-edited path. Since #291 orphan applies only to added
+  # paths, an untracked file with no inlinks is a forced, deterministic
+  # finding — while still exercising the same Chinese-path transport into
+  # Python this test is actually about.
+  write_md "SEED.md" $'# Seed\n\ncontent\n'
   git_commit_all "init"
-  write_md "中文文档.md" $'# 中文标题\n\n修改后的正文。\n'
+  write_md "中文文档.md" $'# 中文标题\n\n内容正文。\n'
 
   run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]
@@ -595,14 +705,16 @@ teardown() {
 }
 
 @test "robustness: path with a space does not crash the pipeline" {
-  # Same forced-orphan determinism as the Chinese-filename case above.
+  # Added (not edited) so it still carries the forced orphan signal, and an
+  # untouched inlink from a spaced path proves the record survives intact.
   write_md "has space here.md" $'# Spaced\n\ncontent\n'
   git_commit_all "init"
-  write_md "has space here.md" $'# Spaced\n\nedited\n'
+  write_md "a spaced linker.md" $'# Linker\n\n[spaced](has space here.md)\n'
+  write_md "another file.md" $'# Another\n\ncontent\n'
 
   run_exit_gate
   [ "$HOOK_EXIT" -eq 2 ]
-  echo "$HOOK_STDERR" | grep -qF -- "--- has space here.md ---"
+  echo "$HOOK_STDERR" | grep -qF -- "--- another file.md ---"
   echo "$HOOK_STDERR" | grep -qF "建议补充索引链接"
 }
 
