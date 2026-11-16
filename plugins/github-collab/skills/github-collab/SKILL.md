@@ -257,4 +257,4 @@ gh api repos/{owner}/{repo}/branches/{branch}/protection
 1. **`enforce_admins=true` 在单人仓库导致合并死锁**：作者不能 approve 自己的 PR，owner 又被 `enforce_admins` 卡住不能走 bypass，PR 永远合不上。单人/双人仓库务必设 `enforce_admins=false`，靠 `--admin` bypass 走管理者自己的 PR。
 2. **required status checks 选到带触发条件的 job，check 永久 pending**：如果某个 job 有 `if: github.event_name == 'push'` 之类的条件，它在 PR 事件上根本不会运行，对应的 check 永远显示 pending，所有 PR 永久卡住。选 required checks 时确认该 job 在 `pull_request` 事件下会真正跑。
 3. **CODEOWNERS 只在默认分支上生效**：必须先把 CODEOWNERS 文件本身合入默认分支，"Require review from Code Owners" 这条保护规则才会真正生效，两者有先后依赖。
-4. **纯文档 PR 也会跑全套 CI，但用 `paths-ignore` 跳过又会撞陷阱②**：给 CI workflow 加 `paths-ignore` 让文档改动跳过整套流程，会导致那个 required check 在文档 PR 上根本不产生结果，永久 pending——和陷阱②同一个根因。这两者只能二选一：要么接受文档 PR 也跑全套 CI，要么放弃把该 check 设为 required。
+4. **「纯文档 PR 跑全套 CI」与「`paths-ignore` 撞陷阱②」是伪二分**：正确做法是把「跑不跑重活」和「required check 是否满足」拆开。重 workflow 用 `paths` / `paths-ignore` 过滤，只在代码路径运行；另建一个 always-on 的轻量 required check（例如 changes 检测 job：文档 PR 直接 success，代码 PR 校验重 workflow 的结论），把它设为唯一 required status。不应把 path 过滤的重 workflow 设为唯一 required check——否则它在文档 PR 上永久 pending，根因同陷阱②。
