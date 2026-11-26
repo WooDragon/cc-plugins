@@ -1,6 +1,6 @@
 # pr-review
 
-AI code review for **already-opened GitHub PRs**, with three backends: a local grok CLI review, a local claude CLI review, and a GitHub Copilot bot review (optional). grok and claude are automatically routed by a unified entry point (`pr-review.sh`); which one runs by default depends on whether the current session itself is already routed through a grok provider (see [Backends](#backends)).
+AI code review for **already-opened GitHub PRs**, with three local backends — claude (the default, optionally routed through a custom gateway), grok and codex (explicit selection) — plus a GitHub Copilot bot review (optional). The unified entry point (`pr-review.sh`) defaults to claude; set `PR_REVIEW_BACKEND` to select another backend (see [Backends](#backends)).
 
 A **pure skill plugin** (no hooks) bundling one skill, three reference docs, and five executable scripts.
 
@@ -23,18 +23,18 @@ claude plugin install pr-review@cc-plugins
 | Latency | Immediate | Immediate | Immediate | Minutes; must be polled |
 | Cost | Cheap; `--effort` is tunable (default `medium`) | Cheap; `--effort` is tunable (default `medium`) | Cheap; reasoning effort tunable via `-c model_reasoning_effort` (default `high`) | Expensive — usually left off |
 | Multi-round | Yes — adversarial follow-up over a persisted session | Yes — adversarial follow-up over a persisted session | Yes — adversarial follow-up over a persisted thread (`codex exec resume`) | No |
-| Use when | `pr-review.sh`'s default auto-routed target; also local self-review before asking for human eyes | Auto-routed target when the current session is itself already routed through a grok provider (self-review-by-the-same-model would be low-value); can also be forced manually | A third independent reviewer is wanted, or when both grok and claude are the same family as the code's author; explicit `PR_REVIEW_BACKEND=codex` only — never auto-routed | Wrapping up a complex project, when a native bot review record on the PR is wanted |
+| Use when | Explicit selection when a Grok perspective is wanted (`PR_REVIEW_BACKEND=grok`); also local self-review before asking for human eyes | Default backend, optionally routed through a custom gateway; local self-review before asking for human eyes | A third independent reviewer is wanted, or when both grok and claude are the same family as the code's author; explicit `PR_REVIEW_BACKEND=codex` only — never the default | Wrapping up a complex project, when a native bot review record on the PR is wanted |
 | Script | `skills/pr-review/scripts/grok-review.sh` | `skills/pr-review/scripts/claude-review.sh` | `skills/pr-review/scripts/codex-review.sh` | `skills/pr-review/scripts/copilot-review.sh` |
 | Reference | `skills/pr-review/references/grok-review.md` | `skills/pr-review/references/claude-review.md` | `skills/pr-review/references/codex-review.md` | `skills/pr-review/references/copilot-review.md` |
 
-`skills/pr-review/scripts/pr-review.sh` is the unified entry point that routes between grok, claude and codex — see `skills/pr-review/scripts/resolve-backend.sh` for the resolution order (`PR_REVIEW_BACKEND` explicit override > auto-detection > default `grok`). codex participates in `pr-review.sh` routing but **does not** participate in auto-selection, only explicit `PR_REVIEW_BACKEND=codex` selects it. copilot is not part of this routing (asynchronous, different CLI parameter shape) — call `copilot-review.sh` directly.
+`skills/pr-review/scripts/pr-review.sh` is the unified entry point that routes between grok, claude and codex — see `skills/pr-review/scripts/resolve-backend.sh` for the resolution order (`PR_REVIEW_BACKEND` explicit override > default `claude`). grok and codex only run when selected explicitly; copilot is not part of this routing (asynchronous, different CLI parameter shape) — call `copilot-review.sh` directly.
 
 ## Quick usage
 
 Normally you don't invoke anything by hand — say "评审 PR 123" / "grok review this PR" / "claude review this PR" and the skill activates. The scripts are also directly runnable:
 
 ```bash
-REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"   # auto-routes grok/claude
+REVIEW="${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh"   # defaults to claude; set PR_REVIEW_BACKEND for grok/codex
 [ -x "$REVIEW" ] || { echo "pr-review script path did not resolve" >&2; exit 1; }
 
 gh pr checkout 123        # cwd must be the PR's own repo worktree
@@ -87,7 +87,7 @@ A failed first round does not create or overwrite session state. A failed ordina
 | Backend | Needs |
 |---|---|
 | grok | `grok` CLI on `PATH` with `-s`/`-r` and `--background-wait-timeout` capability, `gh` (authenticated), `git`; an unrecognized option fails explicitly without a fallback retry |
-| claude | `claude` CLI on `PATH` (logged in), `gh` (authenticated), `git` |
+| claude | `claude` CLI on `PATH`, logged in **or** with a `CLAUDE_REVIEW_*` gateway route configured, `gh` (authenticated), `git` |
 | codex | `codex` CLI on `PATH`, `gh` (authenticated), `git` |
 | copilot | `gh` (authenticated), Copilot code review enabled on the repo |
 
@@ -97,14 +97,31 @@ A failed first round does not create or overwrite session state. A failed ordina
 |---|---|---|
 | `GROK_MODEL` | `grok-4.7` | grok backend model override for new sessions; existing session models remain unchanged |
 | `GROK_EFFORT` | `medium` | grok backend reasoning effort; legal values exactly `none`/`minimal`/`low`/`medium`/`high` (`xhigh` unsupported — a persisted legacy `xhigh` session value is migrated to `high` once before the review runs) |
-| `CLAUDE_REVIEW_MODEL` | `claude-opus-5` | claude backend model override |
+| `CLAUDE_REVIEW_MODEL` | `claude-opus-5-5` | claude backend model override |
 | `CLAUDE_REVIEW_EFFORT` | `medium` | claude backend reasoning effort; legal values exactly `low`/`medium`/`high`/`xhigh`/`max` |
+| `CLAUDE_REVIEW_BASE_URL` | unset | claude backend gateway base URL (leading/trailing whitespace trimmed); must be set together with `CLAUDE_REVIEW_API_KEY_FILE` — an unset pair means official OAuth |
+| `CLAUDE_REVIEW_API_KEY_FILE` | unset | path to a readable regular file holding the gateway API key (contents trimmed; FIFOs, devices and directories rejected); must be set together with `CLAUDE_REVIEW_BASE_URL` |
 | `CODEX_REVIEW_MODEL` | `gpt-5.6-luna` | codex backend model override |
 | `CODEX_REVIEW_EFFORT` | `medium` | codex backend reasoning effort; legal values exactly `none`/`low`/`medium`/`high`/`xhigh`/`max` |
-| `PR_REVIEW_BACKEND` | unset | `grok`/`claude`/`codex`/`copilot` — explicit override for `pr-review.sh`'s auto-routing, takes priority over auto-detection (codex does not participate in auto-detection) |
+| `PR_REVIEW_BACKEND` | unset | `grok`/`claude`/`codex`/`copilot` — explicit override of `pr-review.sh`'s default (`claude`); grok and codex only ever run when selected explicitly |
 | `XDG_STATE_HOME` | `$HOME/.local/state` | root of the session state files (`pr-review/<owner>__<name>__<PR>.session` for grok, `.claude.session` for claude, `.codex.session` for codex — independent, never overwrite each other) |
 
 On a follow-up round, persisted session `MODEL` and `EFFORT` values win over environment variables unless the matching CLI flag is explicit. For a first round, effort priority is explicit CLI `--effort` > `GROK_EFFORT` > the `medium` fallback. On a follow-up, effort priority is explicit CLI `--effort` > persisted session state > `GROK_EFFORT` > the `medium` fallback. The first successful round saves the effective effort, including an explicit CLI `--effort`, in session state. On a follow-up round, an explicit CLI flag overrides only that round and does not update state.
+
+### Custom claude route
+
+The claude backend uses your existing `claude` login (official OAuth/keychain) unless a custom Anthropic-compatible gateway is configured. Set both variables:
+
+```bash
+export CLAUDE_REVIEW_BASE_URL="https://llm-gateway.example"
+export CLAUDE_REVIEW_API_KEY_FILE="$HOME/.config/pr-review/gateway.key"
+```
+
+- Both are required together; setting only one fails before `claude` is invoked.
+- Leading/trailing whitespace is trimmed from the base URL and from the key file contents. An empty result after trimming fails fast.
+- The key file must be a readable **regular file** — FIFOs, devices and directories are rejected instead of being read.
+- The route is injected only into the `claude -p` child process (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`). Host `ANTHROPIC_*` routing variables are still cleared and never inherited.
+- With neither variable set, behavior is unchanged: official OAuth/keychain, no gateway traffic.
 
 ## Tests
 
@@ -118,5 +135,5 @@ Suites (counts are dynamic and intentionally not pinned here):
 - `grok-lifecycle.bats` — model precedence, native background-wait arguments, barrier-based late output and success timing, exact error codes, and failed-call state preservation. These CLI doubles do not establish that a native CLI hang is resolved.
 - `claude-review.bats` — same shape of coverage for the claude backend: isolation flags (`--setting-sources ""`, `--tools ""`, `--safe-mode`, `--strict-mcp-config`, the `unset_provider_routing_env` unset list covering `ANTHROPIC_*`/`CLAUDECODE`/`CLAUDE_CODE_MESSAGING_*`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_CHILD_SESSION`/`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) asserted on both first-round and `--resume` follow-up paths, session resume/fail-fast, `.claude.session` state file isolation from grok's `.session`, and shared-lib workspace pinning reuse. `claude` is stubbed.
 - `codex-review.bats` — codex backend shape: CLI arg parsing, session state files, thread resume/fail-fast, workspace pinning, effort validation, and secret-file heuristics. `codex exec` is stubbed; `git` is real against a per-test temp repo.
-- `resolve-backend.bats` — `PR_REVIEW_BACKEND` pass-through and validation, `ANTHROPIC_DEFAULT_OPUS_MODEL` auto-detection, and `pr-review.sh`'s routing to the resolved backend script (including the `copilot` rejection path).
+- `resolve-backend.bats` — `PR_REVIEW_BACKEND` pass-through and validation, the default-to-claude fallback, and `pr-review.sh`'s routing to the resolved backend script (including the `copilot` rejection path).
 - `skill-contract.bats` — real-skill Markdown contract checks for repair-subagent ownership, main-session SHA verification and follow-up lifecycle, and the grok two-round example.

@@ -4,7 +4,7 @@
 
 > 与 grok 后端共享同一套 diff 组装 / 敏感文件过滤 / 工作区身份钉死逻辑（见 `lib/pr-review-common.sh`），行为细节一律见 [grok-review.md](grok-review.md) 对应章节，本文档不重复展开；本文档只讲 claude 后端特有的部分：CLI 参数形态的两处不同、隔离旗标原理、会话续接机制、state 文件路径。
 
-**要求**：`claude` CLI 已装并登录，`gh` CLI 已装并认证。
+**要求**：`claude` CLI 已装并登录，或已配置 `CLAUDE_REVIEW_*` 网关路由；`gh` CLI 已装并认证。
 
 ## 快速用法
 
@@ -27,7 +27,7 @@ CLI 参数形态（`<PR> [--repo] [--model] [--effort] [--followup] [--since] [-
 
 | 参数 | claude 后端 | grok 后端（对照） |
 |---|---|---|
-| `--model M` | `claude-opus-5`（`CLAUDE_REVIEW_MODEL` 覆盖） | `grok-4.7`（`GROK_MODEL` 覆盖） |
+| `--model M` | `claude-opus-5-5`（`CLAUDE_REVIEW_MODEL` 覆盖） | `grok-4.7`（`GROK_MODEL` 覆盖） |
 | `--effort E` | 合法值严格为 `low/medium/high/xhigh/max`，默认 `medium`（`CLAUDE_REVIEW_EFFORT` 覆盖） | 合法值严格为 `none/minimal/low/medium/high`，默认 `medium`（`GROK_EFFORT` 覆盖） |
 
 表中 Grok 默认值用于新会话。复核未显式传 `--model` 时，Grok 优先沿用旧 session 的 state `MODEL`，包括 `grok-4.6`，不强迁；state 缺少 `MODEL` 时才回退到 `GROK_MODEL` 或新默认值。显式 `--model` 只覆盖本轮，不改写旧 state 的模型。
@@ -44,19 +44,44 @@ unset CLAUDE_CODE_ENTRYPOINT
 unset_provider_routing_env   # lib/pr-review-common.sh：9 个 ANTHROPIC_*/CLAUDE_AGENT_API_BASE_URL
                               # + 5 个 CLAUDE_CODE_MESSAGING_*/SESSION/GATEWAY_MODEL_DISCOVERY，
                               # 两处调用点共用，单一事实源
-claude -p --model "$MODEL" --effort "$EFFORT" \
+unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC   # 宿主值不继承；仅显式 route 时注入 =1
+"${ROUTE_ENV[@]}" claude -p --model "$MODEL" --effort "$EFFORT" \
   --setting-sources "" --tools "" --disable-slash-commands \
   --safe-mode --strict-mcp-config \
   --system-prompt "$RULES或$RULES_FOLLOWUP" \
   --session-id "$SID"   # 首轮；复核轮改用 --resume "$SID"
 ```
 
+`ROUTE_ENV` 默认只有 `env`（未配置网关路由时命令等价于直接 `claude -p ...`）；配置了 `CLAUDE_REVIEW_*` 时追加 `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` 三个赋值，见下文「经本地网关路由（可选）」。
+
 - **`unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT`**：防止在当前 Claude Code 会话内部拉起 `claude -p` 子进程时递归加载 hook/plugin。复用 `plugins/plan-review/scripts/lib/engines/claude.sh` 已验证过的隔离手法。
-- **`unset_provider_routing_env`**（`lib/pr-review-common.sh`，两处调用点共用的单一函数，不再各自手抄一份清单）：清理两组变量。第一组是 `ANTHROPIC_*`/`CLAUDE_AGENT_API_BASE_URL`（`ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_API_BASE_URL`/`CLAUDE_AGENT_API_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_DEFAULT_OPUS_MODEL`/`ANTHROPIC_DEFAULT_SONNET_MODEL`/`ANTHROPIC_DEFAULT_HAIKU_MODEL`/`ANTHROPIC_SMALL_FAST_MODEL`）：当前会话若经外部 wrapper 脚本（`~/.claude/scripts/claude-wrapper.sh` 的 grok 分支）路由到 grok 网关，这组变量会被注入进程环境；不清理的话它们会被子进程原样继承，claude 子进程名义上切到了 claude 后端，实际请求仍会打到 grok 网关——`resolve-backend.sh` 的自动路由判断（见上文）就此完全落空。第二组是 `CLAUDE_CODE_MESSAGING_SOCKET`/`CLAUDE_CODE_MESSAGING_TOKEN`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_CHILD_SESSION`/`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`：前四个是当前会话自身的 team-messaging/IPC 状态，`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` 是 wrapper 的 grok 分支额外注入的网关发现开关，不清理同样会被子进程原样继承。
+- **`unset_provider_routing_env`**（`lib/pr-review-common.sh`，两处调用点共用的单一函数，不再各自手抄一份清单）：清理两组变量。第一组是 `ANTHROPIC_*`/`CLAUDE_AGENT_API_BASE_URL`（`ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_API_BASE_URL`/`CLAUDE_AGENT_API_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_DEFAULT_OPUS_MODEL`/`ANTHROPIC_DEFAULT_SONNET_MODEL`/`ANTHROPIC_DEFAULT_HAIKU_MODEL`/`ANTHROPIC_SMALL_FAST_MODEL`）：当前会话若经外部 wrapper 脚本（`~/.claude/scripts/claude-wrapper.sh` 的 grok 分支）路由到 grok 网关，这组变量会被注入进程环境；不清理的话它们会被子进程原样继承，claude 子进程名义上切到了 claude 后端，实际请求仍会打到宿主网关。第二组是 `CLAUDE_CODE_MESSAGING_SOCKET`/`CLAUDE_CODE_MESSAGING_TOKEN`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_CHILD_SESSION`/`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`：前四个是当前会话自身的 team-messaging/IPC 状态，`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` 是 wrapper 的 grok 分支额外注入的网关发现开关，不清理同样会被子进程原样继承。清空后子进程只走官方 OAuth/keychain，或由 `claude-review.sh` 的可选路由块把显式配置的 `CLAUDE_REVIEW_*` re-inject 回子进程；不恢复任何宿主路由继承。
 - **`--setting-sources "" --tools "" --disable-slash-commands`**：子进程不读任何 settings、无任何工具（比 grok 的 `--deny "Write(**)" --deny "Edit(**)"` 更强——grok 仍能靠 `--cwd` 读工作区文件，而且这两条 deny 规则不是写入的硬保证，实测可经 `run_terminal_cmd` 里的 `python3` 间接落盘绕过；claude 这条路径下连"读"都不允许，全部上下文只能靠 prompt-file 里的文本喂给它）、禁用 slash 命令。因此 claude 后端不需要传等价的 `--cwd` 参数；BASE_SHA/CWD 身份钉死逻辑仍然保留（`build_full_prompt`/`build_incremental_prompt` 共用 lib），但那是为了"从哪个 git 仓库取 diff 文本"服务的，与 claude 进程本身能不能碰文件系统是两回事。
 - **`--setting-sources` 必须传空字符串 `""`，不能传 `"local"`**：这不是措辞选择，是安全修复。已用真实 `claude` CLI 复现：`claude-review.sh` 的运行前提是 cwd 已 `gh pr checkout <PR>`，即 cwd 是**外部贡献者可控的不可信工作区**；若该工作区里放了一个 `.claude/settings.local.json` 定义 SessionStart hook，`--setting-sources local` 会让这个 hook 真实执行——`--tools ""` 对此完全挡不住，因为 hook 触发和工具调用是两条独立的机制，前者不受 `--tools` 约束。这意味着一个恶意 PR 只需提交 `.claude/settings.local.json` 挂一个后门 hook，评审者一跑 `claude-review.sh` 就会执行攻击者指定的任意命令。改成 `--setting-sources ""` 后该 hook 不会触发，claude 照常按 prompt-file 里的文本工作——这是当前唯一安全的取值，任何"图方便"传回 `local` 都会重新打开这个口子。
 - **`--safe-mode --strict-mcp-config`**：关闭比 `--setting-sources ""` 覆盖面更广的一整类通道——`--safe-mode` 一次性禁用 CLAUDE.md/skills/plugins/hooks/MCP servers/自定义命令与 agent/output styles/workflows/主题/键位绑定；`--strict-mcp-config` 双保险，即使显式传了 `--mcp-config` 也只信那份显式清单。动机：`.mcp.json`（项目级 MCP server 自动发现）是独立于 `--setting-sources` 的通道，未受信 PR checkout 根目录放一个恶意 `.mcp.json` 可以在"连接 MCP server"这一步就执行任意命令——这个执行发生在 `--tools ""` 能不能约束后续工具调用之前，`--tools ""` 完全挡不住。
 - **不加 `--no-session-persistence`**：这是与 `plan-review` 插件的 claude engine 的关键差异，容易被后续维护者直接抄错——`--no-session-persistence` 会导致会话不落盘、`--resume` 完全失效，与本脚本要的多轮对抗复评需求矛盾。
+
+## 经本地网关路由（可选）
+
+默认走官方 OAuth/keychain。需要把评审请求打到自建的 Anthropic 兼容网关时，设置两个环境变量（必须成对）：
+
+| 变量 | 含义 |
+|---|---|
+| `CLAUDE_REVIEW_BASE_URL` | 网关 base URL；先 trim 首尾空白，再判非空 |
+| `CLAUDE_REVIEW_API_KEY_FILE` | 存放网关 API key 的**普通文件**路径；内容读出后同样 trim 首尾空白 |
+
+- 只设置其中一个 → 调用 `claude` 前 Fail Fast，错误文案点名缺失的变量；不调用 claude、不落 state。
+- key 文件只接受可读普通文件：FIFO/设备/目录一律拒绝，避免 `cat` 阻塞或读到非预期内容；空文件（trim 后为空）同样 Fail Fast。
+- 校验通过后，路由只经 `env` 数组注入 `claude -p` **子进程**（`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`），不改宿主 shell、不打印 key。
+- 宿主已有的 `ANTHROPIC_*` 路由变量仍由 `unset_provider_routing_env` 清除，绝不继承；只有显式配置的 `CLAUDE_REVIEW_*` 会被 re-inject。
+- 两个变量都未设置时行为不变：走官方 OAuth/keychain，`ROUTE_ENV` 只有 `env`。
+- 诊断行 `>> claude ...` 打印 `route=<base URL 或 official>`，不打印 key。
+
+```bash
+export CLAUDE_REVIEW_BASE_URL="https://llm-gateway.example"
+export CLAUDE_REVIEW_API_KEY_FILE="$HOME/.config/pr-review/gateway.key"
+scripts/claude-review.sh <PR>
+```
 
 ## 会话续接机制
 
@@ -80,4 +105,7 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/pr-review/<owner>__<name>__<PR>.claude.ses
 | `PR #<n> 无活跃 session。请先跑一次首轮：claude-review.sh <n>` | 首次调用就带了 `--followup`，或状态文件已被 30 天 GC 清理、或本轮 `--repo`/所在目录解析出的仓库与首轮不同 |
 | `PR #<n> 的 session 已失效/丢失，上下文不可恢复——请重开首轮评审` | claude 返回 `No conversation found with session ID: ...`，session 已不可恢复；重新跑首轮开始新一轮评审 |
 | 非零 effort/model 报错 | 确认 `--effort` 取值属 `low/medium/high/xhigh/max`、未误用 grok 专属的 `none`/`minimal` |
+| 只配置了 `CLAUDE_REVIEW_BASE_URL` 或 `CLAUDE_REVIEW_API_KEY_FILE` | 两者必须成对；脚本在调用 `claude` 前 Fail Fast，错误文案点名缺失的变量 |
+| key 文件缺失、不可读、为空或不是普通文件 | 校验失败并退出；路径须指向可读普通文件，且内容 trim 后非空 |
+| 网关不认该模型 | 网关须提供 `CLAUDE_REVIEW_MODEL`（默认 `claude-opus-5-5`）对应的模型；模型 id 不存在时 `claude` 以非零退出 |
 | 其余（BASE_SHA 不可达、工作区身份钉死、敏感文件告警等） | 与 grok 后端共用同一套 lib 逻辑，故障排查表见 [grok-review.md](grok-review.md)「故障排查」 |

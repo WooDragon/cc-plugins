@@ -1,12 +1,12 @@
 ---
 name: pr-review
 description: |
-  对已开的 GitHub PR 做 AI 代码评审（PR review），支持本地 Grok/Claude/Codex 评审及指定后端、跨轮复核，以及 GitHub Copilot 评审的首次触发、重新触发和状态查询。Grok/Claude 默认自动路由，Codex 显式选择；Copilot 异步回帖 PR。仅针对已开 PR；本地未提交 working diff 的即时 review 走 /code-review。
+  对已开的 GitHub PR 做 AI 代码评审（PR review），默认 Claude 后端并支持经本地网关路由，可显式切换 Grok/Codex，支持跨轮复核，以及 GitHub Copilot 评审的首次触发、重新触发和状态查询。Grok/Codex 显式选择；Copilot 异步回帖 PR。仅针对已开 PR；本地未提交 working diff 的即时 review 走 /code-review。
 ---
 
 # PR Review
 
-对已开的 GitHub PR 做 AI 代码评审，三个后端按需选（grok/claude 由 `pr-review.sh` 自动路由，copilot 独立入口）。
+对已开的 GitHub PR 做 AI 代码评审，默认 claude 后端（可经本地网关路由；grok/codex 显式选择，均由 `pr-review.sh` 路由），copilot 独立入口。
 
 ## 执行分工（主线裁决，评审正文落盘）
 
@@ -120,9 +120,9 @@ PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改
 
 | 后端 | 机制 | 何时用 | 详细用法 |
 |---|---|---|---|
-| grok | 本地 CLI 同步产出评审 → 终端 | 本地即时评审，默认 medium；复杂评审按选档说明显式选择 high；`pr-review.sh` 自动路由的默认目标 | `references/grok-review.md` |
-| claude | 本地 `claude -p` 同步产出评审 → 终端 | wrapper 会话经 grok provider 路由时，`pr-review.sh` 自动切换到的目标；也可手动强制 | `references/claude-review.md` |
-| codex | 本地 codex CLI 同步产出评审 → 终端 | 需要第三方独立视角时显式指定；不参与自动路由 | `references/codex-review.md` |
+| grok | 本地 CLI 同步产出评审 → 终端 | 需要 Grok 视角时显式选择（`PR_REVIEW_BACKEND=grok`）；本地即时评审，默认 medium；复杂评审按选档说明显式选择 high | `references/grok-review.md` |
+| claude | 本地 `claude -p` 同步产出评审 → 终端 | 默认后端；可经本地网关路由（见 `references/claude-review.md`）；也可手动强制 | `references/claude-review.md` |
+| codex | 本地 codex CLI 同步产出评审 → 终端 | 需要第三方独立视角时显式指定（`PR_REVIEW_BACKEND=codex`）；不参与默认路由 | `references/codex-review.md` |
 | copilot（可选） | gh 触发 GitHub Copilot bot 异步评审 → 回帖 PR | 复杂项目收尾、成本高通常不启用 | `references/copilot-review.md` |
 
 ### Grok 选档
@@ -133,7 +133,7 @@ PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改
 
 ## 默认路径：`pr-review.sh`
 
-`pr-review.sh` 是 grok/claude 之间的自动路由统一入口——`resolve-backend.sh` 决定用哪个后端：`PR_REVIEW_BACKEND` 环境变量显式覆盖 > 自动探测当前会话是否经 wrapper 走 grok 路径（`ANTHROPIC_DEFAULT_OPUS_MODEL` 是否以 `grok/` 开头）> 默认 grok（现状不变）。
+`pr-review.sh` 是三个本地后端（grok/claude/codex）的统一入口——`resolve-backend.sh` 决定用哪个后端：`PR_REVIEW_BACKEND` 环境变量显式覆盖 > 默认 claude。grok/codex 不参与默认路由，只有显式设置 `PR_REVIEW_BACKEND` 才会选中。
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh" <PR> [--repo owner/name]
@@ -141,7 +141,7 @@ PR 极小、单文件、diff 一屏内可尽收——主线直接跑、直接改
 
 **cwd 必须是被评审 PR 所在的仓库工作区**——底层脚本按 `git rev-parse --show-toplevel` 钉死 session 身份、按 cwd 取增量 diff，不是"不依赖 cwd"。结果打到 stdout（按上文重定向落盘），不发 PR 评论。
 
-**强制指定后端**：设 `PR_REVIEW_BACKEND=grok` 或 `PR_REVIEW_BACKEND=claude` 后再调 `pr-review.sh`，或直接调用对应的 `grok-review.sh`/`claude-review.sh`。两个后端 CLI 参数形态完全一致（`<PR> [--repo] [--model] [--effort] [--followup] [--since] [--session] [--allow-divergent-base]`），仅 `--effort` 合法集合不同：grok 严格为 `none/minimal/low/medium/high`（默认 `medium`，`GROK_EFFORT` 覆盖，显式 `--effort` 优先），claude 严格为 `low/medium/high/xhigh/max`（默认 `medium`，`CLAUDE_REVIEW_EFFORT` 覆盖，`CLAUDE_REVIEW_MODEL` 覆盖 model，默认 `claude-opus-5`）。grok 复核轮读到旧持久 state 的 `EFFORT=xhigh` 时会在调用前一次性迁移为 `high`（claude 无此历史包袱）。参数细节、工作原理、故障排查见 `references/grok-review.md`（grok）/ `references/claude-review.md`（claude）。
+**强制指定后端**：默认是 claude；grok/codex 需显式选择——设 `PR_REVIEW_BACKEND=grok` 或 `PR_REVIEW_BACKEND=codex` 后再调 `pr-review.sh`，或直接调用对应的 `grok-review.sh`/`codex-review.sh`。三个本地后端 CLI 参数形态完全一致（`<PR> [--repo] [--model] [--effort] [--followup] [--since] [--session] [--allow-divergent-base]`），仅 `--effort` 合法集合不同：grok 严格为 `none/minimal/low/medium/high`（默认 `medium`，`GROK_EFFORT` 覆盖，显式 `--effort` 优先），claude 严格为 `low/medium/high/xhigh/max`（默认 `medium`，`CLAUDE_REVIEW_EFFORT` 覆盖，`CLAUDE_REVIEW_MODEL` 覆盖 model，默认 `claude-opus-5-5`）。grok 复核轮读到旧持久 state 的 `EFFORT=xhigh` 时会在调用前一次性迁移为 `high`（claude 无此历史包袱）。claude 可经本地网关路由，配置见 `references/claude-review.md`。参数细节、工作原理、故障排查见 `references/grok-review.md`（grok）/ `references/claude-review.md`（claude）。
 
 **脚本路径发现**：主线用 `${CLAUDE_PLUGIN_ROOT}/skills/pr-review/scripts/pr-review.sh`——展开时机与配套先验见「执行分工」§1。该路径只供主线调用，不得下发给修复子任务。只需认识 `pr-review.sh` 这一个命令，不必先跑 `resolve-backend.sh` 再自行选脚本。
 
