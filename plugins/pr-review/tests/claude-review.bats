@@ -405,6 +405,16 @@ EOF
   [[ "$output" == *"route=https://***"* ]]
 }
 
+@test "route: 缺少合法 scheme 时不解析 ://，整体显示 ***" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='user:a://b@host' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"user:a"* ]]
+  [[ "$output" != *"b@"* ]]
+  [[ "$output" == *"route=***"* ]]
+}
+
 @test "route: 无 userinfo 时诊断行保留 scheme+host+path 并剥掉 query 与 fragment" {
   printf 'magpie-key\n' > "$WORK/keyfile"
   run env CLAUDE_REVIEW_BASE_URL='https://gw.example/v1?token=secret#frag' \

@@ -177,11 +177,13 @@ fi
 #   - 不含 @：剥掉 query/fragment 后原样显示（凭据只可能在 query 里）。
 #   - 含 @：userinfo 里的未编码 @/?/# 会让 userinfo 与 query/fragment 的边界本质歧义，
 #     任何基于分隔符的解析都可能残留口令片段；整体只显示 scheme://***。
+#     scheme 只认行首合法的 scheme 语法，否则整体显示 ***，避免把凭据或路径里的 ://
+#     误当成 scheme 分隔符。
 # ROUTE_DISPLAY 为空表示未配置 route，诊断行回退为 official。
 if [[ -n "$REVIEW_BASE_URL" ]]; then
   if [[ "$REVIEW_BASE_URL" == *@* ]]; then
-    if [[ "$REVIEW_BASE_URL" == *://* ]]; then
-      ROUTE_DISPLAY="${REVIEW_BASE_URL%%://*}://***"
+    if [[ "$REVIEW_BASE_URL" =~ ^([A-Za-z][A-Za-z0-9+.-]*):// ]]; then
+      ROUTE_DISPLAY="${BASH_REMATCH[1]}://***"
     else
       ROUTE_DISPLAY="***"
     fi
