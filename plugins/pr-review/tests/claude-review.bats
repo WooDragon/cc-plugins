@@ -298,6 +298,8 @@ EOF
   ! grep -q 'host-key' "$CLAUDE_ENV_SNAPSHOT"
   # 诊断输出不得打印 key 明文（key 只存在于子进程环境，不进 argv、不进日志）
   [[ "$output" != *"magpie-key"* ]]
+  # key 不得出现在 claude 自身的 argv 记录里（这只能守住 claude 自身 argv；env 以环境变量传 key，不证明 env 的瞬时 argv 不可见）
+  ! grep -q 'magpie-key' "$CLAUDE_ARGS_LOG"
 }
 
 @test "route: 复核轮 --resume 同样获得路由注入" {
@@ -348,6 +350,26 @@ EOF
     CLAUDE_REVIEW_API_KEY_FILE="$WORK/keydir" bash "$SCRIPT" 42
   [ "$status" -ne 0 ]
   [ ! -f "$CLAUDE_ARGS_LOG" ]
+}
+
+@test "route: key 文件内容含内部空白/换行时 Fail Fast 且不调用 claude" {
+  printf 'line1\nline2\n' > "$WORK/multiline-key"
+  rm -f "$CLAUDE_ARGS_LOG"
+  run env CLAUDE_REVIEW_BASE_URL="http://127.0.0.1:13425" \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/multiline-key" bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"内部空白/换行"* ]]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+}
+
+@test "route: 诊断行对 base URL 脱敏（去掉 userinfo 与 query），不打印凭据" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='https://user:sekret@gateway.example/v1?token=sekret2' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"sekret"* ]]
+  [[ "$output" != *"sekret2"* ]]
+  [[ "$output" == *"route=https://***@gateway.example/v1"* ]]
 }
 
 @test "route: base URL 全为空白时 Fail Fast 且不调用 claude" {

@@ -29,6 +29,8 @@ claude plugin install pr-review@cc-plugins
 
 `skills/pr-review/scripts/pr-review.sh` is the unified entry point that routes between grok, claude and codex — see `skills/pr-review/scripts/resolve-backend.sh` for the resolution order (`PR_REVIEW_BACKEND` explicit override > default `claude`). grok and codex only run when selected explicitly; copilot is not part of this routing (asynchronous, different CLI parameter shape) — call `copilot-review.sh` directly.
 
+When the author itself is Claude, select `PR_REVIEW_BACKEND=grok` or `PR_REVIEW_BACKEND=codex` explicitly to get an independent perspective.
+
 ## Quick usage
 
 Normally you don't invoke anything by hand — say "评审 PR 123" / "grok review this PR" / "claude review this PR" and the skill activates. The scripts are also directly runnable:
@@ -122,6 +124,7 @@ export CLAUDE_REVIEW_API_KEY_FILE="$HOME/.config/pr-review/gateway.key"
 - The key file must be a readable **regular file** — FIFOs, devices and directories are rejected instead of being read.
 - The route is injected only into the `claude -p` child process (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`). Host `ANTHROPIC_*` routing variables are still cleared and never inherited.
 - With neither variable set, behavior is unchanged: official OAuth/keychain, no gateway traffic.
+- The route is read from the environment on every round and is never persisted to session state — supply the same pair on each follow-up round, otherwise the review silently switches to another endpoint. Only `x-api-key` authentication is supported (`ANTHROPIC_API_KEY`); gateways that accept only `Authorization: Bearer` are out of scope.
 
 ## Tests
 
@@ -133,7 +136,7 @@ Suites (counts are dynamic and intentionally not pinned here):
 
 - `grok-review.bats` — argument parsing, session state files, path construction, fail-fast semantics, directory permissions, GC, effort validation and migration, and the secret-file heuristics. External commands (`grok`, `gh`, `uuidgen`) are stubbed; `git` is real, against a per-test temp repo.
 - `grok-lifecycle.bats` — model precedence, native background-wait arguments, barrier-based late output and success timing, exact error codes, and failed-call state preservation. These CLI doubles do not establish that a native CLI hang is resolved.
-- `claude-review.bats` — same shape of coverage for the claude backend: isolation flags (`--setting-sources ""`, `--tools ""`, `--safe-mode`, `--strict-mcp-config`, the `unset_provider_routing_env` unset list covering `ANTHROPIC_*`/`CLAUDECODE`/`CLAUDE_CODE_MESSAGING_*`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_CHILD_SESSION`/`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) asserted on both first-round and `--resume` follow-up paths, session resume/fail-fast, `.claude.session` state file isolation from grok's `.session`, and shared-lib workspace pinning reuse. `claude` is stubbed.
+- `claude-review.bats` — same shape of coverage for the claude backend: isolation flags (`--setting-sources ""`, `--tools ""`, `--safe-mode`, `--strict-mcp-config`, the `unset_provider_routing_env` unset list covering `ANTHROPIC_*`/`CLAUDECODE`/`CLAUDE_CODE_MESSAGING_*`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_CHILD_SESSION`/`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) asserted on both first-round and `--resume` follow-up paths, session resume/fail-fast, `.claude.session` state file isolation from grok's `.session`, and shared-lib workspace pinning reuse. Gateway route coverage: paired-variable validation, whitespace trimming, FIFO/directory/empty-file rejection, internal-whitespace rejection, diagnostic masking (userinfo and query stripped), key absent from the `claude` argv, and host route non-inheritance. `claude` is stubbed.
 - `codex-review.bats` — codex backend shape: CLI arg parsing, session state files, thread resume/fail-fast, workspace pinning, effort validation, and secret-file heuristics. `codex exec` is stubbed; `git` is real against a per-test temp repo.
 - `resolve-backend.bats` — `PR_REVIEW_BACKEND` pass-through and validation, the default-to-claude fallback, and `pr-review.sh`'s routing to the resolved backend script (including the `copilot` rejection path).
 - `skill-contract.bats` — real-skill Markdown contract checks for repair-subagent ownership, main-session SHA verification and follow-up lifecycle, and the grok two-round example.

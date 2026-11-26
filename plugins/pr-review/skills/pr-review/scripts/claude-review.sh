@@ -45,10 +45,12 @@
 #   - 默认模型 claude-opus-5-5（CLAUDE_REVIEW_MODEL 覆盖）。
 #   - 可选网关路由：CLAUDE_REVIEW_BASE_URL + CLAUDE_REVIEW_API_KEY_FILE 必须成对给出。
 #     base URL 与 key 内容均先 trim 首尾空白再判非空；key 文件只接受可读普通文件（拒绝
-#     FIFO/设备/目录，避免读阻塞）。任一缺失/为空/不可读即在调用 claude 前 Fail Fast。
-#     路由只经子 shell export 注入 claude 子进程（ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY/
-#     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1），key 不进 argv，不改宿主 shell；未配置时
-#     直接调用 claude，子进程仍走官方 OAuth，行为与引入路由前一致。
+#     FIFO/设备/目录，避免读阻塞），trim 后仍含内部空白/换行（多行 key 文件）同样 Fail Fast。
+#     任一缺失/为空/含内部空白/不可读即在调用 claude 前 Fail Fast。诊断行的 route= 经脱敏
+#     （去掉 userinfo 显示 ***、去掉 query），不打印 key 与凭据。路由只经子 shell export
+#     注入 claude 子进程（ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1），
+#     key 不进 argv，不改宿主 shell；未配置时直接调用 claude，子进程仍走官方 OAuth，行为与
+#     引入路由前一致。
 #   - --tools "" 已让 claude 完全没有文件读取能力（比 grok 的 --deny "Write(**)" --deny
 #     "Edit(**)" 更强——grok 还能靠 --cwd 读工作区文件，而且这两条 deny 规则不是写入的硬保证，
 #     实测可经 run_terminal_cmd 里的 python3 间接落盘绕过；故不需要传等价的 --cwd 参数；全部上下文
@@ -150,6 +152,7 @@ fi
 REVIEW_BASE_URL="${CLAUDE_REVIEW_BASE_URL:-}"
 REVIEW_API_KEY_FILE="${CLAUDE_REVIEW_API_KEY_FILE:-}"
 REVIEW_API_KEY=""
+ROUTE_DISPLAY=""
 if [[ -n "$REVIEW_BASE_URL" || -n "$REVIEW_API_KEY_FILE" ]]; then
   [[ -n "$REVIEW_BASE_URL" ]] \
     || die "CLAUDE_REVIEW_BASE_URL 未设置：CLAUDE_REVIEW_BASE_URL 与 CLAUDE_REVIEW_API_KEY_FILE 必须成对给出"
@@ -165,6 +168,16 @@ if [[ -n "$REVIEW_BASE_URL" || -n "$REVIEW_API_KEY_FILE" ]]; then
   REVIEW_API_KEY="${REVIEW_API_KEY#"${REVIEW_API_KEY%%[![:space:]]*}"}"
   REVIEW_API_KEY="${REVIEW_API_KEY%"${REVIEW_API_KEY##*[![:space:]]}"}"
   [[ -n "$REVIEW_API_KEY" ]] || die "CLAUDE_REVIEW_API_KEY_FILE 内容去掉首尾空白后为空: $REVIEW_API_KEY_FILE"
+  # trim 只去首尾；内部空白/换行（如多行 key 文件）会原样进入子进程环境变量并被 claude
+  # 当成错误的 key 值——在调用前 Fail Fast，不把坏值送进子进程。
+  [[ "$REVIEW_API_KEY" != *[[:space:]]* ]] \
+    || die "CLAUDE_REVIEW_API_KEY_FILE 内容含内部空白/换行: $REVIEW_API_KEY_FILE"
+fi
+
+# 诊断行展示用的脱敏 route：去掉 userinfo（显示 ***）与 query，避免把凭据/参数打到 stderr。
+# ROUTE_DISPLAY 为空表示未配置 route，诊断行回退为 official。
+if [[ -n "$REVIEW_BASE_URL" ]]; then
+  ROUTE_DISPLAY=$(printf '%s' "$REVIEW_BASE_URL" | sed -E 's#://[^/@]+@#://***@#; s#\?.*$##')
 fi
 
 # 路由只经子 shell 环境注入 claude 子进程：key 不出现在 /usr/bin/env 的 argv 里，作用域
@@ -231,7 +244,7 @@ if (( FOLLOWUP_MODE )); then
   build_incremental_prompt
 
   ERR_LOG=$(mktemp "${TMPDIR:-/tmp}/claude-review-err.XXXXXX") || die "mktemp 失败"
-  echo ">> claude 复核 PR #$PR ($OWNER/$NAME) — session=$SID model=$MODEL effort=$EFFORT route=${REVIEW_BASE_URL:-official}" >&2
+  echo ">> claude 复核 PR #$PR ($OWNER/$NAME) — session=$SID model=$MODEL effort=$EFFORT route=${ROUTE_DISPLAY:-official}" >&2
 
   # Strip Claude Code internal env vars to prevent recursive hook/plugin loading（复用
   # plan-review 的 claude engine 隔离手法）。unset_provider_routing_env（lib，两处调用点
@@ -310,7 +323,7 @@ else
     [[ -n "$_old_sid" ]] && echo "警告: 覆写已存在的活跃 session（旧 SID=${_old_sid} → 新 SID=${SID}），旧会话记忆将丢失。若本意是复核，请改用: claude-review.sh ${PR} --followup \"<复核指令>\"" >&2
   fi
 
-  echo ">> claude 评审 PR #$PR ($OWNER/$NAME) — session=$SID model=$MODEL effort=$EFFORT route=${REVIEW_BASE_URL:-official}" >&2
+  echo ">> claude 评审 PR #$PR ($OWNER/$NAME) — session=$SID model=$MODEL effort=$EFFORT route=${ROUTE_DISPLAY:-official}" >&2
 
   # Strip Claude Code internal env vars to prevent recursive hook/plugin loading（复用
   # plan-review 的 claude engine 隔离手法）。unset_provider_routing_env（lib，两处调用点
