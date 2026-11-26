@@ -75,7 +75,7 @@ run_claude -p --model "$MODEL" --effort "$EFFORT" \
 - 路由**不写入 session state**：首轮与每轮复核都从环境变量读取，故每轮必须提供同一组变量；漏给就会静默切到另一端点（官方 OAuth 或别的网关），`.err` 里的 `route=` 是每轮实际端点的可见信号。
 - 宿主已有的 `ANTHROPIC_*` 路由变量仍由 `unset_provider_routing_env` 清除，绝不继承；只有显式配置的 `CLAUDE_REVIEW_*` 会被 re-inject。
 - 两个变量都未设置时行为不变：走官方 OAuth/keychain，不注入任何路由值；宿主 `ANTHROPIC_*` 仍由 `unset_provider_routing_env` 清除，非路由变量（如宿主的 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`）原样透传。
-- 诊断行 `>> claude ...` 的 `route=` 显示脱敏后的 base URL——去掉 userinfo（显示为 `***`）、query 与 fragment——未配置 route 时显示 `official`；不打印 key。
+- 诊断行 `>> claude ...` 的 `route=` 显示脱敏后的 base URL：不含 `@` 时剥掉 query/fragment 后原样显示；含 `@` 时 userinfo 与 query/fragment 在未编码输入下边界有歧义，只显示 `scheme://***`。未配置 route 时显示 `official`；不打印 key。
 
 ```bash
 export CLAUDE_REVIEW_BASE_URL="https://llm-gateway.example"

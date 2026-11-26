@@ -362,17 +362,18 @@ EOF
   [ ! -f "$CLAUDE_ARGS_LOG" ]
 }
 
-@test "route: 诊断行对 base URL 脱敏（去掉 userinfo 与 query），不打印凭据" {
+@test "route: 诊断行对含 @ 的 base URL 只显示 scheme，不打印凭据" {
   printf 'magpie-key\n' > "$WORK/keyfile"
   run env CLAUDE_REVIEW_BASE_URL='https://user:sekret@gateway.example/v1?token=sekret2' \
     CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
   [ "$status" -eq 0 ]
   [[ "$output" != *"sekret"* ]]
   [[ "$output" != *"user:"* ]]
-  [[ "$output" == *"route=https://***@gateway.example/v1"* ]]
+  [[ "$output" == *"route=https://***"* ]]
+  [[ "$output" != *"gateway.example"* ]]
 }
 
-@test "route: 诊断脱敏对未编码 @ 的口令与 fragment 同样生效" {
+@test "route: 诊断脱敏对未编码 @ 的口令只显示 scheme" {
   printf 'magpie-key\n' > "$WORK/keyfile"
   run env CLAUDE_REVIEW_BASE_URL='https://user:p@ss@gateway.example/v1#frag' \
     CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
@@ -380,17 +381,38 @@ EOF
   [[ "$output" != *"p@ss"* ]]
   [[ "$output" != *"ss@"* ]]
   [[ "$output" != *"frag"* ]]
-  [[ "$output" == *"route=https://***@gateway.example/v1"* ]]
+  [[ "$output" == *"route=https://***"* ]]
+  [[ "$output" != *"gateway.example"* ]]
 }
 
-@test "route: 诊断脱敏先剥 query 再掩码 userinfo，query 中的 @ 不泄漏" {
+@test "route: 诊断脱敏对 query 中的 @ 只显示 scheme，不泄漏 query" {
   printf 'magpie-key\n' > "$WORK/keyfile"
   run env CLAUDE_REVIEW_BASE_URL='https://gw.example?token=abc@def' \
     CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
   [ "$status" -eq 0 ]
   [[ "$output" != *"abc"* ]]
   [[ "$output" != *"@def"* ]]
-  [[ "$output" == *"route=https://gw.example"* ]]
+  [[ "$output" == *"route=https://***"* ]]
+}
+
+@test "route: 口令含未编码 # 时只显示 scheme，不泄漏 userinfo" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='https://user:pa#ss@gateway.example/v1' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"user:pa"* ]]
+  [[ "$output" != *"pa#ss"* ]]
+  [[ "$output" == *"route=https://***"* ]]
+}
+
+@test "route: 无 userinfo 时诊断行保留 scheme+host+path 并剥掉 query 与 fragment" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='https://gw.example/v1?token=secret#frag' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"secret"* ]]
+  [[ "$output" != *"frag"* ]]
+  [[ "$output" == *"route=https://gw.example/v1"* ]]
 }
 
 @test "route: base URL 全为空白时 Fail Fast 且不调用 claude" {
