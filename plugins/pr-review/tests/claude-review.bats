@@ -383,6 +383,16 @@ EOF
   [[ "$output" == *"route=https://***@gateway.example/v1"* ]]
 }
 
+@test "route: 诊断脱敏先剥 query 再掩码 userinfo，query 中的 @ 不泄漏" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='https://gw.example?token=abc@def' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"abc"* ]]
+  [[ "$output" != *"@def"* ]]
+  [[ "$output" == *"route=https://gw.example"* ]]
+}
+
 @test "route: base URL 全为空白时 Fail Fast 且不调用 claude" {
   printf 'magpie-key\n' > "$WORK/keyfile"
   rm -f "$CLAUDE_ARGS_LOG"

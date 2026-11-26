@@ -173,10 +173,12 @@ if [[ -n "$REVIEW_BASE_URL" || -n "$REVIEW_API_KEY_FILE" ]]; then
     || die "CLAUDE_REVIEW_API_KEY_FILE 内容含内部空白/换行: $REVIEW_API_KEY_FILE"
 fi
 
-# 诊断行展示用的脱敏 route：去掉 userinfo（显示 ***）、query 与 fragment，避免把凭据/参数打到 stderr。
+# 诊断行展示用的脱敏 route：先剥 query/fragment，再把 userinfo 显示为 ***，避免把凭据/参数
+# 打到 stderr。顺序有讲究：先掩码 userinfo 的话，无路径 URL 的 query 里出现 @ 会被当成
+# userinfo，残留 query 尾段。
 # ROUTE_DISPLAY 为空表示未配置 route，诊断行回退为 official。
 if [[ -n "$REVIEW_BASE_URL" ]]; then
-  ROUTE_DISPLAY=$(printf '%s' "$REVIEW_BASE_URL" | sed -E 's|://[^/]*@|://***@|; s|[?#].*$||')
+  ROUTE_DISPLAY=$(printf '%s' "$REVIEW_BASE_URL" | sed -E 's|[?#].*$||; s|://[^/]*@|://***@|')
 fi
 
 # 路由只经子 shell 环境注入 claude 子进程：key 不出现在 /usr/bin/env 的 argv 里，作用域
