@@ -52,7 +52,7 @@ setup() {
   cat > "$WORK/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$CLAUDE_ARGS_LOG"
-{ env | grep -E '^CLAUDECODE=|^CLAUDE_CODE_ENTRYPOINT=|^ANTHROPIC_API_KEY=|^ANTHROPIC_BASE_URL=|^ANTHROPIC_API_BASE_URL=|^CLAUDE_AGENT_API_BASE_URL=|^ANTHROPIC_AUTH_TOKEN=|^ANTHROPIC_DEFAULT_OPUS_MODEL=|^ANTHROPIC_DEFAULT_SONNET_MODEL=|^ANTHROPIC_DEFAULT_HAIKU_MODEL=|^ANTHROPIC_SMALL_FAST_MODEL=|^CLAUDE_CODE_MESSAGING_SOCKET=|^CLAUDE_CODE_MESSAGING_TOKEN=|^CLAUDE_CODE_SESSION_ID=|^CLAUDE_CODE_CHILD_SESSION=|^CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY='; } > "$CLAUDE_ENV_SNAPSHOT" || true
+{ env | grep -E '^CLAUDECODE=|^CLAUDE_CODE_ENTRYPOINT=|^ANTHROPIC_API_KEY=|^ANTHROPIC_BASE_URL=|^ANTHROPIC_API_BASE_URL=|^CLAUDE_AGENT_API_BASE_URL=|^ANTHROPIC_AUTH_TOKEN=|^ANTHROPIC_DEFAULT_OPUS_MODEL=|^ANTHROPIC_DEFAULT_SONNET_MODEL=|^ANTHROPIC_DEFAULT_HAIKU_MODEL=|^ANTHROPIC_SMALL_FAST_MODEL=|^CLAUDE_CODE_MESSAGING_SOCKET=|^CLAUDE_CODE_MESSAGING_TOKEN=|^CLAUDE_CODE_SESSION_ID=|^CLAUDE_CODE_CHILD_SESSION=|^CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=|^CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='; } > "$CLAUDE_ENV_SNAPSHOT" || true
 cat - > "$CLAUDE_PROMPT_CAPTURE"
 case "${CLAUDE_STUB_MODE:-success}" in
   fail_session_invalid)
@@ -114,8 +114,9 @@ EOF
   export GH_CALLS_LOG="$WORK/gh_calls.log"
   export GROK_ARGS_LOG="$WORK/grok_args.log"
   export UUID_COUNTER_FILE="$WORK/uuid_counter"
-  # 隔离宿主环境：断言默认值的用例不能吃宿主 export 的 CLAUDE_REVIEW_EFFORT/CLAUDE_REVIEW_MODEL
-  unset CLAUDE_STUB_MODE CLAUDE_REVIEW_EFFORT CLAUDE_REVIEW_MODEL GH_STUB_PR_HEAD GH_STUB_PR_HEAD_EMPTY GH_STUB_REPO 2>/dev/null || true
+  # 隔离宿主环境：断言默认值的用例不能吃宿主 export 的 CLAUDE_REVIEW_*/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+  unset CLAUDE_STUB_MODE CLAUDE_REVIEW_EFFORT CLAUDE_REVIEW_MODEL GH_STUB_PR_HEAD GH_STUB_PR_HEAD_EMPTY GH_STUB_REPO \
+    CLAUDE_REVIEW_BASE_URL CLAUDE_REVIEW_API_KEY_FILE CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC 2>/dev/null || true
   # 模拟"正在 Claude Code 会话内部"的场景，验证脚本调用前会 unset 掉这两个变量
   export CLAUDECODE=1
   export CLAUDE_CODE_ENTRYPOINT=cli
@@ -170,10 +171,10 @@ EOF
   [[ "$output" == *"非法 effort"* ]]
 }
 
-@test "model: 默认值为 claude-opus-5" {
+@test "model: 默认值为 claude-opus-5-5" {
   run bash "$SCRIPT" 42
   [ "$status" -eq 0 ]
-  [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--model")" = "claude-opus-5" ]
+  [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--model")" = "claude-opus-5-5" ]
 }
 
 @test "model: CLAUDE_REVIEW_MODEL 环境变量可覆盖默认值" {
@@ -245,8 +246,8 @@ EOF
   [ "$status" -eq 0 ]
   # claude stub 的 env 快照里，这一组变量一个都不该出现——出现即代表 grok 网关泄漏进子进程
   [ ! -s "$CLAUDE_ENV_SNAPSHOT" ]
-  # --model 仍是我们自己解析出的 claude-opus-5，未被泄漏的 ANTHROPIC_DEFAULT_OPUS_MODEL 覆盖
-  [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--model")" = "claude-opus-5" ]
+  # --model 仍是我们自己解析出的 claude-opus-5-5，未被泄漏的 ANTHROPIC_DEFAULT_OPUS_MODEL 覆盖
+  [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--model")" = "claude-opus-5-5" ]
 }
 
 @test "复核轮隔离旗标: --tools/--setting-sources/--safe-mode/--strict-mcp-config 在 --resume 路径上同样齐全（防止独立维护的旗标行只有首轮那份被测试钉住）" {
@@ -279,7 +280,182 @@ EOF
     ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL
   [ "$status" -eq 0 ]
   [ ! -s "$CLAUDE_ENV_SNAPSHOT" ]
-  [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--model")" = "claude-opus-5" ]
+  [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--model")" = "claude-opus-5-5" ]
+}
+
+@test "route: 配置 base URL 与 key 文件（均带首尾空白）时子进程获得 trim 后的路由，宿主路由不泄漏" {
+  printf '  magpie-key  \n' > "$WORK/keyfile"
+  export ANTHROPIC_BASE_URL="http://grok.example"
+  export ANTHROPIC_API_KEY="host-key"
+  run env CLAUDE_REVIEW_BASE_URL="  http://127.0.0.1:13425  " \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY
+  [ "$status" -eq 0 ]
+  grep -qx 'ANTHROPIC_BASE_URL=http://127.0.0.1:13425' "$CLAUDE_ENV_SNAPSHOT"
+  grep -qx 'ANTHROPIC_API_KEY=magpie-key' "$CLAUDE_ENV_SNAPSHOT"
+  grep -qx 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' "$CLAUDE_ENV_SNAPSHOT"
+  ! grep -q 'grok.example' "$CLAUDE_ENV_SNAPSHOT" || false
+  ! grep -q 'host-key' "$CLAUDE_ENV_SNAPSHOT" || false
+  # 诊断输出不得打印 key 明文（key 只存在于子进程环境，不进 argv、不进日志）
+  [[ "$output" != *"magpie-key"* ]]
+  # key 不得出现在 claude 自身的 argv 记录里
+  ! grep -q 'magpie-key' "$CLAUDE_ARGS_LOG" || false
+}
+
+@test "route: 复核轮 --resume 同样获得路由注入" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  bash "$SCRIPT" 42 >/dev/null 2>&1
+  rm -f "$CLAUDE_ARGS_LOG" "$CLAUDE_ENV_SNAPSHOT"
+  run env CLAUDE_REVIEW_BASE_URL="http://127.0.0.1:13425" \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42 --followup "复核"
+  [ "$status" -eq 0 ]
+  [ "$(get_arg_value "$CLAUDE_ARGS_LOG" "--resume")" = "TESTUUID-1" ]
+  grep -qx 'ANTHROPIC_BASE_URL=http://127.0.0.1:13425' "$CLAUDE_ENV_SNAPSHOT"
+  grep -qx 'ANTHROPIC_API_KEY=magpie-key' "$CLAUDE_ENV_SNAPSHOT"
+  grep -qx 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' "$CLAUDE_ENV_SNAPSHOT"
+}
+
+@test "route: 只给 CLAUDE_REVIEW_BASE_URL 时 Fail Fast 点名 CLAUDE_REVIEW_API_KEY_FILE 且不调用 claude" {
+  rm -f "$CLAUDE_ARGS_LOG"
+  run env CLAUDE_REVIEW_BASE_URL="http://127.0.0.1:13425" bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CLAUDE_REVIEW_API_KEY_FILE"* ]]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+}
+
+@test "route: 只给 CLAUDE_REVIEW_API_KEY_FILE 时 Fail Fast 点名 CLAUDE_REVIEW_BASE_URL 且不调用 claude" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  rm -f "$CLAUDE_ARGS_LOG"
+  run env CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"CLAUDE_REVIEW_BASE_URL"* ]]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+}
+
+@test "route: key 文件缺失/空文件/目录时 Fail Fast 且不调用 claude" {
+  rm -f "$CLAUDE_ARGS_LOG"
+  run env CLAUDE_REVIEW_BASE_URL="http://127.0.0.1:13425" \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/missing.key" bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+
+  : > "$WORK/empty.key"
+  run env CLAUDE_REVIEW_BASE_URL="http://127.0.0.1:13425" \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/empty.key" bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+
+  mkdir -p "$WORK/keydir"
+  run env CLAUDE_REVIEW_BASE_URL="http://127.0.0.1:13425" \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keydir" bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+}
+
+@test "route: key 文件内容含内部空白/换行时 Fail Fast 且不调用 claude" {
+  printf 'line1\nline2\n' > "$WORK/multiline-key"
+  rm -f "$CLAUDE_ARGS_LOG"
+  run env CLAUDE_REVIEW_BASE_URL="http://127.0.0.1:13425" \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/multiline-key" bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"内部空白/换行"* ]]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+}
+
+@test "route: 诊断行对含 @ 的 base URL 只显示 scheme，不打印凭据" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='https://user:sekret@gateway.example/v1?token=sekret2' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"sekret"* ]]
+  [[ "$output" != *"user:"* ]]
+  [[ "$output" == *"route=https://***"* ]]
+  [[ "$output" != *"gateway.example"* ]]
+}
+
+@test "route: 诊断脱敏对未编码 @ 的口令只显示 scheme" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='https://user:p@ss@gateway.example/v1#frag' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"p@ss"* ]]
+  [[ "$output" != *"ss@"* ]]
+  [[ "$output" != *"frag"* ]]
+  [[ "$output" == *"route=https://***"* ]]
+  [[ "$output" != *"gateway.example"* ]]
+}
+
+@test "route: 诊断脱敏对 query 中的 @ 只显示 scheme，不泄漏 query" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='https://gw.example?token=abc@def' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"abc"* ]]
+  [[ "$output" != *"@def"* ]]
+  [[ "$output" == *"route=https://***"* ]]
+}
+
+@test "route: 口令含未编码 # 时只显示 scheme，不泄漏 userinfo" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='https://user:pa#ss@gateway.example/v1' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"user:pa"* ]]
+  [[ "$output" != *"pa#ss"* ]]
+  [[ "$output" == *"route=https://***"* ]]
+}
+
+@test "route: 缺少合法 scheme 时不解析 ://，整体显示 ***" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='user:a://b@host' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"user:a"* ]]
+  [[ "$output" != *"b@"* ]]
+  [[ "$output" == *"route=***"* ]]
+}
+
+@test "route: 无 userinfo 时诊断行保留 scheme+host+path 并剥掉 query 与 fragment" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='https://gw.example/v1?token=secret#frag' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"secret"* ]]
+  [[ "$output" != *"frag"* ]]
+  [[ "$output" == *"route=https://gw.example/v1"* ]]
+}
+
+@test "route: base URL 全为空白时 Fail Fast 且不调用 claude" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  rm -f "$CLAUDE_ARGS_LOG"
+  run env CLAUDE_REVIEW_BASE_URL='   ' CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"去掉首尾空白后为空"* ]]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+}
+
+@test "route: key 文件为 FIFO 时 Fail Fast 不阻塞且不调用 claude" {
+  mkfifo "$WORK/key.fifo"
+  command -v timeout >/dev/null 2>&1 || skip "timeout 不可用"
+  rm -f "$CLAUDE_ARGS_LOG"
+  run env CLAUDE_REVIEW_BASE_URL=http://127.0.0.1:13425 \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/key.fifo" timeout 5 bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 124 ]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+}
+
+@test "route: 未配置 route 时宿主 ANTHROPIC_* 不进入子进程，宿主非必要流量开关原样透传" {
+  export ANTHROPIC_BASE_URL="http://grok.example"
+  export ANTHROPIC_API_KEY="host-key"
+  export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
+  run bash "$SCRIPT" 42
+  unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+  [ "$status" -eq 0 ]
+  ! grep -q '^ANTHROPIC_BASE_URL=' "$CLAUDE_ENV_SNAPSHOT" || false
+  ! grep -q '^ANTHROPIC_API_KEY=' "$CLAUDE_ENV_SNAPSHOT" || false
+  # 该变量不是路由凭据：宿主值原样透传，不再被脚本清掉
+  grep -qx 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' "$CLAUDE_ENV_SNAPSHOT"
 }
 
 @test "安全: CLAUDE_CODE_MESSAGING_*/CLAUDE_CODE_SESSION_ID/CLAUDE_CODE_CHILD_SESSION/CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY 在首轮与复核轮均不泄漏进 claude -p 子进程（unset_provider_routing_env 统一清理）" {

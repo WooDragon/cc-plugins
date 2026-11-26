@@ -45,22 +45,20 @@ setup() {
   [[ "$output" == *"非法 PR_REVIEW_BACKEND=bogus"* ]]
 }
 
-@test "resolve-backend: ANTHROPIC_DEFAULT_OPUS_MODEL=grok/xxx 时自动选 claude" {
+@test "resolve-backend: ANTHROPIC_DEFAULT_OPUS_MODEL 不再影响默认后端（grok/* 与 claude-opus-5-5 都输出 claude）" {
   run env ANTHROPIC_DEFAULT_OPUS_MODEL=grok/grok-4.6 bash "$RESOLVE_SCRIPT"
+  [ "$status" -eq 0 ]
+  [ "$output" = "claude" ]
+
+  run env ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5-5 bash "$RESOLVE_SCRIPT"
   [ "$status" -eq 0 ]
   [ "$output" = "claude" ]
 }
 
-@test "resolve-backend: 未设置 ANTHROPIC_DEFAULT_OPUS_MODEL 时默认 grok" {
+@test "resolve-backend: 未设置覆盖时默认 claude" {
   run bash "$RESOLVE_SCRIPT"
   [ "$status" -eq 0 ]
-  [ "$output" = "grok" ]
-}
-
-@test "resolve-backend: ANTHROPIC_DEFAULT_OPUS_MODEL 非 grok/* 值时默认 grok" {
-  run env ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-5 bash "$RESOLVE_SCRIPT"
-  [ "$status" -eq 0 ]
-  [ "$output" = "grok" ]
+  [ "$output" = "claude" ]
 }
 
 # ---------- pr-review.sh 路由 ----------
@@ -85,6 +83,13 @@ EOF
   chmod +x "$WORK/scripts_dir/pr-review.sh" "$WORK/scripts_dir/resolve-backend.sh" \
     "$WORK/scripts_dir/grok-review.sh" "$WORK/scripts_dir/claude-review.sh" \
     "$WORK/scripts_dir/codex-review.sh"
+}
+
+@test "pr-review.sh: 未设置 PR_REVIEW_BACKEND 时默认路由到 claude-review.sh" {
+  setup_backend_stubs
+  run env -u PR_REVIEW_BACKEND bash "$WORK/scripts_dir/pr-review.sh" 42 --effort high
+  [ "$status" -eq 0 ]
+  [[ "$output" == "CLAUDE_REVIEW_CALLED 42 --effort high" ]]
 }
 
 @test "pr-review.sh: PR_REVIEW_BACKEND=grok 时路由到 grok-review.sh 并透传参数" {

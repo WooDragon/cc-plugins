@@ -34,13 +34,22 @@
 #     unset_provider_routing_env（lib/pr-review-common.sh，两处调用点共用，单一事实源）
 #     清理两类变量：① ANTHROPIC_*/CLAUDE_AGENT_API_BASE_URL 路由变量（API_KEY/BASE_URL/
 #     AUTH_TOKEN/DEFAULT_*_MODEL 等）——当前会话若经 `~/.claude/scripts/claude-wrapper.sh`
-#     的 grok 分支启动，这些变量会注入整个进程环境、被本子进程继承——不清理的话
-#     resolve-backend.sh 判给 claude 后端，但 claude -p 子进程仍带着 grok 网关的
-#     BASE_URL/API_KEY，请求根本没有脱离 grok 路径，功能名存实亡；② CLAUDE_CODE_MESSAGING_*/
+#     的 grok 分支启动，这些变量会注入整个进程环境、被子进程继承——不清理的话 claude -p
+#     子进程仍带着 grok 网关的 BASE_URL/API_KEY，实际请求会打到宿主网关；② CLAUDE_CODE_MESSAGING_*/
 #     CLAUDE_CODE_SESSION_ID/CLAUDE_CODE_CHILD_SESSION（Claude Code 自身 team-messaging IPC
 #     变量）+ CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY（wrapper 的 grok 分支注入，见
 #     claude-wrapper.sh:1059/1268/1328）——同样可能被子进程继承，与"独立干净子进程"语义不符。
-#     清空后子进程只能走 claude 正常的 OAuth/keychain 登录态。
+#     清空后子进程只走官方 OAuth/keychain，或由调用方通过 CLAUDE_REVIEW_BASE_URL/
+#     CLAUDE_REVIEW_API_KEY_FILE 显式 re-inject 网关路由（见下方可选路由块），绝不继承宿主路由。
+#   - 默认模型 claude-opus-5-5（CLAUDE_REVIEW_MODEL 覆盖）。
+#   - 可选网关路由：CLAUDE_REVIEW_BASE_URL + CLAUDE_REVIEW_API_KEY_FILE 必须成对给出。
+#     base URL 与 key 内容均先 trim 首尾空白再判非空；key 文件只接受可读普通文件（拒绝
+#     FIFO/设备/目录，避免读阻塞），trim 后仍含内部空白/换行（多行 key 文件）同样 Fail Fast。
+#     任一缺失/为空/含内部空白/不可读即在调用 claude 前 Fail Fast。诊断行的 route= 经脱敏
+#     （不含 @ 的 URL 剥掉 query/fragment；含 @ 的 URL 整体只显示 scheme://***），不打印 key 与凭据。路由只经子 shell export
+#     注入 claude 子进程（ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1），
+#     key 不进 argv，不改宿主 shell；未配置时直接调用 claude，子进程仍走官方 OAuth，行为与
+#     引入路由前一致。
 #   - --tools "" 已让 claude 完全没有文件读取能力（比 grok 的 --deny "Write(**)" --deny
 #     "Edit(**)" 更强——grok 还能靠 --cwd 读工作区文件，而且这两条 deny 规则不是写入的硬保证，
 #     实测可经 run_terminal_cmd 里的 python3 间接落盘绕过；故不需要传等价的 --cwd 参数；全部上下文
@@ -53,7 +62,7 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/pr-review-common.sh"
 
-MODEL="${CLAUDE_REVIEW_MODEL:-claude-opus-5}"
+MODEL="${CLAUDE_REVIEW_MODEL:-claude-opus-5-5}"
 EFFORT="${CLAUDE_REVIEW_EFFORT:-medium}"
 # 命令行是否显式给出 model/effort（复核轮据此决定沿用 state 还是尊重 flag；set -u 下必须先初始化）
 MODEL_EXPLICIT=0
@@ -135,6 +144,68 @@ if (( FOLLOWUP_MODE )) && (( ALLOW_DIVERGENT_BASE )); then
   die "--allow-divergent-base 仅在首轮有效（复核轮基线由 BASE_SHA/--since 决定）"
 fi
 
+# ---------- 可选网关路由（见 references/claude-review.md「经本地网关路由（可选）」） ----------
+# CLAUDE_REVIEW_BASE_URL 与 CLAUDE_REVIEW_API_KEY_FILE 必须成对给出；两者都为空 = 走官方
+# OAuth（行为与引入路由前一致）。任一单独设置或校验失败都在调用
+# claude 前 Fail Fast：不调用 claude、不落 state。
+REVIEW_BASE_URL="${CLAUDE_REVIEW_BASE_URL:-}"
+REVIEW_API_KEY_FILE="${CLAUDE_REVIEW_API_KEY_FILE:-}"
+REVIEW_API_KEY=""
+ROUTE_DISPLAY=""
+if [[ -n "$REVIEW_BASE_URL" || -n "$REVIEW_API_KEY_FILE" ]]; then
+  [[ -n "$REVIEW_BASE_URL" ]] \
+    || die "CLAUDE_REVIEW_BASE_URL 未设置：CLAUDE_REVIEW_BASE_URL 与 CLAUDE_REVIEW_API_KEY_FILE 必须成对给出"
+  [[ -n "$REVIEW_API_KEY_FILE" ]] \
+    || die "CLAUDE_REVIEW_API_KEY_FILE 未设置：CLAUDE_REVIEW_BASE_URL 与 CLAUDE_REVIEW_API_KEY_FILE 必须成对给出"
+  REVIEW_BASE_URL="${REVIEW_BASE_URL#"${REVIEW_BASE_URL%%[![:space:]]*}"}"
+  REVIEW_BASE_URL="${REVIEW_BASE_URL%"${REVIEW_BASE_URL##*[![:space:]]}"}"
+  [[ -n "$REVIEW_BASE_URL" ]] || die "CLAUDE_REVIEW_BASE_URL 去掉首尾空白后为空"
+  [[ -f "$REVIEW_API_KEY_FILE" && -r "$REVIEW_API_KEY_FILE" ]] \
+    || die "CLAUDE_REVIEW_API_KEY_FILE 不是可读的普通文件: $REVIEW_API_KEY_FILE"
+  REVIEW_API_KEY=$(cat -- "$REVIEW_API_KEY_FILE") \
+    || die "读取 CLAUDE_REVIEW_API_KEY_FILE 失败: $REVIEW_API_KEY_FILE"
+  REVIEW_API_KEY="${REVIEW_API_KEY#"${REVIEW_API_KEY%%[![:space:]]*}"}"
+  REVIEW_API_KEY="${REVIEW_API_KEY%"${REVIEW_API_KEY##*[![:space:]]}"}"
+  [[ -n "$REVIEW_API_KEY" ]] || die "CLAUDE_REVIEW_API_KEY_FILE 内容去掉首尾空白后为空: $REVIEW_API_KEY_FILE"
+  # trim 只去首尾；内部空白/换行（如多行 key 文件）会原样进入子进程环境变量并被 claude
+  # 当成错误的 key 值——在调用前 Fail Fast，不把坏值送进子进程。
+  [[ "$REVIEW_API_KEY" != *[[:space:]]* ]] \
+    || die "CLAUDE_REVIEW_API_KEY_FILE 内容含内部空白/换行: $REVIEW_API_KEY_FILE"
+fi
+
+# 诊断行展示用的脱敏 route，规则要能扛住未编码输入，不跟分隔符搏斗：
+#   - 不含 @：剥掉 query/fragment 后原样显示（凭据只可能在 query 里）。
+#   - 含 @：userinfo 里的未编码 @/?/# 会让 userinfo 与 query/fragment 的边界本质歧义，
+#     任何基于分隔符的解析都可能残留口令片段；整体只显示 scheme://***。
+#     scheme 只认行首合法的 scheme 语法，否则整体显示 ***，避免把凭据或路径里的 ://
+#     误当成 scheme 分隔符。
+# ROUTE_DISPLAY 为空表示未配置 route，诊断行回退为 official。
+if [[ -n "$REVIEW_BASE_URL" ]]; then
+  if [[ "$REVIEW_BASE_URL" == *@* ]]; then
+    if [[ "$REVIEW_BASE_URL" =~ ^([A-Za-z][A-Za-z0-9+.-]*):// ]]; then
+      ROUTE_DISPLAY="${BASH_REMATCH[1]}://***"
+    else
+      ROUTE_DISPLAY="***"
+    fi
+  else
+    ROUTE_DISPLAY=$(printf '%s' "$REVIEW_BASE_URL" | sed -E 's|[?#].*$||')
+  fi
+fi
+
+# 路由只经子 shell 环境注入 claude 子进程：key 不出现在 /usr/bin/env 的 argv 里，作用域
+# 仅限该子进程。未配置 route 时直接调用 claude，宿主环境原样透传（含宿主的
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC——它不是路由凭据，不在隔离范围内）。
+run_claude() {
+  if [[ -n "$REVIEW_BASE_URL" ]]; then
+    ( export ANTHROPIC_BASE_URL="$REVIEW_BASE_URL" \
+             ANTHROPIC_API_KEY="$REVIEW_API_KEY" \
+             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+      exec claude "$@" )
+  else
+    claude "$@"
+  fi
+}
+
 # owner/name 解析
 if [[ -n "$REPO" ]]; then
   [[ "$REPO" =~ ^[^/]+/[^/]+$ ]] || die "--repo 须为 owner/name 格式，收到: $REPO"
@@ -185,7 +256,7 @@ if (( FOLLOWUP_MODE )); then
   build_incremental_prompt
 
   ERR_LOG=$(mktemp "${TMPDIR:-/tmp}/claude-review-err.XXXXXX") || die "mktemp 失败"
-  echo ">> claude 复核 PR #$PR ($OWNER/$NAME) — session=$SID model=$MODEL effort=$EFFORT" >&2
+  echo ">> claude 复核 PR #$PR ($OWNER/$NAME) — session=$SID model=$MODEL effort=$EFFORT route=${ROUTE_DISPLAY:-official}" >&2
 
   # Strip Claude Code internal env vars to prevent recursive hook/plugin loading（复用
   # plan-review 的 claude engine 隔离手法）。unset_provider_routing_env（lib，两处调用点
@@ -198,7 +269,7 @@ if (( FOLLOWUP_MODE )); then
   unset CLAUDE_CODE_ENTRYPOINT
   unset_provider_routing_env
   set +e
-  claude -p --model "$MODEL" --effort "$EFFORT" \
+  run_claude -p --model "$MODEL" --effort "$EFFORT" \
     --setting-sources "" --tools "" --disable-slash-commands \
     --safe-mode --strict-mcp-config \
     --system-prompt "$RULES_FOLLOWUP" \
@@ -264,7 +335,7 @@ else
     [[ -n "$_old_sid" ]] && echo "警告: 覆写已存在的活跃 session（旧 SID=${_old_sid} → 新 SID=${SID}），旧会话记忆将丢失。若本意是复核，请改用: claude-review.sh ${PR} --followup \"<复核指令>\"" >&2
   fi
 
-  echo ">> claude 评审 PR #$PR ($OWNER/$NAME) — session=$SID model=$MODEL effort=$EFFORT" >&2
+  echo ">> claude 评审 PR #$PR ($OWNER/$NAME) — session=$SID model=$MODEL effort=$EFFORT route=${ROUTE_DISPLAY:-official}" >&2
 
   # Strip Claude Code internal env vars to prevent recursive hook/plugin loading（复用
   # plan-review 的 claude engine 隔离手法）。unset_provider_routing_env（lib，两处调用点
@@ -277,7 +348,7 @@ else
   unset CLAUDECODE
   unset CLAUDE_CODE_ENTRYPOINT
   unset_provider_routing_env
-  claude -p --model "$MODEL" --effort "$EFFORT" \
+  run_claude -p --model "$MODEL" --effort "$EFFORT" \
     --setting-sources "" --tools "" --disable-slash-commands \
     --safe-mode --strict-mcp-config \
     --system-prompt "$RULES" \

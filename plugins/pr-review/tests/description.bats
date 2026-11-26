@@ -68,7 +68,7 @@ assert_contains_all() {
     "已开的 github pr" "本地未提交 working diff" \
     "本地未提交 working diff 的即时 review 走 /code-review" \
     "grok" "claude" "codex" "copilot" "重新触发" "状态查询" \
-    "grok/claude 默认自动路由" "codex 显式选择" \
+    "默认 claude" "grok/codex 显式选择" \
     "copilot 异步回帖 pr"
   [[ "$description" == *"首次触发"* || "$description" == *"gh 触发"* ]]
   [[ "$description" == *"异步"* ]]
