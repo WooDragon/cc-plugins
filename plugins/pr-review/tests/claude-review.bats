@@ -296,6 +296,8 @@ EOF
   grep -qx 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' "$CLAUDE_ENV_SNAPSHOT"
   ! grep -q 'grok.example' "$CLAUDE_ENV_SNAPSHOT"
   ! grep -q 'host-key' "$CLAUDE_ENV_SNAPSHOT"
+  # 诊断输出不得打印 key 明文（key 只存在于子进程环境，不进 argv、不进日志）
+  [[ "$output" != *"magpie-key"* ]]
 }
 
 @test "route: 复核轮 --resume 同样获得路由注入" {
@@ -348,14 +350,37 @@ EOF
   [ ! -f "$CLAUDE_ARGS_LOG" ]
 }
 
-@test "route: 未配置 route 时宿主 export 的 ANTHROPIC_* 与非必要流量开关均不进入子进程" {
+@test "route: base URL 全为空白时 Fail Fast 且不调用 claude" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  rm -f "$CLAUDE_ARGS_LOG"
+  run env CLAUDE_REVIEW_BASE_URL='   ' CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"去掉首尾空白后为空"* ]]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+}
+
+@test "route: key 文件为 FIFO 时 Fail Fast 不阻塞且不调用 claude" {
+  mkfifo "$WORK/key.fifo"
+  command -v timeout >/dev/null 2>&1 || skip "timeout 不可用"
+  rm -f "$CLAUDE_ARGS_LOG"
+  run env CLAUDE_REVIEW_BASE_URL=http://127.0.0.1:13425 \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/key.fifo" timeout 5 bash "$SCRIPT" 42
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 124 ]
+  [ ! -f "$CLAUDE_ARGS_LOG" ]
+}
+
+@test "route: 未配置 route 时宿主 ANTHROPIC_* 不进入子进程，宿主非必要流量开关原样透传" {
   export ANTHROPIC_BASE_URL="http://grok.example"
   export ANTHROPIC_API_KEY="host-key"
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
   run bash "$SCRIPT" 42
   unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
   [ "$status" -eq 0 ]
-  [ ! -s "$CLAUDE_ENV_SNAPSHOT" ]
+  ! grep -q '^ANTHROPIC_BASE_URL=' "$CLAUDE_ENV_SNAPSHOT"
+  ! grep -q '^ANTHROPIC_API_KEY=' "$CLAUDE_ENV_SNAPSHOT"
+  # 该变量不是路由凭据：宿主值原样透传，不再被脚本清掉
+  grep -qx 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' "$CLAUDE_ENV_SNAPSHOT"
 }
 
 @test "安全: CLAUDE_CODE_MESSAGING_*/CLAUDE_CODE_SESSION_ID/CLAUDE_CODE_CHILD_SESSION/CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY 在首轮与复核轮均不泄漏进 claude -p 子进程（unset_provider_routing_env 统一清理）" {

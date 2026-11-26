@@ -44,15 +44,14 @@ unset CLAUDE_CODE_ENTRYPOINT
 unset_provider_routing_env   # lib/pr-review-common.sh：9 个 ANTHROPIC_*/CLAUDE_AGENT_API_BASE_URL
                               # + 5 个 CLAUDE_CODE_MESSAGING_*/SESSION/GATEWAY_MODEL_DISCOVERY，
                               # 两处调用点共用，单一事实源
-unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC   # 宿主值不继承；仅显式 route 时注入 =1
-"${ROUTE_ENV[@]}" claude -p --model "$MODEL" --effort "$EFFORT" \
+run_claude -p --model "$MODEL" --effort "$EFFORT" \
   --setting-sources "" --tools "" --disable-slash-commands \
   --safe-mode --strict-mcp-config \
   --system-prompt "$RULES或$RULES_FOLLOWUP" \
   --session-id "$SID"   # 首轮；复核轮改用 --resume "$SID"
 ```
 
-`ROUTE_ENV` 默认只有 `env`（未配置网关路由时命令等价于直接 `claude -p ...`）；配置了 `CLAUDE_REVIEW_*` 时追加 `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` 三个赋值，见下文「经本地网关路由（可选）」。
+`run_claude` 未配置网关路由时直接调用 `claude -p ...`，`ANTHROPIC_*` 等路由变量仍由 `unset_provider_routing_env` 清除，非路由变量原样透传（包括宿主的 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`——它不在隔离范围内）；配置了 `CLAUDE_REVIEW_*` 时在子 shell 中 export `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` 后 `exec claude`，key 不进 argv，见下文「经本地网关路由（可选）」。
 
 - **`unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT`**：防止在当前 Claude Code 会话内部拉起 `claude -p` 子进程时递归加载 hook/plugin。复用 `plugins/plan-review/scripts/lib/engines/claude.sh` 已验证过的隔离手法。
 - **`unset_provider_routing_env`**（`lib/pr-review-common.sh`，两处调用点共用的单一函数，不再各自手抄一份清单）：清理两组变量。第一组是 `ANTHROPIC_*`/`CLAUDE_AGENT_API_BASE_URL`（`ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_API_BASE_URL`/`CLAUDE_AGENT_API_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_DEFAULT_OPUS_MODEL`/`ANTHROPIC_DEFAULT_SONNET_MODEL`/`ANTHROPIC_DEFAULT_HAIKU_MODEL`/`ANTHROPIC_SMALL_FAST_MODEL`）：当前会话若经外部 wrapper 脚本（`~/.claude/scripts/claude-wrapper.sh` 的 grok 分支）路由到 grok 网关，这组变量会被注入进程环境；不清理的话它们会被子进程原样继承，claude 子进程名义上切到了 claude 后端，实际请求仍会打到宿主网关。第二组是 `CLAUDE_CODE_MESSAGING_SOCKET`/`CLAUDE_CODE_MESSAGING_TOKEN`/`CLAUDE_CODE_SESSION_ID`/`CLAUDE_CODE_CHILD_SESSION`/`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`：前四个是当前会话自身的 team-messaging/IPC 状态，`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` 是 wrapper 的 grok 分支额外注入的网关发现开关，不清理同样会被子进程原样继承。清空后子进程只走官方 OAuth/keychain，或由 `claude-review.sh` 的可选路由块把显式配置的 `CLAUDE_REVIEW_*` re-inject 回子进程；不恢复任何宿主路由继承。
@@ -72,9 +71,9 @@ unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC   # 宿主值不继承；仅显�
 
 - 只设置其中一个 → 调用 `claude` 前 Fail Fast，错误文案点名缺失的变量；不调用 claude、不落 state。
 - key 文件只接受可读普通文件：FIFO/设备/目录一律拒绝，避免 `cat` 阻塞或读到非预期内容；空文件（trim 后为空）同样 Fail Fast。
-- 校验通过后，路由只经 `env` 数组注入 `claude -p` **子进程**（`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`），不改宿主 shell、不打印 key。
+- 校验通过后，路由只经子 shell export 注入 `claude -p` **子进程**（`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`），key 不进 argv，不改宿主 shell、不打印 key。
 - 宿主已有的 `ANTHROPIC_*` 路由变量仍由 `unset_provider_routing_env` 清除，绝不继承；只有显式配置的 `CLAUDE_REVIEW_*` 会被 re-inject。
-- 两个变量都未设置时行为不变：走官方 OAuth/keychain，`ROUTE_ENV` 只有 `env`。
+- 两个变量都未设置时行为不变：走官方 OAuth/keychain，不注入任何路由值；宿主 `ANTHROPIC_*` 仍由 `unset_provider_routing_env` 清除，非路由变量（如宿主的 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`）原样透传。
 - 诊断行 `>> claude ...` 打印 `route=<base URL 或 official>`，不打印 key。
 
 ```bash

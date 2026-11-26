@@ -46,9 +46,9 @@
 #   - 可选网关路由：CLAUDE_REVIEW_BASE_URL + CLAUDE_REVIEW_API_KEY_FILE 必须成对给出。
 #     base URL 与 key 内容均先 trim 首尾空白再判非空；key 文件只接受可读普通文件（拒绝
 #     FIFO/设备/目录，避免读阻塞）。任一缺失/为空/不可读即在调用 claude 前 Fail Fast。
-#     路由只经 env 注入 claude 子进程（ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY/
-#     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1），不改宿主 shell；未配置时 ROUTE_ENV
-#     仅含 env，子进程仍走官方 OAuth，行为与引入路由前一致。
+#     路由只经子 shell export 注入 claude 子进程（ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY/
+#     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1），key 不进 argv，不改宿主 shell；未配置时
+#     直接调用 claude，子进程仍走官方 OAuth，行为与引入路由前一致。
 #   - --tools "" 已让 claude 完全没有文件读取能力（比 grok 的 --deny "Write(**)" --deny
 #     "Edit(**)" 更强——grok 还能靠 --cwd 读工作区文件，而且这两条 deny 规则不是写入的硬保证，
 #     实测可经 run_terminal_cmd 里的 python3 间接落盘绕过；故不需要传等价的 --cwd 参数；全部上下文
@@ -145,11 +145,11 @@ fi
 
 # ---------- 可选网关路由（见 references/claude-review.md「经本地网关路由（可选）」） ----------
 # CLAUDE_REVIEW_BASE_URL 与 CLAUDE_REVIEW_API_KEY_FILE 必须成对给出；两者都为空 = 走官方
-# OAuth（ROUTE_ENV 只有 env，行为与引入路由前一致）。任一单独设置或校验失败都在调用
+# OAuth（行为与引入路由前一致）。任一单独设置或校验失败都在调用
 # claude 前 Fail Fast：不调用 claude、不落 state。
 REVIEW_BASE_URL="${CLAUDE_REVIEW_BASE_URL:-}"
 REVIEW_API_KEY_FILE="${CLAUDE_REVIEW_API_KEY_FILE:-}"
-ROUTE_ENV=(env)
+REVIEW_API_KEY=""
 if [[ -n "$REVIEW_BASE_URL" || -n "$REVIEW_API_KEY_FILE" ]]; then
   [[ -n "$REVIEW_BASE_URL" ]] \
     || die "CLAUDE_REVIEW_BASE_URL 未设置：CLAUDE_REVIEW_BASE_URL 与 CLAUDE_REVIEW_API_KEY_FILE 必须成对给出"
@@ -165,8 +165,21 @@ if [[ -n "$REVIEW_BASE_URL" || -n "$REVIEW_API_KEY_FILE" ]]; then
   REVIEW_API_KEY="${REVIEW_API_KEY#"${REVIEW_API_KEY%%[![:space:]]*}"}"
   REVIEW_API_KEY="${REVIEW_API_KEY%"${REVIEW_API_KEY##*[![:space:]]}"}"
   [[ -n "$REVIEW_API_KEY" ]] || die "CLAUDE_REVIEW_API_KEY_FILE 内容去掉首尾空白后为空: $REVIEW_API_KEY_FILE"
-  ROUTE_ENV+=(ANTHROPIC_BASE_URL="$REVIEW_BASE_URL" ANTHROPIC_API_KEY="$REVIEW_API_KEY" CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1)
 fi
+
+# 路由只经子 shell 环境注入 claude 子进程：key 不出现在 /usr/bin/env 的 argv 里，作用域
+# 仅限该子进程。未配置 route 时直接调用 claude，宿主环境原样透传（含宿主的
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC——它不是路由凭据，不在隔离范围内）。
+run_claude() {
+  if [[ -n "$REVIEW_BASE_URL" ]]; then
+    ( export ANTHROPIC_BASE_URL="$REVIEW_BASE_URL" \
+             ANTHROPIC_API_KEY="$REVIEW_API_KEY" \
+             CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+      exec claude "$@" )
+  else
+    claude "$@"
+  fi
+}
 
 # owner/name 解析
 if [[ -n "$REPO" ]]; then
@@ -230,10 +243,8 @@ if (( FOLLOWUP_MODE )); then
   unset CLAUDECODE
   unset CLAUDE_CODE_ENTRYPOINT
   unset_provider_routing_env
-  # 宿主的非必要流量开关同样不继承；仅显式 route 时经 ROUTE_ENV 注入 =1
-  unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
   set +e
-  "${ROUTE_ENV[@]}" claude -p --model "$MODEL" --effort "$EFFORT" \
+  run_claude -p --model "$MODEL" --effort "$EFFORT" \
     --setting-sources "" --tools "" --disable-slash-commands \
     --safe-mode --strict-mcp-config \
     --system-prompt "$RULES_FOLLOWUP" \
@@ -312,9 +323,7 @@ else
   unset CLAUDECODE
   unset CLAUDE_CODE_ENTRYPOINT
   unset_provider_routing_env
-  # 宿主的非必要流量开关同样不继承；仅显式 route 时经 ROUTE_ENV 注入 =1
-  unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
-  "${ROUTE_ENV[@]}" claude -p --model "$MODEL" --effort "$EFFORT" \
+  run_claude -p --model "$MODEL" --effort "$EFFORT" \
     --setting-sources "" --tools "" --disable-slash-commands \
     --safe-mode --strict-mcp-config \
     --system-prompt "$RULES" \
