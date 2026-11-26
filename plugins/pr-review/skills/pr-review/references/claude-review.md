@@ -70,12 +70,12 @@ run_claude -p --model "$MODEL" --effort "$EFFORT" \
 | `CLAUDE_REVIEW_API_KEY_FILE` | 存放网关 API key 的**普通文件**路径；内容读出后同样 trim 首尾空白 |
 
 - 只设置其中一个 → 调用 `claude` 前 Fail Fast，错误文案点名缺失的变量；不调用 claude、不落 state。
-- key 文件只接受可读普通文件：FIFO/设备/目录一律拒绝，避免 `cat` 阻塞或读到非预期内容；空文件（trim 后为空）同样 Fail Fast；trim 后仍含内部空白/换行（如多行 key 文件）同样 Fail Fast（换行会破坏子进程环境变量的传值）。
+- key 文件只接受可读普通文件：FIFO/设备/目录一律拒绝，避免 `cat` 阻塞或读到非预期内容；空文件（trim 后为空）同样 Fail Fast；trim 后仍含内部空白/换行（如多行 key 文件）同样 Fail Fast（换行会使 key 成为非法的 HTTP 头值）。
 - 校验通过后，路由只经子 shell export 注入 `claude -p` **子进程**（`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`），key 不进 argv，不改宿主 shell、不打印 key。认证只注入 `ANTHROPIC_API_KEY`（`x-api-key`）；只接受 `Authorization: Bearer` 的网关不在支持范围（脚本不设置 `ANTHROPIC_AUTH_TOKEN`）。
 - 路由**不写入 session state**：首轮与每轮复核都从环境变量读取，故每轮必须提供同一组变量；漏给就会静默切到另一端点（官方 OAuth 或别的网关），`.err` 里的 `route=` 是每轮实际端点的可见信号。
 - 宿主已有的 `ANTHROPIC_*` 路由变量仍由 `unset_provider_routing_env` 清除，绝不继承；只有显式配置的 `CLAUDE_REVIEW_*` 会被 re-inject。
 - 两个变量都未设置时行为不变：走官方 OAuth/keychain，不注入任何路由值；宿主 `ANTHROPIC_*` 仍由 `unset_provider_routing_env` 清除，非路由变量（如宿主的 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`）原样透传。
-- 诊断行 `>> claude ...` 的 `route=` 显示脱敏后的 base URL——去掉 userinfo（显示为 `***`）与 query——未配置 route 时显示 `official`；不打印 key。
+- 诊断行 `>> claude ...` 的 `route=` 显示脱敏后的 base URL——去掉 userinfo（显示为 `***`）、query 与 fragment——未配置 route 时显示 `official`；不打印 key。
 
 ```bash
 export CLAUDE_REVIEW_BASE_URL="https://llm-gateway.example"

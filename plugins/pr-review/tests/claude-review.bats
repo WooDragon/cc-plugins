@@ -294,12 +294,12 @@ EOF
   grep -qx 'ANTHROPIC_BASE_URL=http://127.0.0.1:13425' "$CLAUDE_ENV_SNAPSHOT"
   grep -qx 'ANTHROPIC_API_KEY=magpie-key' "$CLAUDE_ENV_SNAPSHOT"
   grep -qx 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' "$CLAUDE_ENV_SNAPSHOT"
-  ! grep -q 'grok.example' "$CLAUDE_ENV_SNAPSHOT"
-  ! grep -q 'host-key' "$CLAUDE_ENV_SNAPSHOT"
+  ! grep -q 'grok.example' "$CLAUDE_ENV_SNAPSHOT" || false
+  ! grep -q 'host-key' "$CLAUDE_ENV_SNAPSHOT" || false
   # 诊断输出不得打印 key 明文（key 只存在于子进程环境，不进 argv、不进日志）
   [[ "$output" != *"magpie-key"* ]]
-  # key 不得出现在 claude 自身的 argv 记录里（这只能守住 claude 自身 argv；env 以环境变量传 key，不证明 env 的瞬时 argv 不可见）
-  ! grep -q 'magpie-key' "$CLAUDE_ARGS_LOG"
+  # key 不得出现在 claude 自身的 argv 记录里
+  ! grep -q 'magpie-key' "$CLAUDE_ARGS_LOG" || false
 }
 
 @test "route: 复核轮 --resume 同样获得路由注入" {
@@ -368,7 +368,18 @@ EOF
     CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
   [ "$status" -eq 0 ]
   [[ "$output" != *"sekret"* ]]
-  [[ "$output" != *"sekret2"* ]]
+  [[ "$output" != *"user:"* ]]
+  [[ "$output" == *"route=https://***@gateway.example/v1"* ]]
+}
+
+@test "route: 诊断脱敏对未编码 @ 的口令与 fragment 同样生效" {
+  printf 'magpie-key\n' > "$WORK/keyfile"
+  run env CLAUDE_REVIEW_BASE_URL='https://user:p@ss@gateway.example/v1#frag' \
+    CLAUDE_REVIEW_API_KEY_FILE="$WORK/keyfile" bash "$SCRIPT" 42
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"p@ss"* ]]
+  [[ "$output" != *"ss@"* ]]
+  [[ "$output" != *"frag"* ]]
   [[ "$output" == *"route=https://***@gateway.example/v1"* ]]
 }
 
@@ -399,8 +410,8 @@ EOF
   run bash "$SCRIPT" 42
   unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
   [ "$status" -eq 0 ]
-  ! grep -q '^ANTHROPIC_BASE_URL=' "$CLAUDE_ENV_SNAPSHOT"
-  ! grep -q '^ANTHROPIC_API_KEY=' "$CLAUDE_ENV_SNAPSHOT"
+  ! grep -q '^ANTHROPIC_BASE_URL=' "$CLAUDE_ENV_SNAPSHOT" || false
+  ! grep -q '^ANTHROPIC_API_KEY=' "$CLAUDE_ENV_SNAPSHOT" || false
   # 该变量不是路由凭据：宿主值原样透传，不再被脚本清掉
   grep -qx 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1' "$CLAUDE_ENV_SNAPSHOT"
 }

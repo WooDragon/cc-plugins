@@ -34,9 +34,8 @@
 #     unset_provider_routing_env（lib/pr-review-common.sh，两处调用点共用，单一事实源）
 #     清理两类变量：① ANTHROPIC_*/CLAUDE_AGENT_API_BASE_URL 路由变量（API_KEY/BASE_URL/
 #     AUTH_TOKEN/DEFAULT_*_MODEL 等）——当前会话若经 `~/.claude/scripts/claude-wrapper.sh`
-#     的 grok 分支启动，这些变量会注入整个进程环境、被本子进程继承——不清理的话
-#     resolve-backend.sh 判给 claude 后端，但 claude -p 子进程仍带着 grok 网关的
-#     BASE_URL/API_KEY，请求根本没有脱离 grok 路径，功能名存实亡；② CLAUDE_CODE_MESSAGING_*/
+#     的 grok 分支启动，这些变量会注入整个进程环境、被子进程继承——不清理的话 claude -p
+#     子进程仍带着 grok 网关的 BASE_URL/API_KEY，实际请求会打到宿主网关；② CLAUDE_CODE_MESSAGING_*/
 #     CLAUDE_CODE_SESSION_ID/CLAUDE_CODE_CHILD_SESSION（Claude Code 自身 team-messaging IPC
 #     变量）+ CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY（wrapper 的 grok 分支注入，见
 #     claude-wrapper.sh:1059/1268/1328）——同样可能被子进程继承，与"独立干净子进程"语义不符。
@@ -174,10 +173,10 @@ if [[ -n "$REVIEW_BASE_URL" || -n "$REVIEW_API_KEY_FILE" ]]; then
     || die "CLAUDE_REVIEW_API_KEY_FILE 内容含内部空白/换行: $REVIEW_API_KEY_FILE"
 fi
 
-# 诊断行展示用的脱敏 route：去掉 userinfo（显示 ***）与 query，避免把凭据/参数打到 stderr。
+# 诊断行展示用的脱敏 route：去掉 userinfo（显示 ***）、query 与 fragment，避免把凭据/参数打到 stderr。
 # ROUTE_DISPLAY 为空表示未配置 route，诊断行回退为 official。
 if [[ -n "$REVIEW_BASE_URL" ]]; then
-  ROUTE_DISPLAY=$(printf '%s' "$REVIEW_BASE_URL" | sed -E 's#://[^/@]+@#://***@#; s#\?.*$##')
+  ROUTE_DISPLAY=$(printf '%s' "$REVIEW_BASE_URL" | sed -E 's|://[^/]*@|://***@|; s|[?#].*$||')
 fi
 
 # 路由只经子 shell 环境注入 claude 子进程：key 不出现在 /usr/bin/env 的 argv 里，作用域
