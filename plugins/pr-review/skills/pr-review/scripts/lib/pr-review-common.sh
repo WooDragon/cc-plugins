@@ -56,7 +56,7 @@ check_model() {
 #      的话 resolve-backend.sh 判给 claude 后端，但 claude -p 子进程仍带着 grok 网关的
 #      BASE_URL/API_KEY，请求根本没有脱离 grok 路径，功能名存实亡。清空后子进程只走官方
 #      OAuth/keychain，或由调用方通过 CLAUDE_REVIEW_BASE_URL/CLAUDE_REVIEW_API_KEY_FILE
-#      显式 re-inject 网关路由（claude-review.sh 的 ROUTE_ENV），绝不继承宿主路由。
+#      显式 re-inject 网关路由（claude-review.sh 的 run_claude 子 shell export），绝不继承宿主路由。
 #   2. CLAUDE_CODE_MESSAGING_SOCKET/CLAUDE_CODE_MESSAGING_TOKEN/CLAUDE_CODE_SESSION_ID/
 #      CLAUDE_CODE_CHILD_SESSION（Claude Code 自身 team-messaging IPC 相关变量）+
 #      CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY（claude-wrapper.sh 的 grok 分支会注入这个，
