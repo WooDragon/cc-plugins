@@ -46,7 +46,7 @@
 #     base URL 与 key 内容均先 trim 首尾空白再判非空；key 文件只接受可读普通文件（拒绝
 #     FIFO/设备/目录，避免读阻塞），trim 后仍含内部空白/换行（多行 key 文件）同样 Fail Fast。
 #     任一缺失/为空/含内部空白/不可读即在调用 claude 前 Fail Fast。诊断行的 route= 经脱敏
-#     （去掉 userinfo 显示 ***、去掉 query），不打印 key 与凭据。路由只经子 shell export
+#     （去掉 userinfo 显示 ***、去掉 query 与 fragment），不打印 key 与凭据。路由只经子 shell export
 #     注入 claude 子进程（ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1），
 #     key 不进 argv，不改宿主 shell；未配置时直接调用 claude，子进程仍走官方 OAuth，行为与
 #     引入路由前一致。
