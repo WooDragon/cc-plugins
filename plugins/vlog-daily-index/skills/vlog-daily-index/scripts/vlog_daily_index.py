@@ -27,11 +27,12 @@ def init(args):
     run_id=args.run_id or dt.datetime.now().strftime('%Y%m%dT%H%M%S')+'-'+digest(str(source))[:8]
     state=Path(args.state).resolve(); temp=(Path(args.temp).resolve()/run_id)
     if state.exists() and (state/'manifest.json').exists(): raise ValueError('State already exists; resume existing run')
+    files=sorted(p for p in source.rglob('*') if p.is_file() and p.suffix.lower() in ('.mp4','.mov','.mkv','.mts'))
+    if not files: raise RuntimeError(f'No source media found under {source}; check the source path or mount before re-init')
     for root in (state,temp):
         if source==root or source in root.parents or root==source.parent: raise ValueError('State/temp must be local and outside source tree')
         store.local_nonsync(root)
         root.mkdir(parents=True,exist_ok=True)
-    files=sorted(p for p in source.rglob('*') if p.is_file() and p.suffix.lower() in ('.mp4','.mov','.mkv','.mts'))
     m={'run_id':run_id,'state_dir':str(state),'temp_dir':str(temp),'status':'running','temporary_artifacts':[],'frames':[],'packages':[],'transcription':{},'config':{'source_root':str(source),'date':args.date,'timezone':'Asia/Shanghai','ffmpeg':args.ffmpeg,'ffprobe':args.ffprobe,'asr_service':args.service,'asr_model':asr.MODEL,'asr_concurrency':1,'vision_concurrency':args.vision_concurrency,'sample_interval':10,'schema_version':analysis.SCHEMA_VERSION,'prompt_version':analysis.PROMPT_VERSION},'sources':[],'versions':{'python':platform.python_version()}}
     host=getattr(args,'host','codex'); m['config']['host']=host; m['config']['model_roles']=dict(HOST_MODEL_ROLES[host])
     m['config'].update(supplement_mode='shot_v1',visual_package_mode='block_visual_v1',extraction_pipeline='select_first_v3',ready_package_limit=24,temp_limit_bytes=256*1024**3,min_free_bytes=5*1024**3)

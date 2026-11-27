@@ -101,6 +101,7 @@ def probe(path, ffprobe, source_root):
         raw=json.loads(command([ffprobe,'-v','error','-show_streams','-show_format','-of','json',path],120).stdout)
         video=next(s for s in raw['streams'] if s['codec_type']=='video'); audio=[s for s in raw['streams'] if s['codec_type']=='audio']
         duration=float(video.get('duration') or raw['format']['duration'])
+        if duration<=0: raise ValueError(f'non-positive duration: {path} duration={duration}')
         average=parse_rate(video.get('avg_frame_rate')); nominal=parse_rate(video.get('r_frame_rate'))
         fps=average if average>0 else nominal
         if fps<=0: raise ValueError(f'ffprobe did not provide a usable frame rate: {path}')

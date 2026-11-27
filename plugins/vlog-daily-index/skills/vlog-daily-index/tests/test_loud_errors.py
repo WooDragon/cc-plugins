@@ -30,6 +30,16 @@ class MissingFrameRate(unittest.TestCase):
         self.assertEqual(result['status'],'ready')
         self.assertAlmostEqual(result['fps'],30000/1001,places=4)
 
+    def test_zero_duration_fails_probe(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/'zero-duration.mp4'; path.write_bytes(b'synthetic')
+            raw={'streams':[{'codec_type':'video','avg_frame_rate':'30000/1001','r_frame_rate':'30000/1001','duration':'0'}],'format':{'duration':'0'}}
+            completed=subprocess.CompletedProcess(args=[],returncode=0,stdout=json.dumps(raw),stderr='')
+            with patch.object(media,'command',return_value=completed):
+                result=media.probe(path,'ffprobe',Path(td))
+        self.assertEqual(result['status'],'failed')
+        self.assertIn('non-positive duration',result['error'])
+
 
 class UnreadableInit(unittest.TestCase):
     def test_all_sources_failed_raises_runtime_error_listing_each(self):
@@ -48,6 +58,16 @@ class UnreadableInit(unittest.TestCase):
         self.assertIn('unreadable b.mov',message)
         self.assertIn('state='+str(root/'state'),message)
         self.assertIn('remove this state before re-init',message)
+
+    def test_empty_source_raises_runtime_error_naming_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); source=root/'source'; source.mkdir()
+            args=Namespace(source=str(source),state=str(root/'state'),temp=str(root/'temp'),run_id=None,date='2030-01-02',ffmpeg='ffmpeg',ffprobe='ffprobe',service='http://example.test:80',vision_concurrency=6,host='codex',asr_model='synthetic',preview_lut_map=None)
+            with self.assertRaises(RuntimeError) as caught: cli.init(args)
+        message=str(caught.exception)
+        self.assertIn('No source media',message)
+        self.assertIn(str(source),message)
+        self.assertIn('check the source path or mount',message)
 
 
 class PausedErrorExit(unittest.TestCase):

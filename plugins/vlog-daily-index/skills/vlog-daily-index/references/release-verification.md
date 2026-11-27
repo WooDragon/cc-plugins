@@ -36,4 +36,4 @@ python tools/verify_release.py --archive SKILL_ZIP --output LOCAL_VERIFICATION -
 
 0.5.0新增合成端到端覆盖真实query来源/原路径适配、精确缓存、2段/34图max薄bundle、部分失败与未知native状态、原补采到日JSON/MD/query的动态通道及needs_playback防循环；测试不调用模型。独立镜头小样仅说明有限采样可读性，不能证明完整视频观看、所有宿主实跑、一般max优势或费用下降。
 
-0.5.1新增无帧率源显式失败（probe不再回退25 fps）、全源不可读时init的响亮失败（消息列出每个源的错误），以及paused_error状态下非status动作先打印结果再以退出码2结束的合成测试；status仍只报告并退出0，旧版本其余行为保留。三项均由合成测试覆盖。测试不连接真实媒体、NAS或ASR。status只报告，vision-queue与vision-work提前返回，三者均不受退出码2影响。
+0.5.1新增无帧率源显式失败（probe不再回退25 fps）、全源不可读时init的响亮失败（消息列出每个源的错误），以及paused_error状态下非status动作先打印结果再以退出码2结束的合成测试；status仍只报告并退出0，旧版本其余行为保留。三项均由合成测试覆盖。测试不连接真实媒体、NAS或ASR。status只报告，vision-queue与vision-work提前返回，三者均不受退出码2影响。空源目录init显式失败、零时长源probe失败，均由合成测试覆盖。
