@@ -27,11 +27,12 @@ def init(args):
     run_id=args.run_id or dt.datetime.now().strftime('%Y%m%dT%H%M%S')+'-'+digest(str(source))[:8]
     state=Path(args.state).resolve(); temp=(Path(args.temp).resolve()/run_id)
     if state.exists() and (state/'manifest.json').exists(): raise ValueError('State already exists; resume existing run')
+    files=sorted(p for p in source.rglob('*') if p.is_file() and p.suffix.lower() in ('.mp4','.mov','.mkv','.mts'))
+    if not files: raise RuntimeError(f'No source media found under {source}; check the source path or mount before re-init')
     for root in (state,temp):
         if source==root or source in root.parents or root==source.parent: raise ValueError('State/temp must be local and outside source tree')
         store.local_nonsync(root)
         root.mkdir(parents=True,exist_ok=True)
-    files=sorted(p for p in source.rglob('*') if p.is_file() and p.suffix.lower() in ('.mp4','.mov','.mkv','.mts'))
     m={'run_id':run_id,'state_dir':str(state),'temp_dir':str(temp),'status':'running','temporary_artifacts':[],'frames':[],'packages':[],'transcription':{},'config':{'source_root':str(source),'date':args.date,'timezone':'Asia/Shanghai','ffmpeg':args.ffmpeg,'ffprobe':args.ffprobe,'asr_service':args.service,'asr_model':asr.MODEL,'asr_concurrency':1,'vision_concurrency':args.vision_concurrency,'sample_interval':10,'schema_version':analysis.SCHEMA_VERSION,'prompt_version':analysis.PROMPT_VERSION},'sources':[],'versions':{'python':platform.python_version()}}
     host=getattr(args,'host','codex'); m['config']['host']=host; m['config']['model_roles']=dict(HOST_MODEL_ROLES[host])
     m['config'].update(supplement_mode='shot_v1',visual_package_mode='block_visual_v1',extraction_pipeline='select_first_v3',ready_package_limit=24,temp_limit_bytes=256*1024**3,min_free_bytes=5*1024**3)
@@ -43,6 +44,9 @@ def init(args):
     for path in files:
         s=media.probe(path,args.ffprobe,source); m['sources'].append(s); save(m)
         print(json.dumps({'probed':s['relative_path'],'status':s['status'],'duration':s.get('duration'),'role':s.get('role')},ensure_ascii=False),flush=True)
+    if m['sources'] and not any(s['status']=='ready' for s in m['sources']):
+        State(state).close(); save(m)
+        raise RuntimeError(f'No readable sources: {json.dumps([{"source":s["relative_path"],"error":s.get("error")} for s in m["sources"]],ensure_ascii=False)}; state={state}; fix the cause and remove this state before re-init')
     State(state).close(); save(m)
     return {'run_id':run_id,'state':str(state),'source_count':len(files),'planned_frames':sum(len(s.get('sample_times',[])) for s in m['sources'])}
 
@@ -441,6 +445,7 @@ def _continue_day_serial(args):
     m=load(args); protocol=read(args.protocol); state=State(m['state_dir'])
     analysis.validate_itinerary(m.get('itinerary',{}).get('data'))
     client=asr.ASRClient(m['config']['asr_service'],protocol=protocol,concurrency=1,model=m['config']['asr_model']); client.preflight()
+    if m.get('status')=='paused_error': m['status']='running'; save(m)
     pause=Path(m['state_dir'])/'pause-media.request'
     def media_worker(source,job):
         block,_,need_frames,audio_output=job
@@ -1031,5 +1036,8 @@ def main():
             from vlog_index.shot_work import require_finished
             require_finished(Path(args.state)/'shot-review')
         result=funcs[args.action](args)
+        manifest=Path(args.state)/'manifest.json'
+        paused_error=args.action!='status' and manifest.exists() and read(manifest).get('status')=='paused_error'
     print(json.dumps(result,ensure_ascii=False,indent=2),flush=True)
+    if paused_error: sys.exit(2)
 if __name__=='__main__': main()

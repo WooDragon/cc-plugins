@@ -28,7 +28,12 @@ def invoke(*arguments):
     output = io.StringIO()
     with patch.object(sys, 'argv', ['vlog_daily_index.py', *map(str, arguments)]), contextlib.redirect_stdout(output):
         cli.main()
-    return json.loads(output.getvalue())
+    text = output.getvalue(); decoder = json.JSONDecoder(); result = None; index = 0
+    while index < len(text):
+        while index < len(text) and text[index].isspace(): index += 1
+        if index >= len(text): break
+        result, index = decoder.raw_decode(text, index)
+    return result
 
 
 class FixedWorkflow(unittest.TestCase):
@@ -119,9 +124,13 @@ class FixedWorkflow(unittest.TestCase):
     def test_new_task_map_command_then_resume_uses_cached_query(self):
         with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {'LOCALAPPDATA': td}):
             root = Path(td); source = root / 'source'; source.mkdir(); state = root / 'state'
-            invoke('init', '--source', source, '--state', state, '--temp', root / 'temporary',
-                   '--date', '2030-01-02', '--ffmpeg', 'unused-fixture', '--ffprobe', 'unused-fixture',
-                   '--service', 'http://unused.invalid')
+            (source / 'fixture.mp4').write_bytes(b'')
+            ready = {'relative_path': 'fixture.mp4', 'status': 'ready', 'duration': 1.0, 'fps': 25,
+                     'sample_times': [0.0], 'blocks': [{'index': 0, 'start': 0.0, 'end': 1.0, 'samples': [0.0]}]}
+            with patch.object(media, 'probe', return_value=ready):
+                invoke('init', '--source', source, '--state', state, '--temp', root / 'temporary',
+                       '--date', '2030-01-02', '--ffmpeg', 'unused-fixture', '--ffprobe', 'unused-fixture',
+                       '--service', 'http://unused.invalid')
             queries = root / 'requests.json'; output = root / 'map-evidence.json'
             dump(queries, [{'coordinates': {'latitude': 1, 'longitude': 2, 'crs': 'EPSG:4326'}}])
             calls = []

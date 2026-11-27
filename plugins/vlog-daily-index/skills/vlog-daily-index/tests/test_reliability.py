@@ -129,6 +129,9 @@ class Reliability(unittest.TestCase):
     def test_init_uses_configured_paths_date_service_and_model(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); source = root / '素材 source'; source.mkdir()
+            (source / 'fixture.mp4').write_bytes(b'')
+            ready = {'relative_path': 'fixture.mp4', 'status': 'ready', 'duration': 1.0, 'fps': 25,
+                     'sample_times': [0.0], 'blocks': [{'index': 0, 'start': 0.0, 'end': 1.0, 'samples': [0.0]}]}
             configuration = root / 'configuration'; configuration.mkdir()
             (configuration / 'preview.cube').write_text('synthetic path fixture', encoding='ascii')
             lut_map = configuration / 'lut-map.json'; dump(lut_map, {'ZVE1:SLOG3CINE': 'preview.cube'})
@@ -137,7 +140,8 @@ class Reliability(unittest.TestCase):
                     temp=str(root / 'temporary'), run_id=f'portable{number}', date='2030-02-03',
                     ffmpeg='custom-ffmpeg', ffprobe='custom-ffprobe', service='http://movable.invalid',
                     asr_model='custom/model', vision_concurrency=3, preview_lut_map=str(lut_map))
-                cli.init(args)
+                with patch.object(media, 'probe', return_value=ready):
+                    cli.init(args)
                 manifest = read(Path(args.state) / 'manifest.json')
                 self.assertEqual(manifest['config']['source_root'], str(source.resolve()))
                 self.assertEqual(manifest['config']['asr_model'], 'custom/model')
@@ -168,12 +172,16 @@ class Reliability(unittest.TestCase):
                         'geography': 'vlog-daily-index:vlog-geography', 'semantic_reasoning_effort': 'high', 'final_review': 'ROOT', 'supplement_decision': 'ROOT'}
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); source = root / 'source'; source.mkdir()
+            (source / 'fixture.mp4').write_bytes(b'')
+            ready = {'relative_path': 'fixture.mp4', 'status': 'ready', 'duration': 1.0, 'fps': 25,
+                     'sample_times': [0.0], 'blocks': [{'index': 0, 'start': 0.0, 'end': 1.0, 'samples': [0.0]}]}
             for name, host, expected in (('default', None, codex_roles), ('claude', 'claude-code', claude_roles)):
                 args = argparse.Namespace(source=str(source), state=str(root / name), temp=str(root / 'temporary'),
                     run_id=name, date='2030-02-03', ffmpeg='ffmpeg', ffprobe='ffprobe',
                     service='http://movable.invalid', vision_concurrency=3)
                 if host: args.host = host
-                cli.init(args)
+                with patch.object(media, 'probe', return_value=ready):
+                    cli.init(args)
                 config = read(Path(args.state) / 'manifest.json')['config']
                 self.assertEqual(config['model_roles'], expected)
                 self.assertEqual(config['host'], host or 'codex')
