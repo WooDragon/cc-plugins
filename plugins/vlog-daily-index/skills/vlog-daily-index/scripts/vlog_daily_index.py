@@ -43,6 +43,9 @@ def init(args):
     for path in files:
         s=media.probe(path,args.ffprobe,source); m['sources'].append(s); save(m)
         print(json.dumps({'probed':s['relative_path'],'status':s['status'],'duration':s.get('duration'),'role':s.get('role')},ensure_ascii=False),flush=True)
+    if m['sources'] and not any(s['status']=='ready' for s in m['sources']):
+        State(state).close(); save(m)
+        raise RuntimeError(f'No readable sources: {json.dumps([{"source":s["relative_path"],"error":s.get("error")} for s in m["sources"]],ensure_ascii=False)}; state={state}; fix the cause and remove this state before re-init')
     State(state).close(); save(m)
     return {'run_id':run_id,'state':str(state),'source_count':len(files),'planned_frames':sum(len(s.get('sample_times',[])) for s in m['sources'])}
 
@@ -441,6 +444,7 @@ def _continue_day_serial(args):
     m=load(args); protocol=read(args.protocol); state=State(m['state_dir'])
     analysis.validate_itinerary(m.get('itinerary',{}).get('data'))
     client=asr.ASRClient(m['config']['asr_service'],protocol=protocol,concurrency=1,model=m['config']['asr_model']); client.preflight()
+    if m.get('status')=='paused_error': m['status']='running'; save(m)
     pause=Path(m['state_dir'])/'pause-media.request'
     def media_worker(source,job):
         block,_,need_frames,audio_output=job
@@ -1031,5 +1035,8 @@ def main():
             from vlog_index.shot_work import require_finished
             require_finished(Path(args.state)/'shot-review')
         result=funcs[args.action](args)
+        manifest=Path(args.state)/'manifest.json'
+        paused_error=args.action!='status' and manifest.exists() and read(manifest).get('status')=='paused_error'
     print(json.dumps(result,ensure_ascii=False,indent=2),flush=True)
+    if paused_error: sys.exit(2)
 if __name__=='__main__': main()

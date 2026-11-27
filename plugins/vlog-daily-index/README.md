@@ -4,7 +4,7 @@
 
 ## 安装
 
-此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.5.0`。两个宿主并列支持。
+此仓库沿用现有 marketplace 布局。技能源码位于 [`skills/vlog-daily-index/`](./skills/vlog-daily-index/)，版本为 `0.5.1`。两个宿主并列支持。
 
 Codex：
 
